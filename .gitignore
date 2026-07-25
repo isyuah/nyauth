@@ -9,6 +9,9 @@
 /web/build/
 /web/node_modules/
 /web/.svelte-kit/
+/web/test-results/
+/web/playwright-report/
+/web/blob-report/
 
 # SDK build artifacts
 /sdk/ts/dist/
@@ -27,7 +30,16 @@ Thumbs.db
 # Config (contains secrets)
 config.yaml
 config.yml
-*.env
+config.*.yaml
+config.*.yml
+!config*.example.yaml
+!config*.example.yml
+!config.docker.yaml
+!config.docker.yml
+.env
+.env.*
+!.env.example
+!.env.*.example
 
 # Database
 *.db

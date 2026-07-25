@@ -14,22 +14,21 @@
   let loading = $state(true);
   let showCreate = $state(false);
   let createError = $state('');
+  let pageError = $state('');
   let createdSecret = $state('');
-  let newApp = $state({ name: '', redirect_uris: '' });
+  let newApp = $state({ name: '', redirect_uris: '', post_logout_redirect_uris: '' });
 
   onMount(() => loadApps());
 
   async function loadApps() {
     loading = true;
     try {
-      const token = localStorage.getItem('nya_token');
-      const res = await fetch('/api/my/clients', { headers: { Authorization: `Bearer ${token}` } });
-      if (res.ok) {
-        const data = await res.json();
-        clients = data.items || [];
-        total = data.total || 0;
-      }
-    } catch {} finally { loading = false; }
+      const data = await api.my.getClients();
+      clients = data.items || [];
+      total = data.total || 0;
+      pageError = '';
+    } catch (err) { pageError = err instanceof Error ? err.message : '加载失败'; }
+    finally { loading = false; }
   }
 
   async function handleCreate(e: Event) {
@@ -37,23 +36,14 @@
     createError = '';
     createdSecret = '';
     try {
-      const token = localStorage.getItem('nya_token');
-      const res = await fetch('/api/my/clients', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({
-          name: newApp.name,
-          redirect_uris: newApp.redirect_uris.split('\n').filter(Boolean),
-        }),
+      const result = await api.my.createClient({
+        name: newApp.name,
+        redirect_uris: newApp.redirect_uris.split('\n').map((uri) => uri.trim()).filter(Boolean),
+        post_logout_redirect_uris: newApp.post_logout_redirect_uris.split('\n').map((uri) => uri.trim()).filter(Boolean),
       });
-      if (!res.ok) {
-        const body = await res.json();
-        throw new Error(body.error || '创建失败');
-      }
-      const result = await res.json();
       if (result.secret) createdSecret = result.secret;
       showCreate = false;
-      newApp = { name: '', redirect_uris: '' };
+      newApp = { name: '', redirect_uris: '', post_logout_redirect_uris: '' };
       loadApps();
     } catch (err) { createError = err instanceof Error ? err.message : '创建失败'; }
   }
@@ -61,10 +51,9 @@
   async function handleDelete(id: string) {
     if (!confirm('删除后，使用此 Client ID 的集成将立即失效。确定继续吗？')) return;
     try {
-      const token = localStorage.getItem('nya_token');
-      await fetch(`/api/my/clients/${id}`, { method: 'DELETE', headers: { Authorization: `Bearer ${token}` } });
+      await api.my.deleteClient(id);
       loadApps();
-    } catch {}
+    } catch (err) { pageError = err instanceof Error ? err.message : '删除失败'; }
   }
 </script>
 
@@ -79,6 +68,10 @@
     <Plus size={16} /> 创建应用
   </Button>
 </div>
+
+{#if pageError}
+  <div class="mb-4 px-4 py-3 rounded-lg" style="background: var(--nya-danger-soft); color: var(--nya-danger); font-size: 13px;">{pageError}</div>
+{/if}
 
 {#if createdSecret}
   <div class="mb-4 px-5 py-4 rounded-lg" style="background: var(--nya-info-soft); border: 1px solid var(--nya-info)/20;">
@@ -120,6 +113,13 @@
             <code style="font-size: 11px; padding: 2px 8px; background: var(--nya-surface-muted); border-radius: 4px; color: var(--nya-text-secondary);">{uri}</code>
           {/each}
         </div>
+        {#if cl.post_logout_redirect_uris?.length}
+          <div class="flex flex-wrap gap-1.5 mt-2">
+            {#each cl.post_logout_redirect_uris as uri}
+              <code style="font-size: 11px; padding: 2px 8px; background: var(--nya-surface-muted); border-radius: 4px; color: var(--nya-text-tertiary);">退出: {uri}</code>
+            {/each}
+          </div>
+        {/if}
       </div>
     {/each}
   </div>
@@ -133,8 +133,13 @@
     {/if}
     <Input label="应用名称" bind:value={newApp.name} required placeholder="我的应用" />
     <div>
-      <label class="block mb-1.5" style="font-size: 14px; font-weight: 550; color: var(--nya-text-primary);">Redirect URI <span style="font-size: 12px; color: var(--nya-text-tertiary); font-weight: 400;">(每行一个)</span></label>
-      <textarea bind:value={newApp.redirect_uris} required rows="3" placeholder="https://my-app.com/callback"
+      <label for="app-redirect-uris" class="block mb-1.5" style="font-size: 14px; font-weight: 550; color: var(--nya-text-primary);">Redirect URI <span style="font-size: 12px; color: var(--nya-text-tertiary); font-weight: 400;">(每行一个)</span></label>
+      <textarea id="app-redirect-uris" bind:value={newApp.redirect_uris} required rows="3" placeholder="https://my-app.com/callback"
+        style="width: 100%; padding: 8px 12px; background: var(--nya-surface); border: 1px solid var(--nya-border-strong); border-radius: 9px; font-size: 13px; font-family: monospace; color: var(--nya-text-primary); resize: vertical;"></textarea>
+    </div>
+    <div>
+      <label for="app-post-logout-uris" class="block mb-1.5" style="font-size: 14px; font-weight: 550; color: var(--nya-text-primary);">Post-logout Redirect URI <span style="font-size: 12px; color: var(--nya-text-tertiary); font-weight: 400;">(每行一个)</span></label>
+      <textarea id="app-post-logout-uris" bind:value={newApp.post_logout_redirect_uris} rows="2" placeholder="https://my-app.com/signed-out"
         style="width: 100%; padding: 8px 12px; background: var(--nya-surface); border: 1px solid var(--nya-border-strong); border-radius: 9px; font-size: 13px; font-family: monospace; color: var(--nya-text-primary); resize: vertical;"></textarea>
     </div>
     <div class="flex justify-end gap-2 pt-2">

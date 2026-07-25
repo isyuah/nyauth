@@ -1,8 +1,7 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
   import { onMount } from 'svelte';
-  import { authStore } from '$lib/stores';
-  import { api } from '$lib/api';
+  import { sessionStore } from '$lib/stores';
   import AppShell from '$lib/components/layout/AppShell.svelte';
 
   let { children } = $props();
@@ -10,22 +9,12 @@
   let loading = $state(true);
 
   onMount(async () => {
-    if (!$authStore.token) {
-      goto('/login');
-      return;
-    }
-    try {
-      const me = await api.getMe();
-      if (me.role !== 'admin') {
-        goto('/profile');
-        return;
-      }
-      authorized = true;
-    } catch {
-      goto('/login');
-    } finally {
-      loading = false;
-    }
+    const session = await sessionStore.initialize();
+    if (!session) goto(`/login?return_to=${encodeURIComponent('/admin')}`);
+    else if (session.must_change_password) goto('/change-password');
+    else if (session.user.role !== 'admin') goto('/dashboard');
+    else authorized = true;
+    loading = false;
   });
 </script>
 

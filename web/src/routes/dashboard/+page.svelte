@@ -8,21 +8,19 @@
   let appCount = $state(0);
   let identityCount = $state(0);
   let loading = $state(true);
+  let error = $state('');
 
   onMount(async () => {
     try {
       me = await api.getMe();
-      const apps = await req<any>('/api/my/clients');
+      const apps = await api.my.getClients();
       appCount = apps?.total || 0;
-    } catch {} finally { loading = false; }
+      const identities = await api.getMyIdentities();
+      identityCount = identities.length;
+    } catch (err) {
+      error = err instanceof Error ? err.message : '概览加载失败';
+    } finally { loading = false; }
   });
-
-  async function req<T>(path: string): Promise<T> {
-    const token = localStorage.getItem('nya_token');
-    const res = await fetch(path, { headers: { Authorization: `Bearer ${token}` } });
-    if (!res.ok) throw new Error(`${res.status}`);
-    return res.json();
-  }
 </script>
 
 <svelte:head><title>用户中心 - Nya</title></svelte:head>
@@ -33,6 +31,10 @@
   </h1>
   <p style="font-size: 14px; color: var(--nya-text-secondary); margin-top: 4px;">管理你的账户和应用</p>
 </div>
+
+{#if error}
+  <div class="mb-4 px-4 py-3 rounded-lg" style="background: var(--nya-danger-soft); color: var(--nya-danger); font-size: 13px;">{error}</div>
+{/if}
 
 <div class="grid" style="gap: 16px; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));">
   <button onclick={() => goto('/dashboard/apps')} class="bg-[var(--nya-surface)] border border-[var(--nya-border)] text-left transition-all hover:shadow-nya-hover" style="min-height: 100px; padding: 20px; border-radius: var(--nya-radius-card); box-shadow: var(--nya-shadow-card);">
@@ -52,7 +54,7 @@
       </div>
       <span style="font-size: 13px; color: var(--nya-text-tertiary);">个人资料</span>
     </div>
-    <p style="font-size: 14px; color: var(--nya-text-secondary);">编辑个人信息和头像</p>
+    <p style="font-size: 14px; color: var(--nya-text-secondary);">{identityCount} 个外部身份已绑定</p>
   </button>
 
   <button onclick={() => goto('/test-client')} class="bg-[var(--nya-surface)] border border-[var(--nya-border)] text-left transition-all hover:shadow-nya-hover" style="min-height: 100px; padding: 20px; border-radius: var(--nya-radius-card); box-shadow: var(--nya-shadow-card);">

@@ -1,6 +1,6 @@
 {
   "name": "@nyasharp/nyauth",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "TypeScript SDK for nyauth authentication server",
   "type": "module",
   "main": "dist/index.js",
@@ -15,8 +15,15 @@
     "build": "tsc",
     "dev": "tsc --watch"
   },
-  "files": ["dist"],
-  "keywords": ["oauth", "oidc", "authentication", "nyauth"],
+  "files": [
+    "dist"
+  ],
+  "keywords": [
+    "oauth",
+    "oidc",
+    "authentication",
+    "nyauth"
+  ],
   "license": "MIT",
   "devDependencies": {
     "typescript": "^5.7.0"

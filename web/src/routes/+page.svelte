@@ -1,20 +1,13 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
   import { onMount } from 'svelte';
-  import { authStore } from '$lib/stores';
-  import { api } from '$lib/api';
+  import { sessionStore } from '$lib/stores';
 
   onMount(async () => {
-    if (!$authStore.token) {
-      goto('/login');
-      return;
-    }
-    try {
-      const me = await api.getMe();
-      goto(me.role === 'admin' ? '/admin' : '/dashboard');
-    } catch {
-      goto('/login');
-    }
+    const session = await sessionStore.initialize();
+    if (!session) return goto('/login');
+    if (session.must_change_password) return goto('/change-password');
+    goto(session.user.role === 'admin' ? '/admin' : '/dashboard');
   });
 </script>
 

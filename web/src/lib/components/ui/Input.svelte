@@ -10,6 +10,7 @@
     mono = false,
     required = false,
     id = '',
+    autocomplete,
     oninput,
   }: {
     label?: string;
@@ -22,6 +23,7 @@
     mono?: boolean;
     required?: boolean;
     id?: string;
+    autocomplete?: 'current-password' | 'new-password' | 'username' | 'email' | 'off';
     oninput?: (e: Event) => void;
   } = $props();
 </script>
@@ -40,6 +42,7 @@
     {disabled}
     {readonly}
     {required}
+    {autocomplete}
     bind:value
     {oninput}
     class="h-[38px] w-full px-3 bg-nya-surface border rounded-nya-sm text-body text-nya-text-primary placeholder-nya-text-tertiary transition-all duration-fast

@@ -1,7 +1,8 @@
 <script lang="ts">
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
-  import { authStore } from '$lib/stores';
+  import { api } from '$lib/api';
+  import { sessionStore } from '$lib/stores';
   import { LayoutDashboard, Users, AppWindow, KeyRound, LogOut, FlaskConical } from 'lucide-svelte';
 
   let {
@@ -23,9 +24,8 @@
     { href: '/admin/providers', icon: KeyRound, label: '身份提供者' },
   ];
 
-  function handleLogout() {
-    authStore.clear();
-    goto('/login');
+  async function handleLogout() {
+    try { await api.logout(); } finally { sessionStore.clear(); goto('/login'); }
   }
 
   function nav(href: string) {

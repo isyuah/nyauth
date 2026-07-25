@@ -1,13 +1,17 @@
 <script lang="ts">
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
-  import { authStore } from '$lib/stores';
+  import { onMount } from 'svelte';
+  import { api } from '$lib/api';
+  import { sessionStore } from '$lib/stores';
   import { LayoutDashboard, AppWindow, Settings, LogOut, User } from 'lucide-svelte';
   import Topbar from '$lib/components/layout/Topbar.svelte';
   import type { Snippet } from 'svelte';
 
   let { children }: { children: Snippet } = $props();
   let sidebarCollapsed = $state(false);
+  let authorized = $state(false);
+  let loading = $state(true);
 
   const navItems = [
     { href: '/dashboard', icon: LayoutDashboard, label: '概览' },
@@ -16,9 +20,24 @@
   ];
 
   function nav(href: string) { goto(href); }
-  function handleLogout() { authStore.clear(); goto('/login'); }
+  onMount(async () => {
+    const session = await sessionStore.initialize();
+    if (!session) goto(`/login?return_to=${encodeURIComponent($page.url.pathname + $page.url.search)}`);
+    else if (session.must_change_password) goto('/change-password');
+    else authorized = true;
+    loading = false;
+  });
+
+  async function handleLogout() {
+    try { await api.logout(); } finally { sessionStore.clear(); goto('/login'); }
+  }
 </script>
 
+{#if loading}
+  <div class="min-h-screen flex items-center justify-center bg-[var(--nya-bg)]">
+    <div class="animate-spin rounded-full h-6 w-6 border-2 border-[var(--nya-primary)]/30 border-t-[var(--nya-primary)]"></div>
+  </div>
+{:else if authorized}
 <div class="min-h-screen bg-[var(--nya-bg)]">
   <!-- Sidebar -->
   <aside class="fixed inset-y-0 left-0 flex flex-col bg-[var(--nya-bg-sidebar)] border-r border-[var(--nya-border)] z-30 transition-all duration-300" style="width: {sidebarCollapsed ? '72px' : '248px'};">
@@ -71,3 +90,4 @@
     </main>
   </div>
 </div>
+{/if}

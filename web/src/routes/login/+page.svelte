@@ -1,7 +1,7 @@
 <script lang="ts">
   import { page } from '$app/stores';
-  import { api } from '$lib/api';
-  import { authStore } from '$lib/stores';
+  import { api, ApiError } from '$lib/api';
+  import { consumeProviderAuthError, safeReturnPath, sessionStore } from '$lib/stores';
   import { goto } from '$app/navigation';
   import { onMount } from 'svelte';
   import Button from '$lib/components/ui/Button.svelte';
@@ -12,9 +12,16 @@
   let error = $state('');
   let loading = $state(false);
   let providers = $state<Array<{ name: string; type: string }>>([]);
-  let returnTo = $derived($page.url.searchParams.get('return_to') || '/admin');
+  let returnTo = $derived(safeReturnPath($page.url.searchParams.get('return_to'), '/dashboard'));
 
   onMount(async () => {
+    const providerError = consumeProviderAuthError();
+    if (providerError) error = providerError;
+    const existing = await sessionStore.initialize();
+    if (existing) {
+      goto(existing.must_change_password ? '/change-password' : returnTo);
+      return;
+    }
     try { providers = await api.getProviders(); } catch {}
   });
 
@@ -23,23 +30,28 @@
     error = '';
     loading = true;
     try {
-      const res = await api.login(username, password);
-      authStore.set({ token: res.access_token, refreshToken: res.refresh_token, expiresIn: res.expires_in });
-      // If return_to is an authorize URL, redirect there (full page, not SPA)
-      if (returnTo.startsWith('/authorize') || returnTo.startsWith('http')) {
+      const session = await api.login(username, password);
+      sessionStore.setSession(session);
+      if (session.must_change_password) {
+        goto(`/change-password?return_to=${encodeURIComponent(returnTo)}`);
+      } else if (returnTo.startsWith('/authorize')) {
         window.location.href = returnTo;
       } else {
         goto(returnTo);
       }
     } catch (err) {
-      error = err instanceof Error ? err.message : '登录失败';
+      if (err instanceof ApiError && err.status === 429 && err.retryAfter) {
+        error = `尝试次数过多，请在 ${err.retryAfter} 秒后重试`;
+      } else {
+        error = err instanceof Error ? err.message : '登录失败';
+      }
     } finally {
       loading = false;
     }
   }
 
   function handleOAuth(name: string) {
-    window.location.href = `/auth/${name}/authorize`;
+    window.location.href = `/auth/${encodeURIComponent(name)}/authorize?return_to=${encodeURIComponent(returnTo)}`;
   }
 </script>
 

@@ -6,7 +6,7 @@ export interface NyAuthConfig {
   issuer: string;
   /** OAuth 2.0 client ID */
   clientId: string;
-  /** OAuth 2.0 client secret (optional for public clients) */
+  /** OAuth 2.0 client secret. Server-side confidential clients only; never expose it in browser bundles. */
   clientSecret?: string;
   /** OAuth 2.0 redirect URI */
   redirectUri: string;
@@ -51,16 +51,14 @@ export interface DiscoveryDocument {
   grant_types_supported?: string[];
 }
 
-/**
- * Result of generating an authorization URL.
- */
+/** Result of generating an S256 PKCE authorization URL. */
 export interface AuthorizationResult {
   url: string;
   state: string;
 }
 
 /**
- * Result of generating an authorization URL with PKCE.
+ * Result of generating an authorization URL with mandatory S256 PKCE.
  */
 export interface PKCEResult extends AuthorizationResult {
   codeVerifier: string;

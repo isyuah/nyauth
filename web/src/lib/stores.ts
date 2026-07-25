@@ -1,40 +1,54 @@
 import { writable } from 'svelte/store';
-import { browser } from '$app/environment';
+import { api, setCsrfToken, type SessionInfo } from '$lib/api';
+import { cleanProviderAuthError, safeReturnPath } from '$lib/navigation';
 
-interface AuthState {
-  token: string | null;
-  refreshToken: string | null;
-  expiresIn: number | null;
+export { safeReturnPath } from '$lib/navigation';
+
+interface SessionState {
+  initialized: boolean;
+  session: SessionInfo | null;
 }
 
-function createAuthStore() {
-  const initial: AuthState = browser
-    ? {
-        token: localStorage.getItem('nya_token'),
-        refreshToken: localStorage.getItem('nya_refresh'),
-        expiresIn: null,
-      }
-    : { token: null, refreshToken: null, expiresIn: null };
+function createSessionStore() {
+  const { subscribe, set } = writable<SessionState>({ initialized: false, session: null });
+  let pending: Promise<SessionInfo | null> | null = null;
 
-  const { subscribe, set } = writable<AuthState>(initial);
+  async function initialize(force = false): Promise<SessionInfo | null> {
+    if (pending && !force) return pending;
+    pending = api.session()
+      .then((session) => {
+        set({ initialized: true, session });
+        return session;
+      })
+      .catch(() => {
+        setCsrfToken('');
+        set({ initialized: true, session: null });
+        return null;
+      })
+      .finally(() => { pending = null; });
+    return pending;
+  }
 
   return {
     subscribe,
-    set: (state: AuthState) => {
-      if (browser) {
-        state.token ? localStorage.setItem('nya_token', state.token) : localStorage.removeItem('nya_token');
-        state.refreshToken ? localStorage.setItem('nya_refresh', state.refreshToken) : localStorage.removeItem('nya_refresh');
-      }
-      set(state);
+    initialize,
+    setSession: (session: SessionInfo) => {
+      setCsrfToken(session.csrf_token);
+      set({ initialized: true, session });
     },
     clear: () => {
-      if (browser) {
-        localStorage.removeItem('nya_token');
-        localStorage.removeItem('nya_refresh');
-      }
-      set({ token: null, refreshToken: null, expiresIn: null });
+      setCsrfToken('');
+      set({ initialized: true, session: null });
     },
   };
 }
 
-export const authStore = createAuthStore();
+export const sessionStore = createSessionStore();
+
+export function consumeProviderAuthError(): string {
+  if (typeof window === 'undefined') return '';
+  const result = cleanProviderAuthError(window.location.href);
+  if (!result) return '';
+  window.history.replaceState(window.history.state, '', result.cleanPath);
+  return result.message;
+}

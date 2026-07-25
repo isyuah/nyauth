@@ -48,25 +48,25 @@ type TokenResponse struct {
 
 // UserInfo holds user information from the userinfo endpoint.
 type UserInfo struct {
-	Sub                string `json:"sub"`
-	PreferredUsername  string `json:"preferred_username,omitempty"`
-	Name               string `json:"name,omitempty"`
-	Email              string `json:"email,omitempty"`
-	Picture            string `json:"picture,omitempty"`
+	Sub               string `json:"sub"`
+	PreferredUsername string `json:"preferred_username,omitempty"`
+	Name              string `json:"name,omitempty"`
+	Email             string `json:"email,omitempty"`
+	Picture           string `json:"picture,omitempty"`
 }
 
 // DiscoveryDocument holds the OIDC discovery metadata.
 type DiscoveryDocument struct {
-	Issuer                string   `json:"issuer"`
-	AuthorizationEndpoint string   `json:"authorization_endpoint"`
-	TokenEndpoint         string   `json:"token_endpoint"`
-	UserinfoEndpoint      string   `json:"userinfo_endpoint"`
-	JWKSURI              string   `json:"jwks_uri"`
-	RevocationEndpoint    string   `json:"revocation_endpoint,omitempty"`
-	IntrospectionEndpoint string   `json:"introspection_endpoint,omitempty"`
-	ScopesSupported       []string `json:"scopes_supported,omitempty"`
+	Issuer                 string   `json:"issuer"`
+	AuthorizationEndpoint  string   `json:"authorization_endpoint"`
+	TokenEndpoint          string   `json:"token_endpoint"`
+	UserinfoEndpoint       string   `json:"userinfo_endpoint"`
+	JWKSURI                string   `json:"jwks_uri"`
+	RevocationEndpoint     string   `json:"revocation_endpoint,omitempty"`
+	IntrospectionEndpoint  string   `json:"introspection_endpoint,omitempty"`
+	ScopesSupported        []string `json:"scopes_supported,omitempty"`
 	ResponseTypesSupported []string `json:"response_types_supported,omitempty"`
-	GrantTypesSupported   []string `json:"grant_types_supported,omitempty"`
+	GrantTypesSupported    []string `json:"grant_types_supported,omitempty"`
 }
 
 // NewClient creates a new nyauth client.
@@ -105,31 +105,24 @@ func (c *Client) Discover(ctx context.Context) (*DiscoveryDocument, error) {
 	return &doc, nil
 }
 
-// GetAuthorizationURL returns the authorization URL and a random state parameter.
-func (c *Client) GetAuthorizationURL(scopes []string, state string) (authURL string, stateOut string) {
-	if state == "" {
-		state = generateRandomState()
-	}
-
-	params := url.Values{
-		"response_type": {"code"},
-		"client_id":     {c.config.ClientID},
-		"redirect_uri":  {c.config.RedirectURI},
-		"scope":         {strings.Join(scopes, " ")},
-		"state":         {state},
-	}
-
-	authEndpoint := strings.TrimSuffix(c.config.Issuer, "/") + "/authorize"
-	return authEndpoint + "?" + params.Encode(), state
+// GetAuthorizationURL returns an authorization URL using mandatory S256 PKCE.
+func (c *Client) GetAuthorizationURL(scopes []string, state string) (authURL, stateOut, codeVerifier, codeChallenge string, err error) {
+	return c.GetAuthorizationURLPKCE(scopes, state)
 }
 
 // GetAuthorizationURLPKCE returns the authorization URL with PKCE parameters.
-func (c *Client) GetAuthorizationURLPKCE(scopes []string, state string) (authURL, stateOut, codeVerifier, codeChallenge string) {
+func (c *Client) GetAuthorizationURLPKCE(scopes []string, state string) (authURL, stateOut, codeVerifier, codeChallenge string, err error) {
 	if state == "" {
-		state = generateRandomState()
+		state, err = generateRandomState()
+		if err != nil {
+			return "", "", "", "", fmt.Errorf("generating state: %w", err)
+		}
 	}
 
-	codeVerifier = generateCodeVerifier()
+	codeVerifier, err = generateCodeVerifier()
+	if err != nil {
+		return "", "", "", "", fmt.Errorf("generating PKCE verifier: %w", err)
+	}
 	codeChallenge = computeS256Challenge(codeVerifier)
 
 	params := url.Values{
@@ -143,16 +136,19 @@ func (c *Client) GetAuthorizationURLPKCE(scopes []string, state string) (authURL
 	}
 
 	authEndpoint := strings.TrimSuffix(c.config.Issuer, "/") + "/authorize"
-	return authEndpoint + "?" + params.Encode(), state, codeVerifier, codeChallenge
+	return authEndpoint + "?" + params.Encode(), state, codeVerifier, codeChallenge, nil
 }
 
 // ExchangeCode exchanges an authorization code for tokens.
 func (c *Client) ExchangeCode(ctx context.Context, code string) (*TokenResponse, error) {
-	return c.ExchangeCodePKCE(ctx, code, "")
+	return nil, fmt.Errorf("PKCE code verifier is required; use ExchangeCodePKCE")
 }
 
 // ExchangeCodePKCE exchanges an authorization code for tokens with PKCE.
 func (c *Client) ExchangeCodePKCE(ctx context.Context, code, codeVerifier string) (*TokenResponse, error) {
+	if codeVerifier == "" {
+		return nil, fmt.Errorf("PKCE code verifier is required")
+	}
 	tokenEndpoint := strings.TrimSuffix(c.config.Issuer, "/") + "/token"
 
 	data := url.Values{
@@ -161,9 +157,7 @@ func (c *Client) ExchangeCodePKCE(ctx context.Context, code, codeVerifier string
 		"redirect_uri": {c.config.RedirectURI},
 	}
 
-	if codeVerifier != "" {
-		data.Set("code_verifier", codeVerifier)
-	}
+	data.Set("code_verifier", codeVerifier)
 
 	return c.doTokenRequest(ctx, tokenEndpoint, data)
 }
@@ -228,6 +222,9 @@ func (c *Client) IntrospectToken(ctx context.Context, token string) (map[string]
 	introspectEndpoint := strings.TrimSuffix(c.config.Issuer, "/") + "/introspect"
 
 	data := url.Values{"token": {token}}
+	if c.config.ClientSecret == "" {
+		data.Set("client_id", c.config.ClientID)
+	}
 	req, err := http.NewRequestWithContext(ctx, "POST", introspectEndpoint, strings.NewReader(data.Encode()))
 	if err != nil {
 		return nil, err
@@ -236,8 +233,6 @@ func (c *Client) IntrospectToken(ctx context.Context, token string) (map[string]
 
 	if c.config.ClientSecret != "" {
 		req.SetBasicAuth(c.config.ClientID, c.config.ClientSecret)
-	} else {
-		data.Set("client_id", c.config.ClientID)
 	}
 
 	resp, err := c.http.Do(req)
@@ -245,6 +240,9 @@ func (c *Client) IntrospectToken(ctx context.Context, token string) (map[string]
 		return nil, err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode != http.StatusOK {
+		return nil, fmt.Errorf("introspection endpoint returned status %d", resp.StatusCode)
+	}
 
 	var result map[string]interface{}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
@@ -258,6 +256,9 @@ func (c *Client) RevokeToken(ctx context.Context, token string) error {
 	revokeEndpoint := strings.TrimSuffix(c.config.Issuer, "/") + "/revoke"
 
 	data := url.Values{"token": {token}}
+	if c.config.ClientSecret == "" {
+		data.Set("client_id", c.config.ClientID)
+	}
 	req, err := http.NewRequestWithContext(ctx, "POST", revokeEndpoint, strings.NewReader(data.Encode()))
 	if err != nil {
 		return err
@@ -273,10 +274,16 @@ func (c *Client) RevokeToken(ctx context.Context, token string) error {
 		return err
 	}
 	defer resp.Body.Close()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		return fmt.Errorf("revocation endpoint returned status %d", resp.StatusCode)
+	}
 	return nil
 }
 
 func (c *Client) doTokenRequest(ctx context.Context, endpoint string, data url.Values) (*TokenResponse, error) {
+	if c.config.ClientSecret == "" {
+		data.Set("client_id", c.config.ClientID)
+	}
 	req, err := http.NewRequestWithContext(ctx, "POST", endpoint, strings.NewReader(data.Encode()))
 	if err != nil {
 		return nil, fmt.Errorf("creating token request: %w", err)
@@ -286,8 +293,6 @@ func (c *Client) doTokenRequest(ctx context.Context, endpoint string, data url.V
 
 	if c.config.ClientSecret != "" {
 		req.SetBasicAuth(c.config.ClientID, c.config.ClientSecret)
-	} else {
-		data.Set("client_id", c.config.ClientID)
 	}
 
 	resp, err := c.http.Do(req)

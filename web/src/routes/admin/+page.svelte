@@ -202,7 +202,7 @@
     <div class="space-y-2">
       <div class="flex items-center gap-2">
         <span style="font-size: 12px; color: var(--nya-text-tertiary); min-width: 80px;">版本</span>
-        <span style="font-size: 12px; color: var(--nya-text-primary);">0.1.0</span>
+        <span style="font-size: 12px; color: var(--nya-text-primary);">0.2.0</span>
       </div>
       <div class="flex items-center gap-2">
         <span style="font-size: 12px; color: var(--nya-text-tertiary); min-width: 80px;">数据库</span>

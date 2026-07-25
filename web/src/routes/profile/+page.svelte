@@ -1,6 +1,8 @@
 <script lang="ts">
   import { api } from '$lib/api';
   import { onMount } from 'svelte';
+  import { goto } from '$app/navigation';
+  import { consumeProviderAuthError, sessionStore } from '$lib/stores';
   import Button from '$lib/components/ui/Button.svelte';
   import Input from '$lib/components/ui/Input.svelte';
   import Badge from '$lib/components/ui/Badge.svelte';
@@ -18,14 +20,21 @@
   let loading = $state(true);
 
   onMount(async () => {
+    const providerError = consumeProviderAuthError();
+    if (providerError) error = providerError;
+    const session = await sessionStore.initialize();
+    if (!session) { goto(`/login?return_to=${encodeURIComponent('/profile')}`); return; }
+    if (session.must_change_password) { goto('/change-password'); return; }
     try {
       me = await api.getMe();
       displayName = me.display_name || '';
       avatarUrl = me.avatar_url || '';
       email = me.email || '';
-      try { identities = (await api.admin.getUserIdentities(me.id)) || []; } catch { identities = []; }
+      try { identities = (await api.getMyIdentities()) || []; } catch { identities = []; }
       try { availableProviders = (await api.getProviders()) || []; } catch { availableProviders = []; }
-    } catch {} finally { loading = false; }
+    } catch (err) {
+      error = err instanceof Error ? err.message : '个人资料加载失败';
+    } finally { loading = false; }
   });
 
   async function handleSave() {
@@ -40,9 +49,14 @@
     finally { saving = false; }
   }
 
-  function bindProvider(name: string) {
-    // Redirect to the provider's OAuth flow with a flag to bind to current account
-    window.location.href = `/auth/${name}/authorize?bind=1`;
+  async function bindProvider(name: string) {
+    error = '';
+    try {
+      const result = await api.bindIdentity(name, '/profile');
+      window.location.assign(result.redirect_url);
+    } catch (err) {
+      error = err instanceof Error ? err.message : '无法发起身份绑定';
+    }
   }
 
   const providerIcons: Record<string, string> = { github: '🐙', google: '🔵', generic: '🔗' };
@@ -132,6 +146,19 @@
               </Button>
             </div>
           </div>
+        </div>
+      </div>
+
+      <!-- 安全设置 -->
+      <div class="bg-[var(--nya-surface)] border border-[var(--nya-border)]" style="border-radius: var(--nya-radius-card); box-shadow: var(--nya-shadow-card); margin-bottom: 20px;">
+        <div class="flex items-center justify-between gap-4" style="padding: 20px 28px;">
+          <div>
+            <h3 style="font-size: 16px; font-weight: 650; color: var(--nya-text-primary); margin: 0;">账户安全</h3>
+            <p style="font-size: 13px; color: var(--nya-text-secondary); margin-top: 4px;">修改密码会退出其他设备并撤销已有令牌。</p>
+          </div>
+          <Button variant="secondary" onclick={() => goto('/change-password?return_to=/profile')}>
+            <KeyRound size={16} /> 修改密码
+          </Button>
         </div>
       </div>
 

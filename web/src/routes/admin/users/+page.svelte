@@ -19,6 +19,7 @@
   let showCreate = $state(false);
   let newUser = $state({ username: '', email: '', password: '', display_name: '' });
   let createError = $state('');
+  let actionError = $state('');
 
   // Drawer state
   let drawerOpen = $state(false);
@@ -33,7 +34,8 @@
       const res = await api.admin.getUsers(page, 20, search);
       users = res.items || [];
       total = res.total || 0;
-    } catch {} finally { loading = false; }
+    } catch (err) { actionError = err instanceof Error ? err.message : '用户列表加载失败'; }
+    finally { loading = false; }
   }
 
   async function handleCreate(e: Event) {
@@ -49,20 +51,28 @@
 
   async function handleDelete(id: string) {
     if (!confirm('确定要删除此用户吗？此操作不可恢复。')) return;
-    try { await api.admin.deleteUser(id); loadUsers(); } catch {}
+    actionError = '';
+    try { await api.admin.deleteUser(id); drawerOpen = false; await loadUsers(); }
+    catch (err) { actionError = err instanceof Error ? err.message : '删除失败'; }
   }
 
   async function handleSuspend(id: string) {
     if (!confirm('确定要封禁此用户吗？')) return;
-    try { await api.admin.suspendUser(id); loadUsers(); if (selectedUser?.id === id) openDrawer(selectedUser); } catch {}
+    actionError = '';
+    try { await api.admin.suspendUser(id); drawerOpen = false; await loadUsers(); }
+    catch (err) { actionError = err instanceof Error ? err.message : '封禁失败'; }
   }
 
   async function handleActivate(id: string) {
-    try { await api.admin.activateUser(id); loadUsers(); if (selectedUser?.id === id) openDrawer(selectedUser); } catch {}
+    actionError = '';
+    try { await api.admin.activateUser(id); drawerOpen = false; await loadUsers(); }
+    catch (err) { actionError = err instanceof Error ? err.message : '解封失败'; }
   }
 
   async function handleRoleChange(id: string, role: string) {
-    try { await api.admin.updateUserRole(id, role); loadUsers(); if (selectedUser?.id === id) openDrawer(selectedUser); } catch {}
+    actionError = '';
+    try { await api.admin.updateUserRole(id, role); drawerOpen = false; await loadUsers(); }
+    catch (err) { actionError = err instanceof Error ? err.message : '角色更新失败'; }
   }
 
   async function openDrawer(user: any) {
@@ -85,6 +95,10 @@
     <Button variant="primary" onclick={() => (showCreate = true)}><Plus size={16} /> 创建用户</Button>
   {/snippet}
 </PageHeader>
+
+{#if actionError}
+  <div class="mb-4 px-4 py-3 rounded-lg" style="background: var(--nya-danger-soft); color: var(--nya-danger); font-size: 13px;">{actionError}</div>
+{/if}
 
 <div class="mb-4 flex gap-3 flex-wrap">
   <div class="flex-1" style="min-width: 200px; max-width: 320px;">

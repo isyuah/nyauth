@@ -3,6 +3,7 @@
   import { api } from '$lib/api';
   import { goto } from '$app/navigation';
   import { onMount } from 'svelte';
+  import { sessionStore } from '$lib/stores';
   import Button from '$lib/components/ui/Button.svelte';
   import Card from '$lib/components/ui/Card.svelte';
   import Badge from '$lib/components/ui/Badge.svelte';
@@ -15,6 +16,16 @@
 
   onMount(async () => {
     if (!challenge) { error = '缺少授权请求'; return; }
+    const returnTo = `/consent?challenge=${encodeURIComponent(challenge)}`;
+    const session = await sessionStore.initialize();
+    if (!session) {
+      goto(`/login?return_to=${encodeURIComponent(returnTo)}`);
+      return;
+    }
+    if (session.must_change_password) {
+      goto(`/change-password?return_to=${encodeURIComponent(returnTo)}`);
+      return;
+    }
     try { consentData = await api.consent.get(challenge); } catch (e) { error = '授权请求无效或已过期'; }
   });
 

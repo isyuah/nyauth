@@ -1,4 +1,4 @@
-.PHONY: build build-ui build-all run migrate clean test dev
+.PHONY: build build-server build-ui build-all run migrate clean test fmt lint tidy dev dev-full docker-build docker-up docker-down docker-logs docker-prod-config docker-prod-up
 
 # Default target
 all: build
@@ -20,7 +20,7 @@ build-all: build-ui build
 
 # Run the server
 run:
-	go run ./cmd/nyauth -config config.yaml
+	go run ./cmd/nyauth serve -config config.yaml
 
 # Run with live reload (requires air)
 dev:
@@ -28,7 +28,7 @@ dev:
 
 # Run database migrations
 migrate:
-	go run ./cmd/nyauth -config config.yaml -migrate
+	go run ./cmd/nyauth migrate -config config.yaml
 
 # Clean build artifacts
 clean:
@@ -71,3 +71,9 @@ docker-down:
 
 docker-logs:
 	docker compose logs -f nyauth
+
+docker-prod-config:
+	docker compose -f docker-compose.prod.yml config
+
+docker-prod-up:
+	docker compose -f docker-compose.prod.yml up -d

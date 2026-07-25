@@ -19,12 +19,23 @@
   let newProvider = $state({ name: '', type: 'github', client_id: '', client_secret: '', discovery_url: '' });
   let createError = $state('');
   let editError = $state('');
+  let actionError = $state('');
+  let callbackOrigin = $state('https://auth.example.com');
   let testResults = $state<Record<string, { loading?: boolean; success?: boolean; latency?: number; error?: string; status_code?: number }>>({});
 
-  onMount(() => loadProviders());
+  onMount(() => {
+    callbackOrigin = window.location.origin;
+    loadProviders();
+  });
+
+  function callbackURL(name: string): string {
+    const pathName = name.trim();
+    return `${callbackOrigin}/auth/${pathName ? encodeURIComponent(pathName) : '{name}'}/callback`;
+  }
 
   async function loadProviders() {
-    try { providers = await api.admin.getProviders(); } catch {}
+    try { providers = await api.admin.getProviders(); actionError = ''; }
+    catch (err) { actionError = err instanceof Error ? err.message : 'Provider 列表加载失败'; }
   }
 
   async function handleCreate(e: Event) {
@@ -70,6 +81,27 @@
     } catch (err) { editError = err instanceof Error ? err.message : '更新失败'; }
   }
 
+  async function toggleProvider(provider: any) {
+    actionError = '';
+    try {
+      await api.admin.updateProvider(provider.name, { enabled: !provider.enabled });
+      await loadProviders();
+    } catch (err) {
+      actionError = err instanceof Error ? err.message : '状态更新失败';
+    }
+  }
+
+  async function deleteProvider(name: string) {
+    if (!confirm(`删除 Provider “${name}” 后将无法继续使用它登录或绑定。确定继续吗？`)) return;
+    actionError = '';
+    try {
+      await api.admin.deleteProvider(name);
+      await loadProviders();
+    } catch (err) {
+      actionError = err instanceof Error ? err.message : '删除失败';
+    }
+  }
+
   const typeLabels: Record<string, string> = { github: 'GitHub', google: 'Google', generic: '通用 OIDC' };
   const typeColors: Record<string, string> = { github: 'var(--nya-text-primary)', google: 'var(--nya-blue)', generic: 'var(--nya-orange)' };
 
@@ -81,7 +113,7 @@
         '打开 GitHub Developer Settings → OAuth Apps → New OAuth App',
         'Application name: 填写你的应用名',
         'Homepage URL: 填写你的域名',
-        'Authorization callback URL: 填写 http://你的域名/auth/github/callback',
+        'Authorization callback URL：使用本页显示的回调地址',
         '创建后复制 Client ID 和 Client Secret 填入上方',
       ],
     },
@@ -92,7 +124,7 @@
         '打开 Google Cloud Console → APIs & Services → Credentials',
         'Create Credentials → OAuth client ID',
         'Application type: Web application',
-        'Authorized redirect URIs: 添加 http://你的域名/auth/google/callback',
+        'Authorized redirect URIs：添加本页显示的回调地址',
         '创建后复制 Client ID 和 Client Secret 填入上方',
       ],
     },
@@ -101,9 +133,9 @@
       url: '',
       steps: [
         '在你的 OIDC Provider 中创建一个 OAuth/OIDC 客户端',
-        'Redirect URI 填写: http://你的域名/auth/{name}/callback',
-        '如果 Provider 支持 OIDC Discovery，填写 Discovery URL',
-        '否则手动填写 Authorization URL 和 Token URL',
+        'Redirect URI：使用本页显示的回调地址',
+        '填写 Provider 的 HTTPS OIDC Discovery URL',
+        '确认 Provider 的 issuer、签名密钥与客户端配置一致',
         '创建后复制 Client ID 和 Client Secret 填入上方',
       ],
     },
@@ -117,6 +149,16 @@
     <Button variant="primary" onclick={() => (showCreate = true)}><Plus size={16} /> 添加身份提供者</Button>
   {/snippet}
 </PageHeader>
+
+{#if callbackOrigin.startsWith('http://')}
+  <div class="mb-4 px-4 py-3 rounded-lg" style="background: var(--nya-warning-soft); color: var(--nya-warning); font-size: 13px;">
+    当前后台通过 HTTP 打开。该地址仅适用于本地开发；生产环境必须从 HTTPS issuer 打开后台，再复制下方回调地址。
+  </div>
+{/if}
+
+{#if actionError}
+  <div class="mb-4 px-4 py-3 rounded-lg" style="background: var(--nya-danger-soft); color: var(--nya-danger); font-size: 13px;">{actionError}</div>
+{/if}
 
 {#if providers.length === 0}
   <EmptyState title="暂无身份提供者" description="添加 GitHub、Google 或其他 OIDC 提供商，让用户使用第三方账号登录。">
@@ -137,12 +179,13 @@
               <h3 style="font-size: 15px; font-weight: 650; color: var(--nya-text-primary);">{p.name}</h3>
               <div class="flex items-center gap-2 mt-0.5">
                 <Badge variant="info">{typeLabels[p.type] || p.type}</Badge>
-                <Badge variant="success">已启用</Badge>
+                <Badge variant={p.enabled === false ? 'default' : 'success'}>{p.enabled === false ? '已禁用' : '已启用'}</Badge>
               </div>
             </div>
           </div>
           <div class="flex items-center gap-2">
             <Button variant="ghost" size="sm" onclick={() => openEdit(p)}>编辑凭据</Button>
+            <Button variant="ghost" size="sm" onclick={() => toggleProvider(p)}>{p.enabled === false ? '启用' : '禁用'}</Button>
             <Button variant="soft" size="sm" onclick={() => handleTest(p.name)}>
               {#if test?.loading}
                 <Loader2 size={14} class="animate-spin" /> 测试中...
@@ -150,6 +193,7 @@
                 测试连接
               {/if}
             </Button>
+            <Button variant="ghost" size="sm" onclick={() => deleteProvider(p.name)}>删除</Button>
           </div>
         </div>
 
@@ -190,7 +234,7 @@
                 </a>
               {/if}
               <p class="mt-2" style="font-size: 11px; color: var(--nya-text-tertiary);">
-                Callback URL: <code style="background: var(--nya-surface); padding: 1px 4px; border-radius: 4px;">{p.name === 'github' || p.name === 'google' ? `http://你的域名/auth/${p.name}/callback` : `http://你的域名/auth/${p.name}/callback`}</code>
+                Callback URL: <code style="background: var(--nya-surface); padding: 1px 4px; border-radius: 4px;">{callbackURL(p.name)}</code>
               </p>
             </div>
           </details>
@@ -221,7 +265,7 @@
       <div class="px-3 py-2 rounded-lg" style="background: var(--nya-info-soft); font-size: 12px; color: var(--nya-info);">
         Callback URL 需要在 {typeLabels[newProvider.type]} 中设置为:
         <code style="display: block; margin-top: 4px; background: rgba(0,0,0,0.05); padding: 2px 6px; border-radius: 4px;">
-          http://你的域名/auth/{newProvider.name || '{name}'}/callback
+          {callbackURL(newProvider.name)}
         </code>
       </div>
     {/if}

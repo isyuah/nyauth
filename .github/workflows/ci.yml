@@ -1,0 +1,108 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  go-test:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: nyauth
+          POSTGRES_USER: nyauth
+          POSTGRES_PASSWORD: ci-database-password-0123456789
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U nyauth -d nyauth"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      NYAUTH_TEST_DATABASE_DSN: postgres://nyauth:ci-database-password-0123456789@127.0.0.1:5432/nyauth?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Run Go race tests
+        run: go test -race ./...
+
+  web:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - run: npm run check
+      - run: npm run test:unit
+      - run: npm run build
+
+  web-e2e:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: web
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - run: npm ci
+      - name: Install Playwright Chromium
+        run: npx playwright install --with-deps chromium
+      - run: npm run test:e2e
+
+  typescript-sdk:
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: sdk/ts
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: sdk/ts/package-lock.json
+      - run: npm ci
+      - run: npm run build
+      - name: Verify RFC 7636 S256 vector
+        run: >-
+          node --input-type=module -e
+          "import {computeS256Challenge} from './dist/index.js';
+          const got = await computeS256Challenge('dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk');
+          if (got !== 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM') throw new Error(got);"
+
+  compose-config:
+    runs-on: ubuntu-latest
+    env:
+      NYAUTH_DATABASE_DSN: postgres://nyauth:ci-database-password@postgres:5432/nyauth?sslmode=disable
+      NYAUTH_REDIS_PASSWORD: ci-redis-password-0123456789
+      NYAUTH_AUTH_ISSUER: https://auth.ci.invalid
+      NYAUTH_AUTH_MASTER_KEY: Y2ktbWFzdGVyLWtleS0wMTIzNDU2Nzg5YWJjZGVmZ2g=
+      NYAUTH_TRUSTED_PROXY_CIDRS: 172.30.0.0/24
+      NYAUTH_IMAGE: ghcr.io/nyasharp/nyauth@sha256:1111111111111111111111111111111111111111111111111111111111111111
+      POSTGRES_PASSWORD: ci-database-password-0123456789
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate development Compose
+        run: docker compose -f docker-compose.yml config --quiet
+      - name: Validate production Compose
+        run: docker compose -f docker-compose.prod.yml config --quiet

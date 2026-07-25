@@ -1,18 +1,16 @@
 <script lang="ts">
-  import { page } from '$app/stores';
   import { onMount } from 'svelte';
 
   // Config
   let clientId = $state('nya-test-client');
   let redirectUri = $state('');
   let scopes = $state(['openid', 'profile', 'email']);
-  let usePKCE = $state(true);
 
   // Flow state
   let step = $state(0); // 0=config, 1=waiting, 2=code received, 3=tokens, 4=userinfo
   let codeVerifier = $state('');
   let codeChallenge = $state('');
-  let state = $state('');
+  let oauthState = $state('');
   let authCode = $state('');
   let returnedState = $state('');
   let tokens = $state<any>(null);
@@ -22,6 +20,20 @@
 
   function log(msg: string) {
     logs = [...logs, `[${new Date().toLocaleTimeString()}] ${msg}`];
+  }
+
+  function clearPendingAuthorization() {
+    sessionStorage.removeItem('nya_pkce_verifier');
+    sessionStorage.removeItem('nya_state');
+  }
+
+  function secureEqual(left: string, right: string): boolean {
+    const length = Math.max(left.length, right.length);
+    let difference = left.length ^ right.length;
+    for (let i = 0; i < length; i += 1) {
+      difference |= (left.charCodeAt(i) || 0) ^ (right.charCodeAt(i) || 0);
+    }
+    return difference === 0;
   }
 
   onMount(() => {
@@ -35,31 +47,45 @@
     const err = url.searchParams.get('error');
 
     if (err) {
+      clearPendingAuthorization();
+      window.history.replaceState({}, '', '/test-client');
       error = `授权失败: ${err} - ${url.searchParams.get('error_description') || ''}`;
       step = 0;
       log(`错误: ${error}`);
       return;
     }
 
-    if (code && returnedSt) {
+    if (code || returnedSt) {
+      window.history.replaceState({}, '', '/test-client');
+      if (!code || !returnedSt) {
+        clearPendingAuthorization();
+        error = '授权回调缺少 code 或 state，已拒绝继续。';
+        log('错误: 授权回调参数不完整');
+        return;
+      }
       authCode = code;
       returnedState = returnedSt;
       step = 2;
       log(`收到授权码: ${code.substring(0, 20)}...`);
       log(`收到 state: ${returnedSt}`);
 
-      // Recover codeVerifier from sessionStorage
+      // Recover and immediately consume the one-time PKCE state.
       const savedVerifier = sessionStorage.getItem('nya_pkce_verifier');
       const savedState = sessionStorage.getItem('nya_state');
-      if (savedVerifier) codeVerifier = savedVerifier;
-      if (savedState && savedState !== returnedSt) {
-        error = 'State 不匹配！可能存在 CSRF 攻击。';
-        log('错误: state 不匹配');
+      clearPendingAuthorization();
+      if (!savedVerifier || !savedState) {
+        error = '缺少一次性 PKCE 状态，无法安全换取令牌。';
+        log('错误: 缺少 PKCE verifier 或 state');
+        step = 0;
         return;
       }
-
-      // Clean URL
-      window.history.replaceState({}, '', '/test-client');
+      codeVerifier = savedVerifier;
+      if (!secureEqual(savedState, returnedSt)) {
+        error = 'State 不匹配！可能存在 CSRF 攻击。';
+        log('错误: state 不匹配');
+        step = 0;
+        return;
+      }
 
       // Auto-exchange
       exchangeCode();
@@ -73,7 +99,7 @@
     return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
   }
 
-  function generatePKCE() {
+  async function generatePKCE() {
     const verifierBytes = new Uint8Array(32);
     crypto.getRandomValues(verifierBytes);
     codeVerifier = base64url(verifierBytes);
@@ -81,18 +107,17 @@
 
     // S256 challenge
     const encoder = new TextEncoder();
-    crypto.subtle.digest('SHA-256', encoder.encode(codeVerifier)).then(hash => {
-      codeChallenge = base64url(new Uint8Array(hash));
-      log(`PKCE code_verifier: ${codeVerifier.substring(0, 20)}...`);
-      log(`PKCE code_challenge (S256): ${codeChallenge.substring(0, 20)}...`);
-    });
+    const hash = await crypto.subtle.digest('SHA-256', encoder.encode(codeVerifier));
+    codeChallenge = base64url(new Uint8Array(hash));
+    log(`PKCE code_verifier: ${codeVerifier.substring(0, 20)}...`);
+    log(`PKCE code_challenge (S256): ${codeChallenge.substring(0, 20)}...`);
   }
 
   function generateState() {
-    const bytes = new Uint8Array(16);
+    const bytes = new Uint8Array(32);
     crypto.getRandomValues(bytes);
-    state = base64url(bytes);
-    sessionStorage.setItem('nya_state', state);
+    oauthState = base64url(bytes);
+    sessionStorage.setItem('nya_state', oauthState);
   }
 
   async function startAuth() {
@@ -100,24 +125,18 @@
     step = 1;
 
     generateState();
-    if (usePKCE) {
-      generatePKCE();
-      // Wait a bit for the async digest
-      await new Promise(r => setTimeout(r, 100));
-    }
+    await generatePKCE();
 
     const params = new URLSearchParams({
       response_type: 'code',
       client_id: clientId,
       redirect_uri: redirectUri,
       scope: scopes.join(' '),
-      state: state,
+      state: oauthState,
     });
 
-    if (usePKCE && codeChallenge) {
-      params.set('code_challenge', codeChallenge);
-      params.set('code_challenge_method', 'S256');
-    }
+    params.set('code_challenge', codeChallenge);
+    params.set('code_challenge_method', 'S256');
 
     const url = `/authorize?${params}`;
     log(`跳转到: ${url}`);
@@ -133,9 +152,12 @@
       client_id: clientId,
     });
 
-    if (usePKCE && codeVerifier) {
-      params.set('code_verifier', codeVerifier);
+    if (!codeVerifier) {
+      error = '缺少 PKCE verifier，无法安全换取令牌';
+      step = 0;
+      return;
     }
+    params.set('code_verifier', codeVerifier);
 
     try {
       const res = await fetch('/token', {
@@ -150,7 +172,7 @@
         log('Token 获取成功！');
         log(`Access Token: ${data.access_token?.substring(0, 30)}...`);
         if (data.id_token) log(`ID Token: ${data.id_token.substring(0, 30)}...`);
-        if (data.refresh_token) log(`Refresh Token: ${data.refresh_token}`);
+        if (data.refresh_token) log(`Refresh Token: ${data.refresh_token.substring(0, 16)}...`);
       } else {
         error = `Token 请求失败: ${data.error} - ${data.error_description || ''}`;
         log(`错误: ${error}`);
@@ -176,22 +198,6 @@
     }
   }
 
-  async function introspectToken() {
-    if (!tokens?.access_token) return;
-    log('正在内省 Token...');
-    try {
-      const res = await fetch('/introspect', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
-        body: new URLSearchParams({ token: tokens.access_token, client_id: clientId }),
-      });
-      const data = await res.json();
-      log(`内省结果: active=${data.active}`);
-    } catch (e) {
-      log(`内省失败: ${e}`);
-    }
-  }
-
   function reset() {
     step = 0;
     tokens = null;
@@ -199,8 +205,7 @@
     authCode = '';
     error = '';
     logs = [];
-    sessionStorage.removeItem('nya_pkce_verifier');
-    sessionStorage.removeItem('nya_state');
+	clearPendingAuthorization();
   }
 
   const scopeOptions = ['openid', 'profile', 'email', 'offline_access'];
@@ -246,16 +251,16 @@
       <h3 style="font-size: 16px; font-weight: 650; margin-bottom: 16px;">客户端配置</h3>
       <div class="space-y-4">
         <div>
-          <label style="font-size: 13px; font-weight: 500; color: var(--nya-text-secondary); display: block; margin-bottom: 4px;">Client ID</label>
-          <input bind:value={clientId} style="width: 100%; height: 38px; padding: 0 12px; border: 1px solid var(--nya-border-strong); border-radius: 9px; font-size: 14px; font-family: monospace;" />
+          <label for="test-client-id" style="font-size: 13px; font-weight: 500; color: var(--nya-text-secondary); display: block; margin-bottom: 4px;">Client ID</label>
+          <input id="test-client-id" bind:value={clientId} style="width: 100%; height: 38px; padding: 0 12px; border: 1px solid var(--nya-border-strong); border-radius: 9px; font-size: 14px; font-family: monospace;" />
         </div>
         <div>
-          <label style="font-size: 13px; font-weight: 500; color: var(--nya-text-secondary); display: block; margin-bottom: 4px;">Redirect URI</label>
-          <input bind:value={redirectUri} style="width: 100%; height: 38px; padding: 0 12px; border: 1px solid var(--nya-border-strong); border-radius: 9px; font-size: 14px; font-family: monospace;" />
+          <label for="test-redirect-uri" style="font-size: 13px; font-weight: 500; color: var(--nya-text-secondary); display: block; margin-bottom: 4px;">Redirect URI</label>
+          <input id="test-redirect-uri" bind:value={redirectUri} style="width: 100%; height: 38px; padding: 0 12px; border: 1px solid var(--nya-border-strong); border-radius: 9px; font-size: 14px; font-family: monospace;" />
         </div>
         <div>
-          <label style="font-size: 13px; font-weight: 500; color: var(--nya-text-secondary); display: block; margin-bottom: 8px;">Scopes</label>
-          <div class="flex flex-wrap gap-2">
+          <span id="test-scopes-label" style="font-size: 13px; font-weight: 500; color: var(--nya-text-secondary); display: block; margin-bottom: 8px;">Scopes</span>
+          <div class="flex flex-wrap gap-2" aria-labelledby="test-scopes-label">
             {#each scopeOptions as s}
               <button
                 onclick={() => toggleScope(s)}
@@ -267,10 +272,7 @@
             {/each}
           </div>
         </div>
-        <label class="flex items-center gap-2 cursor-pointer">
-          <input type="checkbox" bind:checked={usePKCE} />
-          <span style="font-size: 13px; color: var(--nya-text-secondary);">使用 PKCE (S256)</span>
-        </label>
+        <p style="font-size: 13px; color: var(--nya-text-secondary);">PKCE 方法：S256（必需）</p>
       </div>
     </div>
     <button
@@ -298,7 +300,6 @@
       <pre style="font-size: 12px; background: var(--nya-surface-muted); padding: 12px; border-radius: 8px; overflow-x: auto; white-space: pre-wrap; word-break: break-all;">{JSON.stringify(tokens, null, 2)}</pre>
       <div class="flex gap-2 mt-3">
         <button onclick={fetchUserInfo} style="height: 32px; padding: 0 12px; background: var(--nya-primary-soft); color: var(--nya-primary); border-radius: 9px; font-size: 12px; font-weight: 550;">获取用户信息</button>
-        <button onclick={introspectToken} style="height: 32px; padding: 0 12px; background: var(--nya-surface-muted); color: var(--nya-text-secondary); border-radius: 9px; font-size: 12px;">内省 Token</button>
         <button onclick={reset} style="height: 32px; padding: 0 12px; background: var(--nya-surface-muted); color: var(--nya-text-secondary); border-radius: 9px; font-size: 12px;">重新测试</button>
       </div>
     </div>
