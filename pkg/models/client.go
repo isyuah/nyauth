@@ -14,6 +14,7 @@ type OAuthClient struct {
 	Grants       []string          `json:"grants" db:"grants"`
 	Scopes       []string          `json:"scopes" db:"scopes"`
 	IsPublic     bool              `json:"is_public" db:"is_public"`
+	OwnerID      *string           `json:"owner_id,omitempty" db:"owner_id"`
 	Metadata     map[string]string `json:"metadata,omitempty" db:"metadata"`
 	CreatedAt    time.Time         `json:"created_at" db:"created_at"`
 	UpdatedAt    time.Time         `json:"updated_at" db:"updated_at"`

@@ -77,6 +77,7 @@ func runMigrations(db *pgxpool.Pool) error {
 		"000005": "init_jwk_keys",
 		"000006": "add_audit_logs",
 		"000007": "add_user_fields",
+		"000008": "add_client_owner",
 	}
 
 	for version, name := range migrations {

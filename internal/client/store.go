@@ -22,9 +22,9 @@ func NewStore(db *pgxpool.Pool) *Store {
 // Create inserts a new client.
 func (s *Store) Create(ctx context.Context, c *models.OAuthClient) error {
 	_, err := s.db.Exec(ctx, `
-		INSERT INTO oauth_clients (id, secret_hash, name, redirect_uris, grants, scopes, is_public, metadata)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-	`, c.ID, c.SecretHash, c.Name, c.RedirectURIs, c.Grants, c.Scopes, c.IsPublic, c.Metadata)
+		INSERT INTO oauth_clients (id, secret_hash, name, redirect_uris, grants, scopes, is_public, owner_id, metadata)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+	`, c.ID, c.SecretHash, c.Name, c.RedirectURIs, c.Grants, c.Scopes, c.IsPublic, c.OwnerID, c.Metadata)
 	return err
 }
 
@@ -32,9 +32,9 @@ func (s *Store) Create(ctx context.Context, c *models.OAuthClient) error {
 func (s *Store) GetByID(ctx context.Context, id string) (*models.OAuthClient, error) {
 	c := &models.OAuthClient{}
 	err := s.db.QueryRow(ctx, `
-		SELECT id, secret_hash, name, redirect_uris, grants, scopes, is_public, metadata, created_at, updated_at
+		SELECT id, secret_hash, name, redirect_uris, grants, scopes, is_public, owner_id, metadata, created_at, updated_at
 		FROM oauth_clients WHERE id = $1
-	`, id).Scan(&c.ID, &c.SecretHash, &c.Name, &c.RedirectURIs, &c.Grants, &c.Scopes, &c.IsPublic, &c.Metadata, &c.CreatedAt, &c.UpdatedAt)
+	`, id).Scan(&c.ID, &c.SecretHash, &c.Name, &c.RedirectURIs, &c.Grants, &c.Scopes, &c.IsPublic, &c.OwnerID, &c.Metadata, &c.CreatedAt, &c.UpdatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("getting client: %w", err)
 	}
@@ -64,7 +64,7 @@ func (s *Store) List(ctx context.Context, p models.Pagination) (*models.Paginate
 	}
 
 	rows, err := s.db.Query(ctx, `
-		SELECT id, secret_hash, name, redirect_uris, grants, scopes, is_public, metadata, created_at, updated_at
+		SELECT id, secret_hash, name, redirect_uris, grants, scopes, is_public, owner_id, metadata, created_at, updated_at
 		FROM oauth_clients ORDER BY created_at DESC LIMIT $1 OFFSET $2
 	`, p.PageSize, p.Offset())
 	if err != nil {
@@ -75,7 +75,7 @@ func (s *Store) List(ctx context.Context, p models.Pagination) (*models.Paginate
 	var clients []models.OAuthClient
 	for rows.Next() {
 		var c models.OAuthClient
-		if err := rows.Scan(&c.ID, &c.SecretHash, &c.Name, &c.RedirectURIs, &c.Grants, &c.Scopes, &c.IsPublic, &c.Metadata, &c.CreatedAt, &c.UpdatedAt); err != nil {
+		if err := rows.Scan(&c.ID, &c.SecretHash, &c.Name, &c.RedirectURIs, &c.Grants, &c.Scopes, &c.IsPublic, &c.OwnerID, &c.Metadata, &c.CreatedAt, &c.UpdatedAt); err != nil {
 			return nil, err
 		}
 		clients = append(clients, c)
@@ -108,4 +108,46 @@ func (s *Store) AuthenticateClient(ctx context.Context, clientID, clientSecret s
 	}
 
 	return c, nil
+}
+
+// ListByOwner retrieves clients owned by a specific user.
+func (s *Store) ListByOwner(ctx context.Context, ownerID string, p models.Pagination) (*models.PaginatedResponse[models.OAuthClient], error) {
+	var total int64
+	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM oauth_clients WHERE owner_id = $1`, ownerID).Scan(&total); err != nil {
+		return nil, err
+	}
+
+	rows, err := s.db.Query(ctx, `
+		SELECT id, secret_hash, name, redirect_uris, grants, scopes, is_public, owner_id, metadata, created_at, updated_at
+		FROM oauth_clients WHERE owner_id = $1 ORDER BY created_at DESC LIMIT $2 OFFSET $3
+	`, ownerID, p.PageSize, p.Offset())
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var clients []models.OAuthClient
+	for rows.Next() {
+		var c models.OAuthClient
+		if err := rows.Scan(&c.ID, &c.SecretHash, &c.Name, &c.RedirectURIs, &c.Grants, &c.Scopes, &c.IsPublic, &c.OwnerID, &c.Metadata, &c.CreatedAt, &c.UpdatedAt); err != nil {
+			return nil, err
+		}
+		clients = append(clients, c)
+	}
+
+	totalPages := int(total) / p.PageSize
+	if int(total)%p.PageSize > 0 {
+		totalPages++
+	}
+
+	return &models.PaginatedResponse[models.OAuthClient]{
+		Items: clients, Total: total, Page: p.Page, PageSize: p.PageSize, TotalPages: totalPages,
+	}, nil
+}
+
+// CountByOwner counts how many clients a user owns.
+func (s *Store) CountByOwner(ctx context.Context, ownerID string) (int64, error) {
+	var count int64
+	err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM oauth_clients WHERE owner_id = $1`, ownerID).Scan(&count)
+	return count, err
 }

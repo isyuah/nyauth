@@ -498,6 +498,100 @@ func (s *Server) handleListAuditLogs(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, result)
 }
 
+// --- User self-service client management ---
+
+const maxClientsPerUser = 10 // Configurable limit
+
+func currentUserFromContext(r *http.Request) *models.User {
+	if u, ok := r.Context().Value(contextKey("currentUser")).(*models.User); ok {
+		return u
+	}
+	return nil
+}
+
+func (s *Server) handleListMyClients(w http.ResponseWriter, r *http.Request) {
+	user := currentUserFromContext(r)
+	if user == nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "not authenticated"})
+		return
+	}
+	result, err := s.clientService.ListByOwner(r.Context(), user.ID.String(), 1, 50)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) handleCreateMyClient(w http.ResponseWriter, r *http.Request) {
+	user := currentUserFromContext(r)
+	if user == nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "not authenticated"})
+		return
+	}
+
+	// Check limit
+	count, _ := s.clientService.CountByOwner(r.Context(), user.ID.String())
+	if count >= maxClientsPerUser {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": fmt.Sprintf("已达到应用数量上限 (%d)", maxClientsPerUser)})
+		return
+	}
+
+	var req models.CreateClientRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
+		return
+	}
+
+	if req.Grants == nil {
+		req.Grants = []string{models.GrantAuthorizationCode}
+	}
+	if req.Scopes == nil {
+		req.Scopes = []string{"openid", "profile", "email"}
+	}
+
+	result, err := s.clientService.Create(r.Context(), req)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+
+	// Set owner
+	ownerID := user.ID.String()
+	result.OwnerID = &ownerID
+	_, _ = s.clientService.GetStore().GetByID(r.Context(), result.ID) // ensure it exists
+	// Direct update for owner_id
+	_, _ = s.db.Exec(r.Context(), `UPDATE oauth_clients SET owner_id = $1 WHERE id = $2`, user.ID, result.ID)
+
+	writeJSON(w, http.StatusCreated, result)
+}
+
+func (s *Server) handleDeleteMyClient(w http.ResponseWriter, r *http.Request) {
+	user := currentUserFromContext(r)
+	if user == nil {
+		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "not authenticated"})
+		return
+	}
+
+	clientID := chi.URLParam(r, "id")
+	cl, err := s.clientService.GetByID(r.Context(), clientID)
+	if err != nil {
+		writeJSON(w, http.StatusNotFound, map[string]string{"error": "client not found"})
+		return
+	}
+
+	if cl.OwnerID == nil || *cl.OwnerID != user.ID.String() {
+		writeJSON(w, http.StatusForbidden, map[string]string{"error": "只能删除自己创建的应用"})
+		return
+	}
+
+	if err := s.clientService.Delete(r.Context(), clientID); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
 // --- Utilities ---
 
 func extractBearerToken(r *http.Request) string {

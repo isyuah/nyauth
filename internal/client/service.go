@@ -122,3 +122,19 @@ func (s *Service) List(ctx context.Context, page, pageSize int) (*models.Paginat
 func (s *Service) AuthenticateClient(ctx context.Context, clientID, clientSecret string) (*models.OAuthClient, error) {
 	return s.store.AuthenticateClient(ctx, clientID, clientSecret)
 }
+
+// ListByOwner retrieves clients owned by a specific user.
+func (s *Service) ListByOwner(ctx context.Context, ownerID string, page, pageSize int) (*models.PaginatedResponse[models.OAuthClient], error) {
+	p := models.NewPagination(page, pageSize)
+	return s.store.ListByOwner(ctx, ownerID, p)
+}
+
+// CountByOwner counts how many clients a user owns.
+func (s *Service) CountByOwner(ctx context.Context, ownerID string) (int64, error) {
+	return s.store.CountByOwner(ctx, ownerID)
+}
+
+// GetStore returns the underlying store (for direct access when needed).
+func (s *Service) GetStore() *Store {
+	return s.store
+}

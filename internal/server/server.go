@@ -159,8 +159,6 @@ func (s *Server) buildRouter() *chi.Mux {
 	r.Route("/api", func(r chi.Router) {
 		r.Post("/login", s.handleLogin)
 		r.Post("/logout", s.handleLogout)
-		r.Get("/me", s.handleMe)
-		r.Put("/me", s.handleUpdateMe)
 
 		// Provider list (public, for login page)
 		r.Get("/providers", s.handleListProviders)
@@ -170,7 +168,19 @@ func (s *Server) buildRouter() *chi.Mux {
 		r.Post("/consent/accept", s.consentHandler.AcceptConsent)
 		r.Post("/consent/deny", s.consentHandler.DenyConsent)
 
-		// Admin routes (require authentication)
+		// User routes (require login, any role)
+		r.Group(func(r chi.Router) {
+			r.Use(s.userAuthMiddleware)
+			r.Get("/me", s.handleMe)
+			r.Put("/me", s.handleUpdateMe)
+			r.Route("/my/clients", func(r chi.Router) {
+				r.Get("/", s.handleListMyClients)
+				r.Post("/", s.handleCreateMyClient)
+				r.Delete("/{id}", s.handleDeleteMyClient)
+			})
+		})
+
+		// Admin routes (require admin role)
 		r.Group(func(r chi.Router) {
 			r.Use(s.adminAuthMiddleware)
 			// Stats
