@@ -2,99 +2,103 @@ package server
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"time"
 
 	"github.com/nyasharp/nyauth/internal/crypto"
 	"github.com/nyasharp/nyauth/internal/session"
+	"github.com/nyasharp/nyauth/pkg/models"
 )
 
 const sessionCookieName = "nyauth_session"
 const sessionTTL = 24 * time.Hour
 
-// SessionMiddleware provides cookie-based session management.
 type SessionMiddleware struct {
 	sessionStore *session.Store
+	secureCookie bool
 }
 
-// NewSessionMiddleware creates a new session middleware.
-func NewSessionMiddleware(store *session.Store) *SessionMiddleware {
-	return &SessionMiddleware{sessionStore: store}
+func NewSessionMiddleware(store *session.Store, secureCookie bool) *SessionMiddleware {
+	return &SessionMiddleware{sessionStore: store, secureCookie: secureCookie}
 }
 
-// CreateSession creates a new session and sets the cookie.
-func (m *SessionMiddleware) CreateSession(w http.ResponseWriter, r *http.Request, userID, username string) error {
+type AuthenticatedSession struct {
+	ID   string
+	Data *session.SessionData
+}
+
+func (m *SessionMiddleware) CreateSession(w http.ResponseWriter, r *http.Request, user *models.User) (*AuthenticatedSession, error) {
 	sessionID, err := crypto.GenerateRandomString(32)
 	if err != nil {
-		return err
+		return nil, err
 	}
-
-	data := &session.SessionData{
-		UserID:   userID,
-		Username: username,
-	}
-
+	data := &session.SessionData{UserID: user.ID.String(), Username: user.Username, AuthVersion: user.AuthVersion}
 	if err := m.sessionStore.SaveSession(r.Context(), sessionID, data, sessionTTL); err != nil {
-		return err
+		return nil, err
 	}
-
-	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookieName,
-		Value:    sessionID,
-		Path:     "/",
-		HttpOnly: true,
-		SameSite: http.SameSiteLaxMode,
-		MaxAge:   int(sessionTTL.Seconds()),
-	})
-
-	return nil
+	m.setCookie(w, sessionID, int(sessionTTL.Seconds()))
+	return &AuthenticatedSession{ID: sessionID, Data: data}, nil
 }
 
-// DestroySession removes the session and clears the cookie.
+func (m *SessionMiddleware) RotateSession(w http.ResponseWriter, r *http.Request, user *models.User) (*AuthenticatedSession, error) {
+	created, err := m.CreateSession(w, r, user)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := m.sessionStore.DeleteOtherUserSessions(r.Context(), user.ID.String(), created.ID); err != nil {
+		_ = m.sessionStore.DeleteSession(r.Context(), created.ID)
+		m.clearCookie(w)
+		return nil, err
+	}
+	return created, nil
+}
+
 func (m *SessionMiddleware) DestroySession(w http.ResponseWriter, r *http.Request) {
-	cookie, err := r.Cookie(sessionCookieName)
-	if err == nil {
+	if cookie, err := r.Cookie(sessionCookieName); err == nil {
 		_ = m.sessionStore.DeleteSession(r.Context(), cookie.Value)
 	}
-
-	http.SetCookie(w, &http.Cookie{
-		Name:     sessionCookieName,
-		Value:    "",
-		Path:     "/",
-		HttpOnly: true,
-		MaxAge:   -1,
-	})
+	m.clearCookie(w)
 }
 
-// GetSessionData returns session data from the cookie, or nil if not logged in.
-func (m *SessionMiddleware) GetSessionData(r *http.Request) *session.SessionData {
+func (m *SessionMiddleware) GetSession(r *http.Request) (*AuthenticatedSession, error) {
 	cookie, err := r.Cookie(sessionCookieName)
 	if err != nil {
-		return nil
+		return nil, err
 	}
-
 	data, err := m.sessionStore.GetSession(r.Context(), cookie.Value)
 	if err != nil {
-		return nil
+		return nil, err
 	}
-
-	return data
+	return &AuthenticatedSession{ID: cookie.Value, Data: data}, nil
 }
 
-// context key for session data
+func (m *SessionMiddleware) setCookie(w http.ResponseWriter, value string, maxAge int) {
+	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: value, Path: "/", HttpOnly: true, Secure: m.secureCookie, SameSite: http.SameSiteLaxMode, MaxAge: maxAge, Expires: time.Now().Add(time.Duration(maxAge) * time.Second)})
+}
+func (m *SessionMiddleware) clearCookie(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: "", Path: "/", HttpOnly: true, Secure: m.secureCookie, SameSite: http.SameSiteLaxMode, MaxAge: -1, Expires: time.Unix(1, 0)})
+}
+
 type contextKey string
 
-const sessionContextKey contextKey = "session"
+const (
+	sessionContextKey     contextKey = "session"
+	currentUserContextKey contextKey = "current-user"
+	clientIPContextKey    contextKey = "client-ip"
+)
 
-// WithSessionData stores session data in context.
-func WithSessionData(ctx context.Context, data *session.SessionData) context.Context {
-	return context.WithValue(ctx, sessionContextKey, data)
+func withAuthenticatedSession(ctx context.Context, value *AuthenticatedSession) context.Context {
+	return context.WithValue(ctx, sessionContextKey, value)
 }
-
-// SessionFromContext retrieves session data from context.
-func SessionFromContext(ctx context.Context) *session.SessionData {
-	if v, ok := ctx.Value(sessionContextKey).(*session.SessionData); ok {
-		return v
-	}
-	return nil
+func sessionFromContext(ctx context.Context) *AuthenticatedSession {
+	value, _ := ctx.Value(sessionContextKey).(*AuthenticatedSession)
+	return value
+}
+func currentUserFromContext(r *http.Request) *models.User {
+	value, _ := r.Context().Value(currentUserContextKey).(*models.User)
+	return value
+}
+func isNoSession(err error) bool {
+	return errors.Is(err, http.ErrNoCookie) || errors.Is(err, session.ErrNotFound)
 }

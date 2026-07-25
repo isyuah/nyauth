@@ -15,6 +15,25 @@ import (
 	"golang.org/x/crypto/argon2"
 )
 
+const DummyPasswordHash = "$argon2id$v=19$m=65536,t=1,p=4$c3RhdGljLWR1bW15LXNhbHQ$Yv7sTUTZhgAhq7/Oc3b1T3sBv8vH5k/pQEE0A4E1fTk"
+
+var argon2Slots = make(chan struct{}, 4)
+
+// SetArgon2Concurrency configures the process-wide Argon2 work limit. Call it
+// once during startup before serving requests.
+func SetArgon2Concurrency(limit int) {
+	if limit < 1 {
+		limit = 4
+	}
+	argon2Slots = make(chan struct{}, limit)
+}
+
+func withArgon2Slot(fn func()) {
+	argon2Slots <- struct{}{}
+	defer func() { <-argon2Slots }()
+	fn()
+}
+
 // HashPassword hashes a password using argon2id.
 func HashPassword(password string) (string, error) {
 	salt := make([]byte, 16)
@@ -22,7 +41,10 @@ func HashPassword(password string) (string, error) {
 		return "", fmt.Errorf("generating salt: %w", err)
 	}
 
-	hash := argon2.IDKey([]byte(password), salt, 1, 64*1024, 4, 32)
+	var hash []byte
+	withArgon2Slot(func() {
+		hash = argon2.IDKey([]byte(password), salt, 1, 64*1024, 4, 32)
+	})
 
 	encoded := fmt.Sprintf("$argon2id$v=%d$m=%d,t=%d,p=%d$%s$%s",
 		argon2.Version,
@@ -48,7 +70,9 @@ func VerifyPassword(password, encodedHash string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("parsing version: %w", err)
 	}
-	_ = version
+	if version != argon2.Version {
+		return false, fmt.Errorf("unsupported argon2 version")
+	}
 
 	// Parse m, t, p
 	params := parts[3]
@@ -59,19 +83,33 @@ func VerifyPassword(password, encodedHash string) (bool, error) {
 	for _, p := range strings.Split(params, ",") {
 		kv := strings.SplitN(p, "=", 2)
 		if len(kv) != 2 {
-			continue
+			return false, fmt.Errorf("invalid argon2 parameters")
 		}
 		switch kv[0] {
 		case "m":
-			v, _ := strconv.ParseUint(kv[1], 10, 32)
+			v, err := strconv.ParseUint(kv[1], 10, 32)
+			if err != nil {
+				return false, fmt.Errorf("invalid argon2 memory")
+			}
 			memory = uint32(v)
 		case "t":
-			v, _ := strconv.ParseUint(kv[1], 10, 32)
+			v, err := strconv.ParseUint(kv[1], 10, 32)
+			if err != nil {
+				return false, fmt.Errorf("invalid argon2 time")
+			}
 			timeCost = uint32(v)
 		case "p":
-			v, _ := strconv.ParseUint(kv[1], 10, 8)
+			v, err := strconv.ParseUint(kv[1], 10, 8)
+			if err != nil {
+				return false, fmt.Errorf("invalid argon2 parallelism")
+			}
 			parallelism = uint8(v)
+		default:
+			return false, fmt.Errorf("unknown argon2 parameter")
 		}
+	}
+	if memory < 8*1024 || memory > 1024*1024 || timeCost < 1 || timeCost > 10 || parallelism < 1 || parallelism > 16 {
+		return false, fmt.Errorf("argon2 parameters out of range")
 	}
 
 	salt, err := base64.RawStdEncoding.DecodeString(parts[4])
@@ -83,10 +121,35 @@ func VerifyPassword(password, encodedHash string) (bool, error) {
 	if err != nil {
 		return false, fmt.Errorf("decoding hash: %w", err)
 	}
+	if len(salt) < 8 || len(salt) > 64 || len(hash) < 16 || len(hash) > 64 {
+		return false, fmt.Errorf("argon2 salt or hash length out of range")
+	}
 
-	comparisonHash := argon2.IDKey([]byte(password), salt, timeCost, memory, parallelism, uint32(len(hash)))
+	var comparisonHash []byte
+	withArgon2Slot(func() {
+		comparisonHash = argon2.IDKey([]byte(password), salt, timeCost, memory, parallelism, uint32(len(hash)))
+	})
 
 	return subtle.ConstantTimeCompare(hash, comparisonHash) == 1, nil
+}
+
+// HashClientSecret hashes a high-entropy client secret with SHA-256.
+func HashClientSecret(secret string) string {
+	digest := sha256.Sum256([]byte(secret))
+	return "$sha256$" + base64.RawStdEncoding.EncodeToString(digest[:])
+}
+
+// VerifyClientSecret compares a client secret with a SHA-256 digest.
+func VerifyClientSecret(secret, encodedHash string) bool {
+	if !strings.HasPrefix(encodedHash, "$sha256$") {
+		return false
+	}
+	expected, err := base64.RawStdEncoding.DecodeString(strings.TrimPrefix(encodedHash, "$sha256$"))
+	if err != nil || len(expected) != sha256.Size {
+		return false
+	}
+	actual := sha256.Sum256([]byte(secret))
+	return subtle.ConstantTimeCompare(expected, actual[:]) == 1
 }
 
 // Encrypt encrypts plaintext using AES-256-GCM with the given key.

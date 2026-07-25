@@ -7,37 +7,40 @@ import (
 
 // OAuthClient represents a registered OAuth 2.0 client application.
 type OAuthClient struct {
-	ID           string            `json:"id" db:"id"`
-	SecretHash   *string           `json:"-" db:"secret_hash"`
-	Name         string            `json:"name" db:"name"`
-	RedirectURIs []string          `json:"redirect_uris" db:"redirect_uris"`
-	Grants       []string          `json:"grants" db:"grants"`
-	Scopes       []string          `json:"scopes" db:"scopes"`
-	IsPublic     bool              `json:"is_public" db:"is_public"`
-	OwnerID      *string           `json:"owner_id,omitempty" db:"owner_id"`
-	Metadata     map[string]string `json:"metadata,omitempty" db:"metadata"`
-	CreatedAt    time.Time         `json:"created_at" db:"created_at"`
-	UpdatedAt    time.Time         `json:"updated_at" db:"updated_at"`
+	ID                     string            `json:"id" db:"id"`
+	SecretHash             *string           `json:"-" db:"secret_hash"`
+	Name                   string            `json:"name" db:"name"`
+	RedirectURIs           []string          `json:"redirect_uris" db:"redirect_uris"`
+	PostLogoutRedirectURIs []string          `json:"post_logout_redirect_uris" db:"post_logout_redirect_uris"`
+	Grants                 []string          `json:"grants" db:"grants"`
+	Scopes                 []string          `json:"scopes" db:"scopes"`
+	IsPublic               bool              `json:"is_public" db:"is_public"`
+	OwnerID                *string           `json:"owner_id,omitempty" db:"owner_id"`
+	Metadata               map[string]string `json:"metadata,omitempty" db:"metadata"`
+	CreatedAt              time.Time         `json:"created_at" db:"created_at"`
+	UpdatedAt              time.Time         `json:"updated_at" db:"updated_at"`
 }
 
 // CreateClientRequest is the payload to create a client.
 type CreateClientRequest struct {
-	Name         string            `json:"name" validate:"required"`
-	RedirectURIs []string          `json:"redirect_uris" validate:"required,min=1"`
-	Grants       []string          `json:"grants" validate:"required,min=1"`
-	Scopes       []string          `json:"scopes"`
-	IsPublic     bool              `json:"is_public"`
-	Metadata     map[string]string `json:"metadata,omitempty"`
+	Name                   string            `json:"name" validate:"required"`
+	RedirectURIs           []string          `json:"redirect_uris" validate:"required,min=1"`
+	PostLogoutRedirectURIs []string          `json:"post_logout_redirect_uris,omitempty"`
+	Grants                 []string          `json:"grants" validate:"required,min=1"`
+	Scopes                 []string          `json:"scopes"`
+	IsPublic               bool              `json:"is_public"`
+	Metadata               map[string]string `json:"metadata,omitempty"`
 }
 
 // UpdateClientRequest is the payload to update a client.
 type UpdateClientRequest struct {
-	Name         *string           `json:"name,omitempty"`
-	RedirectURIs []string          `json:"redirect_uris,omitempty"`
-	Grants       []string          `json:"grants,omitempty"`
-	Scopes       []string          `json:"scopes,omitempty"`
-	IsPublic     *bool             `json:"is_public,omitempty"`
-	Metadata     map[string]string `json:"metadata,omitempty"`
+	Name                   *string           `json:"name,omitempty"`
+	RedirectURIs           []string          `json:"redirect_uris,omitempty"`
+	PostLogoutRedirectURIs []string          `json:"post_logout_redirect_uris,omitempty"`
+	Grants                 []string          `json:"grants,omitempty"`
+	Scopes                 []string          `json:"scopes,omitempty"`
+	IsPublic               *bool             `json:"is_public,omitempty"`
+	Metadata               map[string]string `json:"metadata,omitempty"`
 }
 
 // CreateClientResponse includes the client secret in plaintext (only returned at creation).
@@ -78,6 +81,16 @@ func (c *OAuthClient) HasScope(scope string) bool {
 func (c *OAuthClient) HasRedirectURI(uri string) bool {
 	for _, u := range c.RedirectURIs {
 		if u == uri {
+			return true
+		}
+	}
+	return false
+}
+
+// HasPostLogoutRedirectURI checks whether a logout redirect URI is registered.
+func (c *OAuthClient) HasPostLogoutRedirectURI(uri string) bool {
+	for _, registered := range c.PostLogoutRedirectURIs {
+		if registered == uri {
 			return true
 		}
 	}

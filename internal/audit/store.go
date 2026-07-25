@@ -3,6 +3,7 @@ package audit
 import (
 	"context"
 	"fmt"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nyasharp/nyauth/pkg/models"
@@ -67,6 +68,9 @@ func (s *Store) List(ctx context.Context, page, pageSize int, event string) (*mo
 		}
 		logs = append(logs, l)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating audit logs: %w", err)
+	}
 
 	totalPages := int(total) / p.PageSize
 	if int(total)%p.PageSize > 0 {
@@ -79,13 +83,15 @@ func (s *Store) List(ctx context.Context, page, pageSize int, event string) (*mo
 }
 
 // CountEvents counts audit events matching a filter.
-func (s *Store) CountEvents(ctx context.Context, event string, since string) (int64, error) {
+func (s *Store) CountEvents(ctx context.Context, event string, since *time.Time) (int64, error) {
 	var count int64
 	query := `SELECT COUNT(*) FROM audit_logs WHERE event = $1`
-	if since != "" {
-		query += ` AND created_at >= ` + since
+	args := []any{event}
+	if since != nil {
+		query += ` AND created_at >= $2`
+		args = append(args, *since)
 	}
-	if err := s.db.QueryRow(ctx, query, event).Scan(&count); err != nil {
+	if err := s.db.QueryRow(ctx, query, args...).Scan(&count); err != nil {
 		return 0, err
 	}
 	return count, nil

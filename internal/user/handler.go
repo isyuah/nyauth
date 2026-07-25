@@ -1,18 +1,52 @@
 package user
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
 
+const maxHandlerBody = 1 << 20
+
+func decodeHandlerJSON(w http.ResponseWriter, r *http.Request, target any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, maxHandlerBody)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return fmt.Errorf("request body must contain one JSON value")
+	}
+	return nil
+}
+
+func isUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
+
+type handlerService interface {
+	List(ctx context.Context, page, pageSize int, search string) (*models.PaginatedResponse[models.User], error)
+	Create(ctx context.Context, req models.CreateUserRequest) (*models.User, error)
+	GetByID(ctx context.Context, id uuid.UUID) (*models.User, error)
+	AdminUpdate(ctx context.Context, id uuid.UUID, req models.AdminUpdateUserRequest) (*models.User, error)
+	Delete(ctx context.Context, id uuid.UUID) error
+	ResetPassword(ctx context.Context, id uuid.UUID, newPassword string) (*models.User, error)
+}
+
 // Handler handles HTTP requests for user operations.
 type Handler struct {
-	service *Service
+	service handlerService
 }
 
 // NewHandler creates a new user handler.
@@ -41,7 +75,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 
 	result, err := h.service.List(r.Context(), page, pageSize, search)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, "failed to list users")
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -49,14 +83,20 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	var req models.CreateUserRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeHandlerJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
 	user, err := h.service.Create(r.Context(), req)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		if IsInvalidInput(err) {
+			writeError(w, http.StatusBadRequest, err.Error())
+		} else if isUniqueViolation(err) {
+			writeError(w, http.StatusConflict, "username or email already exists")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to create user")
+		}
 		return
 	}
 	writeJSON(w, http.StatusCreated, user)
@@ -71,7 +111,11 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 
 	user, err := h.service.GetByID(r.Context(), id)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "user not found")
+		if IsNotFound(err) {
+			writeError(w, http.StatusNotFound, "user not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to get user")
+		}
 		return
 	}
 	writeJSON(w, http.StatusOK, user)
@@ -84,15 +128,21 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	var req models.UpdateUserRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	var req models.AdminUpdateUserRequest
+	if err := decodeHandlerJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
-	user, err := h.service.Update(r.Context(), id, req)
+	user, err := h.service.AdminUpdate(r.Context(), id, req)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		if errors.Is(err, ErrLastActiveAdmin) {
+			writeError(w, http.StatusConflict, err.Error())
+		} else if IsInvalidInput(err) {
+			writeError(w, http.StatusBadRequest, err.Error())
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to update user")
+		}
 		return
 	}
 	writeJSON(w, http.StatusOK, user)
@@ -106,7 +156,13 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.service.Delete(r.Context(), id); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		if errors.Is(err, ErrLastActiveAdmin) {
+			writeError(w, http.StatusConflict, err.Error())
+		} else if IsNotFound(err) {
+			writeError(w, http.StatusNotFound, "user not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to delete user")
+		}
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
@@ -122,13 +178,17 @@ func (h *Handler) ResetPassword(w http.ResponseWriter, r *http.Request) {
 	var body struct {
 		Password string `json:"password"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
+	if err := decodeHandlerJSON(w, r, &body); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
-	if err := h.service.ResetPassword(r.Context(), id, body.Password); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+	if _, err := h.service.ResetPassword(r.Context(), id, body.Password); err != nil {
+		if IsInvalidInput(err) {
+			writeError(w, http.StatusBadRequest, err.Error())
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to reset password")
+		}
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

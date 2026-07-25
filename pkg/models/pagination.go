@@ -25,6 +25,9 @@ func NewPagination(page, pageSize int) Pagination {
 	if pageSize > 100 {
 		pageSize = 100
 	}
+	if page > 1_000_000 {
+		page = 1_000_000
+	}
 	return Pagination{Page: page, PageSize: pageSize}
 }
 

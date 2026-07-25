@@ -30,19 +30,36 @@ func (h *Handler) GetStats(w http.ResponseWriter, r *http.Request) {
 	stats := models.DashboardStats{}
 
 	// User count
-	_ = h.db.QueryRow(ctx, `SELECT COUNT(*) FROM users`).Scan(&stats.UserCount)
+	if err := h.db.QueryRow(ctx, `SELECT COUNT(*) FROM users`).Scan(&stats.UserCount); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load statistics"})
+		return
+	}
 
 	// App count
-	_ = h.db.QueryRow(ctx, `SELECT COUNT(*) FROM oauth_clients`).Scan(&stats.AppCount)
+	if err := h.db.QueryRow(ctx, `SELECT COUNT(*) FROM oauth_clients`).Scan(&stats.AppCount); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load statistics"})
+		return
+	}
 
 	// Login count (7 days)
-	_ = h.db.QueryRow(ctx, `SELECT COUNT(*) FROM audit_logs WHERE event = 'user.login' AND created_at >= NOW() - INTERVAL '7 days'`).Scan(&stats.LoginCount7d)
+	if err := h.db.QueryRow(ctx, `SELECT COUNT(*) FROM audit_logs WHERE event = 'user.login' AND result='success' AND created_at >= NOW() - INTERVAL '7 days'`).Scan(&stats.LoginCount7d); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load statistics"})
+		return
+	}
 
 	// Active sessions (count distinct tokens in Redis)
-	stats.ActiveSessions = h.countActiveSessions(ctx)
+	activeSessions, err := h.countActiveSessions(ctx)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load statistics"})
+		return
+	}
+	stats.ActiveSessions = activeSessions
 
 	// Failed logins (7 days)
-	_ = h.db.QueryRow(ctx, `SELECT COUNT(*) FROM audit_logs WHERE event = 'user.login_failed' AND created_at >= NOW() - INTERVAL '7 days'`).Scan(&stats.FailedLogins7d)
+	if err := h.db.QueryRow(ctx, `SELECT COUNT(*) FROM audit_logs WHERE event = 'user.login_failed' AND result='failure' AND created_at >= NOW() - INTERVAL '7 days'`).Scan(&stats.FailedLogins7d); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load statistics"})
+		return
+	}
 
 	writeJSON(w, http.StatusOK, stats)
 }
@@ -62,11 +79,14 @@ func (h *Handler) GetLoginTrend(w http.ResponseWriter, r *http.Request) {
 		trend.Labels = append(trend.Labels, label)
 
 		var count int64
-		_ = h.db.QueryRow(ctx, `
+		if err := h.db.QueryRow(ctx, `
 			SELECT COUNT(*) FROM audit_logs
 			WHERE event = 'user.login'
 			AND created_at >= $1::date AND created_at < ($1::date + INTERVAL '1 day')
-		`, day.Format("2006-01-02")).Scan(&count)
+		`, day.Format("2006-01-02")).Scan(&count); err != nil {
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load login trend"})
+			return
+		}
 		trend.Values = append(trend.Values, count)
 	}
 
@@ -89,7 +109,7 @@ func (h *Handler) GetRecentLogins(w http.ResponseWriter, r *http.Request) {
 		LIMIT $1
 	`, limit)
 	if err != nil {
-		writeJSON(w, http.StatusOK, []interface{}{})
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load recent logins"})
 		return
 	}
 	defer rows.Close()
@@ -99,7 +119,8 @@ func (h *Handler) GetRecentLogins(w http.ResponseWriter, r *http.Request) {
 		var name, result, ip string
 		var createdAt time.Time
 		if err := rows.Scan(&name, &result, &ip, &createdAt); err != nil {
-			continue
+			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load recent logins"})
+			return
 		}
 		logins = append(logins, map[string]string{
 			"username": name,
@@ -108,6 +129,10 @@ func (h *Handler) GetRecentLogins(w http.ResponseWriter, r *http.Request) {
 			"time":     relativeTime(createdAt),
 		})
 	}
+	if err := rows.Err(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load recent logins"})
+		return
+	}
 
 	if logins == nil {
 		logins = []map[string]string{}
@@ -115,14 +140,13 @@ func (h *Handler) GetRecentLogins(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, logins)
 }
 
-func (h *Handler) countActiveSessions(ctx context.Context) int64 {
-	// Count keys matching token prefix pattern
+func (h *Handler) countActiveSessions(ctx context.Context) (int64, error) {
 	var count int64
-	iter := h.rdb.Scan(ctx, 0, "nyauth:token:*", 1000).Iterator()
+	iter := h.rdb.Scan(ctx, 0, "nyauth:session:*", 1000).Iterator()
 	for iter.Next(ctx) {
 		count++
 	}
-	return count
+	return count, iter.Err()
 }
 
 func relativeTime(t time.Time) string {

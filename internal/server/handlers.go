@@ -2,7 +2,9 @@ package server
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 	"strings"
@@ -11,604 +13,299 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/nyasharp/nyauth/internal/audit"
-	"github.com/nyasharp/nyauth/internal/crypto"
+	"github.com/nyasharp/nyauth/internal/client"
+	"github.com/nyasharp/nyauth/internal/user"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
 
-// handleLogin handles username/password login.
+const maxRequestBody = 1 << 20
+const maxClientsPerUser = 10
+
+func decodeJSON(w http.ResponseWriter, r *http.Request, target any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return fmt.Errorf("request body must contain one JSON value")
+	}
+	return nil
+}
+func writeJSON(w http.ResponseWriter, status int, value any) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(value)
+}
+func writeAPIError(w http.ResponseWriter, status int, message string) {
+	writeJSON(w, status, map[string]string{"error": message})
+}
+func sessionResponse(current *models.User, dataCSRF string) *models.SessionResponse {
+	return &models.SessionResponse{User: current, CSRFToken: dataCSRF, MustChangePassword: current.MustChangePassword}
+}
+
+func setSessionNoStoreHeaders(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store, private")
+	w.Header().Set("Pragma", "no-cache")
+}
+
 func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
-	var req models.LoginRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
+	setSessionNoStoreHeaders(w)
+	if !s.validSameOriginRequest(r) {
+		writeAPIError(w, http.StatusForbidden, "invalid request origin")
 		return
 	}
-
-	user, err := s.userService.Authenticate(r.Context(), req.Username, req.Password)
+	var request models.LoginRequest
+	if err := decodeJSON(w, r, &request); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	request.Username = strings.TrimSpace(request.Username)
+	ip := requestIP(r)
+	allowed, retry, err := s.loginLimiter.Reserve(r.Context(), ip, strings.ToLower(request.Username))
 	if err != nil {
-		audit.Record(r.Context(), s.auditStore, models.AuditUserLoginFailed, nil, req.Username, audit.GetIP(r))
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid credentials"})
+		writeAPIError(w, http.StatusServiceUnavailable, "login temporarily unavailable")
 		return
 	}
-
-	// Record login audit + update last_login
-	ip := audit.GetIP(r)
-	audit.Record(r.Context(), s.auditStore, models.AuditUserLogin, &user.ID, user.Username, ip)
-	_ = s.userService.RecordLogin(r.Context(), user.ID, ip)
-
-	// Create session cookie for consent flow
-	_ = s.sessionMiddleware.CreateSession(w, r, user.ID.String(), user.Username)
-
-	tokenPair, err := s.tokenService.GenerateTokenPair(r.Context(), "nyauth-web", user.ID.String(), []string{"openid", "profile", "email"})
+	if !allowed {
+		seconds := int64((retry + time.Second - 1) / time.Second)
+		w.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
+		writeAPIError(w, http.StatusTooManyRequests, "too many login attempts")
+		return
+	}
+	current, err := s.userService.Authenticate(r.Context(), request.Username, request.Password)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to issue token"})
+		audit.RecordResult(r.Context(), s.auditStore, models.AuditUserLoginFailed, nil, request.Username, "failure", ip)
+		writeAPIError(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
-
-	writeJSON(w, http.StatusOK, tokenPair)
+	authenticated, err := s.sessionMiddleware.CreateSession(w, r, current)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "failed to create session")
+		return
+	}
+	_ = s.loginLimiter.ResetIdentity(r.Context(), ip, strings.ToLower(request.Username))
+	audit.RecordResult(r.Context(), s.auditStore, models.AuditUserLogin, &current.ID, current.Username, "success", ip)
+	_ = s.userService.RecordLogin(r.Context(), current.ID, ip)
+	writeJSON(w, http.StatusOK, sessionResponse(current, authenticated.Data.CSRFToken))
 }
 
-// handleLogout handles logout (revoke the current token).
+func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
+	setSessionNoStoreHeaders(w)
+	current := currentUserFromContext(r)
+	authenticated := sessionFromContext(r.Context())
+	if current == nil || authenticated == nil {
+		writeAPIError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	writeJSON(w, http.StatusOK, sessionResponse(current, authenticated.Data.CSRFToken))
+}
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
-	token := extractBearerToken(r)
-	if token != "" {
-		claims, err := s.tokenService.ValidateAccessToken(r.Context(), token)
-		if err == nil {
-			_ = s.tokenService.RevokeToken(r.Context(), claims.ID)
-		}
-	}
-	writeJSON(w, http.StatusOK, map[string]string{"message": "logged out"})
+	s.sessionMiddleware.DestroySession(w, r)
+	w.WriteHeader(http.StatusNoContent)
 }
-
-// handleMe returns the current user's information.
 func (s *Server) handleMe(w http.ResponseWriter, r *http.Request) {
-	token := extractBearerToken(r)
-	if token == "" {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "missing token"})
+	current := currentUserFromContext(r)
+	if current == nil {
+		writeAPIError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
-
-	claims, err := s.tokenService.ValidateAccessToken(r.Context(), token)
-	if err != nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid token"})
-		return
-	}
-
-	user, err := s.userService.GetByUsername(r.Context(), claims.Subject)
-	if err != nil {
-		// Try by ID
-		id, parseErr := uuid.Parse(claims.Subject)
-		if parseErr != nil {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "user not found"})
-			return
-		}
-		user, err = s.userService.GetByID(r.Context(), id)
-		if err != nil {
-			writeJSON(w, http.StatusNotFound, map[string]string{"error": "user not found"})
-			return
-		}
-	}
-
-	writeJSON(w, http.StatusOK, user)
+	writeJSON(w, http.StatusOK, current)
 }
-
-// handleUpdateMe updates the current user's information.
 func (s *Server) handleUpdateMe(w http.ResponseWriter, r *http.Request) {
-	token := extractBearerToken(r)
-	if token == "" {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "missing token"})
+	current := currentUserFromContext(r)
+	if current == nil {
+		writeAPIError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
-
-	claims, err := s.tokenService.ValidateAccessToken(r.Context(), token)
+	var request models.UpdateUserRequest
+	if err := decodeJSON(w, r, &request); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	updated, err := s.userService.Update(r.Context(), current.ID, request)
 	if err != nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "invalid token"})
+		if user.IsInvalidInput(err) {
+			writeAPIError(w, http.StatusBadRequest, err.Error())
+		} else {
+			writeAPIError(w, http.StatusInternalServerError, "failed to update profile")
+		}
 		return
 	}
-
-	id, err := uuid.Parse(claims.Subject)
+	writeJSON(w, http.StatusOK, updated)
+}
+func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
+	setSessionNoStoreHeaders(w)
+	current := currentUserFromContext(r)
+	if current == nil {
+		writeAPIError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	var request models.ChangePasswordRequest
+	if err := decodeJSON(w, r, &request); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	updated, err := s.userService.ChangePassword(r.Context(), current.ID, request.CurrentPassword, request.NewPassword)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid user ID"})
+		switch {
+		case errors.Is(err, user.ErrInvalidCredentials):
+			writeAPIError(w, http.StatusUnauthorized, "current password is incorrect")
+		case errors.Is(err, user.ErrPasswordUnavailable):
+			writeAPIError(w, http.StatusConflict, err.Error())
+		case user.IsInvalidInput(err):
+			writeAPIError(w, http.StatusBadRequest, err.Error())
+		default:
+			writeAPIError(w, http.StatusInternalServerError, "failed to change password")
+		}
 		return
 	}
-
-	var req models.UpdateUserRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
-		return
-	}
-
-	user, err := s.userService.Update(r.Context(), id, req)
+	authenticated, err := s.sessionMiddleware.RotateSession(w, r, updated)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeAPIError(w, http.StatusInternalServerError, "password changed; please sign in again")
 		return
 	}
-
-	writeJSON(w, http.StatusOK, user)
+	audit.RecordWithTarget(r.Context(), s.auditStore, "user.password_changed", &updated.ID, updated.Username, "user", updated.ID.String(), requestIP(r))
+	writeJSON(w, http.StatusOK, sessionResponse(updated, authenticated.Data.CSRFToken))
 }
 
-// handleListProviders returns the list of available external OAuth providers.
 func (s *Server) handleListProviders(w http.ResponseWriter, r *http.Request) {
-	providers := s.providerMgr.List()
-	writeJSON(w, http.StatusOK, providers)
+	writeJSON(w, http.StatusOK, s.providerMgr.List())
 }
-
-// handleProviderAuthorize initiates an external OAuth flow.
-func (s *Server) handleProviderAuthorize(w http.ResponseWriter, r *http.Request) {
-	providerName := chi.URLParam(r, "provider")
-
-	p, ok := s.providerMgr.Get(providerName)
-	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "provider not found"})
-		return
-	}
-
-	state, _ := crypto.GenerateRandomString(32)
-
-	// Store CSRF state
-	stateData := map[string]string{
-		"provider":    providerName,
-		"redirect_to": r.URL.Query().Get("redirect_to"),
-	}
-	_ = s.sessionStore.SaveCSRFState(r.Context(), state, stateData, 10*60) // 10 min
-
-	redirectURI := s.cfg.Auth.Issuer + "/auth/" + providerName + "/callback"
-	authURL := p.GetAuthorizationURL(state, redirectURI)
-
-	http.Redirect(w, r, authURL, http.StatusFound)
-}
-
-// handleProviderCallback handles the callback from an external OAuth provider.
-func (s *Server) handleProviderCallback(w http.ResponseWriter, r *http.Request) {
-	providerName := chi.URLParam(r, "provider")
-	code := r.URL.Query().Get("code")
-	state := r.URL.Query().Get("state")
-
-	if code == "" || state == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing code or state"})
-		return
-	}
-
-	// Validate CSRF state
-	stateData, err := s.sessionStore.ConsumeCSRFState(r.Context(), state)
+func (s *Server) handleMyIdentities(w http.ResponseWriter, r *http.Request) {
+	current := currentUserFromContext(r)
+	items, err := s.identityStore.ListByUser(r.Context(), current.ID)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid or expired state"})
+		writeAPIError(w, http.StatusInternalServerError, "failed to list identities")
 		return
 	}
-	_ = stateData
-
-	p, ok := s.providerMgr.Get(providerName)
-	if !ok {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "provider not found"})
-		return
-	}
-
-	redirectURI := s.cfg.Auth.Issuer + "/auth/" + providerName + "/callback"
-	token, err := p.ExchangeCode(r.Context(), code, redirectURI)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to exchange code"})
-		return
-	}
-
-	extUser, err := p.GetUserInfo(r.Context(), token)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to get user info"})
-		return
-	}
-
-	// Look up existing identity
-	identity, err := s.identityStore.FindByExternal(r.Context(), providerName, extUser.ID)
-	if err == nil {
-		// Existing identity - issue token
-		tokenPair, err := s.tokenService.GenerateTokenPair(r.Context(), "nyauth-external", identity.UserID.String(), []string{"openid", "profile", "email"})
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to issue token"})
-			return
-		}
-		writeJSON(w, http.StatusOK, tokenPair)
-		return
-	}
-
-	// New identity - create user and binding
-	newUser, err := s.userService.Create(r.Context(), models.CreateUserRequest{
-		Username:    providerName + "_" + extUser.Username,
-		Email:       extUser.Email,
-		Password:    string(mustGenerateRandom(32)), // random password for OAuth users
-		DisplayName: extUser.Username,
-	})
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create user"})
-		return
-	}
-
-	newIdentity := &models.Identity{
-		ID:               uuid.New(),
-		UserID:           newUser.ID,
-		Provider:         providerName,
-		ExternalID:       extUser.ID,
-		ExternalUsername: &extUser.Username,
-		ExternalEmail:    &extUser.Email,
-	}
-	if token.AccessToken != "" {
-		newIdentity.AccessToken = &token.AccessToken
-	}
-	if token.RefreshToken != "" {
-		newIdentity.RefreshToken = &token.RefreshToken
-	}
-
-	if err := s.identityStore.Create(r.Context(), newIdentity); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to create identity binding"})
-		return
-	}
-
-	tokenPair, err := s.tokenService.GenerateTokenPair(r.Context(), "nyauth-external", newUser.ID.String(), []string{"openid", "profile", "email"})
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to issue token"})
-		return
-	}
-
-	writeJSON(w, http.StatusOK, tokenPair)
+	writeJSON(w, http.StatusOK, items)
 }
-
-// --- Admin handlers ---
-
-func (s *Server) handleAdminListProviders(w http.ResponseWriter, r *http.Request) {
-	providers := s.providerMgr.List()
-	writeJSON(w, http.StatusOK, providers)
-}
-
-func (s *Server) handleAdminCreateProvider(w http.ResponseWriter, r *http.Request) {
-	var req models.CreateProviderRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request body"})
-		return
-	}
-
-	p, err := s.providerMgr.CreateProvider(r.Context(), req)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-
-	writeJSON(w, http.StatusCreated, p)
-}
-
-func (s *Server) handleAdminUpdateProvider(w http.ResponseWriter, r *http.Request) {
-	name := chi.URLParam(r, "id")
-	var body struct {
-		ClientID     string `json:"client_id"`
-		ClientSecret string `json:"client_secret"`
-		Scopes       []string `json:"scopes"`
-		Enabled      *bool  `json:"enabled"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
-		return
-	}
-
-	// Build dynamic update
-	sets := []string{}
-	args := []interface{}{}
-	argIdx := 1
-
-	if body.ClientID != "" {
-		sets = append(sets, fmt.Sprintf("client_id=$%d", argIdx))
-		args = append(args, body.ClientID)
-		argIdx++
-	}
-	if body.ClientSecret != "" {
-		// Encrypt the secret
-		encSecret, err := crypto.Encrypt([]byte(body.ClientSecret), s.encryptionKey())
-		if err != nil {
-			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to encrypt secret"})
-			return
-		}
-		sets = append(sets, fmt.Sprintf("client_secret=$%d", argIdx))
-		args = append(args, string(encSecret))
-		argIdx++
-	}
-	if body.Enabled != nil {
-		sets = append(sets, fmt.Sprintf("enabled=$%d", argIdx))
-		args = append(args, *body.Enabled)
-		argIdx++
-	}
-
-	if len(sets) == 0 {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "nothing to update"})
-		return
-	}
-
-	sets = append(sets, "updated_at=NOW()")
-	args = append(args, name)
-
-	query := fmt.Sprintf("UPDATE oauth_providers SET %s WHERE name=$%d", strings.Join(sets, ", "), argIdx)
-	_, err := s.db.Exec(r.Context(), query, args...)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-
-	// Reload providers
-	s.providerMgr.LoadDynamic(r.Context())
-
-	writeJSON(w, http.StatusOK, map[string]string{"status": "updated"})
-}
-
-func (s *Server) encryptionKey() []byte {
-	key := []byte(s.cfg.Auth.EncryptionKey)
-	if len(key) < 32 {
-		padded := make([]byte, 32)
-		copy(padded, key)
-		key = padded
-	}
-	return key
-}
-
-func (s *Server) handleAdminDeleteProvider(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusNotImplemented, map[string]string{"error": "not implemented"})
-}
-
-func (s *Server) handleTestProvider(w http.ResponseWriter, r *http.Request) {
-	providerID := chi.URLParam(r, "id")
-
-	// Try to get from the live provider manager first
-	p, ok := s.providerMgr.Get(providerID)
-	if !ok {
-		// Try to find in the database
-		ctx := r.Context()
-		var discoveryURL, authURL string
-		err := s.db.QueryRow(ctx, `SELECT COALESCE(discovery_url, ''), COALESCE(authorization_url, '') FROM oauth_providers WHERE name = $1`, providerID).Scan(&discoveryURL, &authURL)
-		if err != nil {
-			writeJSON(w, http.StatusNotFound, map[string]interface{}{"success": false, "error": "provider not found"})
-			return
-		}
-		// Test by fetching the discovery URL or auth URL
-		testURL := discoveryURL
-		if testURL == "" {
-			testURL = authURL
-		}
-		if testURL == "" {
-			writeJSON(w, http.StatusOK, map[string]interface{}{"success": false, "latency_ms": 0, "error": "no URL configured to test"})
-			return
-		}
-		start := time.Now()
-		client := &http.Client{Timeout: 10 * time.Second}
-		req, _ := http.NewRequestWithContext(ctx, "GET", testURL, nil)
-		resp, err := client.Do(req)
-		latency := time.Since(start).Milliseconds()
-		if err != nil {
-			writeJSON(w, http.StatusOK, map[string]interface{}{"success": false, "latency_ms": latency, "error": err.Error()})
-			return
-		}
-		defer resp.Body.Close()
-		writeJSON(w, http.StatusOK, map[string]interface{}{
-			"success": resp.StatusCode >= 200 && resp.StatusCode < 400,
-			"latency_ms": latency,
-			"status_code": resp.StatusCode,
-			"provider": providerID,
-		})
-		return
-	}
-
-	// Provider exists in manager — test by fetching its authorization URL
-	ctx := r.Context()
-	start := time.Now()
-	redirectURI := s.cfg.Auth.Issuer + "/auth/" + providerID + "/callback"
-	authURL := p.GetAuthorizationURL("test", redirectURI)
-	// We can't really test auth URL (it redirects), so just check the provider base
-	client := &http.Client{Timeout: 10 * time.Second, CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse }}
-	req, _ := http.NewRequestWithContext(ctx, "GET", authURL, nil)
-	resp, err := client.Do(req)
-	latency := time.Since(start).Milliseconds()
-	if err != nil {
-		writeJSON(w, http.StatusOK, map[string]interface{}{"success": false, "latency_ms": latency, "error": err.Error(), "provider": p.Name(), "type": p.Type()})
-		return
-	}
-	defer resp.Body.Close()
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"success":    resp.StatusCode >= 200 && resp.StatusCode < 500,
-		"latency_ms": latency,
-		"status_code": resp.StatusCode,
-		"provider":   p.Name(),
-		"type":       p.Type(),
-	})
-}
-
-// --- User management ---
 
 func (s *Server) handleUserIdentities(w http.ResponseWriter, r *http.Request) {
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid user ID"})
+		writeAPIError(w, http.StatusBadRequest, "invalid user ID")
 		return
 	}
-	identities, err := s.identityStore.ListByUser(r.Context(), id)
-	if err != nil || identities == nil {
-		writeJSON(w, http.StatusOK, []interface{}{})
+	items, err := s.identityStore.ListByUser(r.Context(), id)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "failed to list identities")
 		return
 	}
-	writeJSON(w, http.StatusOK, identities)
+	writeJSON(w, http.StatusOK, items)
 }
-
 func (s *Server) handleSuspendUser(w http.ResponseWriter, r *http.Request) {
-	id, err := uuid.Parse(chi.URLParam(r, "id"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid user ID"})
-		return
-	}
-	status := models.UserStatusSuspended
-	user, err := s.userService.Update(r.Context(), id, models.UpdateUserRequest{Status: &status})
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	audit.RecordWithTarget(r.Context(), s.auditStore, models.AuditUserSuspended, nil, "admin", "user", id.String(), audit.GetIP(r))
-	writeJSON(w, http.StatusOK, user)
+	s.handleUserStatus(w, r, models.UserStatusSuspended, models.AuditUserSuspended)
 }
-
 func (s *Server) handleActivateUser(w http.ResponseWriter, r *http.Request) {
-	id, err := uuid.Parse(chi.URLParam(r, "id"))
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid user ID"})
-		return
-	}
-	status := models.UserStatusActive
-	user, err := s.userService.Update(r.Context(), id, models.UpdateUserRequest{Status: &status})
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
-		return
-	}
-	audit.RecordWithTarget(r.Context(), s.auditStore, models.AuditUserActivated, nil, "admin", "user", id.String(), audit.GetIP(r))
-	writeJSON(w, http.StatusOK, user)
+	s.handleUserStatus(w, r, models.UserStatusActive, models.AuditUserActivated)
 }
-
-func (s *Server) handleUpdateUserRole(w http.ResponseWriter, r *http.Request) {
+func (s *Server) handleUserStatus(w http.ResponseWriter, r *http.Request, status models.UserStatus, event string) {
+	actor := currentUserFromContext(r)
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid user ID"})
+		writeAPIError(w, http.StatusBadRequest, "invalid user ID")
 		return
 	}
-	var body struct {
+	updated, err := s.userService.AdminUpdate(r.Context(), id, models.AdminUpdateUserRequest{Status: &status})
+	if err != nil {
+		if errors.Is(err, user.ErrLastActiveAdmin) {
+			writeAPIError(w, http.StatusConflict, err.Error())
+		} else {
+			writeAPIError(w, http.StatusInternalServerError, "failed to update user status")
+		}
+		return
+	}
+	audit.RecordWithTarget(r.Context(), s.auditStore, event, &actor.ID, actor.Username, "user", id.String(), requestIP(r))
+	writeJSON(w, http.StatusOK, updated)
+}
+func (s *Server) handleUpdateUserRole(w http.ResponseWriter, r *http.Request) {
+	actor := currentUserFromContext(r)
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid user ID")
+		return
+	}
+	var request struct {
 		Role string `json:"role"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil || (body.Role != "admin" && body.Role != "user") {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "role must be 'admin' or 'user'"})
+	if err := decodeJSON(w, r, &request); err != nil || (request.Role != "admin" && request.Role != "user") {
+		writeAPIError(w, http.StatusBadRequest, "role must be admin or user")
 		return
 	}
-	role := body.Role
-	user, err := s.userService.Update(r.Context(), id, models.UpdateUserRequest{Metadata: map[string]string{"_role": role}})
+	updated, err := s.userService.AdminUpdate(r.Context(), id, models.AdminUpdateUserRequest{Role: &request.Role})
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		if errors.Is(err, user.ErrLastActiveAdmin) {
+			writeAPIError(w, http.StatusConflict, err.Error())
+		} else {
+			writeAPIError(w, http.StatusInternalServerError, "failed to update role")
+		}
 		return
 	}
-	writeJSON(w, http.StatusOK, user)
+	audit.RecordWithTarget(r.Context(), s.auditStore, "user.role_changed", &actor.ID, actor.Username, "user", id.String(), requestIP(r))
+	writeJSON(w, http.StatusOK, updated)
 }
-
-// --- Audit logs ---
 
 func (s *Server) handleListAuditLogs(w http.ResponseWriter, r *http.Request) {
 	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
 	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
-	event := r.URL.Query().Get("event")
-
-	result, err := s.auditStore.List(r.Context(), page, pageSize, event)
+	result, err := s.auditStore.List(r.Context(), page, pageSize, r.URL.Query().Get("event"))
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeAPIError(w, http.StatusInternalServerError, "failed to list audit logs")
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
-}
-
-// --- User self-service client management ---
-
-const maxClientsPerUser = 10 // Configurable limit
-
-func currentUserFromContext(r *http.Request) *models.User {
-	if u, ok := r.Context().Value(contextKey("currentUser")).(*models.User); ok {
-		return u
-	}
-	return nil
 }
 
 func (s *Server) handleListMyClients(w http.ResponseWriter, r *http.Request) {
-	user := currentUserFromContext(r)
-	if user == nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "not authenticated"})
-		return
-	}
-	result, err := s.clientService.ListByOwner(r.Context(), user.ID.String(), 1, 50)
+	current := currentUserFromContext(r)
+	result, err := s.clientService.ListByOwner(r.Context(), current.ID.String(), 1, 50)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		writeAPIError(w, http.StatusInternalServerError, "failed to list applications")
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
 }
-
 func (s *Server) handleCreateMyClient(w http.ResponseWriter, r *http.Request) {
-	user := currentUserFromContext(r)
-	if user == nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "not authenticated"})
+	current := currentUserFromContext(r)
+	var request models.CreateClientRequest
+	if err := decodeJSON(w, r, &request); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-
-	// Check limit
-	count, _ := s.clientService.CountByOwner(r.Context(), user.ID.String())
-	if count >= maxClientsPerUser {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": fmt.Sprintf("已达到应用数量上限 (%d)", maxClientsPerUser)})
-		return
-	}
-
-	var req models.CreateClientRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
-		return
-	}
-
-	if req.Grants == nil {
-		req.Grants = []string{models.GrantAuthorizationCode}
-	}
-	if req.Scopes == nil {
-		req.Scopes = []string{"openid", "profile", "email"}
-	}
-
-	result, err := s.clientService.Create(r.Context(), req)
+	result, err := s.clientService.CreateForOwner(r.Context(), current.ID.String(), maxClientsPerUser, request)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+		switch {
+		case errors.Is(err, client.ErrClientQuotaExceeded):
+			writeAPIError(w, http.StatusForbidden, fmt.Sprintf("application limit reached (%d)", maxClientsPerUser))
+		case client.IsInvalidClient(err):
+			writeAPIError(w, http.StatusBadRequest, err.Error())
+		default:
+			writeAPIError(w, http.StatusInternalServerError, "failed to create application")
+		}
 		return
 	}
-
-	// Set owner
-	ownerID := user.ID.String()
-	result.OwnerID = &ownerID
-	_, _ = s.clientService.GetStore().GetByID(r.Context(), result.ID) // ensure it exists
-	// Direct update for owner_id
-	_, _ = s.db.Exec(r.Context(), `UPDATE oauth_clients SET owner_id = $1 WHERE id = $2`, user.ID, result.ID)
-
+	audit.RecordWithTarget(r.Context(), s.auditStore, models.AuditClientCreated, &current.ID, current.Username, "client", result.ID, requestIP(r))
 	writeJSON(w, http.StatusCreated, result)
 }
-
 func (s *Server) handleDeleteMyClient(w http.ResponseWriter, r *http.Request) {
-	user := currentUserFromContext(r)
-	if user == nil {
-		writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "not authenticated"})
-		return
-	}
-
-	clientID := chi.URLParam(r, "id")
-	cl, err := s.clientService.GetByID(r.Context(), clientID)
+	current := currentUserFromContext(r)
+	id := chi.URLParam(r, "id")
+	registered, err := s.clientService.GetByID(r.Context(), id)
 	if err != nil {
-		writeJSON(w, http.StatusNotFound, map[string]string{"error": "client not found"})
+		writeAPIError(w, http.StatusNotFound, "application not found")
 		return
 	}
-
-	if cl.OwnerID == nil || *cl.OwnerID != user.ID.String() {
-		writeJSON(w, http.StatusForbidden, map[string]string{"error": "只能删除自己创建的应用"})
+	if registered.OwnerID == nil || *registered.OwnerID != current.ID.String() {
+		writeAPIError(w, http.StatusForbidden, "application is not owned by current user")
 		return
 	}
-
-	if err := s.clientService.Delete(r.Context(), clientID); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": err.Error()})
+	if err := s.clientService.Delete(r.Context(), id); err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "failed to delete application")
 		return
 	}
+	audit.RecordWithTarget(r.Context(), s.auditStore, models.AuditClientDeleted, &current.ID, current.Username, "client", id, requestIP(r))
 	w.WriteHeader(http.StatusNoContent)
-}
-
-// --- Utilities ---
-
-func extractBearerToken(r *http.Request) string {
-	auth := r.Header.Get("Authorization")
-	if len(auth) > 7 && auth[:7] == "Bearer " {
-		return auth[7:]
-	}
-	return ""
-}
-
-func mustGenerateRandom(n int) []byte {
-	b, _ := crypto.GenerateRandomString(n)
-	return []byte(b)
-}
-
-func writeJSON(w http.ResponseWriter, status int, v interface{}) {
-	w.Header().Set("Content-Type", "application/json")
-	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(v)
 }

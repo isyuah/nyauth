@@ -1,22 +1,50 @@
 package client
 
 import (
+	"context"
 	"encoding/json"
+	"errors"
+	"fmt"
+	"io"
 	"net/http"
 	"strconv"
 
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
 
+const maxHandlerBody = 1 << 20
+
+type handlerService interface {
+	List(ctx context.Context, page, pageSize int) (*models.PaginatedResponse[models.OAuthClient], error)
+	Create(ctx context.Context, req models.CreateClientRequest) (*models.CreateClientResponse, error)
+	GetByID(ctx context.Context, id string) (*models.OAuthClient, error)
+	Update(ctx context.Context, id string, req models.UpdateClientRequest) (*models.OAuthClient, error)
+	Delete(ctx context.Context, id string) error
+}
+
 // Handler handles HTTP requests for client operations.
 type Handler struct {
-	service *Service
+	service handlerService
 }
 
 // NewHandler creates a new client handler.
 func NewHandler(service *Service) *Handler {
 	return &Handler{service: service}
+}
+
+func decodeHandlerJSON(w http.ResponseWriter, r *http.Request, target any) error {
+	r.Body = http.MaxBytesReader(w, r.Body, maxHandlerBody)
+	decoder := json.NewDecoder(r.Body)
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(target); err != nil {
+		return err
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return fmt.Errorf("request body must contain one JSON value")
+	}
+	return nil
 }
 
 // Routes returns a chi router with client routes.
@@ -38,7 +66,7 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 
 	result, err := h.service.List(r.Context(), page, pageSize)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		writeError(w, http.StatusInternalServerError, "failed to list clients")
 		return
 	}
 	writeJSON(w, http.StatusOK, result)
@@ -46,14 +74,21 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 
 func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	var req models.CreateClientRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeHandlerJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
 	result, err := h.service.Create(r.Context(), req)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		switch {
+		case IsInvalidClient(err):
+			writeError(w, http.StatusBadRequest, err.Error())
+		case errors.Is(err, ErrClientQuotaExceeded):
+			writeError(w, http.StatusConflict, "client quota exceeded")
+		default:
+			writeError(w, http.StatusInternalServerError, "failed to create client")
+		}
 		return
 	}
 	writeJSON(w, http.StatusCreated, result)
@@ -64,7 +99,11 @@ func (h *Handler) Get(w http.ResponseWriter, r *http.Request) {
 
 	client, err := h.service.GetByID(r.Context(), id)
 	if err != nil {
-		writeError(w, http.StatusNotFound, "client not found")
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "client not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to get client")
+		}
 		return
 	}
 	writeJSON(w, http.StatusOK, client)
@@ -74,14 +113,21 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
 	var req models.UpdateClientRequest
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+	if err := decodeHandlerJSON(w, r, &req); err != nil {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
 
 	client, err := h.service.Update(r.Context(), id, req)
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		switch {
+		case IsInvalidClient(err):
+			writeError(w, http.StatusBadRequest, err.Error())
+		case errors.Is(err, pgx.ErrNoRows):
+			writeError(w, http.StatusNotFound, "client not found")
+		default:
+			writeError(w, http.StatusInternalServerError, "failed to update client")
+		}
 		return
 	}
 	writeJSON(w, http.StatusOK, client)
@@ -91,7 +137,11 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
 	if err := h.service.Delete(r.Context(), id); err != nil {
-		writeError(w, http.StatusInternalServerError, err.Error())
+		if errors.Is(err, pgx.ErrNoRows) {
+			writeError(w, http.StatusNotFound, "client not found")
+		} else {
+			writeError(w, http.StatusInternalServerError, "failed to delete client")
+		}
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)

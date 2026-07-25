@@ -24,28 +24,38 @@ type AuditLog struct {
 
 // Audit event types
 const (
-	AuditUserLogin        = "user.login"
-	AuditUserLoginFailed  = "user.login_failed"
-	AuditUserCreated      = "user.created"
-	AuditUserDeleted      = "user.deleted"
-	AuditUserSuspended    = "user.suspended"
-	AuditUserActivated    = "user.activated"
-	AuditClientCreated    = "client.created"
-	AuditClientDeleted    = "client.deleted"
-	AuditProviderCreated  = "provider.created"
-	AuditProviderTested   = "provider.tested"
-	AuditProviderDeleted  = "provider.deleted"
-	AuditTokenIssued      = "token.issued"
-	AuditTokenRevoked     = "token.revoked"
+	AuditUserLogin           = "user.login"
+	AuditUserLoginFailed     = "user.login_failed"
+	AuditUserCreated         = "user.created"
+	AuditUserUpdated         = "user.updated"
+	AuditUserDeleted         = "user.deleted"
+	AuditUserPasswordReset   = "user.password_reset"
+	AuditUserSuspended       = "user.suspended"
+	AuditUserActivated       = "user.activated"
+	AuditUserRoleChanged     = "user.role_changed"
+	AuditUserProfileUpdated  = "user.profile_updated"
+	AuditUserLogout          = "user.logout"
+	AuditIdentityBindStarted = "identity.bind_started"
+	AuditConsentAccepted     = "consent.accepted"
+	AuditConsentDenied       = "consent.denied"
+	AuditClientCreated       = "client.created"
+	AuditClientUpdated       = "client.updated"
+	AuditClientDeleted       = "client.deleted"
+	AuditProviderCreated     = "provider.created"
+	AuditProviderUpdated     = "provider.updated"
+	AuditProviderTested      = "provider.tested"
+	AuditProviderDeleted     = "provider.deleted"
+	AuditTokenIssued         = "token.issued"
+	AuditTokenRevoked        = "token.revoked"
 )
 
 // DashboardStats holds system statistics.
 type DashboardStats struct {
-	UserCount       int64 `json:"user_count"`
-	AppCount        int64 `json:"app_count"`
-	LoginCount7d    int64 `json:"login_count_7d"`
-	ActiveSessions  int64 `json:"active_sessions"`
-	FailedLogins7d  int64 `json:"failed_logins_7d"`
+	UserCount      int64 `json:"user_count"`
+	AppCount       int64 `json:"app_count"`
+	LoginCount7d   int64 `json:"login_count_7d"`
+	ActiveSessions int64 `json:"active_sessions"`
+	FailedLogins7d int64 `json:"failed_logins_7d"`
 }
 
 // LoginTrend holds login trend data.
