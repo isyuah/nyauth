@@ -1,0 +1,96 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* ===== Nya Design Tokens (DESIGN.md §3.1) ===== */
+:root {
+  color-scheme: light;
+
+  --nya-primary: #7c5cff;
+  --nya-primary-hover: #6d4cf5;
+  --nya-primary-active: #5f41e6;
+  --nya-primary-soft: #f1edff;
+  --nya-primary-softer: #f8f5ff;
+  --nya-primary-border: #dcd2ff;
+
+  --nya-pink: #f56fa7;
+  --nya-pink-soft: #fff0f6;
+  --nya-blue: #40a9f3;
+  --nya-blue-soft: #edf8ff;
+  --nya-mint: #19c79a;
+  --nya-mint-soft: #eafbf6;
+  --nya-orange: #ff9657;
+  --nya-orange-soft: #fff3e9;
+
+  --nya-success: #18b77a;
+  --nya-success-soft: #ebfaf3;
+  --nya-warning: #ed8b2d;
+  --nya-warning-soft: #fff5e9;
+  --nya-danger: #ec4b6f;
+  --nya-danger-soft: #fff0f3;
+  --nya-info: #348ff0;
+  --nya-info-soft: #edf6ff;
+
+  --nya-bg: #faf9ff;
+  --nya-bg-sidebar: #fffaff;
+  --nya-surface: #ffffff;
+  --nya-surface-subtle: #fbfaff;
+  --nya-surface-muted: #f6f4fb;
+
+  --nya-text-primary: #202235;
+  --nya-text-secondary: #62677f;
+  --nya-text-tertiary: #9398ac;
+  --nya-text-disabled: #b9bdcb;
+
+  --nya-border: #e9e6f1;
+  --nya-border-strong: #ddd8e9;
+  --nya-divider: #eeebf4;
+
+  --nya-shadow-card: 0 5px 18px rgba(80, 61, 130, 0.055);
+  --nya-shadow-hover: 0 9px 26px rgba(80, 61, 130, 0.09);
+  --nya-shadow-popup: 0 18px 50px rgba(62, 48, 98, 0.15);
+
+  --nya-radius-sm: 8px;
+  --nya-radius-md: 10px;
+  --nya-radius-card: 12px;
+  --nya-radius-lg: 16px;
+  --nya-radius-pill: 999px;
+}
+
+/* ===== Base (§0.4: font-size 16px, min-width 1024px) ===== */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  font-size: 16px;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+body {
+  margin: 0;
+  font-family: Inter, "SF Pro Display", "SF Pro Text", "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--nya-text-primary);
+  background: var(--nya-bg);
+}
+
+code, pre, .font-mono {
+  font-family: "JetBrains Mono", "SFMono-Regular", Consolas, monospace;
+}
+
+:focus-visible {
+  outline: 2px solid var(--nya-primary);
+  outline-offset: 2px;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.01ms !important;
+    transition-duration: 0.01ms !important;
+  }
+}

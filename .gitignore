@@ -1,0 +1,34 @@
+# Binaries
+*.exe
+/bin/
+
+# Go
+/vendor/
+
+# Web UI build artifacts
+/web/build/
+/web/node_modules/
+/web/.svelte-kit/
+
+# SDK build artifacts
+/sdk/ts/dist/
+/sdk/ts/node_modules/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Config (contains secrets)
+config.yaml
+config.yml
+*.env
+
+# Database
+*.db
+*.sqlite

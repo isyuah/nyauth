@@ -1,0 +1,32 @@
+server:
+  host: "0.0.0.0"
+  port: 8080
+
+database:
+  driver: postgres
+  dsn: "postgres://nyauth:nyauth@postgres:5432/nyauth?sslmode=disable"
+
+redis:
+  addr: "redis:6379"
+  password: ""
+  db: 0
+
+auth:
+  issuer: "http://localhost:8080"
+  access_token_ttl: 3600
+  refresh_token_ttl: 2592000
+  authorization_code_ttl: 300
+  encryption_key: "change-me-in-production-32bytes!"
+  jwk:
+    algorithm: RS256
+    key_size: 2048
+    rotation_interval: "720h"
+
+admin:
+  username: admin
+  password: changeme
+  email: admin@example.com
+
+web:
+  enabled: true
+  title: "Nya"

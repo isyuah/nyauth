@@ -1,0 +1,13 @@
+.git
+.gitignore
+*.exe
+bin/
+web/node_modules
+web/.svelte-kit
+sdk/ts/node_modules
+sdk/ts/dist
+*.md
+!README.md
+.air.toml
+.vscode
+.idea

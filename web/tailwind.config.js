@@ -1,0 +1,61 @@
+/** @type {import('tailwindcss').Config} */
+export default {
+  content: ['./src/**/*.{html,js,svelte,ts}'],
+  theme: {
+    extend: {
+      colors: {
+        nya: {
+          primary: 'var(--nya-primary)',
+          'primary-hover': 'var(--nya-primary-hover)',
+          'primary-active': 'var(--nya-primary-active)',
+          'primary-soft': 'var(--nya-primary-soft)',
+          'primary-softer': 'var(--nya-primary-softer)',
+          'primary-border': 'var(--nya-primary-border)',
+          pink: 'var(--nya-pink)',
+          'pink-soft': 'var(--nya-pink-soft)',
+          blue: 'var(--nya-blue)',
+          'blue-soft': 'var(--nya-blue-soft)',
+          mint: 'var(--nya-mint)',
+          'mint-soft': 'var(--nya-mint-soft)',
+          orange: 'var(--nya-orange)',
+          'orange-soft': 'var(--nya-orange-soft)',
+          success: 'var(--nya-success)',
+          'success-soft': 'var(--nya-success-soft)',
+          warning: 'var(--nya-warning)',
+          'warning-soft': 'var(--nya-warning-soft)',
+          danger: 'var(--nya-danger)',
+          'danger-soft': 'var(--nya-danger-soft)',
+          info: 'var(--nya-info)',
+          'info-soft': 'var(--nya-info-soft)',
+          'text-primary': 'var(--nya-text-primary)',
+          'text-secondary': 'var(--nya-text-secondary)',
+          'text-tertiary': 'var(--nya-text-tertiary)',
+          bg: 'var(--nya-bg)',
+          surface: 'var(--nya-surface)',
+          'surface-subtle': 'var(--nya-surface-subtle)',
+          'surface-muted': 'var(--nya-surface-muted)',
+          border: 'var(--nya-border)',
+          'border-strong': 'var(--nya-border-strong)',
+          divider: 'var(--nya-divider)',
+        }
+      },
+      borderRadius: {
+        'nya-sm': 'var(--nya-radius-sm)',
+        'nya-md': 'var(--nya-radius-md)',
+        'nya-card': 'var(--nya-radius-card)',
+        'nya-lg': 'var(--nya-radius-lg)',
+        'nya-pill': 'var(--nya-radius-pill)',
+      },
+      boxShadow: {
+        'nya-card': 'var(--nya-shadow-card)',
+        'nya-hover': 'var(--nya-shadow-hover)',
+        'nya-popup': 'var(--nya-shadow-popup)',
+      },
+      fontFamily: {
+        sans: ['Inter', 'SF Pro Display', 'PingFang SC', 'Microsoft YaHei', 'system-ui', 'sans-serif'],
+        mono: ['JetBrains Mono', 'SFMono-Regular', 'Consolas', 'monospace'],
+      },
+    },
+  },
+  plugins: [],
+};
