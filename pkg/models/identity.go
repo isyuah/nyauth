@@ -14,8 +14,6 @@ type Identity struct {
 	ExternalID       string            `json:"external_id" db:"external_id"`
 	ExternalUsername *string           `json:"external_username,omitempty" db:"external_username"`
 	ExternalEmail    *string           `json:"external_email,omitempty" db:"external_email"`
-	AccessToken      *string           `json:"-" db:"access_token"`  // encrypted
-	RefreshToken     *string           `json:"-" db:"refresh_token"` // encrypted
 	Metadata         map[string]string `json:"metadata,omitempty" db:"metadata"`
 	CreatedAt        time.Time         `json:"created_at" db:"created_at"`
 	UpdatedAt        time.Time         `json:"updated_at" db:"updated_at"`
@@ -23,10 +21,11 @@ type Identity struct {
 
 // ExternalUser is the user info returned by an external provider.
 type ExternalUser struct {
-	Provider  string
-	ID        string
-	Username  string
-	Email     string
-	AvatarURL string
-	RawClaims map[string]interface{}
+	Provider      string
+	ID            string
+	Username      string
+	Email         string
+	EmailVerified bool
+	AvatarURL     string
+	RawClaims     map[string]interface{}
 }
