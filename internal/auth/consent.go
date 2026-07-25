@@ -1,129 +1,139 @@
 package auth
 
 import (
+	"crypto/subtle"
 	"encoding/json"
+	"io"
 	"net/http"
-	"time"
 
-	"github.com/google/uuid"
 	"github.com/nyasharp/nyauth/internal/client"
 	"github.com/nyasharp/nyauth/internal/config"
+	internalcrypto "github.com/nyasharp/nyauth/internal/crypto"
 	"github.com/nyasharp/nyauth/internal/session"
 )
 
-// ConsentHandler handles OAuth consent flow.
 type ConsentHandler struct {
 	sessionStore *session.Store
-	tokenService *TokenService
 	clientStore  *client.Store
 	config       *config.Config
 }
 
-// NewConsentHandler creates a new consent handler.
-func NewConsentHandler(sessionStore *session.Store, tokenService *TokenService, clientStore *client.Store, cfg *config.Config) *ConsentHandler {
-	return &ConsentHandler{
-		sessionStore: sessionStore,
-		tokenService: tokenService,
-		clientStore:  clientStore,
-		config:       cfg,
-	}
+func NewConsentHandler(sessionStore *session.Store, _ *TokenService, clientStore *client.Store, cfg *config.Config) *ConsentHandler {
+	return &ConsentHandler{sessionStore: sessionStore, clientStore: clientStore, config: cfg}
 }
 
-// GetConsent returns consent challenge data for the frontend to display.
 func (h *ConsentHandler) GetConsent(w http.ResponseWriter, r *http.Request) {
 	challenge := r.URL.Query().Get("challenge")
-	if challenge == "" {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "missing challenge"})
+	sess, ok := h.authenticatedSession(r)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "authentication_required")
 		return
 	}
-
 	data, err := h.sessionStore.GetConsent(r.Context(), challenge)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid or expired challenge"})
+	if err != nil || data.UserID != sess.UserID {
+		writeError(w, http.StatusBadRequest, "invalid_or_expired_challenge")
 		return
 	}
-
-	// Get client info
 	cl, err := h.clientStore.GetByID(r.Context(), data.ClientID)
 	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "client not found"})
+		writeError(w, http.StatusBadRequest, "invalid_or_expired_challenge")
 		return
 	}
-
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"challenge":    challenge,
-		"client_name":  cl.Name,
-		"client_id":    cl.ID,
-		"scopes":       data.Scopes,
-		"redirect_uri": data.RedirectURI,
+		"challenge": challenge, "client_name": cl.Name, "client_id": cl.ID,
+		"scopes": data.Scopes, "redirect_uri": data.RedirectURI,
 	})
 }
 
-// AcceptConsent processes the user's consent acceptance.
 func (h *ConsentHandler) AcceptConsent(w http.ResponseWriter, r *http.Request) {
-	var req struct {
-		Challenge string `json:"challenge"`
-	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
+	sess, ok := h.authorizeMutation(r)
+	if !ok {
+		writeError(w, http.StatusForbidden, "csrf_validation_failed")
 		return
 	}
-
-	data, err := h.sessionStore.ConsumeConsent(r.Context(), req.Challenge)
+	challenge, ok := decodeConsentRequest(r)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	data, err := h.sessionStore.ConsumeConsentForUser(r.Context(), challenge, sess.UserID)
+	if err != nil || data.AuthVersion != sess.AuthVersion {
+		writeError(w, http.StatusBadRequest, "invalid_or_expired_challenge")
+		return
+	}
+	code, err := internalcrypto.GenerateRandomString(32)
 	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid or expired challenge"})
+		writeError(w, http.StatusInternalServerError, "server_error")
 		return
 	}
-
-	// Generate authorization code
-	authCode := uuid.New().String()
-	authData := &session.AuthorizationData{
-		ClientID:        data.ClientID,
-		UserID:          data.UserID,
-		RedirectURI:     data.RedirectURI,
-		Scopes:          data.Scopes,
-		CodeChallenge:   data.CodeChallenge,
-		ChallengeMethod: data.ChallengeMethod,
+	authorization := &session.AuthorizationData{
+		ClientID: data.ClientID, UserID: data.UserID, RedirectURI: data.RedirectURI, Scopes: data.Scopes,
+		CodeChallenge: data.CodeChallenge, ChallengeMethod: "S256", Nonce: data.Nonce, AuthVersion: data.AuthVersion,
 	}
-
-	if err := h.sessionStore.SaveAuthorizationCode(r.Context(), authCode, authData, 5*time.Minute); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to generate code"})
+	if err := h.sessionStore.SaveAuthorizationCode(r.Context(), code, authorization, h.config.Auth.AuthorizationCodeTTL); err != nil {
+		writeError(w, http.StatusInternalServerError, "server_error")
 		return
 	}
-
-	// Build redirect URL
-	redirectURL := data.RedirectURI + "?code=" + authCode
-	if data.State != "" {
-		redirectURL += "&state=" + data.State
+	target, err := addQuery(data.RedirectURI, map[string]string{"code": code, "state": data.State})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "server_error")
+		return
 	}
-
-	writeJSON(w, http.StatusOK, map[string]string{
-		"redirect_url": redirectURL,
-	})
+	writeJSON(w, http.StatusOK, map[string]string{"redirect_url": target})
 }
 
-// DenyConsent processes the user's consent denial.
 func (h *ConsentHandler) DenyConsent(w http.ResponseWriter, r *http.Request) {
-	var req struct {
+	sess, ok := h.authorizeMutation(r)
+	if !ok {
+		writeError(w, http.StatusForbidden, "csrf_validation_failed")
+		return
+	}
+	challenge, ok := decodeConsentRequest(r)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	data, err := h.sessionStore.ConsumeConsentForUser(r.Context(), challenge, sess.UserID)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_or_expired_challenge")
+		return
+	}
+	target, err := addQuery(data.RedirectURI, map[string]string{"error": "access_denied", "state": data.State})
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "server_error")
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]string{"redirect_url": target})
+}
+
+func (h *ConsentHandler) authenticatedSession(r *http.Request) (*session.SessionData, bool) {
+	cookie, err := r.Cookie(oauthSessionCookie)
+	if err != nil {
+		return nil, false
+	}
+	sess, err := h.sessionStore.GetSession(r.Context(), cookie.Value)
+	return sess, err == nil && sess.UserID != ""
+}
+
+func (h *ConsentHandler) authorizeMutation(r *http.Request) (*session.SessionData, bool) {
+	sess, ok := h.authenticatedSession(r)
+	if !ok || sess.CSRFToken == "" {
+		return nil, false
+	}
+	provided := r.Header.Get("X-CSRF-Token")
+	if len(provided) != len(sess.CSRFToken) || subtle.ConstantTimeCompare([]byte(provided), []byte(sess.CSRFToken)) != 1 {
+		return nil, false
+	}
+	return sess, true
+}
+
+func decodeConsentRequest(r *http.Request) (string, bool) {
+	var request struct {
 		Challenge string `json:"challenge"`
 	}
-	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid request"})
-		return
+	decoder := json.NewDecoder(io.LimitReader(r.Body, 4096))
+	if err := decoder.Decode(&request); err != nil || request.Challenge == "" {
+		return "", false
 	}
-
-	data, err := h.sessionStore.ConsumeConsent(r.Context(), req.Challenge)
-	if err != nil {
-		writeJSON(w, http.StatusBadRequest, map[string]string{"error": "invalid or expired challenge"})
-		return
-	}
-
-	redirectURL := data.RedirectURI + "?error=access_denied"
-	if data.State != "" {
-		redirectURL += "&state=" + data.State
-	}
-
-	writeJSON(w, http.StatusOK, map[string]string{
-		"redirect_url": redirectURL,
-	})
+	return request.Challenge, true
 }

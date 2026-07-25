@@ -2,12 +2,16 @@ package auth
 
 import (
 	"crypto/rsa"
+	"crypto/subtle"
 	"crypto/x509"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
+	"errors"
 	"math/big"
 	"net/http"
 	"net/url"
+	"sort"
 	"strings"
 	"time"
 
@@ -15,11 +19,18 @@ import (
 	"github.com/google/uuid"
 	"github.com/nyasharp/nyauth/internal/client"
 	"github.com/nyasharp/nyauth/internal/config"
+	internalcrypto "github.com/nyasharp/nyauth/internal/crypto"
 	"github.com/nyasharp/nyauth/internal/session"
 	"github.com/nyasharp/nyauth/internal/user"
+	"github.com/nyasharp/nyauth/pkg/models"
 )
 
-// Handler handles OAuth 2.0 and OIDC HTTP endpoints.
+const oauthSessionCookie = "nyauth_session"
+
+const maxOAuthFormBodyBytes int64 = 1 << 20
+
+var errEndSessionSubjectMismatch = errors.New("ID token subject does not match session subject")
+
 type Handler struct {
 	tokenService *TokenService
 	jwkManager   *JWKManager
@@ -29,34 +40,18 @@ type Handler struct {
 	config       *config.Config
 }
 
-// NewHandler creates a new auth handler.
-func NewHandler(
-	tokenService *TokenService,
-	jwkManager *JWKManager,
-	userService *user.Service,
-	clientStore *client.Store,
-	sessionStore *session.Store,
-	config *config.Config,
-) *Handler {
-	return &Handler{
-		tokenService: tokenService,
-		jwkManager:   jwkManager,
-		userService:  userService,
-		clientStore:  clientStore,
-		sessionStore: sessionStore,
-		config:       config,
+func NewHandler(tokenService *TokenService, jwkManager *JWKManager, userService *user.Service, clientStore *client.Store, sessionStore *session.Store, cfg *config.Config) *Handler {
+	tokenService.SetUserService(userService)
+	if err := jwkManager.Configure(cfg.Auth.MasterKey, cfg.Auth.AccessTokenTTL); err != nil {
+		panic("invalid validated JWK configuration: " + err.Error())
 	}
+	return &Handler{tokenService: tokenService, jwkManager: jwkManager, userService: userService, clientStore: clientStore, sessionStore: sessionStore, config: cfg}
 }
 
-// Routes returns a chi router with auth routes mounted.
 func (h *Handler) Routes() chi.Router {
 	r := chi.NewRouter()
-
-	// OIDC Discovery
 	r.Get("/.well-known/openid-configuration", h.Discovery)
 	r.Get("/.well-known/jwks.json", h.JWKS)
-
-	// OAuth 2.0 endpoints
 	r.Get("/authorize", h.Authorize)
 	r.Post("/token", h.Token)
 	r.Post("/revoke", h.Revoke)
@@ -64,53 +59,32 @@ func (h *Handler) Routes() chi.Router {
 	r.Get("/userinfo", h.UserInfo)
 	r.Post("/userinfo", h.UserInfo)
 	r.Get("/end_session", h.EndSession)
-
 	return r
 }
 
-// Discovery handles the OIDC discovery endpoint.
-func (h *Handler) Discovery(w http.ResponseWriter, r *http.Request) {
-	issuer := h.config.Auth.Issuer
-
-	discovery := map[string]interface{}{
-		"issuer":                 issuer,
-		"authorization_endpoint": issuer + "/authorize",
-		"token_endpoint":         issuer + "/token",
-		"userinfo_endpoint":      issuer + "/userinfo",
-		"jwks_uri":               issuer + "/.well-known/jwks.json",
-		"revocation_endpoint":    issuer + "/revoke",
-		"introspection_endpoint": issuer + "/introspect",
-		"end_session_endpoint":   issuer + "/end_session",
-
-		"response_types_supported": []string{"code", "token", "id_token", "code id_token"},
-		"grant_types_supported": []string{
-			"authorization_code",
-			"client_credentials",
-			"refresh_token",
-		},
-		"subject_types_supported":               []string{"public"},
-		"id_token_signing_alg_values_supported": []string{"RS256"},
+func (h *Handler) Discovery(w http.ResponseWriter, _ *http.Request) {
+	issuer := strings.TrimRight(h.config.Auth.Issuer, "/")
+	writeJSON(w, http.StatusOK, map[string]interface{}{
+		"issuer": issuer, "authorization_endpoint": issuer + "/authorize", "token_endpoint": issuer + "/token",
+		"userinfo_endpoint": issuer + "/userinfo", "jwks_uri": issuer + "/.well-known/jwks.json",
+		"revocation_endpoint": issuer + "/revoke", "introspection_endpoint": issuer + "/introspect", "end_session_endpoint": issuer + "/end_session",
+		"response_types_supported": []string{"code"},
+		"grant_types_supported":    []string{"authorization_code", "client_credentials", "refresh_token"},
+		"subject_types_supported":  []string{"public"}, "id_token_signing_alg_values_supported": []string{"RS256"},
 		"scopes_supported":                      []string{"openid", "profile", "email", "offline_access"},
-		"token_endpoint_auth_methods_supported":  []string{"client_secret_basic", "client_secret_post", "none"},
-		"claims_supported": []string{
-			"sub", "iss", "aud", "exp", "iat", "jti",
-			"name", "email", "preferred_username", "picture",
-		},
-		"code_challenge_methods_supported": []string{"S256", "plain"},
-	}
-
-	writeJSON(w, http.StatusOK, discovery)
+		"token_endpoint_auth_methods_supported": []string{"client_secret_basic", "client_secret_post", "none"},
+		"claims_supported":                      []string{"sub", "iss", "aud", "exp", "iat", "jti", "nonce", "name", "email", "preferred_username", "picture"},
+		"code_challenge_methods_supported":      []string{"S256"},
+	})
 }
 
-// JWKS handles the JSON Web Key Set endpoint.
 func (h *Handler) JWKS(w http.ResponseWriter, r *http.Request) {
 	keys, err := h.jwkManager.ListActivePublicKeys(r.Context())
 	if err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to load keys")
+		writeError(w, http.StatusInternalServerError, "server_error")
 		return
 	}
-
-	type jwkKey struct {
+	type publicJWK struct {
 		Kty string `json:"kty"`
 		Kid string `json:"kid"`
 		Use string `json:"use"`
@@ -118,463 +92,500 @@ func (h *Handler) JWKS(w http.ResponseWriter, r *http.Request) {
 		N   string `json:"n"`
 		E   string `json:"e"`
 	}
-
-	var jwks []jwkKey
-	for _, k := range keys {
-		block, _ := pem.Decode([]byte(k.PublicKey))
+	result := make([]publicJWK, 0, len(keys))
+	for _, key := range keys {
+		block, _ := pem.Decode([]byte(key.PublicKey))
 		if block == nil {
 			continue
 		}
-		pub, err := x509.ParsePKIXPublicKey(block.Bytes)
+		parsed, err := x509.ParsePKIXPublicKey(block.Bytes)
 		if err != nil {
 			continue
 		}
-		rsaPub, ok := pub.(*rsa.PublicKey)
+		publicKey, ok := parsed.(*rsa.PublicKey)
 		if !ok {
 			continue
 		}
-
-		jwks = append(jwks, jwkKey{
-			Kty: "RSA",
-			Kid: k.Kid,
-			Use: k.Usage,
-			Alg: k.Algorithm,
-			N:   bigIntToBase64URL(rsaPub.N),
-			E:   intToBase64URL(rsaPub.E),
-		})
+		result = append(result, publicJWK{Kty: "RSA", Kid: key.Kid, Use: "sig", Alg: "RS256", N: base64.RawURLEncoding.EncodeToString(publicKey.N.Bytes()), E: intToBase64URL(publicKey.E)})
 	}
-
-	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"keys": jwks,
-	})
+	writeJSON(w, http.StatusOK, map[string]interface{}{"keys": result})
 }
 
-// Authorize handles the OAuth 2.0 authorization endpoint.
 func (h *Handler) Authorize(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	clientID := q.Get("client_id")
-	redirectURI := q.Get("redirect_uri")
-	responseType := q.Get("response_type")
-	scope := q.Get("scope")
-	state := q.Get("state")
-	codeChallenge := q.Get("code_challenge")
-	codeChallengeMethod := q.Get("code_challenge_method")
-
-	// Validate required parameters
-	if clientID == "" || redirectURI == "" || responseType != "code" {
-		writeError(w, http.StatusBadRequest, "invalid_request")
+	clientID, redirectURI := q.Get("client_id"), q.Get("redirect_uri")
+	if clientID == "" || redirectURI == "" || q.Get("response_type") != "code" {
+		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "client_id, redirect_uri, and response_type=code are required")
 		return
 	}
-
-	// Validate client
 	cl, err := h.clientStore.GetByID(r.Context(), clientID)
+	if err != nil || !cl.HasRedirectURI(redirectURI) {
+		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "invalid client or redirect_uri")
+		return
+	}
+	if !cl.HasGrant(models.GrantAuthorizationCode) {
+		h.redirectAuthorizeError(w, r, redirectURI, q.Get("state"), "unauthorized_client")
+		return
+	}
+	scopes, err := parseAndValidateScopes(q.Get("scope"), cl.Scopes)
 	if err != nil {
-		writeError(w, http.StatusBadRequest, "invalid_client")
+		h.redirectAuthorizeError(w, r, redirectURI, q.Get("state"), "invalid_scope")
+		return
+	}
+	if containsScope(scopes, "offline_access") && !cl.HasGrant(models.GrantRefreshToken) {
+		h.redirectAuthorizeError(w, r, redirectURI, q.Get("state"), "invalid_scope")
+		return
+	}
+	challenge, method := q.Get("code_challenge"), q.Get("code_challenge_method")
+	if method != "S256" || !validPKCEChallenge(challenge) {
+		h.redirectAuthorizeError(w, r, redirectURI, q.Get("state"), "invalid_request")
+		return
+	}
+	nonce := q.Get("nonce")
+	if containsScope(scopes, "openid") && nonce == "" {
+		h.redirectAuthorizeError(w, r, redirectURI, q.Get("state"), "invalid_request")
 		return
 	}
 
-	if !cl.HasRedirectURI(redirectURI) {
-		writeError(w, http.StatusBadRequest, "invalid_redirect_uri")
-		return
-	}
-
-	if !cl.HasGrant("authorization_code") {
-		writeError(w, http.StatusBadRequest, "unauthorized_client")
-		return
-	}
-
-	// For now, return a JSON response indicating the authorization request is valid.
-	// In production, this would redirect to a consent/login page.
-	// The actual user authentication happens via the login endpoint.
-	scopes := strings.Split(scope, " ")
-
-	// Check for user session (set during login)
-	var userID string
-	if cookie, err := r.Cookie("nyauth_session"); err == nil {
-		if sess, err := h.sessionStore.GetSession(r.Context(), cookie.Value); err == nil {
-			userID = sess.UserID
-		}
-	}
-
-	// If no session, redirect to frontend login page with return URL
-	if userID == "" {
-		returnTo := r.URL.String()
-		loginURL := "/login?return_to=" + url.QueryEscape(returnTo)
+	sess, currentUser := h.currentSessionUser(r)
+	if sess == nil || currentUser == nil {
+		loginURL := "/login?return_to=" + url.QueryEscape(r.URL.RequestURI())
 		http.Redirect(w, r, loginURL, http.StatusFound)
 		return
 	}
-
-	// Create consent challenge
-	challenge := uuid.New().String()
-	consentData := &session.ConsentData{
-		ClientID:        clientID,
-		UserID:          userID,
-		RedirectURI:     redirectURI,
-		Scopes:          scopes,
-		State:           state,
-		CodeChallenge:   codeChallenge,
-		ChallengeMethod: codeChallengeMethod,
-	}
-
-	if err := h.sessionStore.SaveConsent(r.Context(), challenge, consentData, 10*time.Minute); err != nil {
-		writeError(w, http.StatusInternalServerError, "server_error")
+	if currentUser.MustChangePassword {
+		http.Redirect(w, r, "/change-password", http.StatusFound)
 		return
 	}
-
-	// Redirect to consent page
-	http.Redirect(w, r, "/consent?challenge="+challenge, http.StatusFound)
+	consentChallenge, err := internalcrypto.GenerateRandomString(32)
+	if err != nil {
+		writeOAuthError(w, http.StatusInternalServerError, "server_error", "failed to create consent challenge")
+		return
+	}
+	data := &session.ConsentData{ClientID: clientID, UserID: currentUser.ID.String(), RedirectURI: redirectURI, Scopes: scopes,
+		State: q.Get("state"), CodeChallenge: challenge, ChallengeMethod: "S256", Nonce: nonce, AuthVersion: currentUser.AuthVersion}
+	if err := h.sessionStore.SaveConsent(r.Context(), consentChallenge, data, 10*time.Minute); err != nil {
+		writeOAuthError(w, http.StatusInternalServerError, "server_error", "failed to persist consent challenge")
+		return
+	}
+	http.Redirect(w, r, "/consent?challenge="+url.QueryEscape(consentChallenge), http.StatusFound)
 }
 
-// Token handles the OAuth 2.0 token endpoint.
 func (h *Handler) Token(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseForm(); err != nil {
-		writeTokenError(w, "invalid_request", "failed to parse form")
+	setOAuthNoStoreHeaders(w)
+	if err := parseOAuthForm(w, r); err != nil {
+		writeTokenError(w, http.StatusBadRequest, "invalid_request", "invalid form body")
 		return
 	}
-
-	grantType := r.Form.Get("grant_type")
-
-	switch grantType {
-	case "authorization_code":
+	switch r.Form.Get("grant_type") {
+	case models.GrantAuthorizationCode:
 		h.handleAuthorizationCodeGrant(w, r)
-	case "client_credentials":
+	case models.GrantClientCredentials:
 		h.handleClientCredentialsGrant(w, r)
-	case "refresh_token":
+	case models.GrantRefreshToken:
 		h.handleRefreshTokenGrant(w, r)
 	default:
-		writeTokenError(w, "unsupported_grant_type", "grant type not supported")
+		writeTokenError(w, http.StatusBadRequest, "unsupported_grant_type", "grant type is not supported")
 	}
 }
 
 func (h *Handler) handleAuthorizationCodeGrant(w http.ResponseWriter, r *http.Request) {
-	code := r.Form.Get("code")
-	redirectURI := r.Form.Get("redirect_uri")
-	clientID := r.Form.Get("client_id")
-	clientSecret := r.Form.Get("client_secret")
-	codeVerifier := r.Form.Get("code_verifier")
-
-	// Try Basic auth first
-	if clientID == "" || clientSecret == "" {
-		cID, cSecret, ok := r.BasicAuth()
-		if ok {
-			clientID = cID
-			clientSecret = cSecret
-		}
-	}
-
-	if code == "" {
-		writeTokenError(w, "invalid_request", "code is required")
+	code, redirectURI, verifier := r.Form.Get("code"), r.Form.Get("redirect_uri"), r.Form.Get("code_verifier")
+	if code == "" || redirectURI == "" || !validPKCEVerifier(verifier) {
+		writeTokenError(w, http.StatusBadRequest, "invalid_request", "code, redirect_uri, and valid code_verifier are required")
 		return
 	}
-
-	// Consume the authorization code
-	authData, err := h.sessionStore.ConsumeAuthorizationCode(r.Context(), code)
+	stored, err := h.sessionStore.GetAuthorizationCode(r.Context(), code)
 	if err != nil {
-		writeTokenError(w, "invalid_grant", "invalid or expired authorization code")
+		writeTokenError(w, http.StatusBadRequest, "invalid_grant", "invalid or expired authorization code")
 		return
 	}
-
-	// Validate redirect_uri matches
-	if authData.RedirectURI != redirectURI {
-		writeTokenError(w, "invalid_grant", "redirect_uri mismatch")
+	cl, clientID, authOK := h.authenticateTokenClient(r, stored.ClientID, true)
+	if !authOK {
+		writeInvalidClient(w)
 		return
 	}
-
-	// Validate client
-	cl, err := h.clientStore.GetByID(r.Context(), authData.ClientID)
+	if clientID != stored.ClientID || !cl.HasGrant(models.GrantAuthorizationCode) || redirectURI != stored.RedirectURI ||
+		stored.ChallengeMethod != "S256" || !validatePKCE(verifier, stored.CodeChallenge, stored.ChallengeMethod) {
+		writeTokenError(w, http.StatusBadRequest, "invalid_grant", "authorization code binding validation failed")
+		return
+	}
+	if _, err := parseAndValidateScopes(joinScopes(stored.Scopes), cl.Scopes); err != nil {
+		writeTokenError(w, http.StatusBadRequest, "invalid_grant", "authorization scope is no longer allowed")
+		return
+	}
+	uid, err := uuid.Parse(stored.UserID)
 	if err != nil {
-		writeTokenError(w, "invalid_client", "client not found")
+		writeTokenError(w, http.StatusBadRequest, "invalid_grant", "invalid authorization subject")
 		return
 	}
-
-	// For public clients, only PKCE is allowed (no secret)
-	if !cl.IsPublic {
-		if clientSecret == "" {
-			writeTokenError(w, "invalid_client", "client authentication required")
-			return
-		}
-		if _, err := h.clientStore.AuthenticateClient(r.Context(), clientID, clientSecret); err != nil {
-			writeTokenError(w, "invalid_client", "invalid client credentials")
-			return
-		}
+	u, err := h.userService.GetByID(r.Context(), uid)
+	if err != nil || u.Status != models.UserStatusActive || u.AuthVersion != stored.AuthVersion {
+		writeTokenError(w, http.StatusBadRequest, "invalid_grant", "authorization subject is no longer active")
+		return
 	}
-
-	// Validate PKCE if challenge was provided
-	if authData.CodeChallenge != "" {
-		if codeVerifier == "" {
-			writeTokenError(w, "invalid_grant", "code_verifier required")
-			return
-		}
-		if !validatePKCE(codeVerifier, authData.CodeChallenge, authData.ChallengeMethod) {
-			writeTokenError(w, "invalid_grant", "code_verifier mismatch")
-			return
-		}
+	if _, err := h.sessionStore.ConsumeAuthorizationCodeIfMatch(r.Context(), code, stored); err != nil {
+		writeTokenError(w, http.StatusBadRequest, "invalid_grant", "authorization code was already consumed")
+		return
 	}
-
-	// Issue tokens
-	if authData.UserID == "" {
-		authData.UserID = "anonymous" // Should be set during consent
-	}
-
-	tokenPair, err := h.tokenService.GenerateTokenPair(r.Context(), authData.ClientID, authData.UserID, authData.Scopes)
+	issueRefresh := containsScope(stored.Scopes, "offline_access") && cl.HasGrant(models.GrantRefreshToken)
+	pair, err := h.tokenService.GenerateAuthorizationCodeTokenPair(r.Context(), cl.ID, stored.UserID, stored.Scopes, stored.AuthVersion, issueRefresh)
 	if err != nil {
-		writeTokenError(w, "server_error", "failed to issue token")
+		writeTokenError(w, http.StatusInternalServerError, "server_error", "failed to issue token")
 		return
 	}
-
-	// If openid scope, include ID token
-	if containsScope(authData.Scopes, "openid") {
-		userInfo := map[string]interface{}{
-			"preferred_username": authData.UserID,
+	if containsScope(stored.Scopes, "openid") {
+		info := make(map[string]interface{})
+		if containsScope(stored.Scopes, "profile") {
+			info["preferred_username"] = u.Username
+			if u.DisplayName != nil {
+				info["name"] = *u.DisplayName
+			}
+			if u.AvatarURL != nil {
+				info["picture"] = *u.AvatarURL
+			}
 		}
-		idToken, err := h.tokenService.GenerateIDToken(r.Context(), authData.ClientID, authData.UserID, authData.Scopes, "", userInfo)
-		if err == nil {
-			tokenPair.IDToken = idToken
+		if containsScope(stored.Scopes, "email") && u.Email != nil {
+			info["email"] = *u.Email
+		}
+		pair.IDToken, err = h.tokenService.GenerateIDToken(r.Context(), cl.ID, stored.UserID, stored.Scopes, stored.Nonce, info)
+		if err != nil {
+			writeTokenError(w, http.StatusInternalServerError, "server_error", "failed to issue ID token")
+			return
 		}
 	}
-
-	writeJSON(w, http.StatusOK, tokenPair)
+	writeJSON(w, http.StatusOK, pair)
 }
 
 func (h *Handler) handleClientCredentialsGrant(w http.ResponseWriter, r *http.Request) {
-	clientID, clientSecret, ok := r.BasicAuth()
-	if !ok {
-		clientID = r.Form.Get("client_id")
-		clientSecret = r.Form.Get("client_secret")
-	}
-
-	if clientID == "" || clientSecret == "" {
-		writeTokenError(w, "invalid_client", "client authentication required")
+	cl, _, ok := h.authenticateTokenClient(r, "", false)
+	if !ok || cl.IsPublic {
+		writeInvalidClient(w)
 		return
 	}
-
-	cl, err := h.clientStore.AuthenticateClient(r.Context(), clientID, clientSecret)
+	if !cl.HasGrant(models.GrantClientCredentials) {
+		writeTokenError(w, http.StatusBadRequest, "unauthorized_client", "client_credentials grant is not allowed")
+		return
+	}
+	scopes, err := parseAndValidateScopes(r.Form.Get("scope"), cl.Scopes)
 	if err != nil {
-		writeTokenError(w, "invalid_client", "invalid client credentials")
+		writeTokenError(w, http.StatusBadRequest, "invalid_scope", "requested scope is not allowed")
 		return
 	}
-
-	if !cl.HasGrant("client_credentials") {
-		writeTokenError(w, "unauthorized_client", "client_credentials grant not allowed")
-		return
+	if r.Form.Get("scope") == "" {
+		scopes = append([]string(nil), cl.Scopes...)
 	}
-
-	scope := r.Form.Get("scope")
-	scopes := strings.Split(scope, " ")
-	if scope == "" {
-		scopes = cl.Scopes
-	}
-
-	tokenPair, err := h.tokenService.GenerateTokenPair(r.Context(), cl.ID, cl.ID, scopes)
+	scopes = withoutScope(scopes, "offline_access")
+	pair, err := h.tokenService.GenerateClientTokenPair(r.Context(), cl.ID, scopes)
 	if err != nil {
-		writeTokenError(w, "server_error", "failed to issue token")
+		writeTokenError(w, http.StatusInternalServerError, "server_error", "failed to issue token")
 		return
 	}
-
-	writeJSON(w, http.StatusOK, tokenPair)
+	writeJSON(w, http.StatusOK, pair)
 }
 
 func (h *Handler) handleRefreshTokenGrant(w http.ResponseWriter, r *http.Request) {
-	refreshToken := r.Form.Get("refresh_token")
-	clientID := r.Form.Get("client_id")
-	clientSecret := r.Form.Get("client_secret")
-
-	// Try Basic auth
-	if clientID == "" || clientSecret == "" {
-		cID, cSecret, ok := r.BasicAuth()
-		if ok {
-			clientID = cID
-			clientSecret = cSecret
-		}
-	}
-
-	if refreshToken == "" {
-		writeTokenError(w, "invalid_request", "refresh_token is required")
+	refresh := r.Form.Get("refresh_token")
+	if refresh == "" || r.Form.Get("scope") != "" {
+		writeTokenError(w, http.StatusBadRequest, "invalid_request", "refresh_token is required and scope changes are not supported")
 		return
 	}
-
-	// Authenticate client for confidential clients
-	cl, err := h.clientStore.GetByID(r.Context(), clientID)
+	cl, clientID, ok := h.authenticateTokenClient(r, "", true)
+	if !ok {
+		writeInvalidClient(w)
+		return
+	}
+	if !cl.HasGrant(models.GrantRefreshToken) {
+		writeTokenError(w, http.StatusBadRequest, "invalid_grant", "refresh token is not valid for this client")
+		return
+	}
+	pair, err := h.tokenService.RefreshToken(r.Context(), refresh, clientID, cl.Scopes)
 	if err != nil {
-		writeTokenError(w, "invalid_client", "client not found")
+		writeTokenError(w, http.StatusBadRequest, "invalid_grant", "invalid refresh token")
 		return
 	}
-
-	if !cl.IsPublic {
-		if _, err := h.clientStore.AuthenticateClient(r.Context(), clientID, clientSecret); err != nil {
-			writeTokenError(w, "invalid_client", "invalid client credentials")
-			return
-		}
-	}
-
-	tokenPair, err := h.tokenService.RefreshToken(r.Context(), refreshToken, clientID)
-	if err != nil {
-		writeTokenError(w, "invalid_grant", err.Error())
-		return
-	}
-
-	writeJSON(w, http.StatusOK, tokenPair)
+	writeJSON(w, http.StatusOK, pair)
 }
 
-// Revoke handles token revocation (RFC 7009).
 func (h *Handler) Revoke(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseForm(); err != nil {
-		writeTokenError(w, "invalid_request", "failed to parse form")
+	if err := parseOAuthForm(w, r); err != nil {
+		writeTokenError(w, http.StatusBadRequest, "invalid_request", "invalid form body")
 		return
 	}
-
 	token := r.Form.Get("token")
 	if token == "" {
-		writeTokenError(w, "invalid_request", "token is required")
+		writeTokenError(w, http.StatusBadRequest, "invalid_request", "token is required")
 		return
 	}
-
-	// Always return 200 per RFC 7009
-	_ = h.tokenService.RevokeToken(r.Context(), token)
+	cl, _, ok := h.authenticateTokenClient(r, "", true)
+	if !ok {
+		writeInvalidClient(w)
+		return
+	}
+	_ = h.tokenService.RevokeTokenForClient(r.Context(), token, cl.ID)
 	w.WriteHeader(http.StatusOK)
 }
 
-// Introspect handles token introspection (RFC 7662).
 func (h *Handler) Introspect(w http.ResponseWriter, r *http.Request) {
-	if err := r.ParseForm(); err != nil {
+	setOAuthNoStoreHeaders(w)
+	if err := parseOAuthForm(w, r); err != nil {
 		writeJSON(w, http.StatusOK, map[string]interface{}{"active": false})
 		return
 	}
-
-	token := r.Form.Get("token")
-	if token == "" {
-		writeJSON(w, http.StatusOK, map[string]interface{}{"active": false})
+	cl, _, ok := h.authenticateTokenClient(r, "", false)
+	if !ok || cl.IsPublic {
+		writeInvalidClient(w)
 		return
 	}
-
-	result, err := h.tokenService.IntrospectToken(r.Context(), token)
-	if err != nil {
-		writeJSON(w, http.StatusOK, map[string]interface{}{"active": false})
-		return
-	}
-
+	result, _ := h.tokenService.IntrospectTokenForClient(r.Context(), r.Form.Get("token"), cl.ID, cl.Scopes)
 	writeJSON(w, http.StatusOK, result)
 }
 
-// UserInfo handles the OIDC userinfo endpoint.
 func (h *Handler) UserInfo(w http.ResponseWriter, r *http.Request) {
-	token := extractBearerToken(r)
-	if token == "" {
+	setOAuthNoStoreHeaders(w)
+	claims, err := h.tokenService.ValidateAccessToken(r.Context(), extractBearerToken(r))
+	if err != nil || claims.AuthVersion <= 0 {
 		w.Header().Set("WWW-Authenticate", `Bearer error="invalid_token"`)
-		writeError(w, http.StatusUnauthorized, "missing or invalid access token")
+		writeError(w, http.StatusUnauthorized, "invalid_token")
 		return
 	}
-
-	claims, err := h.tokenService.ValidateAccessToken(r.Context(), token)
+	id, err := uuid.Parse(claims.Subject)
 	if err != nil {
-		w.Header().Set("WWW-Authenticate", `Bearer error="invalid_token"`)
-		writeError(w, http.StatusUnauthorized, "invalid token")
+		writeError(w, http.StatusUnauthorized, "invalid_token")
 		return
 	}
-
-	userInfo := map[string]interface{}{
-		"sub": claims.Subject,
+	u, err := h.userService.GetByID(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusUnauthorized, "invalid_token")
+		return
 	}
-
-	// Try to load user details
-	if u, err := h.userService.GetByUsername(r.Context(), claims.Subject); err == nil {
-		userInfo["preferred_username"] = u.Username
-		if u.Email != nil {
-			userInfo["email"] = *u.Email
-		}
+	result := map[string]interface{}{"sub": claims.Subject}
+	scopes := strings.Fields(claims.Scope)
+	if containsScope(scopes, "profile") {
+		result["preferred_username"] = u.Username
 		if u.DisplayName != nil {
-			userInfo["name"] = *u.DisplayName
+			result["name"] = *u.DisplayName
 		}
 		if u.AvatarURL != nil {
-			userInfo["picture"] = *u.AvatarURL
+			result["picture"] = *u.AvatarURL
 		}
 	}
-
-	// Filter by scope
-	scopes := strings.Split(claims.Scope, " ")
-	result := map[string]interface{}{"sub": userInfo["sub"]}
-	if containsScope(scopes, "profile") {
-		if v, ok := userInfo["preferred_username"]; ok {
-			result["preferred_username"] = v
-		}
-		if v, ok := userInfo["name"]; ok {
-			result["name"] = v
-		}
-		if v, ok := userInfo["picture"]; ok {
-			result["picture"] = v
-		}
+	if containsScope(scopes, "email") && u.Email != nil {
+		result["email"] = *u.Email
 	}
-	if containsScope(scopes, "email") {
-		if v, ok := userInfo["email"]; ok {
-			result["email"] = v
-		}
-	}
-
 	writeJSON(w, http.StatusOK, result)
 }
 
-// EndSession handles the OIDC end session endpoint.
 func (h *Handler) EndSession(w http.ResponseWriter, r *http.Request) {
-	// For now, just redirect to post_logout_redirect_uri if provided
-	postLogoutURI := r.URL.Query().Get("post_logout_redirect_uri")
-	if postLogoutURI != "" {
-		http.Redirect(w, r, postLogoutURI, http.StatusFound)
+	setOAuthNoStoreHeaders(w)
+	w.Header().Set("Referrer-Policy", "no-referrer")
+	postLogoutURI, state, hint := r.URL.Query().Get("post_logout_redirect_uri"), r.URL.Query().Get("state"), r.URL.Query().Get("id_token_hint")
+	if hint == "" {
+		if postLogoutURI != "" {
+			writeOAuthError(w, http.StatusBadRequest, "invalid_request", "id_token_hint is required for redirect")
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"message": "no session ended; use the CSRF-protected logout endpoint"})
 		return
 	}
-	writeJSON(w, http.StatusOK, map[string]string{"message": "logged out"})
+	claims, err := h.tokenService.ValidateIDToken(r.Context(), hint)
+	if err != nil || len(claims.Audience) != 1 {
+		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "valid id_token_hint is required for redirect")
+		return
+	}
+	cl, err := h.clientStore.GetByID(r.Context(), claims.Audience[0])
+	if err != nil {
+		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "id_token_hint refers to an unknown client")
+		return
+	}
+	if postLogoutURI != "" && !cl.HasPostLogoutRedirectURI(postLogoutURI) {
+		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "post_logout_redirect_uri is not registered")
+		return
+	}
+	var sessionCookie *http.Cookie
+	if cookie, cookieErr := r.Cookie(oauthSessionCookie); cookieErr == nil {
+		sessionCookie = cookie
+		sess, sessionErr := h.sessionStore.GetSession(r.Context(), cookie.Value)
+		if err := validateEndSessionSession(sess, sessionErr, claims.Subject); errors.Is(err, errEndSessionSubjectMismatch) {
+			writeOAuthError(w, http.StatusBadRequest, "invalid_request", "id_token_hint does not belong to the current session")
+			return
+		} else if err != nil {
+			writeOAuthError(w, http.StatusServiceUnavailable, "server_error", "session service is temporarily unavailable")
+			return
+		}
+	}
+	if sessionCookie != nil {
+		if err := h.sessionStore.DeleteSession(r.Context(), sessionCookie.Value); err != nil && !errors.Is(err, session.ErrNotFound) {
+			writeOAuthError(w, http.StatusServiceUnavailable, "server_error", "session service is temporarily unavailable")
+			return
+		}
+	}
+	http.SetCookie(w, &http.Cookie{Name: oauthSessionCookie, Value: "", Path: "/", HttpOnly: true, Secure: h.config.Server.SecureCookie, SameSite: http.SameSiteLaxMode, MaxAge: -1})
+	if postLogoutURI == "" {
+		writeJSON(w, http.StatusOK, map[string]string{"message": "logged out"})
+		return
+	}
+	target, err := addQuery(postLogoutURI, map[string]string{"state": state})
+	if err != nil {
+		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "invalid post_logout_redirect_uri")
+		return
+	}
+	http.Redirect(w, r, target, http.StatusFound)
 }
 
-// --- Helper functions ---
+func validateEndSessionSession(sess *session.SessionData, err error, subject string) error {
+	if err != nil {
+		if errors.Is(err, session.ErrNotFound) {
+			return nil
+		}
+		return err
+	}
+	if sess == nil || sess.UserID != subject {
+		return errEndSessionSubjectMismatch
+	}
+	return nil
+}
 
-func writeJSON(w http.ResponseWriter, status int, v interface{}) {
+func (h *Handler) authenticateTokenClient(r *http.Request, expectedID string, allowPublic bool) (*models.OAuthClient, string, bool) {
+	formID, formSecret := r.Form.Get("client_id"), r.Form.Get("client_secret")
+	basicID, basicSecret, hasBasic := r.BasicAuth()
+	if hasBasic && (formID != "" || formSecret != "") {
+		return nil, "", false
+	}
+	if !hasBasic && formID == "" {
+		return nil, "", false
+	}
+	clientID, secret := formID, formSecret
+	if hasBasic {
+		clientID, secret = basicID, basicSecret
+	}
+	if clientID == "" {
+		clientID = expectedID
+	}
+	if clientID == "" || (expectedID != "" && clientID != expectedID) {
+		return nil, clientID, false
+	}
+	cl, err := h.clientStore.GetByID(r.Context(), clientID)
+	if err != nil {
+		return nil, clientID, false
+	}
+	if cl.IsPublic {
+		return cl, clientID, allowPublic && !hasBasic && secret == ""
+	}
+	if secret == "" {
+		return nil, clientID, false
+	}
+	authed, err := h.clientStore.AuthenticateClient(r.Context(), clientID, secret)
+	return authed, clientID, err == nil
+}
+
+func (h *Handler) currentSessionUser(r *http.Request) (*session.SessionData, *models.User) {
+	cookie, err := r.Cookie(oauthSessionCookie)
+	if err != nil {
+		return nil, nil
+	}
+	sess, err := h.sessionStore.GetSession(r.Context(), cookie.Value)
+	if err != nil {
+		return nil, nil
+	}
+	id, err := uuid.Parse(sess.UserID)
+	if err != nil {
+		return nil, nil
+	}
+	u, err := h.userService.GetByID(r.Context(), id)
+	if err != nil || u.Status != models.UserStatusActive || u.AuthVersion != sess.AuthVersion {
+		return nil, nil
+	}
+	return sess, u
+}
+
+func (h *Handler) redirectAuthorizeError(w http.ResponseWriter, r *http.Request, redirectURI, state, code string) {
+	target, err := addQuery(redirectURI, map[string]string{"error": code, "state": state})
+	if err != nil {
+		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "invalid redirect URI")
+		return
+	}
+	http.Redirect(w, r, target, http.StatusFound)
+}
+
+func parseAndValidateScopes(raw string, allowed []string) ([]string, error) {
+	requested := strings.Fields(raw)
+	allowedSet := make(map[string]struct{}, len(allowed))
+	for _, scope := range allowed {
+		allowedSet[scope] = struct{}{}
+	}
+	seen := make(map[string]struct{}, len(requested))
+	result := make([]string, 0, len(requested))
+	for _, scope := range requested {
+		if _, ok := allowedSet[scope]; !ok {
+			return nil, errors.New("scope not allowed")
+		}
+		if _, duplicate := seen[scope]; duplicate {
+			return nil, errors.New("duplicate scope")
+		}
+		seen[scope] = struct{}{}
+		result = append(result, scope)
+	}
+	sort.Strings(result)
+	return result, nil
+}
+
+func withoutScope(scopes []string, excluded string) []string {
+	result := make([]string, 0, len(scopes))
+	for _, scope := range scopes {
+		if scope != excluded {
+			result = append(result, scope)
+		}
+	}
+	return result
+}
+func addQuery(raw string, values map[string]string) (string, error) {
+	target, err := url.Parse(raw)
+	if err != nil {
+		return "", err
+	}
+	query := target.Query()
+	for key, value := range values {
+		if value != "" {
+			query.Set(key, value)
+		}
+	}
+	target.RawQuery = query.Encode()
+	return target.String(), nil
+}
+func writeJSON(w http.ResponseWriter, status int, value interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(v)
+	_ = json.NewEncoder(w).Encode(value)
 }
-
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
 }
-
-func writeTokenError(w http.ResponseWriter, code, description string) {
-	writeJSON(w, http.StatusBadRequest, map[string]string{
-		"error":             code,
-		"error_description": description,
-	})
+func writeOAuthError(w http.ResponseWriter, status int, code, description string) {
+	writeJSON(w, status, map[string]string{"error": code, "error_description": description})
 }
-
+func writeTokenError(w http.ResponseWriter, status int, code, description string) {
+	writeOAuthError(w, status, code, description)
+}
+func writeInvalidClient(w http.ResponseWriter) {
+	w.Header().Set("WWW-Authenticate", `Basic realm="token"`)
+	writeTokenError(w, http.StatusUnauthorized, "invalid_client", "client authentication failed")
+}
+func parseOAuthForm(w http.ResponseWriter, r *http.Request) error {
+	r.Body = http.MaxBytesReader(w, r.Body, maxOAuthFormBodyBytes)
+	return r.ParseForm()
+}
+func setOAuthNoStoreHeaders(w http.ResponseWriter) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+}
 func extractBearerToken(r *http.Request) string {
-	auth := r.Header.Get("Authorization")
-	if strings.HasPrefix(auth, "Bearer ") {
-		return strings.TrimPrefix(auth, "Bearer ")
+	parts := strings.Fields(r.Header.Get("Authorization"))
+	if len(parts) == 2 && subtle.ConstantTimeCompare([]byte(strings.ToLower(parts[0])), []byte("bearer")) == 1 {
+		return parts[1]
 	}
 	return ""
 }
-
-func validatePKCE(verifier, challenge, method string) bool {
-	// For plain
-	if method == "" || method == "plain" {
-		return verifier == challenge
-	}
-	// For S256
-	if method == "S256" {
-		return computeS256(verifier) == challenge
-	}
-	return false
-}
-
-func computeS256(verifier string) string {
-	// This would use SHA-256 and base64url encoding
-	// Placeholder - actual implementation needs crypto/sha256
-	h := sha256Sum(verifier)
-	return base64URLEncode(h)
-}
-
-func bigIntToBase64URL(n *big.Int) string {
-	return base64URLEncode(n.Bytes())
-}
-
-func intToBase64URL(e int) string {
-	b := big.NewInt(int64(e)).Bytes()
-	return base64URLEncode(b)
+func intToBase64URL(value int) string {
+	return base64.RawURLEncoding.EncodeToString(big.NewInt(int64(value)).Bytes())
 }
