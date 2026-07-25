@@ -1,3 +1,13 @@
+name: nyauth-dev
+
+x-nyauth-environment: &nyauth-environment
+  NYAUTH_ENVIRONMENT: development
+  NYAUTH_DATABASE_DSN: "postgres://nyauth:${NYAUTH_DEV_POSTGRES_PASSWORD:-local-dev-only-postgres}@postgres:5432/nyauth?sslmode=disable"
+  NYAUTH_REDIS_ADDR: "redis:6379"
+  NYAUTH_REDIS_PASSWORD: "${NYAUTH_DEV_REDIS_PASSWORD:-local-dev-only-redis}"
+  NYAUTH_AUTH_MASTER_KEY: "${NYAUTH_DEV_MASTER_KEY:-MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=}"
+  NYAUTH_BOOTSTRAP_ADMIN_PASSWORD: "${NYAUTH_DEV_ADMIN_PASSWORD:-local-dev-only-admin}"
+
 services:
   postgres:
     image: postgres:16-alpine
@@ -5,13 +15,13 @@ services:
     environment:
       POSTGRES_DB: nyauth
       POSTGRES_USER: nyauth
-      POSTGRES_PASSWORD: nyauth
+      POSTGRES_PASSWORD: "${NYAUTH_DEV_POSTGRES_PASSWORD:-local-dev-only-postgres}"
     volumes:
       - pgdata:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      - "127.0.0.1:5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U nyauth"]
+      test: ["CMD-SHELL", "pg_isready -U nyauth -d nyauth"]
       interval: 5s
       timeout: 3s
       retries: 10
@@ -19,29 +29,46 @@ services:
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: "${NYAUTH_DEV_REDIS_PASSWORD:-local-dev-only-redis}"
+    command: ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$${REDIS_PASSWORD}\""]
     volumes:
       - redisdata:/data
     ports:
-      - "6379:6379"
+      - "127.0.0.1:6379:6379"
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$${REDIS_PASSWORD}\" redis-cli ping | grep -q PONG"]
       interval: 5s
       timeout: 3s
       retries: 10
 
-  nyauth:
+  migrate:
+    image: nyauth:dev
     build: .
-    restart: unless-stopped
-    ports:
-      - "8080:8080"
+    restart: "no"
+    command: ["migrate", "-config", "/etc/nyauth/config.yaml"]
+    environment: *nyauth-environment
+    volumes:
+      - ./config.docker.yaml:/etc/nyauth/config.yaml:ro
     depends_on:
       postgres:
         condition: service_healthy
-      redis:
-        condition: service_healthy
+
+  nyauth:
+    image: nyauth:dev
+    build: .
+    restart: unless-stopped
+    command: ["serve", "-config", "/etc/nyauth/config.yaml"]
+    environment: *nyauth-environment
     volumes:
       - ./config.docker.yaml:/etc/nyauth/config.yaml:ro
-    command: ["-config", "/etc/nyauth/config.yaml", "-migrate"]
+    ports:
+      - "127.0.0.1:8080:8080"
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
 
 volumes:
   pgdata:

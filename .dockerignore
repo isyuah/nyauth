@@ -4,6 +4,9 @@
 bin/
 web/node_modules
 web/.svelte-kit
+web/test-results
+web/playwright-report
+web/blob-report
 sdk/ts/node_modules
 sdk/ts/dist
 *.md
@@ -11,3 +14,15 @@ sdk/ts/dist
 .air.toml
 .vscode
 .idea
+.env
+.env.*
+!.env.example
+!.env.*.example
+config.yaml
+config.yml
+config.*.yaml
+config.*.yml
+!config*.example.yaml
+!config*.example.yml
+!config.docker.yaml
+!config.docker.yml

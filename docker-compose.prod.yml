@@ -1,0 +1,98 @@
+name: nyauth
+
+x-nyauth-environment: &nyauth-environment
+  NYAUTH_ENVIRONMENT: production
+  NYAUTH_DATABASE_DSN: "${NYAUTH_DATABASE_DSN:?set NYAUTH_DATABASE_DSN}"
+  NYAUTH_REDIS_ADDR: "redis:6379"
+  NYAUTH_REDIS_PASSWORD: "${NYAUTH_REDIS_PASSWORD:?set NYAUTH_REDIS_PASSWORD}"
+  NYAUTH_AUTH_ISSUER: "${NYAUTH_AUTH_ISSUER:?set NYAUTH_AUTH_ISSUER}"
+  NYAUTH_AUTH_MASTER_KEY: "${NYAUTH_AUTH_MASTER_KEY:?set NYAUTH_AUTH_MASTER_KEY}"
+  NYAUTH_SERVER_SECURE_COOKIE: "true"
+  NYAUTH_SERVER_TRUSTED_PROXY_CIDRS: "${NYAUTH_TRUSTED_PROXY_CIDRS:?set NYAUTH_TRUSTED_PROXY_CIDRS}"
+  NYAUTH_BOOTSTRAP_ADMIN_USERNAME: "${NYAUTH_BOOTSTRAP_ADMIN_USERNAME:-}"
+  NYAUTH_BOOTSTRAP_ADMIN_PASSWORD: "${NYAUTH_BOOTSTRAP_ADMIN_PASSWORD:-}"
+  NYAUTH_BOOTSTRAP_ADMIN_EMAIL: "${NYAUTH_BOOTSTRAP_ADMIN_EMAIL:-}"
+
+x-hardened-nyauth: &hardened-nyauth
+  image: "${NYAUTH_IMAGE:?set NYAUTH_IMAGE to an immutable image tag or digest}"
+  user: "65532:65532"
+  read_only: true
+  init: true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=16m
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  environment: *nyauth-environment
+  volumes:
+    - ./config.production.yaml:/etc/nyauth/config.yaml:ro
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: "${POSTGRES_DB:-nyauth}"
+      POSTGRES_USER: "${POSTGRES_USER:-nyauth}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  redis:
+    image: redis:7-alpine
+    restart: unless-stopped
+    environment:
+      REDIS_PASSWORD: "${NYAUTH_REDIS_PASSWORD:?set NYAUTH_REDIS_PASSWORD}"
+    command: ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$${REDIS_PASSWORD}\""]
+    volumes:
+      - redisdata:/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$${REDIS_PASSWORD}\" redis-cli ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  migrate:
+    <<: *hardened-nyauth
+    restart: "no"
+    command: ["migrate", "-config", "/etc/nyauth/config.yaml"]
+    networks:
+      - backend
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  nyauth:
+    <<: *hardened-nyauth
+    restart: unless-stopped
+    command: ["serve", "-config", "/etc/nyauth/config.yaml"]
+    expose:
+      - "8080"
+    networks:
+      - backend
+      - proxy
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+networks:
+  backend:
+    internal: true
+  proxy:
+    name: "${NYAUTH_PROXY_NETWORK:-nyauth-proxy}"
+
+volumes:
+  pgdata:
+  redisdata:

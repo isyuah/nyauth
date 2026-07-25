@@ -1,0 +1,34 @@
+# Copy to config.production.yaml and replace every deployment-specific value.
+environment: production
+server:
+  host: "0.0.0.0"
+  port: 8080
+  secure_cookie: true
+  trusted_proxy_cidrs:
+    - "192.0.2.10/32" # Replace with the exact reverse-proxy network.
+database:
+  driver: postgres
+  dsn: ""
+redis:
+  addr: "redis:6379"
+  password: ""
+  db: 0
+auth:
+  issuer: "https://auth.example.com"
+  access_token_ttl: 900
+  refresh_token_ttl: 2592000
+  authorization_code_ttl: 300
+  master_key: ""
+  argon2_concurrency: 4
+  jwk:
+    algorithm: RS256
+    key_size: 3072
+    rotation_interval: 720h
+providers: {}
+admin:
+  username: ""
+  password: ""
+  email: ""
+web:
+  enabled: true
+  title: "Nya"

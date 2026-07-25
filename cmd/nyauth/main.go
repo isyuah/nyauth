@@ -6,116 +6,71 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strings"
 
-	"github.com/jackc/pgx/v5/pgxpool"
+	nyauthroot "github.com/nyasharp/nyauth"
 	"github.com/nyasharp/nyauth/internal/config"
 	"github.com/nyasharp/nyauth/internal/database"
 	"github.com/nyasharp/nyauth/internal/server"
-	nyauthroot "github.com/nyasharp/nyauth"
+)
+
+const (
+	commandServe   = "serve"
+	commandMigrate = "migrate"
 )
 
 func main() {
-	configPath := flag.String("config", "", "path to config file (default: config.yaml)")
-	migrateFlag := flag.Bool("migrate", false, "run database migrations then exit")
-	flag.Parse()
-
-	// Load configuration
+	command, args, err := parseCommand(os.Args[1:])
+	if err != nil {
+		log.Fatal(err)
+	}
+	flags := flag.NewFlagSet("nyauth "+command, flag.ExitOnError)
+	configPath := flags.String("config", "", "path to config file (default: config.yaml)")
+	if err := flags.Parse(args); err != nil {
+		log.Fatalf("parsing arguments: %v", err)
+	}
+	if flags.NArg() != 0 {
+		log.Fatalf("unexpected arguments: %s", strings.Join(flags.Args(), " "))
+	}
 	cfg, err := config.Load(*configPath)
 	if err != nil {
 		log.Fatalf("loading config: %v", err)
 	}
-
+	if command == commandMigrate {
+		if err := database.RunMigrations(cfg.Database.DSN); err != nil {
+			log.Fatalf("running migrations: %v", err)
+		}
+		fmt.Println("migrations applied successfully")
+		return
+	}
 	ctx := context.Background()
-
-	// Connect to PostgreSQL
 	db, err := database.NewPostgresPool(ctx, cfg.Database.DSN)
 	if err != nil {
 		log.Fatalf("connecting to database: %v", err)
 	}
 	defer db.Close()
-
-	// Run migrations if requested
-	if *migrateFlag {
-		if err := runMigrations(db); err != nil {
-			log.Fatalf("running migrations: %v", err)
-		}
-		fmt.Println("migrations applied successfully")
-		os.Exit(0)
+	if err := database.ValidateSchemaVersion(ctx, db); err != nil {
+		log.Fatalf("validating database schema: %v", err)
 	}
-
-	// Connect to Redis
 	rdb := database.NewRedisClient(cfg.Redis.Addr, cfg.Redis.Password, cfg.Redis.DB)
+	defer rdb.Close()
 	if err := rdb.Ping(ctx).Err(); err != nil {
 		log.Fatalf("connecting to redis: %v", err)
 	}
-
-	// Create and run server
 	srv := server.New(cfg, db, rdb, nyauthroot.WebFS)
 	if err := srv.Run(ctx); err != nil {
 		log.Fatalf("server error: %v", err)
 	}
 }
 
-func runMigrations(db *pgxpool.Pool) error {
-	ctx := context.Background()
-
-	_, err := db.Exec(ctx, `
-		CREATE TABLE IF NOT EXISTS schema_migrations (
-			version BIGINT PRIMARY KEY,
-			dirty BOOLEAN NOT NULL DEFAULT FALSE
-		)
-	`)
-	if err != nil {
-		return fmt.Errorf("creating migrations table: %w", err)
+func parseCommand(args []string) (string, []string, error) {
+	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
+		return commandServe, args, nil
 	}
-
-	migrations := map[string]string{
-		"000001": "init_users",
-		"000002": "init_clients",
-		"000003": "init_providers",
-		"000004": "init_identities",
-		"000005": "init_jwk_keys",
-		"000006": "add_audit_logs",
-		"000007": "add_user_fields",
-		"000008": "add_client_owner",
+	switch args[0] {
+	case commandServe, commandMigrate:
+		return args[0], args[1:], nil
+	default:
+		return "", nil, fmt.Errorf("unknown command %q (expected serve or migrate)", args[0])
 	}
-
-	for version, name := range migrations {
-		var exists bool
-		err := db.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM schema_migrations WHERE version = $1)`, version).Scan(&exists)
-		if err != nil {
-			return fmt.Errorf("checking migration %s: %w", version, err)
-		}
-		if exists {
-			continue
-		}
-
-		migrationSQL, err := os.ReadFile(fmt.Sprintf("migrations/%s_%s.up.sql", version, name))
-		if err != nil {
-			return fmt.Errorf("reading migration %s: %w", version, err)
-		}
-
-		tx, err := db.Begin(ctx)
-		if err != nil {
-			return fmt.Errorf("beginning transaction for %s: %w", version, err)
-		}
-
-		if _, err := tx.Exec(ctx, string(migrationSQL)); err != nil {
-			tx.Rollback(ctx)
-			return fmt.Errorf("executing migration %s: %w", version, err)
-		}
-
-		if _, err := tx.Exec(ctx, `INSERT INTO schema_migrations (version, dirty) VALUES ($1, FALSE)`, version); err != nil {
-			tx.Rollback(ctx)
-			return fmt.Errorf("recording migration %s: %w", version, err)
-		}
-
-		if err := tx.Commit(ctx); err != nil {
-			return fmt.Errorf("committing migration %s: %w", version, err)
-		}
-
-		fmt.Printf("applied migration %s_%s\n", version, name)
-	}
-
-	return nil
 }
