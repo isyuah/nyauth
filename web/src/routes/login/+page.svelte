@@ -87,12 +87,8 @@
   <div class="w-full max-w-[400px]">
     <!-- 品牌区 -->
     <div class="text-center mb-8">
-      <div class="relative inline-block">
-        <h1 class="text-[38px] font-bold leading-none text-nya-primary">Nya</h1>
-        <svg aria-hidden="true" focusable="false" class="absolute -top-3 -left-2 w-8 h-5" viewBox="0 0 24 16" fill="none">
-          <path d="M2 16L8 2L12 10L16 2L22 16" stroke="var(--nya-primary)" stroke-width="2" stroke-linecap="round" fill="var(--nya-primary-soft)"/>
-        </svg>
-      </div>
+      <img src="/logo.png" alt="" class="mx-auto mb-3 h-16 w-16 select-none" draggable="false" />
+      <h1 class="text-[38px] font-bold leading-none text-nya-primary">Nya</h1>
       <p class="text-body text-nya-text-secondary mt-2">欢迎回来，今天也要元气满满喵～</p>
     </div>
 

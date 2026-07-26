@@ -76,9 +76,14 @@
     aria-label={section === 'admin' ? '管理后台导航' : '用户中心导航'}
   >
     <a href={section === 'admin' ? '/admin' : '/dashboard'} onclick={onNavigate} class="flex h-[132px] shrink-0 flex-col items-center justify-center overflow-hidden bg-gradient-to-br from-[#f8f5ff] to-[#fff0f6] px-5">
-      <span class="select-none bg-gradient-to-br from-[#8A6CFF] via-[#C28BFF] to-[#FF9BCB] bg-clip-text text-[34px] font-bold leading-none text-transparent">Nya</span>
       {#if showLabels}
+        <span class="flex items-center gap-2">
+          <img src="/logo.png" alt="" class="h-11 w-11 select-none" draggable="false" />
+          <span class="select-none bg-gradient-to-br from-[#8A6CFF] via-[#C28BFF] to-[#FF9BCB] bg-clip-text text-[30px] font-bold leading-none text-transparent">Nya</span>
+        </span>
         <span class="mt-2 text-small text-nya-text-tertiary">{section === 'admin' ? '管理后台' : '用户中心'}</span>
+      {:else}
+        <img src="/logo.png" alt="Nya" class="h-9 w-9 select-none" draggable="false" />
       {/if}
     </a>
 
