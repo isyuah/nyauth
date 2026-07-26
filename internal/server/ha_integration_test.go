@@ -89,7 +89,14 @@ func TestHAHTTPServersShareSessionAndAccountState(t *testing.T) {
 	if crossInstanceSession.User == nil || crossInstanceSession.User.ID != target.ID || crossInstanceSession.CSRFToken != targetLogin.session.CSRFToken {
 		t.Fatalf("second instance returned a different session: %#v", crossInstanceSession)
 	}
-	oauthClientID := "ha-session-revocation-" + marker
+	registered, err := cluster.apps[0].clientService.Create(ctx, models.CreateClientRequest{
+		Name: "HA session revocation client", RedirectURIs: []string{"https://client.invalid/session/" + marker},
+		Grants: []string{models.GrantAuthorizationCode}, Scopes: []string{"profile"}, IsPublic: true,
+	})
+	if err != nil {
+		t.Fatalf("create session-revocation OAuth client: %v", err)
+	}
+	oauthClientID := registered.ID
 	authorizationIssuedAt, err := cluster.apps[0].sessionStore.AuthorizationIssueTime(ctx, target.ID.String(), oauthClientID, time.Hour)
 	if err != nil {
 		t.Fatalf("create OAuth authorization clock: %v", err)

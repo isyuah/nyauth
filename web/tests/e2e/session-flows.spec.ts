@@ -24,6 +24,9 @@ interface MockState {
   clientRotateCSRF?: string | null;
   reauthCSRF?: string | null;
   reauthBody?: unknown;
+  providerReauthCSRF?: string | null;
+  providerReauthBody?: unknown;
+  providerReauthError?: string;
   setPasswordCSRF?: string | null;
   identityDeleteCSRF?: string | null;
   adminRequestSeen?: boolean;
@@ -190,11 +193,12 @@ function sessionResponse(state: MockState) {
   };
 }
 
-async function fulfillJSON(route: Route, status: number, body: unknown) {
+async function fulfillJSON(route: Route, status: number, body: unknown, headers?: Record<string, string>) {
   await route.fulfill({
     status,
     contentType: 'application/json',
     body: JSON.stringify(body),
+    headers,
   });
 }
 
@@ -267,6 +271,22 @@ async function installAPIMocks(page: Page, state: MockState) {
       state.authenticatedAt = new Date().toISOString();
       state.csrfToken = 'csrf-reauthenticated';
       await fulfillJSON(route, 200, sessionResponse(state));
+      return;
+    }
+
+    if (path.startsWith('/api/me/reauth/') && request.method() === 'POST') {
+      state.providerReauthCSRF = await request.headerValue('x-csrf-token');
+      state.providerReauthBody = request.postDataJSON();
+      const body = state.providerReauthBody as { return_to?: string };
+      const returnTo = body.return_to || '/profile';
+      const redirectURL = new URL(returnTo, request.url());
+      if (state.providerReauthError) {
+        redirectURL.searchParams.set('auth_error', state.providerReauthError);
+      } else {
+        state.authenticatedAt = new Date().toISOString();
+        state.csrfToken = 'csrf-provider-reauthenticated';
+      }
+      await fulfillJSON(route, 200, { redirect_url: redirectURL.toString() });
       return;
     }
 
@@ -1056,6 +1076,132 @@ test('invalid email action tokens surface the failure without a false success st
   await expect(page.getByText('新邮箱已生效。为保护账户安全，请重新登录。')).not.toBeVisible();
 });
 
+const registrationOptions = (mode: string, domains: string[] = []) => ({
+  mode,
+  require_email_verification: true,
+  allowed_email_domains: domains,
+});
+
+test('the login page links to registration only when it is open', async ({ page }) => {
+  await page.route('**/api/session', (route) => fulfillJSON(route, 401, { error: 'authentication required' }));
+  await page.route('**/api/providers', (route) => fulfillJSON(route, 200, []));
+  let mode = 'closed';
+  await page.route('**/api/registration', (route) => fulfillJSON(route, 200, registrationOptions(mode)));
+
+  await page.goto('/login');
+  await expect(page.getByRole('link', { name: '忘记密码？' })).toBeVisible();
+  await expect(page.getByRole('link', { name: '注册账号' })).not.toBeVisible();
+
+  mode = 'invite_only';
+  await page.reload();
+  await expect(page.getByRole('link', { name: '注册账号' })).toBeVisible();
+});
+
+test('closed registration shows guidance instead of a form', async ({ page }) => {
+  await page.route('**/api/registration', (route) => fulfillJSON(route, 200, registrationOptions('closed')));
+  await page.goto('/register');
+  await expect(page.getByText('当前未开放注册，请联系管理员创建账号。')).toBeVisible();
+  await expect(page.getByLabel('用户名')).not.toBeVisible();
+});
+
+test('invite-only registration submits the invite code and shows the pending state', async ({ page }) => {
+  await page.route('**/api/registration', (route) => fulfillJSON(route, 200, registrationOptions('invite_only')));
+  let registerBody: unknown;
+  await page.route('**/api/register', async (route) => {
+    registerBody = route.request().postDataJSON();
+    await fulfillJSON(route, 201, {
+      status: 'pending_verification',
+      verification_expires_at: '2026-07-29T12:00:00Z',
+    });
+  });
+
+  await page.goto('/register?invite=welcome-code-123');
+  await expect(page).toHaveURL(/\/register$/);
+  await expect(page.getByLabel('邀请码')).toHaveValue('welcome-code-123');
+
+  await page.getByLabel('用户名').fill('newbie');
+  await page.getByLabel('邮箱地址').fill('newbie@example.com');
+  await page.locator('#register-password').fill('a-new-password-123');
+  await page.locator('#register-confirm').fill('a-new-password-123');
+  await page.getByRole('button', { name: '注册' }).click();
+
+  await expect(page.getByText(/验证邮件已成功加入发送队列/)).toBeVisible();
+  await expect(page.getByText(/截止时间不会因重发而延长/)).toBeVisible();
+  await expect(page.getByRole('link', { name: '重发验证邮件' })).toHaveAttribute('href', '/resend-verification');
+  expect(registerBody).toEqual({
+    username: 'newbie',
+    email: 'newbie@example.com',
+    password: 'a-new-password-123',
+    invite_code: 'welcome-code-123',
+  });
+});
+
+test('open registration hides the invite field and surfaces conflicts', async ({ page }) => {
+  await page.route('**/api/registration', (route) =>
+    fulfillJSON(route, 200, registrationOptions('open', ['corp.example.com'])));
+  let requests = 0;
+  await page.route('**/api/register', async (route) => {
+    requests += 1;
+    await fulfillJSON(route, 409, { error: 'username or email is already taken' });
+  });
+
+  await page.goto('/register');
+  await expect(page.getByText('仅允许以下域名的邮箱：corp.example.com')).toBeVisible();
+  await expect(page.getByLabel('邀请码')).not.toBeVisible();
+
+  await page.getByLabel('用户名').fill('taken');
+  await page.getByLabel('邮箱地址').fill('taken@corp.example.com');
+  await page.locator('#register-password').fill('a-new-password-123');
+  await page.locator('#register-confirm').fill('a-new-password-123');
+  await page.getByRole('button', { name: '注册' }).click();
+
+  await expect(page.getByRole('alert')).toHaveText('用户名或邮箱已被使用');
+  expect(requests).toBe(1);
+  await expect(page.getByRole('button', { name: '注册' })).toBeEnabled();
+});
+
+test('login distinguishes an unverified email from bad credentials', async ({ page }) => {
+  await page.route('**/api/session', (route) => fulfillJSON(route, 401, { error: 'authentication required' }));
+  await page.route('**/api/providers', (route) => fulfillJSON(route, 200, []));
+  await page.route('**/api/registration', (route) => fulfillJSON(route, 200, registrationOptions('closed')));
+  await page.route('**/api/login', (route) =>
+    fulfillJSON(route, 403, { error: 'email verification is required before signing in' }));
+
+  await page.goto('/login');
+  await page.getByLabel('用户名').fill('pending-user');
+  await page.getByLabel('密码').fill('a-valid-password-123');
+  await page.getByRole('button', { name: '登录' }).click();
+
+  await expect(page.getByText('邮箱尚未验证，请先完成验证邮件中的确认再登录')).toBeVisible();
+  await expect(page.getByRole('link', { name: '重发验证邮件' })).toHaveAttribute('href', '/resend-verification');
+});
+
+test('pending verification resend is enumeration-safe and recovers after rate limiting', async ({ page }) => {
+  let requests = 0;
+  let resendBody: unknown;
+  await page.route('**/api/email/verification/resend', async (route) => {
+    requests += 1;
+    resendBody = route.request().postDataJSON();
+    if (requests === 1) {
+      await fulfillJSON(route, 429, { error: 'too many email verification requests' }, { 'Retry-After': '15' });
+      return;
+    }
+    await fulfillJSON(route, 202, { status: 'accepted' });
+  });
+
+  await page.goto('/resend-verification');
+  await page.getByLabel('注册邮箱').fill('pending@example.com');
+  await page.getByRole('button', { name: '提交重发请求' }).click();
+  await expect(page.getByRole('alert')).toHaveText('请求过于频繁，请在 15 秒后重试。');
+  await expect(page.getByLabel('注册邮箱')).toHaveValue('pending@example.com');
+
+  await page.getByRole('button', { name: '提交重发请求' }).click();
+  await expect(page.getByText('如果该邮箱对应仍有效的待验证注册，新邮件已成功加入发送队列。')).toBeVisible();
+  await expect(page.getByText('重发不会延长原注册截止时间。')).toBeVisible();
+  expect(resendBody).toEqual({ email: 'pending@example.com' });
+  expect(requests).toBe(2);
+});
+
 test('forgot-password surfaces rate limiting and allows a later retry', async ({ page }) => {
   let requests = 0;
   await page.route('**/api/password/forgot', async (route) => {
@@ -1533,6 +1679,240 @@ test('runtime branding propagates to the sidebar and saves with CSRF', async ({ 
   expect(updateBody).toEqual({ title: 'Acme SSO', logo_url: 'https://cdn.example.com/logo.png' });
   expect(updateCSRF).toBe('csrf-brand');
   await expect(sidebar.getByText('Acme SSO')).toBeVisible();
+});
+
+test('admin invites are created with CSRF and the one-time code is shown once', async ({ page }) => {
+  const state: MockState = {
+    authenticated: true,
+    mustChangePassword: false,
+    role: 'admin',
+    csrfToken: 'csrf-invite',
+  };
+  await installAPIMocks(page, state);
+  await page.route('**/api/admin/settings/registration', (route) => fulfillJSON(route, 200, {
+    mode: 'invite_only', require_email_verification: true, allowed_email_domains: [],
+    pending_registration_ttl: '72h',
+    invite_default_ttl: '168h', invite_default_max_uses: 1,
+  }));
+
+  const activeInvite = {
+    id: '77777777-7777-7777-7777-777777777777',
+    created_by: null,
+    note: '给测试同学',
+    max_uses: 3,
+    used_count: 1,
+    reserved_count: 1,
+    expires_at: '2026-08-30T00:00:00Z',
+    revoked_at: null,
+    created_at: '2026-07-20T00:00:00Z',
+    status: 'active',
+  };
+  let createBody: unknown;
+  const createCSRFs: Array<string | null> = [];
+  let createAttempts = 0;
+  let revokeCSRF: string | null = null;
+  let revokedID = '';
+  await page.route('**/api/admin/invites', async (route) => {
+    if (route.request().method() === 'GET') {
+      await fulfillJSON(route, 200, [activeInvite]);
+      return;
+    }
+    createBody = route.request().postDataJSON();
+    createCSRFs.push(route.request().headers()['x-csrf-token'] ?? null);
+    createAttempts += 1;
+    if (createAttempts === 1) {
+      await fulfillJSON(route, 403, { error: 'recent authentication is required' });
+      return;
+    }
+    await fulfillJSON(route, 201, {
+      ...activeInvite,
+      id: '88888888-8888-8888-8888-888888888888',
+      note: '新同事',
+      max_uses: 3,
+      used_count: 0,
+      reserved_count: 0,
+      code: 'one-time-code-abc',
+      register_url: 'https://auth.example.test/register?invite=one-time-code-abc',
+    });
+  });
+  await page.route('**/api/admin/invites/*', async (route) => {
+    revokeCSRF = route.request().headers()['x-csrf-token'] ?? null;
+    revokedID = new URL(route.request().url()).pathname.split('/').pop() ?? '';
+    await route.fulfill({ status: 204 });
+  });
+
+  await page.goto('/admin/invites');
+  await expect(page.getByRole('link', { name: '邀请管理' })).toHaveAttribute('aria-current', 'page');
+  await expect(page.getByText('给测试同学')).toBeVisible();
+  await expect(page.getByText(/已使用 1 \/ 待验证 1 \/ 总次数 3/)).toBeVisible();
+
+  await page.getByRole('button', { name: '创建邀请' }).click();
+  await page.getByLabel('备注（可选）').fill('新同事');
+  await page.getByLabel('可用次数（可选）').fill('3');
+  await page.getByRole('button', { name: '创建', exact: true }).click();
+
+  await expect(page.getByRole('dialog', { name: '重新验证身份' })).toBeVisible();
+  await page.getByLabel('当前密码').fill('current-password');
+  await page.getByRole('button', { name: '使用密码验证' }).click();
+
+  await expect(page.getByText('邀请已创建 — 请立即保存，关闭后无法再次查看')).toBeVisible();
+  await expect(page.getByText('one-time-code-abc', { exact: true })).toBeVisible();
+  expect(createBody).toEqual({ note: '新同事', max_uses: 3 });
+  expect(createCSRFs).toEqual(['csrf-invite', 'csrf-reauthenticated']);
+  expect(state.reauthBody).toEqual({ password: 'current-password' });
+  expect(state.reauthCSRF).toBe('csrf-invite');
+
+  await page.getByRole('button', { name: `吊销邀请 给测试同学` }).click();
+  await page.getByRole('dialog').getByRole('button', { name: '吊销' }).click();
+  await expect(page.getByRole('dialog')).not.toBeVisible();
+  expect(revokedID).toBe(activeInvite.id);
+  expect(revokeCSRF).toBe('csrf-reauthenticated');
+});
+
+test('registration settings save with CSRF and open mode forces verification', async ({ page }) => {
+  await installAPIMocks(page, {
+    authenticated: true,
+    mustChangePassword: false,
+    role: 'admin',
+    csrfToken: 'csrf-reg-settings',
+    systemStatus,
+  });
+  let putBody: unknown;
+  let putCSRF: string | null = null;
+  await page.route('**/api/admin/settings/registration', async (route) => {
+    if (route.request().method() === 'GET') {
+      await fulfillJSON(route, 200, {
+        mode: 'closed', require_email_verification: true, allowed_email_domains: [],
+        pending_registration_ttl: '72h',
+        invite_default_ttl: '168h', invite_default_max_uses: 1,
+      });
+      return;
+    }
+    putBody = route.request().postDataJSON();
+    putCSRF = route.request().headers()['x-csrf-token'] ?? null;
+    await fulfillJSON(route, 200, {
+      mode: 'open', require_email_verification: true, allowed_email_domains: ['corp.example.com'],
+      pending_registration_ttl: '72h',
+      invite_default_ttl: '168h', invite_default_max_uses: 1,
+    });
+  });
+
+  await page.goto('/admin/system');
+  await expect(page.getByRole('heading', { name: '注册设置' })).toBeVisible();
+
+  await page.getByRole('radio', { name: /开放/ }).check();
+  await expect(page.getByRole('checkbox', { name: /要求邮箱验证/ })).toBeDisabled();
+  await page.getByLabel('允许的邮箱域名（每行一个，留空不限制）').fill('corp.example.com');
+  await page.getByRole('button', { name: '保存注册设置' }).click();
+
+  await expect(page.getByText('注册设置已保存，立即对所有实例生效。')).toBeVisible();
+  expect(putBody).toEqual({
+    mode: 'open',
+    require_email_verification: true,
+    allowed_email_domains: ['corp.example.com'],
+    pending_registration_ttl: '72h',
+    invite_default_ttl: '168h',
+    invite_default_max_uses: 1,
+  });
+  expect(putCSRF).toBe('csrf-reg-settings');
+});
+
+test('provider reauthentication restores registration settings and retries the save once', async ({ page }) => {
+  const state: MockState = {
+    authenticated: true,
+    mustChangePassword: false,
+    role: 'admin',
+    csrfToken: 'csrf-provider-settings',
+    hasPassword: false,
+    identities: [githubIdentity],
+    systemStatus,
+  };
+  await installAPIMocks(page, state);
+  let putAttempts = 0;
+  let putBody: unknown;
+  const putCSRFs: Array<string | null> = [];
+  await page.route('**/api/admin/settings/registration', async (route) => {
+    if (route.request().method() === 'GET') {
+      await fulfillJSON(route, 200, {
+        mode: 'closed', require_email_verification: true, allowed_email_domains: [],
+        pending_registration_ttl: '72h', invite_default_ttl: '168h', invite_default_max_uses: 1,
+      });
+      return;
+    }
+    putAttempts += 1;
+    putBody = route.request().postDataJSON();
+    putCSRFs.push(route.request().headers()['x-csrf-token'] ?? null);
+    if (putAttempts === 1) {
+      await fulfillJSON(route, 403, { error: 'recent authentication is required' });
+      return;
+    }
+    await fulfillJSON(route, 200, putBody);
+  });
+
+  await page.goto('/admin/system');
+  await page.getByRole('radio', { name: /开放/ }).check();
+  await page.getByLabel('允许的邮箱域名（每行一个，留空不限制）').fill('corp.example.com');
+  await page.getByLabel('待验证注册有效期').fill('48h');
+  await page.getByRole('button', { name: '保存注册设置' }).click();
+
+  await expect(page.getByRole('dialog', { name: '重新验证身份' })).toBeVisible();
+  await page.getByRole('button', { name: '使用 github 验证' }).click();
+  await expect(page.getByText('注册设置已保存，立即对所有实例生效。')).toBeVisible();
+
+  expect(putAttempts).toBe(2);
+  expect(putBody).toEqual({
+    mode: 'open',
+    require_email_verification: true,
+    allowed_email_domains: ['corp.example.com'],
+    pending_registration_ttl: '48h',
+    invite_default_ttl: '168h',
+    invite_default_max_uses: 1,
+  });
+  expect(putCSRFs).toEqual(['csrf-provider-settings', 'csrf-provider-reauthenticated']);
+  expect(state.providerReauthBody).toEqual({ return_to: '/admin/system' });
+  expect(state.providerReauthCSRF).toBe('csrf-provider-settings');
+  expect(await page.evaluate(() => sessionStorage.getItem('nyauth:reauth:registration-settings'))).toBeNull();
+});
+
+test('provider reauthentication denial restores the unsaved registration form', async ({ page }) => {
+  const state: MockState = {
+    authenticated: true,
+    mustChangePassword: false,
+    role: 'admin',
+    csrfToken: 'csrf-provider-denied',
+    hasPassword: false,
+    identities: [githubIdentity],
+    providerReauthError: 'provider_denied',
+    systemStatus,
+  };
+  await installAPIMocks(page, state);
+  let putAttempts = 0;
+  await page.route('**/api/admin/settings/registration', async (route) => {
+    if (route.request().method() === 'GET') {
+      await fulfillJSON(route, 200, {
+        mode: 'closed', require_email_verification: true, allowed_email_domains: [],
+        pending_registration_ttl: '72h', invite_default_ttl: '168h', invite_default_max_uses: 1,
+      });
+      return;
+    }
+    putAttempts += 1;
+    await fulfillJSON(route, 403, { error: 'recent authentication is required' });
+  });
+
+  await page.goto('/admin/system');
+  await page.getByRole('radio', { name: /开放/ }).check();
+  await page.getByLabel('允许的邮箱域名（每行一个，留空不限制）').fill('lab.example.org');
+  await page.getByLabel('待验证注册有效期').fill('24h');
+  await page.getByRole('button', { name: '保存注册设置' }).click();
+  await page.getByRole('button', { name: '使用 github 验证' }).click();
+
+  await expect(page.getByRole('alert')).toHaveText('你取消了外部身份提供商的授权。');
+  await expect(page.getByRole('radio', { name: /开放/ })).toBeChecked();
+  await expect(page.getByLabel('允许的邮箱域名（每行一个，留空不限制）')).toHaveValue('lab.example.org');
+  await expect(page.getByLabel('待验证注册有效期')).toHaveValue('24h');
+  await expect(page).toHaveURL(/\/admin\/system$/);
+  expect(putAttempts).toBe(1);
+  expect(await page.evaluate(() => sessionStorage.getItem('nyauth:reauth:registration-settings'))).toBeNull();
 });
 
 test('the system status page renders the backend status DTO and admin navigation entry', async ({ page }) => {

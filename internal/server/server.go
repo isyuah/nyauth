@@ -28,7 +28,9 @@ import (
 	"github.com/nyasharp/nyauth/internal/config"
 	"github.com/nyasharp/nyauth/internal/crypto"
 	"github.com/nyasharp/nyauth/internal/identity"
+	"github.com/nyasharp/nyauth/internal/invite"
 	"github.com/nyasharp/nyauth/internal/provider"
+	"github.com/nyasharp/nyauth/internal/registration"
 	"github.com/nyasharp/nyauth/internal/session"
 	"github.com/nyasharp/nyauth/internal/settings"
 	"github.com/nyasharp/nyauth/internal/stats"
@@ -60,6 +62,8 @@ type Server struct {
 	authorizationStore *authorization.Store
 	statsHandler       *stats.Handler
 	settingsMgr        *settings.Manager
+	inviteStore        *invite.Store
+	registrationStore  *registration.Store
 	telemetry          *telemetry.Runtime
 	accountService     accountActionService
 	accountLimiter     *AccountActionLimiter
@@ -81,7 +85,7 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 	providerMgr := provider.NewManager(db, cfg.Auth.MasterKey, cfg.IsProduction())
 	authHandler := auth.NewHandler(tokenService, jwkManager, userService, clientStore, sessionStore, cfg)
 	consentHandler := auth.NewConsentHandler(sessionStore, tokenService, clientStore, authorizationStore, cfg)
-	s := &Server{cfg: cfg, db: db, rdb: rdb, webFS: webFS, trustedProxies: parseTrustedProxyCIDRs(cfg.Server.TrustedProxyCIDRs), userService: userService, clientService: clientService, providerMgr: providerMgr, identityStore: identityStore, sessionStore: sessionStore, tokenService: tokenService, jwkManager: jwkManager, authHandler: authHandler, consentHandler: consentHandler, sessionMiddleware: NewSessionMiddleware(sessionStore, cfg.Server.SecureCookie), loginLimiter: NewLoginLimiter(rdb), accountLimiter: NewAccountActionLimiter(rdb), auditStore: audit.NewStore(db), authorizationStore: authorizationStore, statsHandler: stats.NewHandler(db, rdb), settingsMgr: settings.NewManager(db, settings.Branding{Title: cfg.Web.Title, LogoURL: cfg.Web.LogoURL}), telemetry: telemetryRuntime}
+	s := &Server{cfg: cfg, db: db, rdb: rdb, webFS: webFS, trustedProxies: parseTrustedProxyCIDRs(cfg.Server.TrustedProxyCIDRs), userService: userService, clientService: clientService, providerMgr: providerMgr, identityStore: identityStore, sessionStore: sessionStore, tokenService: tokenService, jwkManager: jwkManager, authHandler: authHandler, consentHandler: consentHandler, sessionMiddleware: NewSessionMiddleware(sessionStore, cfg.Server.SecureCookie), loginLimiter: NewLoginLimiter(rdb), accountLimiter: NewAccountActionLimiter(rdb), auditStore: audit.NewStore(db), authorizationStore: authorizationStore, statsHandler: stats.NewHandler(db, rdb), settingsMgr: settings.NewManager(db, settings.Branding{Title: cfg.Web.Title, LogoURL: cfg.Web.LogoURL}), inviteStore: invite.NewStore(db), registrationStore: registration.NewStore(db), telemetry: telemetryRuntime}
 	if err := telemetryRuntime.BindPoolObservers(db, rdb); err != nil {
 		return nil, fmt.Errorf("configuring dependency pool metrics: %w", err)
 	}
@@ -179,10 +183,13 @@ func (s *Server) buildRouter() *chi.Mux {
 	r.Route("/api", func(r chi.Router) {
 		r.Post("/login", s.handleLogin)
 		r.Get("/branding", s.handleGetBranding)
+		r.Get("/registration", s.handleRegistrationOptions)
+		r.Post("/register", s.handleRegister)
 		r.Get("/providers", s.handleListProviders)
 		r.Post("/password/forgot", s.handleRequestPasswordReset)
 		r.Post("/password/reset", s.handleConfirmPasswordReset)
 		r.Post("/email/verify", s.handleConfirmEmailVerification)
+		r.Post("/email/verification/resend", s.handleResendPendingEmailVerification)
 		r.Post("/email/change/confirm", s.handleConfirmEmailChange)
 		r.Group(func(r chi.Router) {
 			r.Use(s.userAuthMiddleware)
@@ -222,6 +229,11 @@ func (s *Server) buildRouter() *chi.Mux {
 			r.Use(s.csrfMiddleware)
 			r.Get("/admin/system/status", s.handleSystemStatus)
 			r.Put("/admin/branding", s.handleUpdateBranding)
+			r.Get("/admin/settings/registration", s.handleGetRegistrationSettings)
+			r.Put("/admin/settings/registration", s.handleUpdateRegistrationSettings)
+			r.Get("/admin/invites", s.handleListInvites)
+			r.Post("/admin/invites", s.handleCreateInvite)
+			r.Delete("/admin/invites/{id}", s.handleRevokeInvite)
 			r.Get("/admin/stats", s.statsHandler.GetStats)
 			r.Get("/admin/stats/login-trend", s.statsHandler.GetLoginTrend)
 			r.Get("/admin/stats/recent-logins", s.statsHandler.GetRecentLogins)
@@ -338,6 +350,7 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	go s.rotateJWKs(runCtx)
 	go s.statsHandler.Run(runCtx, time.Minute)
+	go s.runRegistrationCleanup(runCtx)
 	go func() {
 		<-runCtx.Done()
 		s.readiness.accepting.Store(false)
@@ -357,6 +370,33 @@ func (s *Server) Run(ctx context.Context) error {
 		return nil
 	}
 	return err
+}
+
+func (s *Server) runRegistrationCleanup(ctx context.Context) {
+	run := func() {
+		result, err := s.registrationStore.CleanupExpired(ctx, time.Now().UTC(), 200, 10)
+		if err != nil {
+			if !errors.Is(err, context.Canceled) {
+				slog.ErrorContext(ctx, "expired registration cleanup failed", "error", err)
+			}
+			return
+		}
+		if result.LockAcquired && result.Released > 0 {
+			slog.InfoContext(ctx, "expired registrations cleaned",
+				"released", result.Released, "deleted_users", result.DeletedUsers, "batches", result.Batches)
+		}
+	}
+	run()
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			run()
+		}
+	}
 }
 
 func (s *Server) rotateJWKs(ctx context.Context) {

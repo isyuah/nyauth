@@ -6,11 +6,14 @@ import (
 	"fmt"
 	"net/mail"
 	"strings"
+	"time"
 
 	"github.com/google/uuid"
+	"github.com/nyasharp/nyauth/internal/account"
 	"github.com/nyasharp/nyauth/internal/audit"
 	"github.com/nyasharp/nyauth/internal/crypto"
 	"github.com/nyasharp/nyauth/internal/passwordpolicy"
+	"github.com/nyasharp/nyauth/internal/registration"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
 
@@ -19,10 +22,15 @@ var (
 	ErrInvalidInput        = errors.New("invalid input")
 	ErrPasswordUnavailable = errors.New("password login is not available for this account")
 	ErrPasswordConfigured  = errors.New("a local password is already configured")
+	ErrInviteInvalid       = registration.ErrInviteInvalid
+	// ErrEmailVerificationPending is returned only after the supplied
+	// credentials verified correctly, so revealing it is safe and actionable.
+	ErrEmailVerificationPending = errors.New("email verification is required before signing in")
 )
 
 type serviceStore interface {
 	Create(ctx context.Context, u *models.User) error
+	CreateRegistration(ctx context.Context, u *models.User, options RegistrationCommitOptions) (*uuid.UUID, error)
 	GetByID(ctx context.Context, id uuid.UUID) (*models.User, error)
 	GetByUsername(ctx context.Context, username string) (*models.User, error)
 	UpdateSelf(ctx context.Context, id uuid.UUID, req models.UpdateUserRequest) (*models.User, error)
@@ -40,6 +48,25 @@ type serviceStore interface {
 }
 
 type Service struct{ store serviceStore }
+
+type RegistrationCommitOptions struct {
+	InviteCodeHash *string
+	ExpiresAt      time.Time
+	Now            time.Time
+	Mode           string
+	Audit          registration.AuditContext
+	Verification   *account.PreparedActionEmail
+}
+
+type RegisterOptions struct {
+	PendingVerification bool
+	InviteCodeHash      *string
+	ExpiresAt           time.Time
+	Now                 time.Time
+	Mode                string
+	Audit               registration.AuditContext
+	PrepareVerification func(*models.User) (*account.PreparedActionEmail, error)
+}
 
 func NewService(store *Store) *Service { return &Service{store: store} }
 
@@ -110,6 +137,78 @@ func (s *Service) Create(ctx context.Context, req models.CreateUserRequest) (*mo
 		return nil, err
 	}
 	return u, nil
+}
+
+// ValidateRegistration runs the registration field validations without side
+// effects so callers can fail fast before consuming an invite.
+func (s *Service) ValidateRegistration(req models.RegisterRequest) error {
+	username := strings.TrimSpace(req.Username)
+	email := strings.TrimSpace(req.Email)
+	if err := validateUsername(username); err != nil {
+		return err
+	}
+	if email == "" {
+		return fmt.Errorf("%w: email is required", ErrInvalidInput)
+	}
+	if err := validateEmail(email); err != nil {
+		return err
+	}
+	return validatePassword(req.Password)
+}
+
+// Register creates a self-registered account. Email is mandatory because it
+// is the recovery anchor; the account starts pending when verification is
+// required and only becomes active after the emailed confirmation.
+func (s *Service) Register(ctx context.Context, req models.RegisterRequest, options RegisterOptions) (*models.User, *uuid.UUID, error) {
+	req.Username = strings.TrimSpace(req.Username)
+	req.Email = strings.TrimSpace(req.Email)
+	if err := validateUsername(req.Username); err != nil {
+		return nil, nil, err
+	}
+	if req.Email == "" {
+		return nil, nil, fmt.Errorf("%w: email is required", ErrInvalidInput)
+	}
+	if err := validateEmail(req.Email); err != nil {
+		return nil, nil, err
+	}
+	if err := validatePassword(req.Password); err != nil {
+		return nil, nil, err
+	}
+	hash, err := crypto.HashPassword(req.Password)
+	if err != nil {
+		return nil, nil, fmt.Errorf("hashing password: %w", err)
+	}
+	status := models.UserStatusActive
+	if options.PendingVerification {
+		status = models.UserStatusPending
+	}
+	u := &models.User{
+		ID: uuid.New(), Username: req.Username, Email: &req.Email, PasswordHash: &hash,
+		Status: status, Role: "user", AuthVersion: 1, SessionVersion: 1,
+		Metadata: map[string]string{},
+	}
+	var verification *account.PreparedActionEmail
+	if options.PendingVerification {
+		if options.PrepareVerification == nil {
+			return nil, nil, fmt.Errorf("preparing registration verification: verification builder is required")
+		}
+		verification, err = options.PrepareVerification(u)
+		if err != nil {
+			return nil, nil, fmt.Errorf("preparing registration verification: %w", err)
+		}
+	}
+	inviteID, err := s.store.CreateRegistration(ctx, u, RegistrationCommitOptions{
+		InviteCodeHash: options.InviteCodeHash,
+		ExpiresAt:      options.ExpiresAt,
+		Now:            options.Now,
+		Mode:           options.Mode,
+		Audit:          options.Audit,
+		Verification:   verification,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	return u, inviteID, nil
 }
 
 func (s *Service) GetByID(ctx context.Context, id uuid.UUID) (*models.User, error) {
@@ -301,7 +400,13 @@ func (s *Service) Authenticate(ctx context.Context, username, password string) (
 		candidate = "invalid-login-password"
 	}
 	ok, verifyErr := crypto.VerifyPassword(candidate, hash)
-	if !validUsername || !validPassword || lookupErr != nil || verifyErr != nil || !ok || u == nil || u.PasswordHash == nil || u.Status != models.UserStatusActive {
+	if !validUsername || !validPassword || lookupErr != nil || verifyErr != nil || !ok || u == nil || u.PasswordHash == nil {
+		return nil, ErrInvalidCredentials
+	}
+	if u.Status == models.UserStatusPending {
+		return nil, ErrEmailVerificationPending
+	}
+	if u.Status != models.UserStatusActive {
 		return nil, ErrInvalidCredentials
 	}
 	return u, nil

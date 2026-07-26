@@ -255,6 +255,53 @@ export interface Branding {
   logo_url: string;
 }
 
+export type RegistrationMode = 'closed' | 'invite_only' | 'open';
+
+export interface RegistrationOptions {
+  mode: RegistrationMode;
+  require_email_verification: boolean;
+  allowed_email_domains: string[];
+}
+
+export interface RegistrationSettings {
+  mode: RegistrationMode;
+  require_email_verification: boolean;
+  allowed_email_domains: string[];
+  pending_registration_ttl: string;
+  invite_default_ttl: string;
+  invite_default_max_uses: number;
+}
+
+export interface RegisterInput {
+  username: string;
+  email: string;
+  password: string;
+  invite_code?: string;
+}
+
+export interface Invite {
+  id: string;
+  created_by: string | null;
+  note: string;
+  max_uses: number;
+  used_count: number;
+  reserved_count: number;
+  expires_at: string;
+  revoked_at?: string | null;
+  created_at: string;
+  status: 'active' | 'expired' | 'exhausted' | 'revoked' | string;
+}
+
+export interface CreateInviteResult extends Invite {
+  code: string;
+  register_url: string;
+}
+
+export interface RegisterResult {
+  status: 'pending_verification' | 'registered';
+  verification_expires_at?: string;
+}
+
 export type ComponentStatus = 'ok' | 'degraded' | 'unavailable' | string;
 
 export interface SystemStatus {
@@ -308,6 +355,7 @@ export class ApiError extends Error {
     message: string,
     readonly status: number,
     readonly retryAfter?: number,
+    readonly serverMessage: string = message,
   ) {
     super(message);
     this.name = 'ApiError';
@@ -326,6 +374,14 @@ const API_ERROR_TRANSLATIONS: Record<string, string> = {
   'reauthentication failed': '重新认证失败，请稍后重试',
   'reauthentication session could not be updated': '重新认证成功，但会话更新失败，请重试',
   'csrf_validation_failed': '安全校验失败，请刷新页面后重试',
+  'email verification is required before signing in': '邮箱尚未验证，请先完成验证邮件中的确认再登录',
+  'registration is closed': '当前未开放注册',
+  'invite code is required': '需要邀请码才能注册',
+  'invalid or expired invite code': '邀请码无效或已失效',
+  'username or email is already taken': '用户名或邮箱已被使用',
+  'email domain is not allowed': '该邮箱域名不允许注册',
+  'too many registration attempts': '注册尝试过于频繁，请稍后再试',
+  'registration requires email delivery, which is not configured': '注册功能暂不可用：邮件服务未配置',
 };
 
 export function localizeAPIErrorMessage(message: string): string {
@@ -333,6 +389,12 @@ export function localizeAPIErrorMessage(message: string): string {
   if (normalized.includes(PASSWORD_POLICY_ERROR)) return PASSWORD_REQUIREMENT;
   if (API_ERROR_TRANSLATIONS[normalized]) return API_ERROR_TRANSLATIONS[normalized];
   return message;
+}
+
+export function isRecentAuthenticationError(cause: unknown): cause is ApiError {
+  return cause instanceof ApiError
+    && cause.status === 403
+    && cause.serverMessage.trim().toLowerCase() === 'recent authentication is required';
 }
 
 let csrfToken = '';
@@ -380,6 +442,7 @@ async function req<T>(path: string, opts: RequestInit = {}, redirectOnUnauthoriz
       localizeAPIErrorMessage(message),
       res.status,
       Number.isFinite(retryAfter) ? retryAfter : undefined,
+      message,
     );
   }
 
@@ -411,6 +474,13 @@ export const api = {
       body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
     }, false),
   getBranding: () => req<Branding>('/api/branding', {}, false),
+  getRegistrationOptions: () => req<RegistrationOptions>('/api/registration', {}, false),
+  register: (data: RegisterInput) =>
+    req<RegisterResult>('/api/register', { method: 'POST', body: JSON.stringify(data) }, false),
+  resendPendingEmailVerification: (email: string) =>
+    req<{ status: 'accepted' }>('/api/email/verification/resend', {
+      method: 'POST', body: JSON.stringify({ email }),
+    }, false),
   getProviders: () => req<ProviderSummary[]>('/api/providers'),
   getMyIdentities: () => req<ExternalIdentity[]>('/api/me/identities'),
   bindIdentity: (provider: string, returnTo = '/profile') =>
@@ -482,6 +552,14 @@ export const api = {
     getSystemStatus: () => req<SystemStatus>('/api/admin/system/status'),
     updateBranding: (branding: Branding) =>
       req<Branding>('/api/admin/branding', { method: 'PUT', body: JSON.stringify(branding) }),
+    getRegistrationSettings: () => req<RegistrationSettings>('/api/admin/settings/registration'),
+    updateRegistrationSettings: (settings: RegistrationSettings) =>
+      req<RegistrationSettings>('/api/admin/settings/registration', { method: 'PUT', body: JSON.stringify(settings) }),
+    getInvites: () => req<Invite[]>('/api/admin/invites'),
+    createInvite: (data: { note?: string; max_uses?: number; ttl?: string }) =>
+      req<CreateInviteResult>('/api/admin/invites', { method: 'POST', body: JSON.stringify(data) }),
+    revokeInvite: (id: string) =>
+      req<void>(`/api/admin/invites/${encodeURIComponent(id)}`, { method: 'DELETE' }),
     getUsers: (page = 1, pageSize = 20, search = '', status?: UserStatus) => {
       const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
       if (search) params.set('q', search);

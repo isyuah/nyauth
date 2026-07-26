@@ -13,6 +13,7 @@
     ScrollText,
     Server,
     ShieldCheck,
+    Ticket,
     UserRound,
     Users,
   } from 'lucide-svelte';
@@ -36,6 +37,7 @@
     { href: '/admin/users', icon: Users, label: '用户管理' },
     { href: '/admin/clients', icon: AppWindow, label: '应用管理' },
     { href: '/admin/providers', icon: KeyRound, label: '身份提供者' },
+    { href: '/admin/invites', icon: Ticket, label: '邀请管理' },
     { href: '/admin/audit', icon: ScrollText, label: '审计日志' },
     { href: '/admin/system', icon: Server, label: '系统状态' },
   ];

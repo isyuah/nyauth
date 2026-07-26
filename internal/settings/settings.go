@@ -12,90 +12,187 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
 const (
 	brandingKey            = "branding"
+	registrationKey        = "registration"
 	notificationChannel    = "nyauth_settings_changed"
 	reconciliationInterval = 60 * time.Second
 )
 
-// Branding is the first runtime-settings consumer: the values the web UI uses
-// to present the deployment (sidebar wordmark, login heading, logo).
+// Branding holds the values the web UI uses to present the deployment
+// (sidebar wordmark, login heading, logo).
 type Branding struct {
 	Title   string `json:"title"`
 	LogoURL string `json:"logo_url"`
+}
+
+// Registration modes for public self-registration.
+const (
+	RegistrationClosed     = "closed"
+	RegistrationInviteOnly = "invite_only"
+	RegistrationOpen       = "open"
+)
+
+// ValidRegistrationMode reports whether the value is a known mode.
+func ValidRegistrationMode(mode string) bool {
+	switch mode {
+	case RegistrationClosed, RegistrationInviteOnly, RegistrationOpen:
+		return true
+	}
+	return false
+}
+
+// Registration controls public self-registration and invite defaults.
+type Registration struct {
+	Mode                     string   `json:"mode"`
+	RequireEmailVerification bool     `json:"require_email_verification"`
+	AllowedEmailDomains      []string `json:"allowed_email_domains"`
+	PendingRegistrationTTL   string   `json:"pending_registration_ttl"`
+	InviteDefaultTTL         string   `json:"invite_default_ttl"`
+	InviteDefaultMaxUses     int      `json:"invite_default_max_uses"`
+}
+
+// DefaultRegistration returns the safe out-of-the-box registration settings:
+// self-registration disabled, verification required once it is opened.
+func DefaultRegistration() Registration {
+	return Registration{
+		Mode:                     RegistrationClosed,
+		RequireEmailVerification: true,
+		AllowedEmailDomains:      []string{},
+		PendingRegistrationTTL:   "72h",
+		InviteDefaultTTL:         "168h",
+		InviteDefaultMaxUses:     1,
+	}
 }
 
 // Manager caches the current settings snapshot and keeps it consistent across
 // instances with the same LISTEN/NOTIFY + reconciliation pattern the provider
 // manager uses. Config values act as defaults when nothing is stored yet.
 type Manager struct {
-	db       *pgxpool.Pool
-	defaults Branding
-	snapshot atomic.Pointer[Branding]
+	db               *pgxpool.Pool
+	brandingDefaults Branding
+	branding         atomic.Pointer[Branding]
+	registration     atomic.Pointer[Registration]
 }
 
-func NewManager(db *pgxpool.Pool, defaults Branding) *Manager {
-	return &Manager{db: db, defaults: defaults}
+func NewManager(db *pgxpool.Pool, brandingDefaults Branding) *Manager {
+	return &Manager{db: db, brandingDefaults: brandingDefaults}
 }
 
 // Branding returns the stored branding, or the config defaults before the
 // first successful load and when nothing has been stored.
 func (m *Manager) Branding() Branding {
-	if snapshot := m.snapshot.Load(); snapshot != nil {
+	if snapshot := m.branding.Load(); snapshot != nil {
 		return *snapshot
 	}
-	return m.defaults
+	return m.brandingDefaults
 }
 
+// Registration returns the stored registration settings or the safe defaults.
+func (m *Manager) Registration() Registration {
+	if snapshot := m.registration.Load(); snapshot != nil {
+		return *snapshot
+	}
+	return DefaultRegistration()
+}
+
+// Load refreshes every settings group from the database. Missing rows reset
+// the corresponding group to its defaults so deletes propagate too.
 func (m *Manager) Load(ctx context.Context) error {
 	if m.db == nil {
 		return nil
 	}
-	var raw []byte
-	err := m.db.QueryRow(ctx, `SELECT value FROM runtime_settings WHERE key = $1`, brandingKey).Scan(&raw)
-	if errors.Is(err, pgx.ErrNoRows) {
-		m.snapshot.Store(nil)
-		return nil
-	}
+	rows, err := m.db.Query(ctx, `SELECT key, value FROM runtime_settings WHERE key = ANY($1)`,
+		[]string{brandingKey, registrationKey})
 	if err != nil {
 		return fmt.Errorf("loading runtime settings: %w", err)
 	}
-	stored := m.defaults
-	if err := json.Unmarshal(raw, &stored); err != nil {
-		return fmt.Errorf("decoding stored branding: %w", err)
+	defer rows.Close()
+	stored := map[string][]byte{}
+	for rows.Next() {
+		var key string
+		var value []byte
+		if err := rows.Scan(&key, &value); err != nil {
+			return fmt.Errorf("scanning runtime setting: %w", err)
+		}
+		stored[key] = value
 	}
-	m.snapshot.Store(&stored)
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("reading runtime settings: %w", err)
+	}
+
+	if raw, ok := stored[brandingKey]; ok {
+		branding := m.brandingDefaults
+		if err := json.Unmarshal(raw, &branding); err != nil {
+			return fmt.Errorf("decoding stored branding: %w", err)
+		}
+		m.branding.Store(&branding)
+	} else {
+		m.branding.Store(nil)
+	}
+
+	if raw, ok := stored[registrationKey]; ok {
+		registration := DefaultRegistration()
+		if err := json.Unmarshal(raw, &registration); err != nil {
+			return fmt.Errorf("decoding stored registration settings: %w", err)
+		}
+		m.registration.Store(&registration)
+	} else {
+		m.registration.Store(nil)
+	}
 	return nil
 }
 
 // SetBranding persists the branding, refreshes the local snapshot, and
 // notifies other instances. Validation is the caller's responsibility.
 func (m *Manager) SetBranding(ctx context.Context, branding Branding, updatedBy string) error {
+	if err := m.store(ctx, brandingKey, branding, updatedBy); err != nil {
+		return err
+	}
+	m.branding.Store(&branding)
+	m.notify(ctx, brandingKey)
+	return nil
+}
+
+// SetRegistration persists the registration settings, refreshes the local
+// snapshot, and notifies other instances. Validation is the caller's
+// responsibility.
+func (m *Manager) SetRegistration(ctx context.Context, registration Registration, updatedBy string) error {
+	if err := m.store(ctx, registrationKey, registration, updatedBy); err != nil {
+		return err
+	}
+	m.registration.Store(&registration)
+	m.notify(ctx, registrationKey)
+	return nil
+}
+
+func (m *Manager) store(ctx context.Context, key string, value any, updatedBy string) error {
 	if m.db == nil {
 		return errors.New("runtime settings storage is unavailable")
 	}
-	encoded, err := json.Marshal(branding)
+	encoded, err := json.Marshal(value)
 	if err != nil {
-		return fmt.Errorf("encoding branding: %w", err)
+		return fmt.Errorf("encoding %s settings: %w", key, err)
 	}
 	_, err = m.db.Exec(ctx, `
 		INSERT INTO runtime_settings (key, value, updated_by, updated_at)
 		VALUES ($1, $2, $3, now())
 		ON CONFLICT (key) DO UPDATE SET
 			value = EXCLUDED.value, updated_by = EXCLUDED.updated_by, updated_at = EXCLUDED.updated_at
-	`, brandingKey, encoded, updatedBy)
+	`, key, encoded, updatedBy)
 	if err != nil {
-		return fmt.Errorf("storing branding: %w", err)
-	}
-	m.snapshot.Store(&branding)
-	if _, err := m.db.Exec(ctx, `SELECT pg_notify($1, $2)`, notificationChannel, brandingKey); err != nil {
-		slog.ErrorContext(ctx, "settings change notification failed", "error", err)
+		return fmt.Errorf("storing %s settings: %w", key, err)
 	}
 	return nil
+}
+
+func (m *Manager) notify(ctx context.Context, key string) {
+	if _, err := m.db.Exec(ctx, `SELECT pg_notify($1, $2)`, notificationChannel, key); err != nil {
+		slog.ErrorContext(ctx, "settings change notification failed", "key", key, "error", err)
+	}
 }
 
 // StartSynchronization keeps the snapshot consistent across instances:

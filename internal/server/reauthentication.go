@@ -17,6 +17,19 @@ func isRecentAuthentication(authenticatedAt, now time.Time) bool {
 	return now.Sub(authenticatedAt) <= account.DefaultReauthenticationTTL
 }
 
+func (s *Server) requireRecentAuthentication(w http.ResponseWriter, r *http.Request) bool {
+	authenticated := sessionFromContext(r.Context())
+	if authenticated == nil {
+		writeAPIError(w, http.StatusUnauthorized, "authentication required")
+		return false
+	}
+	if !isRecentAuthentication(authenticated.Data.AuthenticatedAt, time.Now().UTC()) {
+		writeAPIError(w, http.StatusForbidden, "recent authentication is required")
+		return false
+	}
+	return true
+}
+
 func (s *Server) handlePasswordReauthentication(w http.ResponseWriter, r *http.Request) {
 	setSessionNoStoreHeaders(w)
 	current := currentUserFromContext(r)

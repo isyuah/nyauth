@@ -5,8 +5,10 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/google/uuid"
+	"github.com/nyasharp/nyauth/internal/account"
 	"github.com/nyasharp/nyauth/internal/audit"
 	"github.com/nyasharp/nyauth/internal/crypto"
 	"github.com/nyasharp/nyauth/pkg/models"
@@ -18,6 +20,9 @@ type bootstrapStore struct {
 }
 
 func (s *bootstrapStore) Create(context.Context, *models.User) error { return errors.New("unused") }
+func (s *bootstrapStore) CreateRegistration(context.Context, *models.User, RegistrationCommitOptions) (*uuid.UUID, error) {
+	return nil, errors.New("unused")
+}
 func (s *bootstrapStore) GetByID(context.Context, uuid.UUID) (*models.User, error) {
 	return nil, errors.New("unused")
 }
@@ -216,5 +221,114 @@ func TestCreateDefaultsOmittedMetadataToEmptyObject(t *testing.T) {
 	}
 	if created.DisplayName != nil || created.Email != nil {
 		t.Fatalf("blank optional fields must stay null: %#v", created)
+	}
+}
+
+type registrationRecordingStore struct {
+	bootstrapStore
+	created  *models.User
+	options  RegistrationCommitOptions
+	inviteID uuid.UUID
+}
+
+func (s *registrationRecordingStore) CreateRegistration(_ context.Context, u *models.User, options RegistrationCommitOptions) (*uuid.UUID, error) {
+	s.created = u
+	s.options = options
+	if options.InviteCodeHash == nil {
+		return nil, nil
+	}
+	s.inviteID = uuid.New()
+	return &s.inviteID, nil
+}
+
+func TestRegisterCreatesPendingUserAndForwardsInviteHash(t *testing.T) {
+	store := &registrationRecordingStore{}
+	service := &Service{store: store}
+	hash := "invite-hash"
+	now := time.Now().UTC()
+	created, inviteID, err := service.Register(context.Background(), models.RegisterRequest{
+		Username: "newbie", Email: "newbie@example.com", Password: "a-valid-password-123",
+	}, RegisterOptions{
+		PendingVerification: true, InviteCodeHash: &hash, Now: now, ExpiresAt: now.Add(72 * time.Hour),
+		PrepareVerification: func(*models.User) (*account.PreparedActionEmail, error) {
+			return &account.PreparedActionEmail{}, nil
+		},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if created.Status != models.UserStatusPending {
+		t.Fatalf("status = %q", created.Status)
+	}
+	if created.Email == nil || *created.Email != "newbie@example.com" || created.Metadata == nil {
+		t.Fatalf("created = %#v", created)
+	}
+	if created.Role != "user" || created.MustChangePassword {
+		t.Fatalf("unexpected privileges: %#v", created)
+	}
+	if store.options.InviteCodeHash == nil || *store.options.InviteCodeHash != hash {
+		t.Fatalf("invite hash was not forwarded: %#v", store.options.InviteCodeHash)
+	}
+	if store.options.Verification == nil || !store.options.ExpiresAt.Equal(now.Add(72*time.Hour)) {
+		t.Fatalf("registration commit options = %#v", store.options)
+	}
+	if inviteID == nil || *inviteID != store.inviteID {
+		t.Fatalf("invite ID = %#v", inviteID)
+	}
+
+	active, activeInviteID, err := service.Register(context.Background(), models.RegisterRequest{
+		Username: "walkin", Email: "walkin@example.com", Password: "a-valid-password-123",
+	}, RegisterOptions{Now: now, ExpiresAt: now.Add(72 * time.Hour)})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if active.Status != models.UserStatusActive || activeInviteID != nil {
+		t.Fatalf("open registration = %#v invite=%v", active, activeInviteID)
+	}
+}
+
+func TestRegisterRejectsMissingEmail(t *testing.T) {
+	service := &Service{store: &registrationRecordingStore{}}
+	if _, _, err := service.Register(context.Background(), models.RegisterRequest{
+		Username: "noemail", Password: "a-valid-password-123",
+	}, RegisterOptions{PendingVerification: true, Now: time.Now().UTC(), ExpiresAt: time.Now().UTC().Add(time.Hour)}); !IsInvalidInput(err) {
+		t.Fatalf("missing email error = %v", err)
+	}
+	if err := service.ValidateRegistration(models.RegisterRequest{Username: "noemail", Password: "a-valid-password-123"}); !IsInvalidInput(err) {
+		t.Fatalf("validate missing email error = %v", err)
+	}
+}
+
+type pendingAuthStore struct {
+	bootstrapStore
+	user *models.User
+}
+
+func (s *pendingAuthStore) GetByUsername(context.Context, string) (*models.User, error) {
+	return s.user, nil
+}
+
+func TestAuthenticatePendingUserGetsDistinctErrorOnlyWithValidPassword(t *testing.T) {
+	hash, err := crypto.HashPassword("a-valid-password-123")
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := &pendingAuthStore{user: &models.User{
+		ID: uuid.New(), Username: "pending-user", PasswordHash: &hash,
+		Status: models.UserStatusPending, AuthVersion: 1,
+	}}
+	service := &Service{store: store}
+
+	if _, err := service.Authenticate(context.Background(), "pending-user", "a-valid-password-123"); !errors.Is(err, ErrEmailVerificationPending) {
+		t.Fatalf("pending login error = %v", err)
+	}
+	// A wrong password must NOT reveal the pending state.
+	if _, err := service.Authenticate(context.Background(), "pending-user", "wrong-password-123"); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("wrong-password error = %v", err)
+	}
+
+	store.user.Status = models.UserStatusSuspended
+	if _, err := service.Authenticate(context.Background(), "pending-user", "a-valid-password-123"); !errors.Is(err, ErrInvalidCredentials) {
+		t.Fatalf("suspended login error = %v", err)
 	}
 }

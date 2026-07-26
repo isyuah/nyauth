@@ -4,12 +4,15 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nyasharp/nyauth/internal/account"
 	"github.com/nyasharp/nyauth/internal/audit"
+	"github.com/nyasharp/nyauth/internal/registration"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
 
@@ -31,6 +34,10 @@ const userSelectCols = `id, username, email, email_verified_at, password_hash, p
 
 type rowScanner interface {
 	Scan(dest ...any) error
+}
+
+type userExecer interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
 }
 
 func scanUser(row rowScanner) (*models.User, error) {
@@ -61,7 +68,11 @@ func (s *Store) enqueueSecurityNotification(ctx context.Context, tx pgx.Tx, user
 }
 
 func (s *Store) Create(ctx context.Context, u *models.User) error {
-	_, err := s.db.Exec(ctx, `
+	return insertUser(ctx, s.db, u)
+}
+
+func insertUser(ctx context.Context, execer userExecer, u *models.User) error {
+	_, err := execer.Exec(ctx, `
 		INSERT INTO users (
 			id, username, email, password_hash, password_changed_at, display_name, avatar_url,
 			status, role, auth_version, session_version, must_change_password, metadata
@@ -72,6 +83,82 @@ func (s *Store) Create(ctx context.Context, u *models.User) error {
 		return fmt.Errorf("inserting user: %w", err)
 	}
 	return nil
+}
+
+// CreateRegistration atomically writes the user, durable lifecycle record,
+// optional invite reservation, verification artifacts, and audit events.
+func (s *Store) CreateRegistration(ctx context.Context, u *models.User, options RegistrationCommitOptions) (*uuid.UUID, error) {
+	now := options.Now.UTC()
+	if u == nil || u.ID == uuid.Nil || now.IsZero() || !options.ExpiresAt.After(now) {
+		return nil, fmt.Errorf("invalid registration commit options")
+	}
+	if u.Status == models.UserStatusPending && options.Verification == nil {
+		return nil, fmt.Errorf("pending registration verification artifacts are required")
+	}
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("starting registration: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var inviteID *uuid.UUID
+	if options.InviteCodeHash != nil {
+		inviteID, err = registration.ReserveInviteTx(ctx, tx, *options.InviteCodeHash, now)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if err := insertUser(ctx, tx, u); err != nil {
+		return nil, err
+	}
+	registrationID := uuid.New()
+	registrationStatus := registration.StatusCompleted
+	if u.Status == models.UserStatusPending {
+		registrationStatus = registration.StatusPending
+	}
+	if err := registration.InsertTx(
+		ctx, tx, registrationID, u.ID, inviteID, registrationStatus, options.ExpiresAt, now,
+	); err != nil {
+		return nil, err
+	}
+	if options.Verification != nil {
+		if err := account.ReplaceActionAndQueueEmailTx(ctx, tx, options.Verification.Action, options.Verification.Email); err != nil {
+			return nil, fmt.Errorf("persisting registration verification: %w", err)
+		}
+	}
+
+	actorID := u.ID
+	details := map[string]any{
+		"mode":                  options.Mode,
+		"registration_id":       registrationID.String(),
+		"verification_required": u.Status == models.UserStatusPending,
+	}
+	if inviteID != nil {
+		details["invite_id"] = inviteID.String()
+	}
+	if err := audit.EnqueueTargetResultTx(
+		ctx, tx, models.AuditUserRegistered, &actorID, u.Username, "user", u.ID.String(),
+		"success", "low", options.Audit.IPAddress, options.Audit.UserAgent, details, now,
+	); err != nil {
+		return nil, fmt.Errorf("auditing user registration: %w", err)
+	}
+	if inviteID != nil {
+		event := models.AuditInviteConsumed
+		if registrationStatus == registration.StatusPending {
+			event = models.AuditInviteReserved
+		}
+		if err := audit.EnqueueTargetResultTx(
+			ctx, tx, event, &actorID, u.Username, "invite", inviteID.String(),
+			"success", "low", options.Audit.IPAddress, options.Audit.UserAgent,
+			map[string]any{"registration_id": registrationID.String(), "user_id": u.ID.String()}, now,
+		); err != nil {
+			return nil, fmt.Errorf("auditing invite reservation: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("committing registration: %w", err)
+	}
+	return inviteID, nil
 }
 
 func (s *Store) GetByID(ctx context.Context, id uuid.UUID) (*models.User, error) {
@@ -155,6 +242,18 @@ func (s *Store) UpdateAdmin(ctx context.Context, id uuid.UUID, req models.AdminU
 		}
 		if count <= 1 {
 			return nil, ErrLastActiveAdmin
+		}
+	}
+	if currentStatus == models.UserStatusPending && req.Status != nil && *req.Status == models.UserStatusActive {
+		actorID := mutation.ActorID
+		if _, err := registration.CompleteForUserTx(
+			ctx, tx, id, time.Now().UTC(), true, "admin_activation",
+			registration.AuditContext{
+				ActorID: &actorID, ActorName: mutation.ActorName,
+				IPAddress: mutation.IPAddress, UserAgent: mutation.UserAgent,
+			},
+		); err != nil {
+			return nil, err
 		}
 	}
 	var email, displayName, avatarURL any
@@ -343,6 +442,16 @@ func (s *Store) Delete(ctx context.Context, id uuid.UUID, mutation audit.Mutatio
 		if count <= 1 {
 			return ErrLastActiveAdmin
 		}
+	}
+	actorID := mutation.ActorID
+	if _, err := registration.ReleaseForUserTx(
+		ctx, tx, id, time.Now().UTC(), registration.ReleaseReasonAdminDeleted, "admin_deletion",
+		registration.AuditContext{
+			ActorID: &actorID, ActorName: mutation.ActorName,
+			IPAddress: mutation.IPAddress, UserAgent: mutation.UserAgent,
+		},
+	); err != nil {
+		return err
 	}
 	result, err := tx.Exec(ctx, `DELETE FROM users WHERE id=$1`, id)
 	if err != nil {

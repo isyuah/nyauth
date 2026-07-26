@@ -34,6 +34,7 @@ type fakeServiceStore struct {
 	consumeNewEmail      string
 	consumeNotices       []*OutboxEmail
 	consumeErr           error
+	pendingExpiresAt     time.Time
 }
 
 func (f *fakeServiceStore) GetUserByID(context.Context, uuid.UUID) (*models.User, error) {
@@ -50,11 +51,24 @@ func (f *fakeServiceStore) GetUserByEmail(context.Context, string) (*models.User
 	return f.user, nil
 }
 
+func (f *fakeServiceStore) GetPendingRegistrationByEmail(context.Context, string, time.Time) (*models.User, time.Time, error) {
+	if f.lookupErr != nil {
+		return nil, time.Time{}, f.lookupErr
+	}
+	return f.user, f.pendingExpiresAt, nil
+}
+
 func (f *fakeServiceStore) EmailInUse(context.Context, string, uuid.UUID) (bool, error) {
 	return f.emailInUse, nil
 }
 
 func (f *fakeServiceStore) ReplaceActionAndQueueEmail(_ context.Context, action *ActionToken, email *OutboxEmail) error {
+	f.action = action
+	f.queuedEmail = email
+	return nil
+}
+
+func (f *fakeServiceStore) ReplacePendingVerificationAndQueueEmail(_ context.Context, _ string, action *ActionToken, email *OutboxEmail, _ time.Time) error {
 	f.action = action
 	f.queuedEmail = email
 	return nil

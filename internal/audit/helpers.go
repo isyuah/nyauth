@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
 
@@ -40,6 +41,33 @@ func EnqueueLog(ctx context.Context, store *Store, entry *models.AuditLog) error
 		return err
 	}
 	return store.Enqueue(ctx, event)
+}
+
+// EnqueueTargetResultTx queues a targeted audit event in the caller's
+// transaction. It is used by public and background lifecycle operations that
+// do not have a management MutationAudit actor.
+func EnqueueTargetResultTx(
+	ctx context.Context,
+	tx pgx.Tx,
+	event string,
+	actorID *uuid.UUID,
+	actorName, targetType, targetID, result, riskLevel, ip, userAgent string,
+	details map[string]any,
+	createdAt time.Time,
+) error {
+	entry := newAuditEntry(event, actorID, actorName, result, riskLevel, ip, userAgent, details)
+	entry.CreatedAt = createdAt.UTC()
+	if value := strings.TrimSpace(targetType); value != "" {
+		entry.TargetType = &value
+	}
+	if value := strings.TrimSpace(targetID); value != "" {
+		entry.TargetID = &value
+	}
+	outboxEvent, err := outboxEventFromAuditLog(entry)
+	if err != nil {
+		return err
+	}
+	return EnqueueTx(ctx, tx, outboxEvent)
 }
 
 func newAuditEntry(event string, actorID *uuid.UUID, actorName, result, riskLevel, ip, userAgent string, details map[string]any) *models.AuditLog {

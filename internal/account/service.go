@@ -29,8 +29,10 @@ const (
 type serviceStore interface {
 	GetUserByID(ctx context.Context, id uuid.UUID) (*models.User, error)
 	GetUserByEmail(ctx context.Context, normalizedEmail string) (*models.User, error)
+	GetPendingRegistrationByEmail(ctx context.Context, normalizedEmail string, now time.Time) (*models.User, time.Time, error)
 	EmailInUse(ctx context.Context, normalizedEmail string, exceptUserID uuid.UUID) (bool, error)
 	ReplaceActionAndQueueEmail(ctx context.Context, action *ActionToken, email *OutboxEmail) error
+	ReplacePendingVerificationAndQueueEmail(ctx context.Context, expectedEmail string, action *ActionToken, email *OutboxEmail, now time.Time) error
 	GetUsableAction(ctx context.Context, tokenHash []byte, action Action, now time.Time) (*ActionToken, error)
 	ConsumePasswordReset(ctx context.Context, token *ActionToken, expectedEmail, passwordHash string, notices []*OutboxEmail, now time.Time) (*models.User, error)
 	ConsumeEmailVerification(ctx context.Context, token *ActionToken, expectedEmail string, now time.Time) (*models.User, error)
@@ -135,7 +137,7 @@ func (s *Service) RequestPasswordReset(ctx context.Context, email string, metada
 	if accountUser.Status != models.UserStatusActive || accountUser.Email == nil || accountUser.EmailVerifiedAt == nil {
 		return nil
 	}
-	return s.createActionEmail(ctx, accountUser, ActionPasswordReset, actionClaims{Email: normalized}, metadata, s.passwordResetTTL)
+	return s.createActionEmail(ctx, accountUser, ActionPasswordReset, actionClaims{Email: normalized}, metadata, s.clock().UTC().Add(s.passwordResetTTL))
 }
 
 func (s *Service) ConfirmPasswordReset(ctx context.Context, rawToken, newPassword string) (*models.User, error) {
@@ -171,7 +173,8 @@ func (s *Service) RequestEmailVerification(ctx context.Context, userID uuid.UUID
 	if err != nil {
 		return fmt.Errorf("loading account for email verification: %w", err)
 	}
-	if accountUser.Status != models.UserStatusActive || accountUser.Email == nil {
+	// Pending accounts are self-registrations waiting on exactly this email.
+	if (accountUser.Status != models.UserStatusActive && accountUser.Status != models.UserStatusPending) || accountUser.Email == nil {
 		return ErrAccountUnavailable
 	}
 	if accountUser.EmailVerifiedAt != nil {
@@ -181,7 +184,62 @@ func (s *Service) RequestEmailVerification(ctx context.Context, userID uuid.UUID
 	if err != nil {
 		return fmt.Errorf("%w: account email is invalid", ErrInvalidInput)
 	}
-	return s.createActionEmail(ctx, accountUser, ActionEmailVerification, actionClaims{Email: normalized}, metadata, s.emailActionTTL)
+	return s.createActionEmail(ctx, accountUser, ActionEmailVerification, actionClaims{Email: normalized}, metadata, s.clock().UTC().Add(s.emailActionTTL))
+}
+
+// PrepareEmailVerification completes token generation, envelope encryption,
+// and email rendering without writing to the database. Public registration
+// uses it before opening the transaction that creates the account.
+func (s *Service) PrepareEmailVerification(accountUser *models.User, metadata RequestMetadata, expiresAt time.Time) (*PreparedActionEmail, error) {
+	if accountUser == nil || accountUser.Email == nil || accountUser.Status != models.UserStatusPending {
+		return nil, ErrAccountUnavailable
+	}
+	normalized, err := normalizeEmail(*accountUser.Email)
+	if err != nil {
+		return nil, fmt.Errorf("%w: account email is invalid", ErrInvalidInput)
+	}
+	return s.prepareActionEmail(
+		accountUser,
+		ActionEmailVerification,
+		actionClaims{Email: normalized},
+		metadata,
+		expiresAt.UTC(),
+	)
+}
+
+// RequestPendingEmailVerification is intentionally enumeration-safe. Unknown,
+// active, and expired accounts all complete without a write or a distinct
+// error. A matching pending registration receives a replacement token whose
+// deadline remains the registration's persisted deadline.
+func (s *Service) RequestPendingEmailVerification(ctx context.Context, email string, metadata RequestMetadata) error {
+	normalized, err := normalizeEmail(email)
+	if err != nil {
+		return nil
+	}
+	now := s.clock().UTC()
+	accountUser, expiresAt, err := s.store.GetPendingRegistrationByEmail(ctx, normalized, now)
+	if err != nil {
+		if IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("looking up pending email verification: %w", err)
+	}
+	prepared, err := s.prepareActionEmail(
+		accountUser,
+		ActionEmailVerification,
+		actionClaims{Email: normalized},
+		metadata,
+		expiresAt,
+	)
+	if err != nil {
+		return err
+	}
+	if err := s.store.ReplacePendingVerificationAndQueueEmail(
+		ctx, normalized, prepared.Action, prepared.Email, now,
+	); err != nil {
+		return fmt.Errorf("persisting pending email verification: %w", err)
+	}
+	return nil
 }
 
 func (s *Service) ConfirmEmailVerification(ctx context.Context, rawToken string) (*models.User, error) {
@@ -230,7 +288,7 @@ func (s *Service) RequestEmailChange(ctx context.Context, userID uuid.UUID, newE
 	if inUse {
 		return ErrEmailInUse
 	}
-	return s.createActionEmail(ctx, accountUser, ActionEmailChange, actionClaims{Email: normalized, PreviousEmail: previousEmail}, metadata, s.emailActionTTL)
+	return s.createActionEmail(ctx, accountUser, ActionEmailChange, actionClaims{Email: normalized, PreviousEmail: previousEmail}, metadata, s.clock().UTC().Add(s.emailActionTTL))
 }
 
 func (s *Service) ConfirmEmailChange(ctx context.Context, rawToken string) (*models.User, error) {
@@ -351,42 +409,58 @@ func validSecurityNoticeProvider(value string) bool {
 	return true
 }
 
-func (s *Service) createActionEmail(ctx context.Context, accountUser *models.User, action Action, claims actionClaims, metadata RequestMetadata, ttl time.Duration) error {
+func (s *Service) createActionEmail(ctx context.Context, accountUser *models.User, action Action, claims actionClaims, metadata RequestMetadata, expiresAt time.Time) error {
+	prepared, err := s.prepareActionEmail(accountUser, action, claims, metadata, expiresAt)
+	if err != nil {
+		return err
+	}
+	if err := s.store.ReplaceActionAndQueueEmail(ctx, prepared.Action, prepared.Email); err != nil {
+		return fmt.Errorf("persisting account action: %w", err)
+	}
+	return nil
+}
+
+func (s *Service) prepareActionEmail(accountUser *models.User, action Action, claims actionClaims, metadata RequestMetadata, expiresAt time.Time) (*PreparedActionEmail, error) {
 	rawToken, err := s.generateToken()
 	if err != nil {
-		return fmt.Errorf("generating account action token: %w", err)
+		return nil, fmt.Errorf("generating account action token: %w", err)
 	}
 	if len(rawToken) < 32 {
-		return fmt.Errorf("generated account action token is too short")
+		return nil, fmt.Errorf("generated account action token is too short")
 	}
 	now := s.clock().UTC()
+	expiresAt = expiresAt.UTC()
+	if !expiresAt.After(now) {
+		return nil, fmt.Errorf("account action expiry must be in the future")
+	}
+	ttl := expiresAt.Sub(now)
 	requestIP, userAgent := sanitizeMetadata(metadata)
 	token := &ActionToken{
 		ID: uuid.New(), UserID: accountUser.ID, Action: action, TokenHash: HashActionToken(rawToken),
-		RequestedIP: requestIP, UserAgent: userAgent, ExpiresAt: now.Add(ttl), CreatedAt: now,
+		RequestedIP: requestIP, UserAgent: userAgent, ExpiresAt: expiresAt, CreatedAt: now,
 	}
 	encodedClaims, err := json.Marshal(claims)
 	if err != nil {
-		return fmt.Errorf("encoding account action claims: %w", err)
+		return nil, fmt.Errorf("encoding account action claims: %w", err)
 	}
 	token.PayloadCiphertext, err = crypto.EncryptEnvelope(
 		s.masterKeys[s.activeKeyID], s.activeKeyID, actionEnvelopePurpose, encodedClaims, actionAAD(token),
 	)
 	if err != nil {
-		return fmt.Errorf("encrypting account action claims: %w", err)
+		return nil, fmt.Errorf("encrypting account action claims: %w", err)
 	}
 	message, err := s.actionMessage(action, claims.Email, rawToken, ttl)
 	if err != nil {
-		return err
+		return nil, err
 	}
 	outbox, err := s.newOutboxEmail(accountUser.ID, messageTypeForAction(action), message, now)
 	if err != nil {
-		return err
+		return nil, err
 	}
-	if err := s.store.ReplaceActionAndQueueEmail(ctx, token, outbox); err != nil {
-		return fmt.Errorf("persisting account action: %w", err)
+	if outbox.ExpiresAt.After(expiresAt) {
+		outbox.ExpiresAt = expiresAt
 	}
-	return nil
+	return &PreparedActionEmail{Action: token, Email: outbox}, nil
 }
 
 func (s *Service) loadAction(ctx context.Context, rawToken string, action Action, now time.Time) (*ActionToken, actionClaims, error) {

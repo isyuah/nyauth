@@ -126,3 +126,37 @@ func TestDescribeAuthorizationRevocation(t *testing.T) {
 		t.Fatalf("unexpected descriptor: %#v", descriptor)
 	}
 }
+
+func TestDescribeRegistrationAdministrationMutations(t *testing.T) {
+	actor := &models.User{ID: uuid.New(), Username: "admin"}
+	for _, test := range []struct {
+		method, path, route, id string
+		event, targetType       string
+		riskLevel               string
+		successAlreadyAudited   bool
+	}{
+		{http.MethodPut, "/api/admin/settings/registration", "/api/admin/settings/registration", "", models.AuditSettingsUpdated, "settings", "high", false},
+		{http.MethodPost, "/api/admin/invites", "/api/admin/invites", "", models.AuditInviteCreated, "invite", "medium", true},
+		{http.MethodDelete, "/api/admin/invites/invite-1", "/api/admin/invites/{id}", "invite-1", models.AuditInviteRevoked, "invite", "medium", true},
+	} {
+		t.Run(test.method+" "+test.path, func(t *testing.T) {
+			routeContext := chi.NewRouteContext()
+			routeContext.RoutePatterns = append(routeContext.RoutePatterns, test.route)
+			if test.id != "" {
+				routeContext.URLParams.Add("id", test.id)
+			}
+			request := httptest.NewRequest(test.method, test.path, nil)
+			request = request.WithContext(context.WithValue(request.Context(), chi.RouteCtxKey, routeContext))
+			descriptor, ok := describeMutation(request, actor)
+			if !ok {
+				t.Fatal("registration administration mutation was not described")
+			}
+			if descriptor.event != test.event || descriptor.targetType != test.targetType || descriptor.riskLevel != test.riskLevel || descriptor.successAlreadyAudited != test.successAlreadyAudited {
+				t.Fatalf("unexpected descriptor: %#v", descriptor)
+			}
+			if test.id != "" && descriptor.targetID != test.id {
+				t.Fatalf("target ID = %q, want %q", descriptor.targetID, test.id)
+			}
+		})
+	}
+}

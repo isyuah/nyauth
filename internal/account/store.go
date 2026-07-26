@@ -10,10 +10,12 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/nyasharp/nyauth/internal/registration"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
 
 const accountUserSelectCols = `id, username, email, email_verified_at, password_hash, password_changed_at, display_name, avatar_url, status, role, auth_version, session_version, must_change_password, last_authenticated_at, last_login_at, last_login_ip, metadata, created_at, updated_at`
+const qualifiedAccountUserSelectCols = `users.id, users.username, users.email, users.email_verified_at, users.password_hash, users.password_changed_at, users.display_name, users.avatar_url, users.status, users.role, users.auth_version, users.session_version, users.must_change_password, users.last_authenticated_at, users.last_login_at, users.last_login_ip, users.metadata, users.created_at, users.updated_at`
 
 type Store struct {
 	db *pgxpool.Pool
@@ -27,15 +29,17 @@ type rowScanner interface {
 	Scan(dest ...any) error
 }
 
-func scanAccountUser(row rowScanner) (*models.User, error) {
+func scanAccountUser(row rowScanner, extra ...any) (*models.User, error) {
 	accountUser := &models.User{}
-	if err := row.Scan(
+	destinations := []any{
 		&accountUser.ID, &accountUser.Username, &accountUser.Email, &accountUser.EmailVerifiedAt,
 		&accountUser.PasswordHash, &accountUser.PasswordChangedAt, &accountUser.DisplayName,
 		&accountUser.AvatarURL, &accountUser.Status, &accountUser.Role, &accountUser.AuthVersion, &accountUser.SessionVersion,
 		&accountUser.MustChangePassword, &accountUser.LastAuthenticatedAt, &accountUser.LastLoginAt,
 		&accountUser.LastLoginIP, &accountUser.Metadata, &accountUser.CreatedAt, &accountUser.UpdatedAt,
-	); err != nil {
+	}
+	destinations = append(destinations, extra...)
+	if err := row.Scan(destinations...); err != nil {
 		return nil, err
 	}
 	return accountUser, nil
@@ -59,6 +63,22 @@ func (s *Store) GetUserByEmail(ctx context.Context, normalizedEmail string) (*mo
 	return accountUser, nil
 }
 
+func (s *Store) GetPendingRegistrationByEmail(ctx context.Context, normalizedEmail string, now time.Time) (*models.User, time.Time, error) {
+	var expiresAt time.Time
+	accountUser, err := scanAccountUser(s.db.QueryRow(ctx, `
+		SELECT `+qualifiedAccountUserSelectCols+`,registration.expires_at
+		FROM users
+		JOIN self_registrations AS registration ON registration.user_id=users.id
+		WHERE LOWER(BTRIM(users.email))=$1
+		  AND users.status='pending' AND users.email_verified_at IS NULL
+		  AND registration.status='pending' AND registration.expires_at>$2
+	`, normalizedEmail, now.UTC()), &expiresAt)
+	if err != nil {
+		return nil, time.Time{}, fmt.Errorf("getting pending registration by email: %w", err)
+	}
+	return accountUser, expiresAt, nil
+}
+
 func (s *Store) EmailInUse(ctx context.Context, normalizedEmail string, exceptUserID uuid.UUID) (bool, error) {
 	var inUse bool
 	err := s.db.QueryRow(ctx, `
@@ -76,6 +96,21 @@ func (s *Store) ReplaceActionAndQueueEmail(ctx context.Context, action *ActionTo
 		return err
 	}
 	defer tx.Rollback(ctx)
+	if err := ReplaceActionAndQueueEmailTx(ctx, tx, action, email); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// ReplaceActionAndQueueEmailTx persists a prepared action, its encrypted email,
+// and the action-requested audit event in the caller's transaction.
+func ReplaceActionAndQueueEmailTx(ctx context.Context, tx pgx.Tx, action *ActionToken, email *OutboxEmail) error {
+	if tx == nil || action == nil || email == nil {
+		return fmt.Errorf("prepared account action and transaction are required")
+	}
+	if action.UserID == uuid.Nil || email.UserID == nil || *email.UserID != action.UserID {
+		return fmt.Errorf("prepared account action user does not match email user")
+	}
 	if _, err := tx.Exec(ctx, `
 		UPDATE account_action_tokens
 		SET revoked_at=$3, revoked_reason='superseded', payload_ciphertext=''
@@ -101,7 +136,38 @@ func (s *Store) ReplaceActionAndQueueEmail(ctx context.Context, action *ActionTo
 	}); err != nil {
 		return err
 	}
-	return tx.Commit(ctx)
+	return nil
+}
+
+func (s *Store) ReplacePendingVerificationAndQueueEmail(ctx context.Context, expectedEmail string, action *ActionToken, email *OutboxEmail, now time.Time) error {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("starting pending verification replacement: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	var lockedID uuid.UUID
+	err = tx.QueryRow(ctx, `
+		SELECT registration.id
+		FROM self_registrations AS registration
+		JOIN users ON users.id=registration.user_id
+		WHERE registration.user_id=$1 AND registration.status='pending' AND registration.expires_at>$2
+		  AND users.status='pending' AND users.email_verified_at IS NULL
+		  AND LOWER(BTRIM(users.email))=$3
+		FOR UPDATE OF registration,users
+	`, action.UserID, now.UTC(), expectedEmail).Scan(&lockedID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("locking pending registration: %w", err)
+	}
+	if err := ReplaceActionAndQueueEmailTx(ctx, tx, action, email); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("committing pending verification replacement: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) GetUsableAction(ctx context.Context, tokenHash []byte, action Action, now time.Time) (*ActionToken, error) {
@@ -157,9 +223,35 @@ func (s *Store) ConsumePasswordReset(ctx context.Context, token *ActionToken, ex
 
 func (s *Store) ConsumeEmailVerification(ctx context.Context, token *ActionToken, expectedEmail string, now time.Time) (*models.User, error) {
 	return s.consumeAction(ctx, token, now, nil, func(tx pgx.Tx) (*models.User, error) {
+		var currentStatus models.UserStatus
+		var username string
+		if err := tx.QueryRow(ctx, `
+			SELECT status,username FROM users
+			WHERE id=$1 AND status IN ('active','pending') AND LOWER(BTRIM(email))=$2
+			FOR UPDATE
+		`, token.UserID, expectedEmail).Scan(&currentStatus, &username); err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return nil, ErrInvalidActionToken
+			}
+			return nil, fmt.Errorf("locking account for email verification: %w", err)
+		}
+		if currentStatus == models.UserStatusPending {
+			actorID := token.UserID
+			transition, err := registration.CompleteForUserTx(
+				ctx, tx, token.UserID, now, false, "email_verification",
+				registration.AuditContext{ActorID: &actorID, ActorName: username},
+			)
+			if err != nil {
+				return nil, err
+			}
+			if !transition.Changed {
+				return nil, ErrInvalidActionToken
+			}
+		}
 		accountUser, err := scanAccountUser(tx.QueryRow(ctx, `
-			UPDATE users SET email_verified_at=$3,updated_at=$3
-			WHERE id=$1 AND status='active' AND LOWER(BTRIM(email))=$2
+			UPDATE users SET email_verified_at=$3,updated_at=$3,
+				status = CASE WHEN status='pending' THEN 'active' ELSE status END
+			WHERE id=$1 AND status IN ('active','pending') AND LOWER(BTRIM(email))=$2
 			RETURNING `+accountUserSelectCols,
 			token.UserID, expectedEmail, now,
 		))

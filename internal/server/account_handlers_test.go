@@ -21,6 +21,8 @@ import (
 
 type fakeAccountActionService struct {
 	requestPasswordResetErr error
+	requestPendingVerifyErr error
+	pendingVerifyEmails     []string
 	confirmPasswordResetErr error
 	confirmPasswordUser     *models.User
 }
@@ -35,6 +37,15 @@ func (f *fakeAccountActionService) ConfirmPasswordReset(context.Context, string,
 
 func (f *fakeAccountActionService) RequestEmailVerification(context.Context, uuid.UUID, account.RequestMetadata) error {
 	return nil
+}
+
+func (f *fakeAccountActionService) RequestPendingEmailVerification(_ context.Context, email string, _ account.RequestMetadata) error {
+	f.pendingVerifyEmails = append(f.pendingVerifyEmails, email)
+	return f.requestPendingVerifyErr
+}
+
+func (f *fakeAccountActionService) PrepareEmailVerification(*models.User, account.RequestMetadata, time.Time) (*account.PreparedActionEmail, error) {
+	return &account.PreparedActionEmail{}, nil
 }
 
 func (f *fakeAccountActionService) ConfirmEmailVerification(context.Context, string) (*models.User, error) {
@@ -132,5 +143,81 @@ func TestAccountActionLimiterUsesHashedKeysAndEnforcesSubjectLimit(t *testing.T)
 		if strings.Contains(key, "private@example.test") || strings.Contains(key, "192.0.2.20") {
 			t.Fatalf("rate-limit key exposes private input: %q", key)
 		}
+	}
+}
+
+func TestPendingVerificationResendIsSameOriginAndEnumerationSafe(t *testing.T) {
+	t.Parallel()
+	service := &fakeAccountActionService{requestPendingVerifyErr: errors.New("database unavailable")}
+	server, _ := newAccountHandlerTestServer(t, service)
+
+	crossOrigin := httptest.NewRequest(http.MethodPost, "/api/email/verification/resend", bytes.NewBufferString(`{"email":"pending@example.test"}`))
+	crossOrigin.Header.Set("Origin", "https://evil.example.test")
+	crossOrigin.RemoteAddr = "192.0.2.30:12345"
+	crossOriginRecorder := httptest.NewRecorder()
+	server.handleResendPendingEmailVerification(crossOriginRecorder, crossOrigin)
+	if crossOriginRecorder.Code != http.StatusForbidden {
+		t.Fatalf("cross-origin status = %d, body=%s", crossOriginRecorder.Code, crossOriginRecorder.Body.String())
+	}
+	if len(service.pendingVerifyEmails) != 0 {
+		t.Fatalf("cross-origin request reached account service: %#v", service.pendingVerifyEmails)
+	}
+
+	request := httptest.NewRequest(http.MethodPost, "/api/email/verification/resend", bytes.NewBufferString(`{"email":" Pending@Example.Test "}`))
+	request.Header.Set("Origin", "https://auth.example.test")
+	request.RemoteAddr = "192.0.2.30:12345"
+	recorder := httptest.NewRecorder()
+	server.handleResendPendingEmailVerification(recorder, request)
+	if recorder.Code != http.StatusAccepted || strings.TrimSpace(recorder.Body.String()) != `{"status":"accepted"}` {
+		t.Fatalf("enumeration-safe resend: status=%d body=%s", recorder.Code, recorder.Body.String())
+	}
+	if len(service.pendingVerifyEmails) != 1 || service.pendingVerifyEmails[0] != " Pending@Example.Test " {
+		t.Fatalf("pending verification calls = %#v", service.pendingVerifyEmails)
+	}
+}
+
+func TestPendingVerificationResendRejectsInvalidJSONAndRateLimits(t *testing.T) {
+	t.Parallel()
+	service := &fakeAccountActionService{}
+	server, _ := newAccountHandlerTestServer(t, service)
+
+	invalid := httptest.NewRequest(http.MethodPost, "/api/email/verification/resend", bytes.NewBufferString(`{"email":`))
+	invalid.Header.Set("Origin", "https://auth.example.test")
+	invalid.RemoteAddr = "192.0.2.31:12345"
+	invalidRecorder := httptest.NewRecorder()
+	server.handleResendPendingEmailVerification(invalidRecorder, invalid)
+	if invalidRecorder.Code != http.StatusBadRequest {
+		t.Fatalf("invalid JSON status = %d, body=%s", invalidRecorder.Code, invalidRecorder.Body.String())
+	}
+
+	for attempt := 1; attempt <= 6; attempt++ {
+		request := httptest.NewRequest(http.MethodPost, "/api/email/verification/resend", bytes.NewBufferString(`{"email":"pending@example.test"}`))
+		request.Header.Set("Origin", "https://auth.example.test")
+		request.RemoteAddr = "192.0.2.32:12345"
+		recorder := httptest.NewRecorder()
+		server.handleResendPendingEmailVerification(recorder, request)
+		if attempt <= 5 && recorder.Code != http.StatusAccepted {
+			t.Fatalf("attempt %d status = %d, body=%s", attempt, recorder.Code, recorder.Body.String())
+		}
+		if attempt == 6 {
+			if recorder.Code != http.StatusTooManyRequests || recorder.Header().Get("Retry-After") == "" {
+				t.Fatalf("limited resend: status=%d retry=%q body=%s", recorder.Code, recorder.Header().Get("Retry-After"), recorder.Body.String())
+			}
+		}
+	}
+}
+
+func TestPendingVerificationResendReturnsUnavailableWhenRedisFails(t *testing.T) {
+	t.Parallel()
+	server, mini := newAccountHandlerTestServer(t, &fakeAccountActionService{})
+	mini.Close()
+
+	request := httptest.NewRequest(http.MethodPost, "/api/email/verification/resend", bytes.NewBufferString(`{"email":"pending@example.test"}`))
+	request.Header.Set("Origin", "https://auth.example.test")
+	request.RemoteAddr = "192.0.2.33:12345"
+	recorder := httptest.NewRecorder()
+	server.handleResendPendingEmailVerification(recorder, request)
+	if recorder.Code != http.StatusServiceUnavailable {
+		t.Fatalf("Redis failure status = %d, body=%s", recorder.Code, recorder.Body.String())
 	}
 }

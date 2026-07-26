@@ -96,6 +96,14 @@ type OutboxEmail struct {
 	CreatedAt        time.Time
 }
 
+// PreparedActionEmail contains encrypted account-action artifacts that have
+// completed all CPU-only preparation and can be committed by a caller's
+// database transaction.
+type PreparedActionEmail struct {
+	Action *ActionToken
+	Email  *OutboxEmail
+}
+
 type actionClaims struct {
 	Email         string `json:"email"`
 	PreviousEmail string `json:"previous_email,omitempty"`

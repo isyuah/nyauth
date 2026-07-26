@@ -26,6 +26,7 @@
 - 外部身份：GitHub、Google、通用 HTTPS OIDC Provider；不按邮箱自动合并账户
 - 管理后台：用户、客户端、Provider、审计与统计
 - 账户安全中心：设备会话、OAuth 授权、近期重新认证、邮箱验证与密码恢复
+- 自助注册：关闭 / 邀请制 / 开放三种模式，域名白名单与邀请码均为运行时设置
 - 运维：严格 readiness、JSON 日志、内部 Prometheus、可选 OTLP 与审计 outbox
 - 集成方式：标准 OAuth/OIDC Discovery、成熟语言库与 BFF 会话模式
 
@@ -51,7 +52,7 @@ go run ./cmd/nyauth serve -config config.yaml
 go run ./cmd/nyauth maintenance -config config.yaml
 ```
 
-迁移命令使用数据库锁；多个实例同时执行时只有一个实例应用迁移。`migrate` 和 `maintenance` 使用迁移账号预创建审计月分区、应用 `audit.retention` 并清理已投递的旧 outbox；`serve` 不执行 DDL，不会修改 schema，数据库未迁移或版本不匹配时会拒绝启动。
+迁移命令使用数据库锁；多个实例同时执行时只有一个实例应用迁移。`migrate` 和 `maintenance` 使用迁移账号预创建审计月分区、应用 `audit.retention`、清理已投递的旧 outbox，并复用注册过期清理逻辑作为运维兜底。常驻 `serve` 实例会在启动后立即、此后每小时尝试清理超过各自持久化截止时间的待验证注册；PostgreSQL advisory lock 保证多实例每轮只有一个执行者。`serve` 不执行 DDL，数据库未迁移或版本不匹配时会拒绝启动。
 
 配置文件采用严格解码，未知字段（包括已删除的旧 `providers` 配置）会直接导致启动失败。环境变量统一使用 `NYAUTH_` 前缀和下划线层级，例如 `server.trusted_proxy_cidrs` 对应 `NYAUTH_SERVER_TRUSTED_PROXY_CIDRS`。数据库 DSN、Redis 密码、master key、bootstrap 管理员密码、SMTP 密码和 OTLP Authorization 均支持 `*_FILE`；同一项不能同时设置直接值与文件值。
 
@@ -106,7 +107,7 @@ docker compose up --build
 
 Prometheus 指标默认由仅限内部网络访问的 `/metrics` 提供。可选 OTLP HTTP 导出使用 `NYAUTH_TELEMETRY_OTLP_ENABLED`、`NYAUTH_TELEMETRY_OTLP_ENDPOINT`、`NYAUTH_TELEMETRY_OTLP_EXPORT_INTERVAL` 和 `NYAUTH_TELEMETRY_OTLP_TIMEOUT`；collector Authorization 建议通过 `NYAUTH_TELEMETRY_OTLP_AUTHORIZATION_FILE` 注入，生产 endpoint 必须使用 HTTPS。
 
-SMTP 使用 `NYAUTH_MAIL_*` 环境变量配置，密码优先通过 `NYAUTH_MAIL_SMTP_PASSWORD_FILE` 注入。常用变量包括 `NYAUTH_MAIL_ENABLED`、`NYAUTH_MAIL_FROM_ADDRESS`、`NYAUTH_MAIL_PUBLIC_BASE_URL`、`NYAUTH_MAIL_SMTP_HOST`、`NYAUTH_MAIL_SMTP_PORT`、`NYAUTH_MAIL_SMTP_USERNAME` 和 `NYAUTH_MAIL_SMTP_TLS_MODE`；生产环境禁止明文 SMTP，并要求公开邮件链接使用 HTTPS。
+Nyauth 只发送邮件，不读取邮箱，因此不使用 IMAP。SMTP 使用启动期 `NYAUTH_MAIL_*` 环境变量配置，修改后需要重启对应 `serve` 实例；密码优先通过 `NYAUTH_MAIL_SMTP_PASSWORD_FILE` 注入。常用变量包括 `NYAUTH_MAIL_ENABLED`、`NYAUTH_MAIL_FROM_ADDRESS`、`NYAUTH_MAIL_PUBLIC_BASE_URL`、`NYAUTH_MAIL_SMTP_HOST`、`NYAUTH_MAIL_SMTP_PORT`、`NYAUTH_MAIL_SMTP_USERNAME` 和 `NYAUTH_MAIL_SMTP_TLS_MODE`；生产环境禁止明文 SMTP，并要求公开邮件链接使用 HTTPS。
 
 ## 第一方会话 API
 
@@ -180,7 +181,14 @@ OAuth 客户端支持 `post_logout_redirect_uris`。`/end_session` 仅允许跳�
 | POST | `/api/password/forgot` | 请求密码重置邮件 |
 | POST | `/api/password/reset` | 原子消费 Token 并重置密码 |
 | POST | `/api/email/verify` | 原子确认邮箱验证 |
+| POST | `/api/email/verification/resend` | 不可枚举地重发仍有效的待验证注册邮件，不延长截止时间 |
 | POST | `/api/email/change/confirm` | 原子确认邮箱变更 |
+| GET | `/api/registration` | 公开注册配置（模式、是否需验证、域名限制） |
+| POST | `/api/register` | 自助注册（closed/invite_only/open 由运行时设置控制） |
+
+自助注册默认关闭。开启需先启用邮件子系统；邀请制模式下用户、注册生命周期、邀请码预占、验证 Token、邮件 outbox 和审计事件在同一事务内提交，失败会整体回滚。邀请码在邮箱验证后才计为已使用；删除或清理待验证用户会释放预占，删除已完成用户不会返还次数。
+
+`pending_registration_ttl` 是可热更新的注册设置，默认 `72h`、允许 `1h` 至 `720h`。创建注册时会保存绝对截止时间，后续修改设置或重发验证邮件都不会改变既有截止时间。注册、邮箱验证、邀请码预占/消耗/释放及注册过期均写入审计 outbox。
 
 ## 运行状态端点
 
@@ -213,6 +221,8 @@ Provider 不再从 YAML 或环境变量静态加载，只能由管理员写入�
 - `GET /api/admin/audit-logs/export`：按最多 31 天、50,000 条流式导出 NDJSON 或 CEF；CEF 可导入常见 SIEM。
 - `POST /api/admin/clients/{id}/rotate-secret`：立即轮换客户端 Secret，新值仅展示一次。
 - `GET /api/admin/users/{id}/sessions`、`DELETE /api/admin/users/{id}/sessions`：查看或撤销用户会话。
+- `GET/PUT /api/admin/settings/registration`：注册模式、邮箱验证要求、域名白名单、待验证期限与邀请默认值（运行时设置，免重启生效；修改要求近期重新认证）。
+- `GET/POST /api/admin/invites`、`DELETE /api/admin/invites/{id}`：邀请码管理；明文 code 仅创建响应返回一次，库中只存哈希；列表分别返回已使用与待验证预占数。创建要求近期重新认证，紧急吊销不要求。
 
 未来只有版本化 `/api/v1` 会作为自动化管理契约；在 Service Account、细粒度 scope、audience、幂等键和 OpenAPI 稳定前不发布专有 Management SDK。
 

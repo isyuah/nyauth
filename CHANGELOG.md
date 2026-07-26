@@ -17,6 +17,7 @@
 - 品牌：接入 nyauth 猫猫 logo（favicon 与 Web UI 品牌区）
 - 运行时设置：`runtime_settings` 表与跨实例同步（LISTEN/NOTIFY + 定时对账）；首个消费者为品牌设置（站点名称 / Logo URL），管理后台"系统状态"页可编辑，免重启即时生效
 - 每客户端访问策略：`open`（默认）/ `admins_only` / `allowlist`（用户白名单）；授权端点拒绝名单外用户（`access_denied` + 审计），refresh 与 access token 校验时复查策略——被移出名单的用户令牌在下次使用时即失效；机器流程（client_credentials）不受限；管理后台可编辑策略与访问名单
+- 自助注册与邀请制：注册模式（`closed` 默认 / `invite_only` / `open`）、邮箱验证要求、域名白名单、`pending_registration_ttl` 与邀请默认值均为跨实例运行时设置；用户、注册记录、邀请码预占、验证 Token、邮件 outbox 和审计事件同事务提交；邀请码在验证后消耗，删除或自动清理 pending 用户会释放预占；公开重发接口不可枚举且不延长截止时间；服务启动后及每小时执行 HA 安全的有界清理，`maintenance` 复用同一逻辑兜底；创建邀请和修改注册策略要求近期重新认证，吊销不要求；新增 `invite.reserved`、`invite.consumed`、`invite.reservation_released` 与 `registration.expired` 审计事件
 - 高可用与备份恢复文档、OAuth/OIDC 集成指南（`docs/`）
 
 ### 变更（破坏性）

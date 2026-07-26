@@ -18,6 +18,8 @@ type accountActionService interface {
 	RequestPasswordReset(context.Context, string, account.RequestMetadata) error
 	ConfirmPasswordReset(context.Context, string, string) (*models.User, error)
 	RequestEmailVerification(context.Context, uuid.UUID, account.RequestMetadata) error
+	RequestPendingEmailVerification(context.Context, string, account.RequestMetadata) error
+	PrepareEmailVerification(*models.User, account.RequestMetadata, time.Time) (*account.PreparedActionEmail, error)
 	ConfirmEmailVerification(context.Context, string) (*models.User, error)
 	RequestEmailChange(context.Context, uuid.UUID, string, time.Time, account.RequestMetadata) error
 	ConfirmEmailChange(context.Context, string) (*models.User, error)
@@ -37,6 +39,10 @@ type accountTokenConfirmation struct {
 }
 
 type emailChangeRequest struct {
+	Email string `json:"email"`
+}
+
+type emailVerificationResendRequest struct {
 	Email string `json:"email"`
 }
 
@@ -130,6 +136,48 @@ func (s *Server) handleRequestEmailVerification(w http.ResponseWriter, r *http.R
 	if err := s.accountService.RequestEmailVerification(r.Context(), current.ID, accountRequestMetadata(r)); err != nil {
 		s.writeAccountActionError(w, r, "email_verification_request", err)
 		return
+	}
+	writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
+}
+
+func (s *Server) handleResendPendingEmailVerification(w http.ResponseWriter, r *http.Request) {
+	setSessionNoStoreHeaders(w)
+	if !s.validSameOriginRequest(r) {
+		writeAPIError(w, http.StatusForbidden, "invalid request origin")
+		return
+	}
+	if s.accountService == nil || s.accountLimiter == nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "email verification is unavailable")
+		return
+	}
+	var request emailVerificationResendRequest
+	if err := decodeJSON(w, r, &request); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	subject := strings.ToLower(strings.TrimSpace(request.Email))
+	allowed, retry, err := s.accountLimiter.Reserve(
+		r.Context(), "pending-email-verification", requestIP(r), subject,
+	)
+	if err != nil {
+		s.telemetry.RecordRateLimit(r.Context(), "account_action", "pending_email_verification", "error")
+		writeAPIError(w, http.StatusServiceUnavailable, "email verification is temporarily unavailable")
+		return
+	}
+	if !allowed {
+		s.telemetry.RecordRateLimit(r.Context(), "account_action", "pending_email_verification", "rejected")
+		w.Header().Set("Retry-After", retryAfterSeconds(retry))
+		writeAPIError(w, http.StatusTooManyRequests, "too many email verification requests")
+		return
+	}
+	s.telemetry.RecordRateLimit(r.Context(), "account_action", "pending_email_verification", "allowed")
+	if err := s.accountService.RequestPendingEmailVerification(r.Context(), request.Email, accountRequestMetadata(r)); err != nil {
+		// Queue and lookup failures remain indistinguishable from an unknown
+		// address. Operators still receive a durable log/metric signal.
+		slog.ErrorContext(r.Context(), "pending email verification could not be requeued", "error", err)
+		s.telemetry.RecordAuthEvent(r.Context(), "pending_email_verification", "queue_error")
+	} else {
+		s.telemetry.RecordAuthEvent(r.Context(), "pending_email_verification", "accepted")
 	}
 	writeJSON(w, http.StatusAccepted, map[string]string{"status": "accepted"})
 }

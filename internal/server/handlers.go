@@ -92,6 +92,12 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	s.telemetry.RecordRateLimit(r.Context(), "login", "login", "allowed")
 	current, err := s.userService.Authenticate(r.Context(), request.Username, request.Password)
 	if err != nil {
+		if errors.Is(err, user.ErrEmailVerificationPending) {
+			s.telemetry.RecordAuthEvent(r.Context(), "login", "email_unverified")
+			s.enqueueAuditResult(r.Context(), models.AuditUserLoginFailed, nil, truncateAuditValue(request.Username, maxAuditActorNameLength), "failure", "low", ip, truncateAuditValue(r.UserAgent(), maxAuditUserAgentLength), map[string]any{"authentication_method": "password", "reason": "email_unverified"})
+			writeAPIError(w, http.StatusForbidden, "email verification is required before signing in")
+			return
+		}
 		s.telemetry.RecordAuthEvent(r.Context(), "login", "invalid_credentials")
 		s.enqueueAuditResult(r.Context(), models.AuditUserLoginFailed, nil, truncateAuditValue(request.Username, maxAuditActorNameLength), "failure", "medium", ip, truncateAuditValue(r.UserAgent(), maxAuditUserAgentLength), map[string]any{"authentication_method": "password"})
 		writeAPIError(w, http.StatusUnauthorized, "invalid credentials")

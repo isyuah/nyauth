@@ -187,6 +187,15 @@ func describeMutation(r *http.Request, actor *models.User) (mutationAuditDescrip
 	case r.Method == http.MethodDelete && strings.HasPrefix(path, "/api/admin/clients/"):
 		return mutationAuditDescriptor{event: models.AuditClientDeleted, targetType: "client", targetID: param("id"), riskLevel: "high", successAlreadyAudited: true}, true
 
+	case r.Method == http.MethodPut && path == "/api/admin/branding":
+		return mutationAuditDescriptor{event: models.AuditSettingsUpdated, targetType: "settings", targetID: "branding", riskLevel: "medium"}, true
+	case r.Method == http.MethodPut && path == "/api/admin/settings/registration":
+		return mutationAuditDescriptor{event: models.AuditSettingsUpdated, targetType: "settings", targetID: "registration", riskLevel: "high"}, true
+	case r.Method == http.MethodPost && path == "/api/admin/invites":
+		return mutationAuditDescriptor{event: models.AuditInviteCreated, targetType: "invite", riskLevel: "medium", successAlreadyAudited: true}, true
+	case r.Method == http.MethodDelete && strings.HasPrefix(path, "/api/admin/invites/"):
+		return mutationAuditDescriptor{event: models.AuditInviteRevoked, targetType: "invite", targetID: param("id"), riskLevel: "medium", successAlreadyAudited: true}, true
+
 	case r.Method == http.MethodPost && path == "/api/admin/providers":
 		return mutationAuditDescriptor{event: models.AuditProviderCreated, targetType: "provider", riskLevel: "high", successAlreadyAudited: true}, true
 	case r.Method == http.MethodPost && strings.HasSuffix(path, "/test") && strings.HasPrefix(path, "/api/admin/providers/"):

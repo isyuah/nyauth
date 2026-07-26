@@ -18,6 +18,7 @@ import (
 	"github.com/nyasharp/nyauth/internal/config"
 	"github.com/nyasharp/nyauth/internal/database"
 	"github.com/nyasharp/nyauth/internal/recovery"
+	"github.com/nyasharp/nyauth/internal/registration"
 	"github.com/nyasharp/nyauth/internal/server"
 	"github.com/nyasharp/nyauth/internal/telemetry"
 )
@@ -186,10 +187,16 @@ func runAuditMaintenance(cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
+	registrationCleanup, err := registration.NewStore(db).CleanupExpired(ctx, now, 500, 100)
+	if err != nil {
+		return err
+	}
 	slog.Info("audit storage maintenance completed",
 		"dropped_partitions", retention.DroppedPartitions,
 		"deleted_boundary_rows", retention.DeletedRows,
 		"deleted_processed_outbox_rows", cleanedOutbox,
+		"released_pending_registrations", registrationCleanup.Released,
+		"deleted_pending_users", registrationCleanup.DeletedUsers,
 	)
 	return nil
 }

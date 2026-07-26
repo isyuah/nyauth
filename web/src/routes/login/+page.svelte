@@ -17,6 +17,9 @@
   let cleanedReturnTo = $state<string | null>(null);
   let returnTo = $derived(cleanedReturnTo ?? safeReturnPath($page.url.searchParams.get('return_to'), '/dashboard'));
 
+  let registrationOpen = $state(false);
+  let pendingVerification = $state(false);
+
   async function loadProviders() {
     providersLoading = true;
     providersError = '';
@@ -27,6 +30,15 @@
       providersError = cause instanceof Error ? cause.message : '外部登录方式加载失败';
     } finally {
       providersLoading = false;
+    }
+  }
+
+  async function loadRegistrationOptions() {
+    try {
+      const options = await api.getRegistrationOptions();
+      registrationOpen = options.mode !== 'closed';
+    } catch {
+      registrationOpen = false;
     }
   }
 
@@ -48,12 +60,13 @@
     } catch (cause) {
       error = cause instanceof Error ? `会话检查失败：${cause.message}` : '暂时无法连接认证服务';
     }
-    await loadProviders();
+    await Promise.all([loadProviders(), loadRegistrationOptions()]);
   });
 
   async function handleLogin(e: Event) {
     e.preventDefault();
     error = '';
+    pendingVerification = false;
     loading = true;
     try {
       const session = await api.login(username, password);
@@ -66,6 +79,9 @@
         goto(returnTo);
       }
     } catch (err) {
+      pendingVerification = err instanceof ApiError
+        && err.status === 403
+        && err.serverMessage.toLowerCase() === 'email verification is required before signing in';
       if (err instanceof ApiError && err.status === 429 && err.retryAfter) {
         error = `尝试次数过多，请在 ${err.retryAfter} 秒后重试`;
       } else {
@@ -97,6 +113,7 @@
       {#if error}
         <div role="alert" class="mb-5 px-4 py-3 bg-nya-danger-soft border border-nya-danger/20 rounded-nya-sm text-small text-nya-danger">
           {error}
+          {#if pendingVerification}<a href="/resend-verification" class="mt-2 block font-semibold text-nya-primary hover:underline">重发验证邮件</a>{/if}
         </div>
       {/if}
 
@@ -104,7 +121,10 @@
         <Input id="username" label="用户名" bind:value={username} required autocomplete="username" placeholder="输入用户名" />
         <Input id="password" type="password" label="密码" bind:value={password} required autocomplete="current-password" placeholder="输入密码" />
 
-        <div class="flex justify-end"><a href="/forgot-password" class="text-small text-nya-primary hover:underline">忘记密码？</a></div>
+        <div class="flex items-center justify-between">
+          {#if registrationOpen}<a href="/register" class="text-small text-nya-primary hover:underline">注册账号</a>{:else}<span></span>{/if}
+          <a href="/forgot-password" class="text-small text-nya-primary hover:underline">忘记密码？</a>
+        </div>
 
         <Button type="submit" {loading} size="lg" variant="primary" fullWidth>
           {loading ? '登录中...' : '登录'}
