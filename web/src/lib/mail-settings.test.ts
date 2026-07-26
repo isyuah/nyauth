@@ -37,6 +37,11 @@ describe('mail candidate payload', () => {
   it('uses an explicit empty password only for passwordless SMTP', () => {
     expect(buildMailCandidateInput(7, draft, 'must-not-be-used', true).password).toBe('');
   });
+
+  it('normalizes the numeric value emitted by an edited number input', () => {
+    const editedDraft = { ...draft, port: 2525 } as unknown as MailCandidateDraft;
+    expect(buildMailCandidateInput(7, editedDraft, '', false).port).toBe(2525);
+  });
 });
 
 describe('provider reauthentication snapshot', () => {

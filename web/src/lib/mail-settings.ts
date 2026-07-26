@@ -52,10 +52,11 @@ export function buildMailCandidateInput(
   password: string,
   passwordless: boolean,
 ): SaveMailCandidateInput {
+  const port = Number(String(draft.port ?? '').trim());
   const payload: SaveMailCandidateInput = {
     expected_revision: expectedRevision,
     host: draft.host.trim(),
-    port: Number(draft.port.trim()),
+    port,
     username: draft.username.trim(),
     tls_mode: draft.tls_mode,
     from_address: draft.from_address.trim(),

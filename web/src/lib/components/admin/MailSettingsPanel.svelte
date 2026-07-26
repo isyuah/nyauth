@@ -137,7 +137,7 @@
   }
 
   function validateDraft(): string {
-    const port = Number(draft.port.trim());
+    const port = Number(String(draft.port ?? '').trim());
     if (!draft.host.trim()) return '请填写 SMTP 主机。';
     if (!Number.isSafeInteger(port) || port < 1 || port > 65535) return 'SMTP 端口必须是 1 至 65535 之间的整数。';
     if (!draft.from_address.trim()) return '请填写发件邮箱地址。';
