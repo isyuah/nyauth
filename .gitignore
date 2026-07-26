@@ -46,3 +46,6 @@ config.*.yml
 # Database
 *.db
 *.sqlite
+
+# Local backups
+*.bak
