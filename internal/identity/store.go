@@ -9,14 +9,25 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/nyasharp/nyauth/internal/account"
+	"github.com/nyasharp/nyauth/internal/audit"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
 
-type Store struct{ db *pgxpool.Pool }
+type Store struct {
+	db                  *pgxpool.Pool
+	notificationBuilder account.SecurityNotificationBuilder
+}
 
-const usersEmailUniqueConstraint = "users_email_unique"
+const usersEmailUniqueConstraint = "idx_users_email_normalized"
+
+var ErrLastAuthenticationMethod = errors.New("cannot remove the last authentication method")
 
 func NewStore(db *pgxpool.Pool) *Store { return &Store{db: db} }
+
+func (s *Store) SetSecurityNotificationBuilder(builder account.SecurityNotificationBuilder) {
+	s.notificationBuilder = builder
+}
 
 const identityCols = `id,user_id,provider,external_id,external_username,external_email,metadata,created_at,updated_at`
 
@@ -30,6 +41,30 @@ func scanIdentity(row rowScanner) (*models.Identity, error) {
 	return i, nil
 }
 
+func lockIdentityNotificationUser(ctx context.Context, tx pgx.Tx, userID uuid.UUID) (*models.User, error) {
+	user := &models.User{ID: userID}
+	if err := tx.QueryRow(ctx, `
+		SELECT username,email,email_verified_at FROM users WHERE id=$1 FOR UPDATE
+	`, userID).Scan(&user.Username, &user.Email, &user.EmailVerifiedAt); err != nil {
+		return nil, fmt.Errorf("locking identity owner: %w", err)
+	}
+	return user, nil
+}
+
+func (s *Store) enqueueSecurityNotification(ctx context.Context, tx pgx.Tx, user *models.User, notice account.SecurityNotice) error {
+	if s.notificationBuilder == nil {
+		return nil
+	}
+	email, err := s.notificationBuilder.BuildSecurityNotification(user, notice)
+	if err != nil {
+		return fmt.Errorf("building identity security notification: %w", err)
+	}
+	if err := account.EnqueueEmailTx(ctx, tx, email); err != nil {
+		return fmt.Errorf("queueing identity security notification: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) FindByExternal(ctx context.Context, provider, externalID string) (*models.Identity, error) {
 	i, err := scanIdentity(s.db.QueryRow(ctx, `SELECT `+identityCols+` FROM identities WHERE provider=$1 AND external_id=$2`, provider, externalID))
 	if err != nil {
@@ -37,10 +72,35 @@ func (s *Store) FindByExternal(ctx context.Context, provider, externalID string)
 	}
 	return i, nil
 }
-func (s *Store) Create(ctx context.Context, i *models.Identity) error {
-	_, err := s.db.Exec(ctx, `INSERT INTO identities (id,user_id,provider,external_id,external_username,external_email,metadata) VALUES ($1,$2,$3,$4,$5,$6,$7)`, i.ID, i.UserID, i.Provider, i.ExternalID, i.ExternalUsername, i.ExternalEmail, i.Metadata)
+func (s *Store) Create(ctx context.Context, i *models.Identity, mutation audit.MutationAudit) error {
+	if i == nil {
+		return fmt.Errorf("identity is required")
+	}
+	if err := mutation.ValidateEvent(models.AuditIdentityBound); err != nil {
+		return fmt.Errorf("invalid identity binding audit context: %w", err)
+	}
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("starting identity binding: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	owner, err := lockIdentityNotificationUser(ctx, tx, i.UserID)
+	if err != nil {
+		return err
+	}
+	_, err = tx.Exec(ctx, `INSERT INTO identities (id,user_id,provider,external_id,external_username,external_email,metadata) VALUES ($1,$2,$3,$4,$5,$6,$7)`, i.ID, i.UserID, i.Provider, i.ExternalID, i.ExternalUsername, i.ExternalEmail, i.Metadata)
 	if err != nil {
 		return fmt.Errorf("creating identity: %w", err)
+	}
+	mutation = mutation.WithTarget("identity", i.ID.String()).WithDetails(map[string]any{"provider": i.Provider})
+	if err := audit.EnqueueMutationTx(ctx, tx, mutation); err != nil {
+		return fmt.Errorf("auditing identity binding: %w", err)
+	}
+	if err := s.enqueueSecurityNotification(ctx, tx, owner, account.SecurityNotice{MessageType: account.MessageIdentityBound, Provider: i.Provider}); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("committing identity binding: %w", err)
 	}
 	return nil
 }
@@ -52,7 +112,12 @@ func (s *Store) CreateUserAndIdentity(ctx context.Context, u *models.User, i *mo
 		return err
 	}
 	defer tx.Rollback(ctx)
-	_, err = tx.Exec(ctx, `INSERT INTO users (id,username,email,password_hash,display_name,avatar_url,status,role,auth_version,must_change_password,metadata) VALUES ($1,$2,$3,NULL,$4,$5,$6,$7,$8,FALSE,$9)`, u.ID, u.Username, u.Email, u.DisplayName, u.AvatarURL, u.Status, u.Role, u.AuthVersion, u.Metadata)
+	_, err = tx.Exec(ctx, `
+		INSERT INTO users (
+			id,username,email,email_verified_at,password_hash,display_name,avatar_url,
+			status,role,auth_version,session_version,must_change_password,metadata
+		) VALUES ($1,$2,$3,CASE WHEN $3::text IS NULL THEN NULL ELSE NOW() END,NULL,$4,$5,$6,$7,$8,$9,FALSE,$10)
+	`, u.ID, u.Username, u.Email, u.DisplayName, u.AvatarURL, u.Status, u.Role, u.AuthVersion, u.SessionVersion, u.Metadata)
 	if err != nil {
 		return fmt.Errorf("creating external user: %w", err)
 	}
@@ -92,6 +157,53 @@ func (s *Store) Delete(ctx context.Context, id uuid.UUID) error {
 		return pgx.ErrNoRows
 	}
 	return nil
+}
+
+// DeleteOwned removes an identity and increments auth_version in the same
+// transaction. An external-only account must always retain at least one
+// identity so the operation cannot lock the owner out.
+func (s *Store) DeleteOwned(ctx context.Context, userID, identityID uuid.UUID, mutation audit.MutationAudit) error {
+	if err := mutation.ValidateEvent(models.AuditIdentityUnbound); err != nil {
+		return fmt.Errorf("invalid identity removal audit context: %w", err)
+	}
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	owner, err := lockIdentityNotificationUser(ctx, tx, userID)
+	if err != nil {
+		return err
+	}
+	var hasPassword bool
+	if err := tx.QueryRow(ctx, `SELECT password_hash IS NOT NULL FROM users WHERE id=$1`, userID).Scan(&hasPassword); err != nil {
+		return err
+	}
+	var identityCount int
+	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM identities WHERE user_id=$1`, userID).Scan(&identityCount); err != nil {
+		return err
+	}
+	var providerName string
+	if err := tx.QueryRow(ctx, `SELECT provider FROM identities WHERE id=$1 AND user_id=$2 FOR UPDATE`, identityID, userID).Scan(&providerName); err != nil {
+		return err
+	}
+	if !hasPassword && identityCount <= 1 {
+		return ErrLastAuthenticationMethod
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM identities WHERE id=$1 AND user_id=$2`, identityID, userID); err != nil {
+		return fmt.Errorf("deleting owned identity: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `UPDATE users SET auth_version=auth_version+1,updated_at=NOW() WHERE id=$1`, userID); err != nil {
+		return fmt.Errorf("invalidating credentials after identity removal: %w", err)
+	}
+	mutation = mutation.WithTarget("identity", identityID.String()).WithDetails(map[string]any{"provider": providerName})
+	if err := audit.EnqueueMutationTx(ctx, tx, mutation); err != nil {
+		return fmt.Errorf("auditing identity removal: %w", err)
+	}
+	if err := s.enqueueSecurityNotification(ctx, tx, owner, account.SecurityNotice{MessageType: account.MessageIdentityUnbound, Provider: providerName}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 func IsNotFound(err error) bool { return errors.Is(err, pgx.ErrNoRows) }
 

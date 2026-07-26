@@ -2,7 +2,8 @@ name: nyauth-dev
 
 x-nyauth-environment: &nyauth-environment
   NYAUTH_ENVIRONMENT: development
-  NYAUTH_DATABASE_DSN: "postgres://nyauth:${NYAUTH_DEV_POSTGRES_PASSWORD:-local-dev-only-postgres}@postgres:5432/nyauth?sslmode=disable"
+  NYAUTH_DATABASE_DSN: "postgres://nyauth_runtime:${NYAUTH_DEV_RUNTIME_POSTGRES_PASSWORD:-local-dev-only-runtime-postgres}@postgres:5432/nyauth?sslmode=disable"
+  NYAUTH_DATABASE_RUNTIME_ROLE: "${NYAUTH_DATABASE_RUNTIME_ROLE:-nyauth_runtime}"
   NYAUTH_REDIS_ADDR: "redis:6379"
   NYAUTH_REDIS_PASSWORD: "${NYAUTH_DEV_REDIS_PASSWORD:-local-dev-only-redis}"
   NYAUTH_AUTH_MASTER_KEY: "${NYAUTH_DEV_MASTER_KEY:-MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=}"
@@ -12,28 +13,43 @@ services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
+    stop_grace_period: 30s
+    pids_limit: 200
+    mem_limit: 512m
+    cpus: 1.0
     environment:
       POSTGRES_DB: nyauth
-      POSTGRES_USER: nyauth
-      POSTGRES_PASSWORD: "${NYAUTH_DEV_POSTGRES_PASSWORD:-local-dev-only-postgres}"
+      POSTGRES_USER: nyauth_migrator
+      POSTGRES_PASSWORD: "${NYAUTH_DEV_MIGRATION_POSTGRES_PASSWORD:-local-dev-only-migration-postgres}"
+      NYAUTH_RUNTIME_DB_PASSWORD: "${NYAUTH_DEV_RUNTIME_POSTGRES_PASSWORD:-local-dev-only-runtime-postgres}"
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./docker/postgres/init-runtime-role.sh:/docker-entrypoint-initdb.d/010-nyauth-runtime-role.sh:ro
     ports:
       - "127.0.0.1:5432:5432"
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U nyauth -d nyauth"]
+      test: ["CMD-SHELL", "pg_isready -U nyauth_migrator -d nyauth"]
       interval: 5s
       timeout: 3s
       retries: 10
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    stop_grace_period: 20s
+    pids_limit: 100
+    mem_limit: 256m
+    cpus: 0.5
     environment:
       REDIS_PASSWORD: "${NYAUTH_DEV_REDIS_PASSWORD:-local-dev-only-redis}"
-    command: ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$${REDIS_PASSWORD}\""]
-    volumes:
-      - redisdata:/data
+      REDIS_MAXMEMORY: "${NYAUTH_DEV_REDIS_MAXMEMORY:-192mb}"
+    command: ["sh", "-c", "exec redis-server --save '' --appendonly no --maxmemory \"$${REDIS_MAXMEMORY}\" --maxmemory-policy noeviction --requirepass \"$${REDIS_PASSWORD}\""]
     ports:
       - "127.0.0.1:6379:6379"
     healthcheck:
@@ -41,35 +57,70 @@ services:
       interval: 5s
       timeout: 3s
       retries: 10
+      start_period: 5s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   migrate:
     image: nyauth:dev
     build: .
     restart: "no"
-    command: ["migrate", "-config", "/etc/nyauth/config.yaml"]
-    environment: *nyauth-environment
-    volumes:
-      - ./config.docker.yaml:/etc/nyauth/config.yaml:ro
+    init: true
+    read_only: true
+    pids_limit: 100
+    mem_limit: 256m
+    cpus: 0.5
+    command: ["migrate"]
+    healthcheck:
+      disable: true
+    environment:
+      NYAUTH_ENVIRONMENT: development
+      NYAUTH_DATABASE_DSN: "postgres://nyauth_migrator:${NYAUTH_DEV_MIGRATION_POSTGRES_PASSWORD:-local-dev-only-migration-postgres}@postgres:5432/nyauth?sslmode=disable"
+      NYAUTH_AUDIT_RETENTION: "${NYAUTH_AUDIT_RETENTION:-8760h}"
     depends_on:
       postgres:
         condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   nyauth:
     image: nyauth:dev
     build: .
     restart: unless-stopped
+    init: true
+    read_only: true
+    stop_grace_period: 40s
+    pids_limit: 200
+    mem_limit: 512m
+    cpus: 1.0
     command: ["serve", "-config", "/etc/nyauth/config.yaml"]
     environment: *nyauth-environment
     volumes:
       - ./config.docker.yaml:/etc/nyauth/config.yaml:ro
     ports:
       - "127.0.0.1:8080:8080"
+    healthcheck:
+      test: ["CMD", "nyauth", "healthcheck", "-url", "http://127.0.0.1:8080/readyz", "-timeout", "3s"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     depends_on:
       migrate:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "5"
 
 volumes:
   pgdata:
-  redisdata:

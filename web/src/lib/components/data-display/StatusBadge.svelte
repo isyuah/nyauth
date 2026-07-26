@@ -13,9 +13,12 @@
     pending: { variant: 'warning', label: '待验证' },
     enabled: { variant: 'success', label: '已启用' },
     disabled: { variant: 'default', label: '已禁用' },
+    ok: { variant: 'success', label: '正常' },
+    degraded: { variant: 'warning', label: '降级' },
+    unavailable: { variant: 'danger', label: '不可用' },
   };
 
-  const config = map[status] || { variant: 'default' as const, label: status };
+  let config = $derived(map[status] || { variant: 'default' as const, label: status });
 </script>
 
 <Badge variant={config.variant}>{config.label}</Badge>

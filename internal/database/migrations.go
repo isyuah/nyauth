@@ -9,10 +9,22 @@ import (
 	_ "github.com/golang-migrate/migrate/v4/database/postgres"
 	"github.com/golang-migrate/migrate/v4/source/iofs"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/nyasharp/nyauth/internal/config"
 	migrationfiles "github.com/nyasharp/nyauth/migrations"
 )
 
 const SchemaVersion int64 = 1
+
+// RunConfiguredMigrations applies the database TLS policy before invoking the
+// embedded migration runner. Keep RunMigrations(string) for isolated tests and
+// callers that already provide a fully resolved DSN.
+func RunConfiguredMigrations(databaseConfig config.DatabaseConfig) error {
+	dsn, err := configuredPostgresDSN(databaseConfig)
+	if err != nil {
+		return fmt.Errorf("building migration database DSN: %w", err)
+	}
+	return RunMigrations(dsn)
+}
 
 func RunMigrations(databaseURL string) error {
 	source, err := iofs.New(migrationfiles.Files, ".")

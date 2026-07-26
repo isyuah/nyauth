@@ -12,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/nyasharp/nyauth/internal/audit"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
 
@@ -36,12 +37,12 @@ func isUniqueViolation(err error) bool {
 }
 
 type handlerService interface {
-	List(ctx context.Context, page, pageSize int, search string) (*models.PaginatedResponse[models.User], error)
+	List(ctx context.Context, page, pageSize int, search string, status models.UserStatus) (*models.PaginatedResponse[models.User], error)
 	Create(ctx context.Context, req models.CreateUserRequest) (*models.User, error)
 	GetByID(ctx context.Context, id uuid.UUID) (*models.User, error)
-	AdminUpdate(ctx context.Context, id uuid.UUID, req models.AdminUpdateUserRequest) (*models.User, error)
-	Delete(ctx context.Context, id uuid.UUID) error
-	ResetPassword(ctx context.Context, id uuid.UUID, newPassword string) (*models.User, error)
+	AdminUpdate(ctx context.Context, id uuid.UUID, req models.AdminUpdateUserRequest, mutation audit.MutationAudit) (*models.User, error)
+	Delete(ctx context.Context, id uuid.UUID, mutation audit.MutationAudit) error
+	ResetPassword(ctx context.Context, id uuid.UUID, newPassword string, mutation audit.MutationAudit) (*models.User, error)
 }
 
 // Handler handles HTTP requests for user operations.
@@ -72,8 +73,13 @@ func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
 	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
 	search := r.URL.Query().Get("q")
+	status := models.UserStatus(r.URL.Query().Get("status"))
+	if status != "" && status != models.UserStatusActive && status != models.UserStatusSuspended && status != models.UserStatusPending {
+		writeError(w, http.StatusBadRequest, "invalid user status")
+		return
+	}
 
-	result, err := h.service.List(r.Context(), page, pageSize, search)
+	result, err := h.service.List(r.Context(), page, pageSize, search, status)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list users")
 		return
@@ -134,7 +140,12 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := h.service.AdminUpdate(r.Context(), id, req)
+	mutation, ok := audit.MutationAuditFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "audit context unavailable")
+		return
+	}
+	user, err := h.service.AdminUpdate(r.Context(), id, req, mutation)
 	if err != nil {
 		if errors.Is(err, ErrLastActiveAdmin) {
 			writeError(w, http.StatusConflict, err.Error())
@@ -155,7 +166,12 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.service.Delete(r.Context(), id); err != nil {
+	mutation, ok := audit.MutationAuditFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "audit context unavailable")
+		return
+	}
+	if err := h.service.Delete(r.Context(), id, mutation); err != nil {
 		if errors.Is(err, ErrLastActiveAdmin) {
 			writeError(w, http.StatusConflict, err.Error())
 		} else if IsNotFound(err) {
@@ -183,7 +199,12 @@ func (h *Handler) ResetPassword(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if _, err := h.service.ResetPassword(r.Context(), id, body.Password); err != nil {
+	mutation, ok := audit.MutationAuditFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "audit context unavailable")
+		return
+	}
+	if _, err := h.service.ResetPassword(r.Context(), id, body.Password, mutation); err != nil {
 		if IsInvalidInput(err) {
 			writeError(w, http.StatusBadRequest, err.Error())
 		} else {

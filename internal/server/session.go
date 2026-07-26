@@ -33,7 +33,12 @@ func (m *SessionMiddleware) CreateSession(w http.ResponseWriter, r *http.Request
 	if err != nil {
 		return nil, err
 	}
-	data := &session.SessionData{UserID: user.ID.String(), Username: user.Username, AuthVersion: user.AuthVersion}
+	now := time.Now().UTC()
+	data := &session.SessionData{
+		UserID: user.ID.String(), Username: user.Username, AuthVersion: user.AuthVersion, SessionVersion: user.SessionVersion,
+		IPAddress: requestIP(r), UserAgent: truncateAuditValue(r.UserAgent(), maxAuditUserAgentLength),
+		CreatedAt: now, LastSeenAt: now, AuthenticatedAt: now,
+	}
 	if err := m.sessionStore.SaveSession(r.Context(), sessionID, data, sessionTTL); err != nil {
 		return nil, err
 	}
@@ -54,6 +59,23 @@ func (m *SessionMiddleware) RotateSession(w http.ResponseWriter, r *http.Request
 	return created, nil
 }
 
+func (m *SessionMiddleware) MarkReauthenticated(r *http.Request, user *models.User) (*AuthenticatedSession, error) {
+	authenticated := sessionFromContext(r.Context())
+	if authenticated == nil || authenticated.Data == nil {
+		return nil, errors.New("authenticated session is unavailable")
+	}
+	now := time.Now().UTC()
+	authenticated.Data.AuthenticatedAt = now
+	authenticated.Data.LastSeenAt = now
+	authenticated.Data.Username = user.Username
+	authenticated.Data.AuthVersion = user.AuthVersion
+	authenticated.Data.SessionVersion = user.SessionVersion
+	if err := m.sessionStore.SaveSession(r.Context(), authenticated.ID, authenticated.Data, sessionTTL); err != nil {
+		return nil, err
+	}
+	return authenticated, nil
+}
+
 func (m *SessionMiddleware) DestroySession(w http.ResponseWriter, r *http.Request) {
 	if cookie, err := r.Cookie(sessionCookieName); err == nil {
 		_ = m.sessionStore.DeleteSession(r.Context(), cookie.Value)
@@ -69,6 +91,12 @@ func (m *SessionMiddleware) GetSession(r *http.Request) (*AuthenticatedSession, 
 	data, err := m.sessionStore.GetSession(r.Context(), cookie.Value)
 	if err != nil {
 		return nil, err
+	}
+	if data.LastSeenAt.IsZero() || time.Since(data.LastSeenAt) >= 5*time.Minute {
+		now := time.Now().UTC()
+		if err := m.sessionStore.TouchSession(r.Context(), cookie.Value, now); err == nil {
+			data.LastSeenAt = now
+		}
 	}
 	return &AuthenticatedSession{ID: cookie.Value, Data: data}, nil
 }
@@ -98,7 +126,4 @@ func sessionFromContext(ctx context.Context) *AuthenticatedSession {
 func currentUserFromContext(r *http.Request) *models.User {
 	value, _ := r.Context().Value(currentUserContextKey).(*models.User)
 	return value
-}
-func isNoSession(err error) bool {
-	return errors.Is(err, http.ErrNoCookie) || errors.Is(err, session.ErrNotFound)
 }

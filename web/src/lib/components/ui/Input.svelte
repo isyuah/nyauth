@@ -1,4 +1,6 @@
 <script lang="ts">
+  import FormField from './FormField.svelte';
+
   let {
     label = '',
     placeholder = '',
@@ -26,23 +28,24 @@
     autocomplete?: 'current-password' | 'new-password' | 'username' | 'email' | 'off';
     oninput?: (e: Event) => void;
   } = $props();
+
+  const componentId = $props.id();
+  let resolvedId = $derived(id || `${componentId}-input`);
+  let describedBy = $derived(error ? `${resolvedId}-error` : undefined);
 </script>
 
-<div class="flex flex-col gap-1.5">
-  {#if label}
-    <label for={id} class="text-body-medium text-nya-text-primary">
-      {label}
-      {#if required}<span class="text-nya-danger">*</span>{/if}
-    </label>
-  {/if}
+<FormField id={resolvedId} {label} {required} {error}>
+  {#snippet children()}
   <input
-    {id}
+    id={resolvedId}
     {type}
     {placeholder}
     {disabled}
     {readonly}
     {required}
     {autocomplete}
+    aria-invalid={error ? 'true' : undefined}
+    aria-describedby={describedBy}
     bind:value
     {oninput}
     class="h-[38px] w-full px-3 bg-nya-surface border rounded-nya-sm text-body text-nya-text-primary placeholder-nya-text-tertiary transition-all duration-fast
@@ -51,7 +54,5 @@
       {mono ? 'font-mono text-small' : ''}
       focus:outline-none focus:ring-2 focus:border-nya-primary"
   />
-  {#if error}
-    <p class="text-small text-nya-danger">{error}</p>
-  {/if}
-</div>
+  {/snippet}
+</FormField>

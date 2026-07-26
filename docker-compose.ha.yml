@@ -1,0 +1,160 @@
+name: nyauth-ha
+
+x-nyauth-environment: &nyauth-environment
+  NYAUTH_ENVIRONMENT: production
+  NYAUTH_DATABASE_DSN_FILE: "/run/secrets/database_runtime_dsn"
+  NYAUTH_DATABASE_RUNTIME_ROLE: "${NYAUTH_DATABASE_RUNTIME_ROLE:-nyauth_runtime}"
+  NYAUTH_DATABASE_MAX_CONNS: "${NYAUTH_DATABASE_MAX_CONNS:-50}"
+  NYAUTH_DATABASE_MIN_CONNS: "${NYAUTH_DATABASE_MIN_CONNS:-5}"
+  NYAUTH_DATABASE_MAX_CONN_LIFETIME: "${NYAUTH_DATABASE_MAX_CONN_LIFETIME:-1h}"
+  NYAUTH_DATABASE_MAX_CONN_IDLE_TIME: "${NYAUTH_DATABASE_MAX_CONN_IDLE_TIME:-30m}"
+  NYAUTH_DATABASE_HEALTH_CHECK_PERIOD: "${NYAUTH_DATABASE_HEALTH_CHECK_PERIOD:-1m}"
+  NYAUTH_DATABASE_CONNECT_TIMEOUT: "${NYAUTH_DATABASE_CONNECT_TIMEOUT:-5s}"
+  NYAUTH_DATABASE_STATEMENT_TIMEOUT: "${NYAUTH_DATABASE_STATEMENT_TIMEOUT:-15s}"
+  NYAUTH_DATABASE_TLS_MODE: "${NYAUTH_DATABASE_TLS_MODE:-verify-full}"
+  NYAUTH_DATABASE_TLS_ROOT_CA_FILE: "${NYAUTH_DATABASE_TLS_ROOT_CA_FILE:-}"
+  NYAUTH_DATABASE_TLS_CLIENT_CERT_FILE: "${NYAUTH_DATABASE_TLS_CLIENT_CERT_FILE:-}"
+  NYAUTH_DATABASE_TLS_CLIENT_KEY_FILE: "${NYAUTH_DATABASE_TLS_CLIENT_KEY_FILE:-}"
+  NYAUTH_DATABASE_TLS_SERVER_NAME: "${NYAUTH_DATABASE_TLS_SERVER_NAME:-}"
+  NYAUTH_REDIS_ADDR: "${NYAUTH_REDIS_ADDR:?set the external Redis address}"
+  NYAUTH_REDIS_USERNAME: "${NYAUTH_REDIS_USERNAME:-}"
+  NYAUTH_REDIS_PASSWORD_FILE: "/run/secrets/redis_password"
+  NYAUTH_REDIS_DB: "${NYAUTH_REDIS_DB:-0}"
+  NYAUTH_REDIS_POOL_SIZE: "${NYAUTH_REDIS_POOL_SIZE:-50}"
+  NYAUTH_REDIS_MIN_IDLE_CONNS: "${NYAUTH_REDIS_MIN_IDLE_CONNS:-5}"
+  NYAUTH_REDIS_MAX_IDLE_CONNS: "${NYAUTH_REDIS_MAX_IDLE_CONNS:-25}"
+  NYAUTH_REDIS_TLS_ENABLED: "${NYAUTH_REDIS_TLS_ENABLED:-true}"
+  NYAUTH_REDIS_TLS_ROOT_CA_FILE: "${NYAUTH_REDIS_TLS_ROOT_CA_FILE:-}"
+  NYAUTH_REDIS_TLS_SERVER_NAME: "${NYAUTH_REDIS_TLS_SERVER_NAME:-}"
+  NYAUTH_AUTH_ISSUER: "${NYAUTH_AUTH_ISSUER:?set the public HTTPS issuer}"
+  NYAUTH_AUTH_MASTER_KEY_FILE: "/run/secrets/auth_master_key"
+  NYAUTH_SERVER_SECURE_COOKIE: "true"
+  NYAUTH_SERVER_TRUSTED_PROXY_CIDRS: "${NYAUTH_TRUSTED_PROXY_CIDRS:?set the reverse-proxy CIDRs}"
+  NYAUTH_BOOTSTRAP_ADMIN_USERNAME: "${NYAUTH_BOOTSTRAP_ADMIN_USERNAME:-}"
+  NYAUTH_BOOTSTRAP_ADMIN_PASSWORD:
+  NYAUTH_BOOTSTRAP_ADMIN_EMAIL: "${NYAUTH_BOOTSTRAP_ADMIN_EMAIL:-}"
+  NYAUTH_MAIL_ENABLED: "${NYAUTH_MAIL_ENABLED:-false}"
+  NYAUTH_MAIL_FROM_ADDRESS: "${NYAUTH_MAIL_FROM_ADDRESS:-}"
+  NYAUTH_MAIL_FROM_NAME: "${NYAUTH_MAIL_FROM_NAME:-Nyauth}"
+  NYAUTH_MAIL_PUBLIC_BASE_URL: "${NYAUTH_MAIL_PUBLIC_BASE_URL:-}"
+  NYAUTH_MAIL_SMTP_HOST: "${NYAUTH_MAIL_SMTP_HOST:-}"
+  NYAUTH_MAIL_SMTP_PORT: "${NYAUTH_MAIL_SMTP_PORT:-587}"
+  NYAUTH_MAIL_SMTP_USERNAME: "${NYAUTH_MAIL_SMTP_USERNAME:-}"
+  NYAUTH_MAIL_SMTP_PASSWORD:
+  NYAUTH_MAIL_SMTP_TLS_MODE: "${NYAUTH_MAIL_SMTP_TLS_MODE:-starttls}"
+  NYAUTH_MAIL_SMTP_CONNECT_TIMEOUT: "${NYAUTH_MAIL_SMTP_CONNECT_TIMEOUT:-10s}"
+  NYAUTH_MAIL_SMTP_SEND_TIMEOUT: "${NYAUTH_MAIL_SMTP_SEND_TIMEOUT:-30s}"
+  NYAUTH_AUDIT_RETENTION: "${NYAUTH_AUDIT_RETENTION:-8760h}"
+  NYAUTH_TELEMETRY_OTLP_ENABLED: "${NYAUTH_TELEMETRY_OTLP_ENABLED:-false}"
+  NYAUTH_TELEMETRY_OTLP_ENDPOINT: "${NYAUTH_TELEMETRY_OTLP_ENDPOINT:-}"
+  NYAUTH_TELEMETRY_OTLP_AUTHORIZATION:
+  NYAUTH_TELEMETRY_OTLP_EXPORT_INTERVAL: "${NYAUTH_TELEMETRY_OTLP_EXPORT_INTERVAL:-30s}"
+  NYAUTH_TELEMETRY_OTLP_TIMEOUT: "${NYAUTH_TELEMETRY_OTLP_TIMEOUT:-10s}"
+
+x-nyauth-maintenance-environment: &nyauth-maintenance-environment
+  NYAUTH_ENVIRONMENT: production
+  NYAUTH_DATABASE_DSN_FILE: "/run/secrets/database_migration_dsn"
+  NYAUTH_DATABASE_RUNTIME_ROLE: "${NYAUTH_DATABASE_RUNTIME_ROLE:-nyauth_runtime}"
+  NYAUTH_DATABASE_MAX_CONNS: "${NYAUTH_DATABASE_MAX_CONNS:-50}"
+  NYAUTH_DATABASE_MIN_CONNS: "${NYAUTH_DATABASE_MIN_CONNS:-5}"
+  NYAUTH_DATABASE_MAX_CONN_LIFETIME: "${NYAUTH_DATABASE_MAX_CONN_LIFETIME:-1h}"
+  NYAUTH_DATABASE_MAX_CONN_IDLE_TIME: "${NYAUTH_DATABASE_MAX_CONN_IDLE_TIME:-30m}"
+  NYAUTH_DATABASE_HEALTH_CHECK_PERIOD: "${NYAUTH_DATABASE_HEALTH_CHECK_PERIOD:-1m}"
+  NYAUTH_DATABASE_CONNECT_TIMEOUT: "${NYAUTH_DATABASE_CONNECT_TIMEOUT:-5s}"
+  NYAUTH_DATABASE_STATEMENT_TIMEOUT: "${NYAUTH_DATABASE_STATEMENT_TIMEOUT:-15s}"
+  NYAUTH_DATABASE_TLS_MODE: "${NYAUTH_DATABASE_TLS_MODE:-verify-full}"
+  NYAUTH_DATABASE_TLS_ROOT_CA_FILE: "${NYAUTH_DATABASE_TLS_ROOT_CA_FILE:-}"
+  NYAUTH_DATABASE_TLS_CLIENT_CERT_FILE: "${NYAUTH_DATABASE_TLS_CLIENT_CERT_FILE:-}"
+  NYAUTH_DATABASE_TLS_CLIENT_KEY_FILE: "${NYAUTH_DATABASE_TLS_CLIENT_KEY_FILE:-}"
+  NYAUTH_DATABASE_TLS_SERVER_NAME: "${NYAUTH_DATABASE_TLS_SERVER_NAME:-}"
+  NYAUTH_AUDIT_RETENTION: "${NYAUTH_AUDIT_RETENTION:-8760h}"
+
+x-hardened-nyauth: &hardened-nyauth
+  image: "${NYAUTH_IMAGE:?set NYAUTH_IMAGE to an immutable image digest}"
+  user: "65532:65532"
+  read_only: true
+  init: true
+  tmpfs:
+    - /tmp:rw,noexec,nosuid,size=16m
+  cap_drop:
+    - ALL
+  security_opt:
+    - no-new-privileges:true
+  environment: *nyauth-environment
+
+x-app: &app
+  <<: *hardened-nyauth
+  restart: unless-stopped
+  stop_grace_period: 40s
+  pids_limit: 200
+  mem_limit: 512m
+  cpus: 1.0
+  command: ["serve"]
+  secrets:
+    - database_runtime_dsn
+    - redis_password
+    - auth_master_key
+  healthcheck:
+    test: ["CMD", "nyauth", "healthcheck", "-url", "http://127.0.0.1:8080/readyz", "-timeout", "3s"]
+    interval: 10s
+    timeout: 5s
+    retries: 5
+    start_period: 30s
+  networks:
+    - backend
+    - proxy
+  depends_on:
+    migrate:
+      condition: service_completed_successfully
+  logging:
+    driver: json-file
+    options:
+      max-size: "20m"
+      max-file: "5"
+
+services:
+  migrate:
+    <<: *hardened-nyauth
+    restart: "no"
+    stop_grace_period: 30s
+    pids_limit: 100
+    mem_limit: 256m
+    cpus: 0.5
+    command: ["migrate"]
+    healthcheck:
+      disable: true
+    environment:
+      <<: *nyauth-maintenance-environment
+    secrets:
+      - database_migration_dsn
+    networks:
+      - backend
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  nyauth-a:
+    <<: *app
+
+  nyauth-b:
+    <<: *app
+
+networks:
+  backend:
+    external: true
+    name: "${NYAUTH_BACKEND_NETWORK:?set the external dependency network}"
+  proxy:
+    external: true
+    name: "${NYAUTH_PROXY_NETWORK:?set the external reverse-proxy network}"
+
+secrets:
+  database_runtime_dsn:
+    file: "${NYAUTH_DATABASE_DSN_FILE:?set the runtime PostgreSQL DSN secret file}"
+  database_migration_dsn:
+    file: "${NYAUTH_DATABASE_MIGRATION_DSN_FILE:?set the migration PostgreSQL DSN secret file}"
+  redis_password:
+    file: "${NYAUTH_REDIS_PASSWORD_FILE:?set the Redis password secret file}"
+  auth_master_key:
+    file: "${NYAUTH_AUTH_MASTER_KEY_FILE:?set the Base64 master-key secret file}"

@@ -4,15 +4,50 @@ server:
   host: "0.0.0.0"
   port: 8080
   secure_cookie: true
+  readiness_timeout: 3s
+  shutdown_timeout: 30s
   trusted_proxy_cidrs:
     - "192.0.2.10/32" # Replace with the exact reverse-proxy network.
 database:
   driver: postgres
   dsn: ""
+  runtime_role: nyauth_runtime
+  max_conns: 50
+  min_conns: 5
+  max_conn_lifetime: 1h
+  max_conn_idle_time: 15m
+  health_check_period: 30s
+  connect_timeout: 5s
+  statement_timeout: 15s
+  tls:
+    # Leave empty to use sslmode/sslrootcert from the DSN secret. Set
+    # verify-full here when TLS policy is managed outside the DSN.
+    mode: ""
+    root_ca_file: ""
+    client_cert_file: ""
+    client_key_file: ""
+    server_name: ""
 redis:
   addr: "redis:6379"
+  username: ""
   password: ""
   db: 0
+  pool_size: 50
+  min_idle_conns: 5
+  max_idle_conns: 25
+  dial_timeout: 5s
+  read_timeout: 3s
+  write_timeout: 3s
+  pool_timeout: 4s
+  conn_max_idle_time: 15m
+  conn_max_lifetime: 1h
+  tls:
+    enabled: false
+    root_ca_file: ""
+    client_cert_file: ""
+    client_key_file: ""
+    server_name: ""
+    insecure_skip_verify: false
 auth:
   issuer: "https://auth.example.com"
   access_token_ttl: 900
@@ -24,11 +59,19 @@ auth:
     algorithm: RS256
     key_size: 3072
     rotation_interval: 720h
-providers: {}
 admin:
   username: ""
-  password: ""
   email: ""
 web:
   enabled: true
   title: "Nya"
+audit:
+  retention: 8760h
+telemetry:
+  otlp:
+    enabled: false
+    endpoint: "https://otel-collector.example.com/v1/metrics"
+    # Set through NYAUTH_TELEMETRY_OTLP_AUTHORIZATION_FILE when required.
+    authorization: ""
+    export_interval: 30s
+    timeout: 10s

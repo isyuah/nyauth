@@ -11,7 +11,8 @@ export default defineConfig({
       '/token': 'http://localhost:8080',
       '/.well-known': 'http://localhost:8080',
       '/userinfo': 'http://localhost:8080',
-      '/health': 'http://localhost:8080'
+      '/livez': 'http://localhost:8080',
+      '/readyz': 'http://localhost:8080'
     }
   }
 });

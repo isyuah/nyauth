@@ -3,23 +3,31 @@ package server
 import (
 	"context"
 	"crypto/subtle"
+	"errors"
 	"net"
 	"net/http"
 	"net/url"
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/nyasharp/nyauth/internal/session"
+	"github.com/nyasharp/nyauth/internal/user"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
 
 func (s *Server) userAuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authenticated, err := s.sessionMiddleware.GetSession(r)
-		if err != nil {
-			if !isNoSession(err) {
-				s.sessionMiddleware.DestroySession(w, r)
-			}
+		switch {
+		case errors.Is(err, http.ErrNoCookie):
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "authentication required"})
+			return
+		case errors.Is(err, session.ErrNotFound):
+			s.sessionMiddleware.DestroySession(w, r)
+			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "session expired"})
+			return
+		case err != nil:
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "session service unavailable"})
 			return
 		}
 		userID, err := uuid.Parse(authenticated.Data.UserID)
@@ -29,7 +37,18 @@ func (s *Server) userAuthMiddleware(next http.Handler) http.Handler {
 			return
 		}
 		current, err := s.userService.GetByID(r.Context(), userID)
-		if err != nil || current.Status != models.UserStatusActive || current.AuthVersion != authenticated.Data.AuthVersion {
+		if err != nil {
+			if user.IsNotFound(err) {
+				s.sessionMiddleware.DestroySession(w, r)
+				writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "session expired"})
+				return
+			}
+			writeJSON(w, http.StatusServiceUnavailable, map[string]string{"error": "account service unavailable"})
+			return
+		}
+		if current.Status != models.UserStatusActive ||
+			current.AuthVersion != authenticated.Data.AuthVersion ||
+			current.SessionVersion != authenticated.Data.SessionVersion {
 			s.sessionMiddleware.DestroySession(w, r)
 			writeJSON(w, http.StatusUnauthorized, map[string]string{"error": "session expired"})
 			return
@@ -59,7 +78,17 @@ func (s *Server) csrfMiddleware(next http.Handler) http.Handler {
 		}
 		authenticated := sessionFromContext(r.Context())
 		provided := r.Header.Get("X-CSRF-Token")
-		if authenticated == nil || provided == "" || len(provided) != len(authenticated.Data.CSRFToken) || subtle.ConstantTimeCompare([]byte(provided), []byte(authenticated.Data.CSRFToken)) != 1 {
+		rejectionReason := ""
+		switch {
+		case authenticated == nil:
+			rejectionReason = "missing_session"
+		case provided == "":
+			rejectionReason = "missing_token"
+		case len(provided) != len(authenticated.Data.CSRFToken) || subtle.ConstantTimeCompare([]byte(provided), []byte(authenticated.Data.CSRFToken)) != 1:
+			rejectionReason = "mismatch"
+		}
+		if rejectionReason != "" {
+			s.telemetry.RecordCSRFReject(r.Context(), rejectionReason)
 			writeJSON(w, http.StatusForbidden, map[string]string{"error": "invalid CSRF token"})
 			return
 		}

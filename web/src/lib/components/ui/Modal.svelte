@@ -1,44 +1,51 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
+  import { Dialog } from 'bits-ui';
   import { X } from 'lucide-svelte';
-  import { scale, fade } from 'svelte/transition';
 
   let {
     open = $bindable(false),
     size = 'md',
     title = '',
+    description = '',
     children,
   }: {
     open?: boolean;
     size?: 'sm' | 'md' | 'lg';
     title?: string;
+    description?: string;
     children: Snippet;
   } = $props();
 
   const widths = { sm: '420px', md: '560px', lg: '720px' };
 </script>
 
-{#if open}
-  <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-  <div class="fixed inset-0 z-50 flex items-center justify-center p-4" onclick={() => (open = false)}>
-    <div class="fixed inset-0 bg-black/30" transition:fade={{ duration: 150 }} style="backdrop-filter: blur(2px);"></div>
-    <div
-      class="relative w-full bg-[var(--nya-surface)] overflow-hidden"
+<Dialog.Root bind:open>
+  <Dialog.Portal>
+    <Dialog.Overlay class="fixed inset-0 z-50 bg-black/30 backdrop-blur-[2px]" />
+    <Dialog.Content
+      class="fixed left-1/2 top-1/2 z-50 max-h-[calc(100vh-2rem)] w-[calc(100%-2rem)] -translate-x-1/2 -translate-y-1/2 overflow-y-auto bg-nya-surface outline-none"
       style="max-width: {widths[size]}; border-radius: var(--nya-radius-lg); box-shadow: var(--nya-shadow-popup);"
-      transition:scale={{ start: 0.95, duration: 200, easing: (t) => t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2 }}
-      onclick={(e) => e.stopPropagation()}
     >
       {#if title}
-        <div class="flex items-center justify-between px-6 py-4 border-b border-[var(--nya-divider)]">
-          <h3 style="font-size: 16px; font-weight: 650; color: var(--nya-text-primary);">{title}</h3>
-          <button onclick={() => (open = false)} class="p-1.5 rounded-lg hover:bg-[var(--nya-surface-muted)] text-[var(--nya-text-tertiary)] transition-colors">
+        <div class="flex items-start justify-between gap-4 border-b border-nya-divider px-6 py-4">
+          <div>
+            <Dialog.Title level={2} class="text-[16px] font-semibold text-nya-text-primary">{title}</Dialog.Title>
+            {#if description}
+              <Dialog.Description class="mt-1 text-[13px] text-nya-text-secondary">{description}</Dialog.Description>
+            {/if}
+          </div>
+          <Dialog.Close
+            class="shrink-0 rounded-lg p-1.5 text-nya-text-tertiary transition-colors hover:bg-nya-surface-muted hover:text-nya-text-primary"
+            aria-label="关闭对话框"
+          >
             <X size={18} />
-          </button>
+          </Dialog.Close>
         </div>
       {/if}
-      <div style="padding: 20px 24px;">
+      <div class="px-6 py-5">
         {@render children()}
       </div>
-    </div>
-  </div>
-{/if}
+    </Dialog.Content>
+  </Dialog.Portal>
+</Dialog.Root>

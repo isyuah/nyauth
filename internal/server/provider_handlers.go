@@ -96,7 +96,7 @@ func (s *Server) beginProviderFlow(w http.ResponseWriter, r *http.Request, provi
 		"return_to": safeReturnPath(returnTo, "/"), "nonce": nonce,
 		"flow_digest": providerSessionDigest(flowSecret),
 	}
-	if intent == "bind" {
+	if intent == "bind" || intent == "reauth" {
 		authenticated := sessionFromContext(r.Context())
 		if authenticated == nil {
 			writeAPIError(w, http.StatusUnauthorized, "authentication required")
@@ -134,9 +134,40 @@ func (s *Server) handleProviderBind(w http.ResponseWriter, r *http.Request) {
 	s.beginProviderFlow(w, r, chi.URLParam(r, "provider"), "bind", current.ID.String(), safeReturnPath(request.ReturnTo, "/profile"), true)
 }
 
+func (s *Server) handleProviderReauthentication(w http.ResponseWriter, r *http.Request) {
+	current := currentUserFromContext(r)
+	if current == nil {
+		writeAPIError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	var request struct {
+		ReturnTo string `json:"return_to"`
+	}
+	if r.ContentLength != 0 {
+		if err := decodeJSON(w, r, &request); err != nil {
+			writeAPIError(w, http.StatusBadRequest, "invalid request body")
+			return
+		}
+	}
+	s.beginProviderFlow(w, r, chi.URLParam(r, "provider"), "reauth", current.ID.String(), safeReturnPath(request.ReturnTo, "/profile"), true)
+}
+
 func (s *Server) providerCallbackFailure(w http.ResponseWriter, r *http.Request, intent, returnTo, code string, status int) {
+	s.telemetry.RecordProviderEvent(r.Context(), "callback", intent, "failure", code, -1)
+	event := "provider.callback_failed"
+	switch intent {
+	case "login":
+		event = models.AuditUserLoginFailed
+	case "bind":
+		event = "identity.bind_failed"
+	case "reauth":
+		event = "user.reauthentication_failed"
+	}
+	s.enqueueAuditTargetResult(r.Context(), event, nil, "", "provider", chi.URLParam(r, "provider"), "failure", "medium", requestIP(r), truncateAuditValue(r.UserAgent(), maxAuditUserAgentLength), map[string]any{
+		"intent": intent, "failure_reason": code, "http_status": status,
+	})
 	fallback := "/login"
-	if intent == "bind" {
+	if intent == "bind" || intent == "reauth" {
 		fallback = "/profile"
 	}
 	target := safeReturnPath(returnTo, fallback)
@@ -181,13 +212,20 @@ func (s *Server) handleProviderCallback(w http.ResponseWriter, r *http.Request) 
 		s.providerCallbackFailure(w, r, intent, returnTo, "provider_unavailable", http.StatusBadRequest)
 		return
 	}
+	authStarted := time.Now()
 	external, err := configured.Authenticate(r.Context(), code, s.providerCallbackURI(providerName), stateData["nonce"])
 	if err != nil {
+		s.telemetry.RecordProviderEvent(r.Context(), "authentication", intent, "failure", "provider_authentication_failed", time.Since(authStarted))
 		s.providerCallbackFailure(w, r, intent, returnTo, "provider_authentication_failed", http.StatusBadGateway)
 		return
 	}
+	s.telemetry.RecordProviderEvent(r.Context(), "authentication", intent, "success", "none", time.Since(authStarted))
 	if intent == "bind" {
 		s.finishIdentityBind(w, r, providerName, stateData["user_id"], stateData["session_digest"], returnTo, external)
+		return
+	}
+	if intent == "reauth" {
+		s.finishExternalReauthentication(w, r, providerName, stateData["user_id"], stateData["session_digest"], returnTo, external)
 		return
 	}
 	s.finishExternalLogin(w, r, providerName, returnTo, external)
@@ -216,13 +254,16 @@ func (s *Server) finishIdentityBind(w http.ResponseWriter, r *http.Request, prov
 		return
 	}
 	current, err := s.userService.GetByID(r.Context(), id)
-	if err != nil || current.Status != models.UserStatusActive || current.AuthVersion != authenticated.Data.AuthVersion {
+	if err != nil || current.Status != models.UserStatusActive ||
+		current.AuthVersion != authenticated.Data.AuthVersion ||
+		current.SessionVersion != authenticated.Data.SessionVersion {
 		s.providerCallbackFailure(w, r, "bind", returnTo, "session_changed", http.StatusUnauthorized)
 		return
 	}
 	existing, err := s.identityStore.FindByExternal(r.Context(), providerName, external.ID)
 	if err == nil {
 		if existing.UserID == current.ID {
+			s.telemetry.RecordProviderEvent(r.Context(), "callback", "bind", "success", "none", -1)
 			http.Redirect(w, r, safeReturnPath(returnTo, "/profile"), http.StatusFound)
 			return
 		}
@@ -234,11 +275,60 @@ func (s *Server) finishIdentityBind(w http.ResponseWriter, r *http.Request, prov
 		return
 	}
 	binding := identityFromExternal(providerName, current.ID, external)
-	if err := s.identityStore.Create(r.Context(), binding); err != nil {
+	if err := s.identityStore.Create(r.Context(), binding, audit.MutationAudit{
+		Event: models.AuditIdentityBound, ActorID: current.ID, ActorName: current.Username,
+		TargetType: "identity", TargetID: binding.ID.String(), Result: "success", RiskLevel: "high",
+		IPAddress: requestIP(r), UserAgent: truncateAuditValue(r.UserAgent(), maxAuditUserAgentLength),
+	}); err != nil {
 		s.providerCallbackFailure(w, r, "bind", returnTo, "binding_failed", http.StatusConflict)
 		return
 	}
-	audit.RecordWithTarget(r.Context(), s.auditStore, "identity.bound", &current.ID, current.Username, "identity", binding.ID.String(), requestIP(r))
+	s.telemetry.RecordProviderEvent(r.Context(), "callback", "bind", "success", "none", -1)
+	http.Redirect(w, r, safeReturnPath(returnTo, "/profile"), http.StatusFound)
+}
+
+func (s *Server) finishExternalReauthentication(w http.ResponseWriter, r *http.Request, providerName, expectedUserID, expectedSessionDigest, returnTo string, external *models.ExternalUser) {
+	authenticated, err := s.sessionMiddleware.GetSession(r)
+	actualSessionDigest := ""
+	if err == nil {
+		actualSessionDigest = providerSessionDigest(authenticated.ID)
+	}
+	if err != nil || authenticated.Data.UserID != expectedUserID || expectedSessionDigest == "" ||
+		len(actualSessionDigest) != len(expectedSessionDigest) ||
+		subtle.ConstantTimeCompare([]byte(actualSessionDigest), []byte(expectedSessionDigest)) != 1 {
+		s.providerCallbackFailure(w, r, "reauth", returnTo, "session_changed", http.StatusUnauthorized)
+		return
+	}
+	id, err := uuid.Parse(expectedUserID)
+	if err != nil {
+		s.providerCallbackFailure(w, r, "reauth", returnTo, "session_changed", http.StatusUnauthorized)
+		return
+	}
+	current, err := s.userService.GetByID(r.Context(), id)
+	if err != nil || current.Status != models.UserStatusActive ||
+		current.AuthVersion != authenticated.Data.AuthVersion ||
+		current.SessionVersion != authenticated.Data.SessionVersion {
+		s.providerCallbackFailure(w, r, "reauth", returnTo, "session_changed", http.StatusUnauthorized)
+		return
+	}
+	binding, err := s.identityStore.FindByExternal(r.Context(), providerName, external.ID)
+	if err != nil || binding.UserID != current.ID {
+		s.providerCallbackFailure(w, r, "reauth", returnTo, "identity_mismatch", http.StatusForbidden)
+		return
+	}
+	updated, err := s.userService.RecordAuthentication(r.Context(), current.ID)
+	if err != nil {
+		s.providerCallbackFailure(w, r, "reauth", returnTo, "reauthentication_failed", http.StatusInternalServerError)
+		return
+	}
+	ctx := withAuthenticatedSession(r.Context(), authenticated)
+	if _, err := s.sessionMiddleware.MarkReauthenticated(r.WithContext(ctx), updated); err != nil {
+		s.providerCallbackFailure(w, r, "reauth", returnTo, "session_failed", http.StatusServiceUnavailable)
+		return
+	}
+	s.enqueueAuditTargetResult(r.Context(), "user.reauthenticated", &current.ID, current.Username, "provider", providerName, "success", "medium", requestIP(r), truncateAuditValue(r.UserAgent(), maxAuditUserAgentLength), map[string]any{"authentication_method": "provider"})
+	s.telemetry.RecordAuthEvent(r.Context(), "reauthentication", "success")
+	s.telemetry.RecordProviderEvent(r.Context(), "callback", "reauth", "success", "none", -1)
 	http.Redirect(w, r, safeReturnPath(returnTo, "/profile"), http.StatusFound)
 }
 
@@ -283,7 +373,7 @@ func (s *Server) finishExternalLogin(w http.ResponseWriter, r *http.Request, pro
 		if display == "" {
 			display = providerName + " user"
 		}
-		current = &models.User{ID: uuid.New(), Username: externalUsername(providerName, external), DisplayName: &display, Status: models.UserStatusActive, Role: "user", AuthVersion: 1, Metadata: map[string]string{}}
+		current = &models.User{ID: uuid.New(), Username: externalUsername(providerName, external), DisplayName: &display, Status: models.UserStatusActive, Role: "user", AuthVersion: 1, SessionVersion: 1, Metadata: map[string]string{}}
 		if external.AvatarURL != "" {
 			current.AvatarURL = &external.AvatarURL
 		}
@@ -314,13 +404,14 @@ func (s *Server) finishExternalLogin(w http.ResponseWriter, r *http.Request, pro
 		s.providerCallbackFailure(w, r, "login", returnTo, "session_failed", http.StatusInternalServerError)
 		return
 	}
-	audit.RecordResult(r.Context(), s.auditStore, models.AuditUserLogin, &current.ID, current.Username, "success", requestIP(r))
+	s.enqueueAuditResult(r.Context(), models.AuditUserLogin, &current.ID, current.Username, "success", "low", requestIP(r), truncateAuditValue(r.UserAgent(), maxAuditUserAgentLength), map[string]any{"authentication_method": "provider", "provider": providerName})
 	_ = s.userService.RecordLogin(r.Context(), current.ID, requestIP(r))
+	s.telemetry.RecordProviderEvent(r.Context(), "callback", "login", "success", "none", -1)
 	http.Redirect(w, r, safeReturnPath(returnTo, "/dashboard"), http.StatusFound)
 }
 
 func (s *Server) handleAdminListProviders(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.db.Query(r.Context(), `SELECT id,name,type,client_id,scopes,discovery_url,authorization_url,token_url,userinfo_url,enabled,metadata,created_at,updated_at FROM oauth_providers ORDER BY name`)
+	rows, err := s.db.Query(r.Context(), `SELECT id,name,type,client_id,scopes,discovery_url,authorization_url,token_url,userinfo_url,enabled,revision,metadata,created_at,updated_at FROM oauth_providers ORDER BY name`)
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "failed to list providers")
 		return
@@ -329,7 +420,7 @@ func (s *Server) handleAdminListProviders(w http.ResponseWriter, r *http.Request
 	items := make([]models.ExternalProvider, 0)
 	for rows.Next() {
 		var item models.ExternalProvider
-		if err := rows.Scan(&item.ID, &item.Name, &item.Type, &item.ClientID, &item.Scopes, &item.DiscoveryURL, &item.AuthorizationURL, &item.TokenURL, &item.UserinfoURL, &item.Enabled, &item.Metadata, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.Name, &item.Type, &item.ClientID, &item.Scopes, &item.DiscoveryURL, &item.AuthorizationURL, &item.TokenURL, &item.UserinfoURL, &item.Enabled, &item.Revision, &item.Metadata, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			writeAPIError(w, http.StatusInternalServerError, "failed to list providers")
 			return
 		}
@@ -344,6 +435,9 @@ func (s *Server) handleAdminListProviders(w http.ResponseWriter, r *http.Request
 func validateProviderRequest(request models.CreateProviderRequest) error {
 	if err := provider.ValidateName(request.Name); err != nil {
 		return err
+	}
+	if request.Enabled == nil {
+		return errors.New("enabled must be explicitly set")
 	}
 	if strings.TrimSpace(request.ClientID) == "" || request.ClientSecret == "" {
 		return errors.New("client_id and client_secret are required")
@@ -368,7 +462,6 @@ func emptyProviderUpdate(request models.UpdateProviderRequest) bool {
 }
 
 func (s *Server) handleAdminCreateProvider(w http.ResponseWriter, r *http.Request) {
-	actor := currentUserFromContext(r)
 	var request models.CreateProviderRequest
 	if err := decodeJSON(w, r, &request); err != nil {
 		writeAPIError(w, http.StatusBadRequest, "invalid request body")
@@ -378,17 +471,20 @@ func (s *Server) handleAdminCreateProvider(w http.ResponseWriter, r *http.Reques
 		writeAPIError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	created, err := s.providerMgr.CreateProvider(r.Context(), request)
+	mutation, ok := audit.MutationAuditFromContext(r.Context())
+	if !ok {
+		writeAPIError(w, http.StatusInternalServerError, "audit context unavailable")
+		return
+	}
+	created, err := s.providerMgr.CreateProvider(r.Context(), request, mutation)
 	if err != nil {
 		writeAPIError(w, http.StatusConflict, "failed to create provider")
 		return
 	}
-	audit.RecordWithTarget(r.Context(), s.auditStore, models.AuditProviderCreated, &actor.ID, actor.Username, "provider", created.Name, requestIP(r))
 	writeJSON(w, http.StatusCreated, created)
 }
 
 func (s *Server) handleAdminUpdateProvider(w http.ResponseWriter, r *http.Request) {
-	actor := currentUserFromContext(r)
 	name := chi.URLParam(r, "id")
 	var request models.UpdateProviderRequest
 	if err := decodeJSON(w, r, &request); err != nil {
@@ -420,7 +516,12 @@ func (s *Server) handleAdminUpdateProvider(w http.ResponseWriter, r *http.Reques
 			return
 		}
 	}
-	updated, err := s.providerMgr.UpdateProvider(r.Context(), name, request)
+	mutation, ok := audit.MutationAuditFromContext(r.Context())
+	if !ok {
+		writeAPIError(w, http.StatusInternalServerError, "audit context unavailable")
+		return
+	}
+	updated, err := s.providerMgr.UpdateProvider(r.Context(), name, request, mutation)
 	if err != nil {
 		if errors.Is(err, provider.ErrProviderNotFound) {
 			writeAPIError(w, http.StatusNotFound, "provider not found")
@@ -429,13 +530,16 @@ func (s *Server) handleAdminUpdateProvider(w http.ResponseWriter, r *http.Reques
 		}
 		return
 	}
-	audit.RecordWithTarget(r.Context(), s.auditStore, "provider.updated", &actor.ID, actor.Username, "provider", name, requestIP(r))
 	writeJSON(w, http.StatusOK, updated)
 }
 func (s *Server) handleAdminDeleteProvider(w http.ResponseWriter, r *http.Request) {
-	actor := currentUserFromContext(r)
 	name := chi.URLParam(r, "id")
-	if err := s.providerMgr.DeleteProvider(r.Context(), name); err != nil {
+	mutation, ok := audit.MutationAuditFromContext(r.Context())
+	if !ok {
+		writeAPIError(w, http.StatusInternalServerError, "audit context unavailable")
+		return
+	}
+	if err := s.providerMgr.DeleteProvider(r.Context(), name, mutation); err != nil {
 		if errors.Is(err, provider.ErrProviderNotFound) {
 			writeAPIError(w, http.StatusNotFound, "provider not found")
 		} else {
@@ -443,35 +547,29 @@ func (s *Server) handleAdminDeleteProvider(w http.ResponseWriter, r *http.Reques
 		}
 		return
 	}
-	audit.RecordWithTarget(r.Context(), s.auditStore, models.AuditProviderDeleted, &actor.ID, actor.Username, "provider", name, requestIP(r))
 	w.WriteHeader(http.StatusNoContent)
 }
 func (s *Server) handleTestProvider(w http.ResponseWriter, r *http.Request) {
 	actor := currentUserFromContext(r)
 	name := chi.URLParam(r, "id")
-	configured, ok := s.providerMgr.Get(name)
-	if !ok {
-		audit.RecordTargetResult(r.Context(), s.auditStore, models.AuditProviderTested, &actor.ID, actor.Username, "provider", name, "failure", requestIP(r))
-		writeJSON(w, http.StatusOK, map[string]any{"success": false, "error": "provider is disabled or unavailable"})
-		return
-	}
-	state, err := crypto.GenerateRandomString(32)
+	result, err := s.providerMgr.ValidateStoredProvider(r.Context(), name)
 	if err != nil {
-		writeAPIError(w, http.StatusInternalServerError, "failed to test provider")
+		if errors.Is(err, provider.ErrProviderNotFound) {
+			writeAPIError(w, http.StatusNotFound, "provider not found")
+		} else {
+			writeAPIError(w, http.StatusServiceUnavailable, "provider configuration could not be validated")
+		}
 		return
 	}
-	nonce, err := crypto.GenerateRandomString(32)
-	if err != nil {
-		writeAPIError(w, http.StatusInternalServerError, "failed to test provider")
-		return
-	}
-	authorizationURL := configured.AuthorizationURL(state, nonce, s.providerCallbackURI(name))
-	parsed, err := url.Parse(authorizationURL)
-	success := err == nil && parsed.Scheme == "https" && parsed.Host != ""
-	result := "failure"
+	success := result.ConfigurationValid && result.AuthorizationEndpointValid
+	auditResult := "failure"
 	if success {
-		result = "success"
+		auditResult = "success"
 	}
-	audit.RecordTargetResult(r.Context(), s.auditStore, models.AuditProviderTested, &actor.ID, actor.Username, "provider", name, result, requestIP(r))
-	writeJSON(w, http.StatusOK, map[string]any{"success": success, "provider": name, "type": configured.Type()})
+	riskLevel := "low"
+	if auditResult == "failure" {
+		riskLevel = "medium"
+	}
+	s.enqueueAuditTargetResult(r.Context(), models.AuditProviderTested, &actor.ID, actor.Username, "provider", name, auditResult, riskLevel, requestIP(r), truncateAuditValue(r.UserAgent(), maxAuditUserAgentLength), nil)
+	writeJSON(w, http.StatusOK, result)
 }

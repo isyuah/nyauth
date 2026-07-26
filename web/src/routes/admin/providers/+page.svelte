@@ -1,295 +1,380 @@
 <script lang="ts">
-  import { api } from '$lib/api';
   import { onMount } from 'svelte';
+  import {
+    api,
+    type CreateProviderInput,
+    type ExternalProvider,
+    type ProviderTestResult,
+    type UpdateProviderInput,
+  } from '$lib/api';
+  import { parseTokenList } from '$lib/admin-form-utils';
   import PageHeader from '$lib/components/layout/PageHeader.svelte';
-  import Button from '$lib/components/ui/Button.svelte';
-  import Input from '$lib/components/ui/Input.svelte';
-  import Select from '$lib/components/ui/Select.svelte';
-  import Modal from '$lib/components/ui/Modal.svelte';
-  import Card from '$lib/components/ui/Card.svelte';
   import Badge from '$lib/components/ui/Badge.svelte';
-  import EmptyState from '$lib/components/ui/EmptyState.svelte';
-  import { Plus, KeyRound, CheckCircle, XCircle, ExternalLink, Loader2 } from 'lucide-svelte';
+  import Button from '$lib/components/ui/Button.svelte';
+  import Card from '$lib/components/ui/Card.svelte';
+  import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
+  import Input from '$lib/components/ui/Input.svelte';
+  import Modal from '$lib/components/ui/Modal.svelte';
+  import ResourceState from '$lib/components/ui/ResourceState.svelte';
+  import Select from '$lib/components/ui/Select.svelte';
+  import { CheckCircle, ExternalLink, KeyRound, Plus, XCircle } from 'lucide-svelte';
 
-  let providers = $state<any[]>([]);
-  let showCreate = $state(false);
-  let showEdit = $state(false);
-  let editingProvider = $state<any>(null);
-  let editForm = $state({ client_id: '', client_secret: '' });
-  let newProvider = $state({ name: '', type: 'github', client_id: '', client_secret: '', discovery_url: '' });
-  let createError = $state('');
-  let editError = $state('');
-  let actionError = $state('');
-  let callbackOrigin = $state('https://auth.example.com');
-  let testResults = $state<Record<string, { loading?: boolean; success?: boolean; latency?: number; error?: string; status_code?: number }>>({});
-
-  onMount(() => {
-    callbackOrigin = window.location.origin;
-    loadProviders();
-  });
-
-  function callbackURL(name: string): string {
-    const pathName = name.trim();
-    return `${callbackOrigin}/auth/${pathName ? encodeURIComponent(pathName) : '{name}'}/callback`;
-  }
-
-  async function loadProviders() {
-    try { providers = await api.admin.getProviders(); actionError = ''; }
-    catch (err) { actionError = err instanceof Error ? err.message : 'Provider 列表加载失败'; }
-  }
-
-  async function handleCreate(e: Event) {
-    e.preventDefault();
-    createError = '';
-    try {
-      await api.admin.createProvider(newProvider);
-      showCreate = false;
-      newProvider = { name: '', type: 'github', client_id: '', client_secret: '', discovery_url: '' };
-      loadProviders();
-    } catch (err) { createError = err instanceof Error ? err.message : '创建失败'; }
-  }
-
-  async function handleTest(name: string) {
-    testResults[name] = { loading: true };
-    testResults = { ...testResults };
-    try {
-      const res = await api.admin.testProvider(name);
-      testResults[name] = { success: res.success, latency: res.latency_ms, error: res.error, status_code: res.status_code };
-    } catch (err) {
-      testResults[name] = { success: false, error: err instanceof Error ? err.message : '测试失败' };
-    }
-    testResults = { ...testResults };
-  }
-
-  function openEdit(p: any) {
-    editingProvider = p;
-    editForm = { client_id: '', client_secret: '' };
-    editError = '';
-    showEdit = true;
-  }
-
-  async function handleEdit(e: Event) {
-    e.preventDefault();
-    editError = '';
-    try {
-      const data: any = {};
-      if (editForm.client_id) data.client_id = editForm.client_id;
-      if (editForm.client_secret) data.client_secret = editForm.client_secret;
-      await api.admin.updateProvider(editingProvider.name, data);
-      showEdit = false;
-      loadProviders();
-    } catch (err) { editError = err instanceof Error ? err.message : '更新失败'; }
-  }
-
-  async function toggleProvider(provider: any) {
-    actionError = '';
-    try {
-      await api.admin.updateProvider(provider.name, { enabled: !provider.enabled });
-      await loadProviders();
-    } catch (err) {
-      actionError = err instanceof Error ? err.message : '状态更新失败';
-    }
-  }
-
-  async function deleteProvider(name: string) {
-    if (!confirm(`删除 Provider “${name}” 后将无法继续使用它登录或绑定。确定继续吗？`)) return;
-    actionError = '';
-    try {
-      await api.admin.deleteProvider(name);
-      await loadProviders();
-    } catch (err) {
-      actionError = err instanceof Error ? err.message : '删除失败';
-    }
-  }
+  type ProviderTestState = { revision: number; loading: boolean; result?: ProviderTestResult; error?: string };
+  type ProviderForm = {
+    name: string;
+    type: 'github' | 'google' | 'generic';
+    client_id: string;
+    client_secret: string;
+    scopes: string;
+    discovery_url: string;
+    authorization_url: string;
+    token_url: string;
+    userinfo_url: string;
+    enabled: boolean;
+  };
+  type ProviderEditForm = Omit<ProviderForm, 'name' | 'type'>;
 
   const typeLabels: Record<string, string> = { github: 'GitHub', google: 'Google', generic: '通用 OIDC' };
   const typeColors: Record<string, string> = { github: 'var(--nya-text-primary)', google: 'var(--nya-blue)', generic: 'var(--nya-orange)' };
-
   const setupGuides: Record<string, { title: string; url: string; steps: string[] }> = {
     github: {
       title: 'GitHub OAuth App',
       url: 'https://github.com/settings/developers',
-      steps: [
-        '打开 GitHub Developer Settings → OAuth Apps → New OAuth App',
-        'Application name: 填写你的应用名',
-        'Homepage URL: 填写你的域名',
-        'Authorization callback URL：使用本页显示的回调地址',
-        '创建后复制 Client ID 和 Client Secret 填入上方',
-      ],
+      steps: ['创建 GitHub OAuth App', 'Homepage URL 填写你的应用地址', 'Authorization callback URL 使用本页回调地址', '复制 Client ID 和 Client Secret'],
     },
     google: {
       title: 'Google Cloud Console',
       url: 'https://console.cloud.google.com/apis/credentials',
-      steps: [
-        '打开 Google Cloud Console → APIs & Services → Credentials',
-        'Create Credentials → OAuth client ID',
-        'Application type: Web application',
-        'Authorized redirect URIs：添加本页显示的回调地址',
-        '创建后复制 Client ID 和 Client Secret 填入上方',
-      ],
+      steps: ['创建 Web application 类型的 OAuth client', 'Authorized redirect URIs 添加本页回调地址', '复制 Client ID 和 Client Secret'],
     },
     generic: {
       title: '通用 OIDC Provider',
       url: '',
-      steps: [
-        '在你的 OIDC Provider 中创建一个 OAuth/OIDC 客户端',
-        'Redirect URI：使用本页显示的回调地址',
-        '填写 Provider 的 HTTPS OIDC Discovery URL',
-        '确认 Provider 的 issuer、签名密钥与客户端配置一致',
-        '创建后复制 Client ID 和 Client Secret 填入上方',
-      ],
+      steps: ['在上游创建 OIDC 客户端', 'Redirect URI 使用本页回调地址', '填写 HTTPS Discovery URL', '确认 issuer、签名密钥和客户端配置一致'],
     },
   };
+
+  let providers = $state<ExternalProvider[]>([]);
+  let loading = $state(true);
+  let pageError = $state('');
+  let issuer = $state('');
+  let issuerLoading = $state(true);
+  let issuerError = $state('');
+  let showCreate = $state(false);
+  let creating = $state(false);
+  let showEdit = $state(false);
+  let editingProvider = $state<ExternalProvider | null>(null);
+  let editing = $state(false);
+  let editForm = $state<ProviderEditForm>({ client_id: '', client_secret: '', scopes: '', discovery_url: '', authorization_url: '', token_url: '', userinfo_url: '', enabled: true });
+  let newProvider = $state<ProviderForm>({ name: '', type: 'github', client_id: '', client_secret: '', scopes: '', discovery_url: '', authorization_url: '', token_url: '', userinfo_url: '', enabled: true });
+  let createError = $state('');
+  let editError = $state('');
+  let testResults = $state<Record<string, ProviderTestState>>({});
+  let deleteTarget = $state<ExternalProvider | null>(null);
+  let deleteOpen = $state(false);
+  let deleteError = $state('');
+
+  function invalidateTestResult(name: string) {
+    if (!(name in testResults)) return;
+    const next = { ...testResults };
+    delete next[name];
+    testResults = next;
+  }
+
+  function callbackURL(name: string): string {
+    if (!issuer) return '';
+    const providerName = name.trim();
+    return `${issuer.replace(/\/$/, '')}/auth/${providerName ? encodeURIComponent(providerName) : '{name}'}/callback`;
+  }
+
+  async function loadProviders() {
+    loading = true;
+    pageError = '';
+    try {
+      const loaded = await api.admin.getProviders();
+      const revisions = new Map(loaded.map((provider) => [provider.name, provider.revision]));
+      testResults = Object.fromEntries(
+        Object.entries(testResults).filter(([name, state]) => revisions.get(name) === state.revision),
+      );
+      providers = loaded;
+    } catch (cause) {
+      pageError = cause instanceof Error ? cause.message : 'Provider 列表加载失败';
+    } finally {
+      loading = false;
+    }
+  }
+
+  async function loadIssuer() {
+    issuerLoading = true;
+    issuerError = '';
+    try {
+      issuer = (await api.discovery()).issuer;
+    } catch (cause) {
+      issuer = '';
+      issuerError = cause instanceof Error ? cause.message : 'Issuer 信息加载失败';
+    } finally {
+      issuerLoading = false;
+    }
+  }
+
+  async function handleCreate(event: SubmitEvent) {
+    event.preventDefault();
+    creating = true;
+    createError = '';
+    try {
+      const payload: CreateProviderInput = {
+        name: newProvider.name.trim(),
+        type: newProvider.type,
+        client_id: newProvider.client_id.trim(),
+        client_secret: newProvider.client_secret,
+        enabled: newProvider.enabled,
+        scopes: parseTokenList(newProvider.scopes),
+        discovery_url: newProvider.discovery_url.trim() || undefined,
+        authorization_url: newProvider.authorization_url.trim() || undefined,
+        token_url: newProvider.token_url.trim() || undefined,
+        userinfo_url: newProvider.userinfo_url.trim() || undefined,
+      };
+      if (newProvider.type === 'generic' && !payload.discovery_url) {
+        createError = '通用 OIDC Provider 必须填写 HTTPS Discovery URL。';
+        return;
+      }
+      await api.admin.createProvider(payload);
+      showCreate = false;
+      newProvider = { name: '', type: 'github', client_id: '', client_secret: '', scopes: '', discovery_url: '', authorization_url: '', token_url: '', userinfo_url: '', enabled: true };
+      await loadProviders();
+    } catch (cause) {
+      createError = cause instanceof Error ? cause.message : '创建失败';
+    } finally {
+      creating = false;
+    }
+  }
+
+  async function handleTest(provider: ExternalProvider) {
+    const { name, revision } = provider;
+    testResults = { ...testResults, [name]: { revision, loading: true } };
+    try {
+      const result = await api.admin.testProvider(name);
+      if (testResults[name]?.revision === revision) {
+        testResults = { ...testResults, [name]: { revision, loading: false, result } };
+      }
+    } catch (cause) {
+      if (testResults[name]?.revision === revision) {
+        testResults = { ...testResults, [name]: { revision, loading: false, error: cause instanceof Error ? cause.message : '配置校验失败' } };
+      }
+    }
+  }
+
+  function openEdit(provider: ExternalProvider) {
+    editingProvider = provider;
+    editForm = {
+      client_id: provider.client_id,
+      client_secret: '',
+      scopes: provider.scopes.join('\n'),
+      discovery_url: provider.discovery_url || '',
+      authorization_url: provider.authorization_url || '',
+      token_url: provider.token_url || '',
+      userinfo_url: provider.userinfo_url || '',
+      enabled: provider.enabled,
+    };
+    editError = '';
+    showEdit = true;
+  }
+
+  async function handleEdit(event: SubmitEvent) {
+    event.preventDefault();
+    if (!editingProvider) return;
+    const clientID = editForm.client_id.trim();
+    if (!clientID) {
+      editError = 'Client ID 不能为空。';
+      return;
+    }
+    const discoveryURL = editForm.discovery_url.trim();
+    if (editingProvider.type === 'generic' && !discoveryURL) {
+      editError = '通用 OIDC Provider 必须填写 HTTPS Discovery URL。';
+      return;
+    }
+    if (editingProvider.discovery_url && !discoveryURL) {
+      editError = '当前后端不允许清空已配置的 Discovery URL。';
+      return;
+    }
+    const payload: UpdateProviderInput = {
+      client_id: clientID,
+      scopes: parseTokenList(editForm.scopes),
+      authorization_url: editForm.authorization_url.trim(),
+      token_url: editForm.token_url.trim(),
+      userinfo_url: editForm.userinfo_url.trim(),
+      enabled: editForm.enabled,
+    };
+    if (discoveryURL) payload.discovery_url = discoveryURL;
+    if (editForm.client_secret) payload.client_secret = editForm.client_secret;
+    editing = true;
+    editError = '';
+    try {
+      await api.admin.updateProvider(editingProvider.name, payload);
+      invalidateTestResult(editingProvider.name);
+      showEdit = false;
+      await loadProviders();
+    } catch (cause) {
+      editError = cause instanceof Error ? cause.message : '更新失败';
+    } finally {
+      editing = false;
+    }
+  }
+
+  async function toggleProvider(provider: ExternalProvider) {
+    pageError = '';
+    try {
+      await api.admin.updateProvider(provider.name, { enabled: !provider.enabled });
+      invalidateTestResult(provider.name);
+      await loadProviders();
+    } catch (cause) {
+      pageError = cause instanceof Error ? cause.message : '状态更新失败';
+    }
+  }
+
+  function requestDelete(provider: ExternalProvider) {
+    deleteTarget = provider;
+    deleteError = '';
+    deleteOpen = true;
+  }
+
+  async function deleteProvider() {
+    if (!deleteTarget) return;
+    deleteError = '';
+    try {
+      await api.admin.deleteProvider(deleteTarget.name);
+      await loadProviders();
+    } catch (cause) {
+      deleteError = cause instanceof Error ? cause.message : '删除失败';
+      throw cause;
+    }
+  }
+
+  function validationPassed(result: ProviderTestResult): boolean {
+    return result.configuration_valid && result.authorization_endpoint_valid && result.discovery_reachable !== false;
+  }
+
+  onMount(() => {
+    void loadProviders();
+    void loadIssuer();
+  });
 </script>
 
 <svelte:head><title>身份提供者 - Nya</title></svelte:head>
 
-<PageHeader title="身份提供者" description="管理外部 OAuth / OIDC 身份提供商，让用户使用第三方账号登录">
-  {#snippet action()}
-    <Button variant="primary" onclick={() => (showCreate = true)}><Plus size={16} /> 添加身份提供者</Button>
-  {/snippet}
+<PageHeader title="身份提供者" description="管理外部 OAuth / OIDC 登录配置">
+  {#snippet action()}<Button variant="primary" onclick={() => (showCreate = true)}><Plus size={16} /> 添加身份提供者</Button>{/snippet}
 </PageHeader>
 
-{#if callbackOrigin.startsWith('http://')}
-  <div class="mb-4 px-4 py-3 rounded-lg" style="background: var(--nya-warning-soft); color: var(--nya-warning); font-size: 13px;">
-    当前后台通过 HTTP 打开。该地址仅适用于本地开发；生产环境必须从 HTTPS issuer 打开后台，再复制下方回调地址。
+{#if issuer.startsWith('http://')}
+  <div class="mb-4 rounded-nya-sm bg-nya-warning-soft px-4 py-3 text-small text-nya-warning">当前 issuer 使用 HTTP，仅适合本地开发；生产环境必须使用 HTTPS。</div>
+{:else if issuerError && !issuerLoading}
+  <div class="mb-4 flex flex-wrap items-center justify-between gap-3 rounded-nya-sm bg-nya-danger-soft px-4 py-3 text-small text-nya-danger" role="alert">
+    <span>无法加载公开 Issuer 信息，暂时不能生成 Callback URL。Provider 列表和配置操作不受影响。</span>
+    <Button variant="secondary" size="sm" onclick={loadIssuer}>重试</Button>
   </div>
 {/if}
 
-{#if actionError}
-  <div class="mb-4 px-4 py-3 rounded-lg" style="background: var(--nya-danger-soft); color: var(--nya-danger); font-size: 13px;">{actionError}</div>
-{/if}
-
-{#if providers.length === 0}
-  <EmptyState title="暂无身份提供者" description="添加 GitHub、Google 或其他 OIDC 提供商，让用户使用第三方账号登录。">
-    {#snippet icon()}<KeyRound size={48} />{/snippet}
-    {#snippet action()}<Button variant="primary" onclick={() => (showCreate = true)}>添加身份提供者</Button>{/snippet}
-  </EmptyState>
-{:else}
-  <div class="space-y-4">
-    {#each providers as p}
-      {@const test = testResults[p.name]}
-      <Card>
-        <div class="flex items-start justify-between">
-          <div class="flex items-center gap-3">
-            <div class="flex items-center justify-center rounded-lg" style="width: 44px; height: 44px; background: var(--nya-surface-muted);">
-              <KeyRound size={20} style="color: {typeColors[p.type] || 'var(--nya-text-secondary)'};" />
+<ResourceState
+  {loading}
+  error={pageError}
+  empty={providers.length === 0}
+  emptyTitle="暂无身份提供者"
+  emptyDescription="添加 GitHub、Google 或其他 OIDC 提供商，让用户使用第三方账号登录。"
+  onretry={loadProviders}
+>
+  {#snippet emptyAction()}<Button variant="primary" onclick={() => (showCreate = true)}>添加身份提供者</Button>{/snippet}
+  {#snippet children()}
+    <div class="space-y-4">
+      {#each providers as provider}
+        {@const test = testResults[provider.name]?.revision === provider.revision ? testResults[provider.name] : undefined}
+        <Card>
+          <div class="flex flex-col justify-between gap-4 lg:flex-row lg:items-start">
+            <div class="flex items-center gap-3">
+              <span class="flex h-11 w-11 items-center justify-center rounded-nya-md bg-nya-surface-muted"><KeyRound size={20} color={typeColors[provider.type] || 'var(--nya-text-secondary)'} /></span>
+              <div><h2 class="text-card-title text-nya-text-primary">{provider.name}</h2><div class="mt-1 flex flex-wrap items-center gap-2"><Badge variant="info">{typeLabels[provider.type] || provider.type}</Badge><Badge variant={provider.enabled ? 'success' : 'default'}>{provider.enabled ? '已启用' : '已禁用'}</Badge><span class="text-micro text-nya-text-tertiary">配置修订 #{provider.revision}</span></div></div>
             </div>
-            <div>
-              <h3 style="font-size: 15px; font-weight: 650; color: var(--nya-text-primary);">{p.name}</h3>
-              <div class="flex items-center gap-2 mt-0.5">
-                <Badge variant="info">{typeLabels[p.type] || p.type}</Badge>
-                <Badge variant={p.enabled === false ? 'default' : 'success'}>{p.enabled === false ? '已禁用' : '已启用'}</Badge>
-              </div>
+            <div class="flex flex-wrap items-center gap-2">
+              <Button variant="ghost" size="sm" onclick={() => openEdit(provider)}>编辑配置</Button>
+              <Button variant="ghost" size="sm" onclick={() => toggleProvider(provider)}>{provider.enabled ? '禁用' : '启用'}</Button>
+              <Button variant="soft" size="sm" onclick={() => handleTest(provider)} loading={test?.loading ?? false}>配置校验</Button>
+              <Button variant="ghost" size="sm" onclick={() => requestDelete(provider)}>删除</Button>
             </div>
           </div>
-          <div class="flex items-center gap-2">
-            <Button variant="ghost" size="sm" onclick={() => openEdit(p)}>编辑凭据</Button>
-            <Button variant="ghost" size="sm" onclick={() => toggleProvider(p)}>{p.enabled === false ? '启用' : '禁用'}</Button>
-            <Button variant="soft" size="sm" onclick={() => handleTest(p.name)}>
-              {#if test?.loading}
-                <Loader2 size={14} class="animate-spin" /> 测试中...
+
+          <dl class="mt-4 grid gap-2 rounded-nya-sm bg-nya-surface-muted p-3 text-small md:grid-cols-2">
+            <div><dt class="text-nya-text-tertiary">Client ID</dt><dd class="truncate font-mono text-nya-text-primary" title={provider.client_id}>{provider.client_id}</dd></div>
+            <div><dt class="text-nya-text-tertiary">Scopes</dt><dd class="text-nya-text-primary">{provider.scopes.length > 0 ? provider.scopes.join(' ') : '未配置'}</dd></div>
+            <div class="md:col-span-2"><dt class="text-nya-text-tertiary">Discovery URL</dt><dd class="break-all font-mono text-nya-text-primary">{provider.discovery_url || '未配置'}</dd></div>
+            <div><dt class="text-nya-text-tertiary">Authorization URL</dt><dd class="break-all font-mono text-nya-text-primary">{provider.authorization_url || '由 Provider 默认或 Discovery 决定'}</dd></div>
+            <div><dt class="text-nya-text-tertiary">Token URL</dt><dd class="break-all font-mono text-nya-text-primary">{provider.token_url || '由 Provider 默认或 Discovery 决定'}</dd></div>
+            <div class="md:col-span-2"><dt class="text-nya-text-tertiary">Userinfo URL</dt><dd class="break-all font-mono text-nya-text-primary">{provider.userinfo_url || '由 Provider 默认或 Discovery 决定'}</dd></div>
+          </dl>
+
+          {#if test && !test.loading}
+            {@const valid = test.result ? validationPassed(test.result) : false}
+            <div class="mt-4 rounded-nya-sm px-3 py-3 text-small {valid ? 'bg-nya-success-soft' : 'bg-nya-danger-soft'}">
+              {#if test.result}
+                <div class="flex items-start gap-2 {valid ? 'text-nya-success' : 'text-nya-danger'}">{#if valid}<CheckCircle size={15} class="mt-0.5 shrink-0" />{:else}<XCircle size={15} class="mt-0.5 shrink-0" />{/if}<div><p class="font-semibold">{valid ? '配置有效' : '配置存在问题'}</p><p class="mt-0.5">{test.result.message}</p>{#if test.result.latency_ms !== undefined}<p class="mt-1 text-nya-text-tertiary">校验耗时 {test.result.latency_ms} ms</p>{/if}</div></div>
               {:else}
-                测试连接
+                <div class="flex items-center gap-2 text-nya-danger"><XCircle size={15} /> {test.error || '配置校验失败'}</div>
               {/if}
-            </Button>
-            <Button variant="ghost" size="sm" onclick={() => deleteProvider(p.name)}>删除</Button>
-          </div>
-        </div>
+              <p class="mt-2 text-nya-text-tertiary">该检查不会验证 Client Secret；客户端凭据只会在真实登录时由上游验证。</p>
+            </div>
+          {/if}
 
-        <!-- 测试结果 -->
-        {#if test && !test.loading}
-          <div class="mt-3 px-3 py-2 rounded-lg" style="background: {test.success ? 'var(--nya-success-soft)' : 'var(--nya-danger-soft)'}; font-size: 13px;">
-            {#if test.success}
-              <span class="flex items-center gap-1.5" style="color: var(--nya-success);">
-                <CheckCircle size={14} /> 连接成功
-                {#if test.latency !== undefined}
-                  <span style="color: var(--nya-text-tertiary); margin-left: 8px;">延迟 {test.latency}ms</span>
-                {/if}
-                {#if test.status_code}
-                  <span style="color: var(--nya-text-tertiary); margin-left: 8px;">HTTP {test.status_code}</span>
-                {/if}
-              </span>
-            {:else}
-              <span class="flex items-center gap-1.5" style="color: var(--nya-danger);">
-                <XCircle size={14} /> 连接失败: {test.error || '未知错误'}
-              </span>
-            {/if}
-          </div>
-        {/if}
-
-        <!-- 配置说明 -->
-        {#if setupGuides[p.type]}
-          <details class="mt-3">
-            <summary style="font-size: 12px; color: var(--nya-primary); cursor: pointer;">配置指南</summary>
-            <div class="mt-2 px-3 py-2 rounded-lg" style="background: var(--nya-surface-muted); font-size: 12px;">
-              <ol style="padding-left: 16px; line-height: 1.8; color: var(--nya-text-secondary);">
-                {#each setupGuides[p.type].steps as step}
-                  <li>{step}</li>
-                {/each}
-              </ol>
-              {#if setupGuides[p.type].url}
-                <a href={setupGuides[p.type].url} target="_blank" class="inline-flex items-center gap-1 mt-2" style="color: var(--nya-primary); font-size: 12px;">
-                  打开管理页面 <ExternalLink size={12} />
-                </a>
-              {/if}
-              <p class="mt-2" style="font-size: 11px; color: var(--nya-text-tertiary);">
-                Callback URL: <code style="background: var(--nya-surface); padding: 1px 4px; border-radius: 4px;">{callbackURL(p.name)}</code>
-              </p>
+          <details class="mt-4">
+            <summary class="cursor-pointer text-small text-nya-primary">配置指南</summary>
+            <div class="mt-2 rounded-nya-sm bg-nya-surface-muted px-3 py-3 text-small text-nya-text-secondary">
+              <ol class="list-decimal space-y-1 pl-5">{#each setupGuides[provider.type]?.steps || [] as step}<li>{step}</li>{/each}</ol>
+              {#if setupGuides[provider.type]?.url}<a href={setupGuides[provider.type].url} target="_blank" rel="noreferrer" class="mt-2 inline-flex items-center gap-1 text-nya-primary hover:underline">打开管理页面 <ExternalLink size={12} /></a>{/if}
+              {#if callbackURL(provider.name)}<p class="mt-2 break-all text-micro text-nya-text-tertiary">Callback URL: <code>{callbackURL(provider.name)}</code></p>{/if}
             </div>
           </details>
-        {/if}
-      </Card>
-    {/each}
-  </div>
-{/if}
+        </Card>
+      {/each}
+    </div>
+  {/snippet}
+</ResourceState>
 
-<!-- 添加 Modal -->
-<Modal bind:open={showCreate} title="添加身份提供者" size="md">
+<Modal bind:open={showCreate} title="添加身份提供者" description="凭据会在服务端加密保存" size="md">
   <form onsubmit={handleCreate} class="space-y-4">
-    {#if createError}
-      <div class="px-3 py-2 rounded-lg" style="background: var(--nya-danger-soft); font-size: 12px; color: var(--nya-danger);">{createError}</div>
-    {/if}
-    <Input label="名称" bind:value={newProvider.name} required placeholder="例如: github, google, my-sso" />
-    <Select label="类型" bind:value={newProvider.type} options={[
-      { value: 'github', label: 'GitHub' },
-      { value: 'google', label: 'Google' },
-      { value: 'generic', label: '通用 OIDC' },
-    ]} />
-    <Input label="Client ID" bind:value={newProvider.client_id} required mono placeholder="从 OAuth Provider 获取" />
-    <Input label="Client Secret" type="password" bind:value={newProvider.client_secret} required placeholder="从 OAuth Provider 获取" />
-    {#if newProvider.type === 'generic'}
-      <Input label="Discovery URL" bind:value={newProvider.discovery_url} placeholder="https://idp.example.com/.well-known/openid-configuration" />
-    {/if}
-    {#if setupGuides[newProvider.type]}
-      <div class="px-3 py-2 rounded-lg" style="background: var(--nya-info-soft); font-size: 12px; color: var(--nya-info);">
-        Callback URL 需要在 {typeLabels[newProvider.type]} 中设置为:
-        <code style="display: block; margin-top: 4px; background: rgba(0,0,0,0.05); padding: 2px 6px; border-radius: 4px;">
-          {callbackURL(newProvider.name)}
-        </code>
-      </div>
-    {/if}
-    <div class="flex justify-end gap-2 pt-2">
-      <Button variant="secondary" onclick={() => (showCreate = false)}>取消</Button>
-      <Button type="submit" variant="primary">添加</Button>
-    </div>
+    {#if createError}<p class="rounded-nya-sm bg-nya-danger-soft px-3 py-2 text-small text-nya-danger" role="alert">{createError}</p>{/if}
+    <Input id="provider-name" label="名称" bind:value={newProvider.name} required placeholder="例如 github 或 company-sso" />
+    <Select id="provider-type" label="类型" bind:value={newProvider.type} options={[{ value: 'github', label: 'GitHub' }, { value: 'google', label: 'Google' }, { value: 'generic', label: '通用 OIDC' }]} />
+    <Input id="provider-client-id" label="Client ID" bind:value={newProvider.client_id} required mono placeholder="从上游 Provider 获取" />
+    <Input id="provider-client-secret" label="Client Secret" type="password" bind:value={newProvider.client_secret} required autocomplete="off" placeholder="从上游 Provider 获取" />
+    <Input id="provider-scopes" label="Scopes" bind:value={newProvider.scopes} mono placeholder="openid profile email" />
+    <Input id="provider-discovery" label="Discovery URL" bind:value={newProvider.discovery_url} required={newProvider.type === 'generic'} placeholder="https://idp.example.com/.well-known/openid-configuration" />
+    <div class="grid gap-4 sm:grid-cols-2"><Input id="provider-authorization-url" label="Authorization URL" bind:value={newProvider.authorization_url} placeholder="可选，自定义授权端点" /><Input id="provider-token-url" label="Token URL" bind:value={newProvider.token_url} placeholder="可选，自定义 Token 端点" /></div>
+    <Input id="provider-userinfo-url" label="Userinfo URL" bind:value={newProvider.userinfo_url} placeholder="可选，自定义 Userinfo 端点" />
+    <label class="flex items-start gap-2 rounded-nya-sm bg-nya-surface-muted px-3 py-2"><input type="checkbox" bind:checked={newProvider.enabled} class="mt-0.5" /><span><span class="block text-body text-nya-text-primary">创建后立即启用</span><span class="block text-small text-nya-text-tertiary">关闭时，配置会以禁用状态一次性保存，不会进入登录运行时。</span></span></label>
+    {#if callbackURL(newProvider.name)}<div class="rounded-nya-sm bg-nya-info-soft px-3 py-2 text-small text-nya-info">在上游设置 Callback URL：<code class="mt-1 block break-all">{callbackURL(newProvider.name)}</code></div>{/if}
+    <div class="flex justify-end gap-2 pt-2"><Button variant="secondary" onclick={() => (showCreate = false)} disabled={creating}>取消</Button><Button type="submit" variant="primary" loading={creating}>添加</Button></div>
   </form>
 </Modal>
 
-<!-- 编辑凭据 Modal -->
-<Modal bind:open={showEdit} title="编辑 Provider 凭据 - {editingProvider?.name || ''}" size="sm">
+<Modal bind:open={showEdit} title={`编辑 Provider 配置 · ${editingProvider?.name || ''}`} description="Provider 名称和类型创建后不可变更" size="lg">
   <form onsubmit={handleEdit} class="space-y-4">
-    {#if editError}
-      <div class="px-3 py-2 rounded-lg" style="background: var(--nya-danger-soft); font-size: 12px; color: var(--nya-danger);">{editError}</div>
-    {/if}
-    <div class="px-3 py-2 rounded-lg" style="background: var(--nya-warning-soft); font-size: 12px; color: var(--nya-warning);">
-      更新 Client Secret 后，旧 Secret 将立即失效。
-    </div>
-    <Input label="Client ID（留空则不更新）" bind:value={editForm.client_id} mono placeholder="留空保持不变" />
-    <Input label="Client Secret（留空则不更新）" type="password" bind:value={editForm.client_secret} placeholder="留空保持不变" />
-    <div class="flex justify-end gap-2 pt-2">
-      <Button variant="secondary" onclick={() => (showEdit = false)}>取消</Button>
-      <Button type="submit" variant="primary">保存</Button>
-    </div>
+    {#if editError}<p class="rounded-nya-sm bg-nya-danger-soft px-3 py-2 text-small text-nya-danger" role="alert">{editError}</p>{/if}
+    <p class="rounded-nya-sm bg-nya-warning-soft px-3 py-2 text-small text-nya-warning">当前配置修订 #{editingProvider?.revision ?? '-'}。Client Secret 留空会保持原值；填写新值则立即替换。</p>
+    <div class="grid gap-4 sm:grid-cols-2"><Input id="edit-provider-client-id" label="Client ID" bind:value={editForm.client_id} mono required /><div><span class="mb-1.5 block text-body-medium text-nya-text-primary">名称 / 类型</span><p class="rounded-nya-sm bg-nya-surface-muted px-3 py-2 text-small text-nya-text-secondary">{editingProvider?.name} · {editingProvider ? (typeLabels[editingProvider.type] || editingProvider.type) : ''}</p></div></div>
+    <Input id="edit-provider-client-secret" label="Client Secret" type="password" bind:value={editForm.client_secret} autocomplete="off" placeholder="留空保持不变" />
+    <Input id="edit-provider-scopes" label="Scopes" bind:value={editForm.scopes} mono placeholder="openid profile email" />
+    <Input id="edit-provider-discovery" label="Discovery URL" bind:value={editForm.discovery_url} required={editingProvider?.type === 'generic'} />
+    <div class="grid gap-4 sm:grid-cols-2"><Input id="edit-provider-authorization-url" label="Authorization URL" bind:value={editForm.authorization_url} placeholder="留空以使用默认值" /><Input id="edit-provider-token-url" label="Token URL" bind:value={editForm.token_url} placeholder="留空以使用默认值" /></div>
+    <Input id="edit-provider-userinfo-url" label="Userinfo URL" bind:value={editForm.userinfo_url} placeholder="留空以使用默认值" />
+    <label class="flex items-start gap-2 rounded-nya-sm bg-nya-surface-muted px-3 py-2"><input type="checkbox" bind:checked={editForm.enabled} class="mt-0.5" /><span><span class="block text-body text-nya-text-primary">启用 Provider</span><span class="block text-small text-nya-text-tertiary">禁用后会立即从运行时 Provider 快照移除。</span></span></label>
+    <div class="flex justify-end gap-2 pt-2"><Button variant="secondary" onclick={() => (showEdit = false)} disabled={editing}>取消</Button><Button type="submit" variant="primary" loading={editing}>保存</Button></div>
   </form>
 </Modal>
+
+<ConfirmDialog
+  bind:open={deleteOpen}
+  title="删除身份提供者"
+  description={`删除后，用户将无法继续通过“${deleteTarget?.name || ''}”登录或绑定身份。`}
+  confirmLabel="永久删除"
+  confirmationText={deleteTarget?.name || ''}
+  error={deleteError}
+  onconfirm={deleteProvider}
+/>

@@ -17,21 +17,25 @@ const (
 
 // User represents a registered user.
 type User struct {
-	ID                 uuid.UUID         `json:"id" db:"id"`
-	Username           string            `json:"username" db:"username"`
-	Email              *string           `json:"email,omitempty" db:"email"`
-	PasswordHash       *string           `json:"-" db:"password_hash"`
-	DisplayName        *string           `json:"display_name,omitempty" db:"display_name"`
-	AvatarURL          *string           `json:"avatar_url,omitempty" db:"avatar_url"`
-	Status             UserStatus        `json:"status" db:"status"`
-	Role               string            `json:"role" db:"role"`
-	AuthVersion        int64             `json:"-" db:"auth_version"`
-	MustChangePassword bool              `json:"must_change_password" db:"must_change_password"`
-	LastLoginAt        *time.Time        `json:"last_login_at,omitempty" db:"last_login_at"`
-	LastLoginIP        *string           `json:"last_login_ip,omitempty" db:"last_login_ip"`
-	Metadata           map[string]string `json:"metadata,omitempty" db:"metadata"`
-	CreatedAt          time.Time         `json:"created_at" db:"created_at"`
-	UpdatedAt          time.Time         `json:"updated_at" db:"updated_at"`
+	ID                  uuid.UUID         `json:"id" db:"id"`
+	Username            string            `json:"username" db:"username"`
+	Email               *string           `json:"email,omitempty" db:"email"`
+	EmailVerifiedAt     *time.Time        `json:"email_verified_at,omitempty" db:"email_verified_at"`
+	PasswordHash        *string           `json:"-" db:"password_hash"`
+	PasswordChangedAt   *time.Time        `json:"-" db:"password_changed_at"`
+	DisplayName         *string           `json:"display_name,omitempty" db:"display_name"`
+	AvatarURL           *string           `json:"avatar_url,omitempty" db:"avatar_url"`
+	Status              UserStatus        `json:"status" db:"status"`
+	Role                string            `json:"role" db:"role"`
+	AuthVersion         int64             `json:"-" db:"auth_version"`
+	SessionVersion      int64             `json:"-" db:"session_version"`
+	MustChangePassword  bool              `json:"must_change_password" db:"must_change_password"`
+	LastAuthenticatedAt *time.Time        `json:"-" db:"last_authenticated_at"`
+	LastLoginAt         *time.Time        `json:"last_login_at,omitempty" db:"last_login_at"`
+	LastLoginIP         *string           `json:"last_login_ip,omitempty" db:"last_login_ip"`
+	Metadata            map[string]string `json:"metadata,omitempty" db:"metadata"`
+	CreatedAt           time.Time         `json:"created_at" db:"created_at"`
+	UpdatedAt           time.Time         `json:"updated_at" db:"updated_at"`
 }
 
 // CreateUserRequest is the payload to create a user.
@@ -74,7 +78,10 @@ type ChangePasswordRequest struct {
 
 // SessionResponse is returned after login and when loading the browser session.
 type SessionResponse struct {
-	User               *User  `json:"user"`
-	CSRFToken          string `json:"csrf_token"`
-	MustChangePassword bool   `json:"must_change_password"`
+	User               *User      `json:"user"`
+	CSRFToken          string     `json:"csrf_token"`
+	MustChangePassword bool       `json:"must_change_password"`
+	HasPassword        bool       `json:"has_password"`
+	EmailVerified      bool       `json:"email_verified"`
+	AuthenticatedAt    *time.Time `json:"authenticated_at"`
 }

@@ -4,33 +4,59 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
+	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/nyasharp/nyauth/internal/audit"
 	"github.com/nyasharp/nyauth/internal/crypto"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
 
-var ErrClientQuotaExceeded = errors.New("OAuth client quota exceeded")
+var (
+	ErrClientQuotaExceeded    = errors.New("OAuth client quota exceeded")
+	ErrClientOwnerUnavailable = errors.New("OAuth client owner is unavailable")
+)
 
 type Store struct{ db *pgxpool.Pool }
 
 func NewStore(db *pgxpool.Pool) *Store { return &Store{db: db} }
 
-const clientSelectCols = `id, secret_hash, name, redirect_uris, post_logout_redirect_uris, grants, scopes, is_public, owner_id, metadata, created_at, updated_at`
+const clientSelectCols = `id, secret_hash, secret_hint, secret_version, secret_rotated_at, secret_last_used_at, name, redirect_uris, post_logout_redirect_uris, grants, scopes, is_public, owner_id, metadata, created_at, updated_at`
 
 type rowScanner interface{ Scan(dest ...any) error }
 
+type clientExecer interface {
+	Exec(context.Context, string, ...any) (pgconn.CommandTag, error)
+}
+
 func scanClient(row rowScanner) (*models.OAuthClient, error) {
 	c := &models.OAuthClient{}
-	if err := row.Scan(&c.ID, &c.SecretHash, &c.Name, &c.RedirectURIs, &c.PostLogoutRedirectURIs, &c.Grants, &c.Scopes, &c.IsPublic, &c.OwnerID, &c.Metadata, &c.CreatedAt, &c.UpdatedAt); err != nil {
+	if err := row.Scan(
+		&c.ID, &c.SecretHash, &c.SecretHint, &c.SecretVersion, &c.SecretRotatedAt,
+		&c.SecretLastUsedAt, &c.Name, &c.RedirectURIs, &c.PostLogoutRedirectURIs,
+		&c.Grants, &c.Scopes, &c.IsPublic, &c.OwnerID, &c.Metadata, &c.CreatedAt, &c.UpdatedAt,
+	); err != nil {
 		return nil, err
 	}
 	return c, nil
 }
 
 func (s *Store) Create(ctx context.Context, c *models.OAuthClient) error {
-	_, err := s.db.Exec(ctx, `INSERT INTO oauth_clients (id,secret_hash,name,redirect_uris,post_logout_redirect_uris,grants,scopes,is_public,owner_id,metadata) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, c.ID, c.SecretHash, c.Name, c.RedirectURIs, c.PostLogoutRedirectURIs, c.Grants, c.Scopes, c.IsPublic, c.OwnerID, c.Metadata)
+	prepareSecretMetadata(c, time.Now().UTC())
+	return insertClient(ctx, s.db, c)
+}
+
+func insertClient(ctx context.Context, execer clientExecer, c *models.OAuthClient) error {
+	_, err := execer.Exec(ctx, `
+		INSERT INTO oauth_clients (
+			id,secret_hash,secret_hint,secret_version,secret_rotated_at,name,redirect_uris,
+			post_logout_redirect_uris,grants,scopes,is_public,owner_id,metadata
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+	`, c.ID, c.SecretHash, c.SecretHint, c.SecretVersion, c.SecretRotatedAt, c.Name,
+		c.RedirectURIs, c.PostLogoutRedirectURIs, c.Grants, c.Scopes, c.IsPublic, c.OwnerID, c.Metadata)
 	if err != nil {
 		return fmt.Errorf("creating OAuth client: %w", err)
 	}
@@ -38,6 +64,7 @@ func (s *Store) Create(ctx context.Context, c *models.OAuthClient) error {
 }
 
 func (s *Store) CreateForOwner(ctx context.Context, c *models.OAuthClient, ownerID string, limit int) error {
+	prepareSecretMetadata(c, time.Now().UTC())
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return err
@@ -45,6 +72,9 @@ func (s *Store) CreateForOwner(ctx context.Context, c *models.OAuthClient, owner
 	defer tx.Rollback(ctx)
 	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, ownerID); err != nil {
 		return fmt.Errorf("locking client owner: %w", err)
+	}
+	if err = requireActiveOwner(ctx, tx, ownerID); err != nil {
+		return err
 	}
 	var count int
 	if err = tx.QueryRow(ctx, `SELECT COUNT(*) FROM oauth_clients WHERE owner_id=$1`, ownerID).Scan(&count); err != nil {
@@ -54,11 +84,46 @@ func (s *Store) CreateForOwner(ctx context.Context, c *models.OAuthClient, owner
 		return ErrClientQuotaExceeded
 	}
 	c.OwnerID = &ownerID
-	_, err = tx.Exec(ctx, `INSERT INTO oauth_clients (id,secret_hash,name,redirect_uris,post_logout_redirect_uris,grants,scopes,is_public,owner_id,metadata) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`, c.ID, c.SecretHash, c.Name, c.RedirectURIs, c.PostLogoutRedirectURIs, c.Grants, c.Scopes, c.IsPublic, ownerID, c.Metadata)
-	if err != nil {
-		return fmt.Errorf("creating owned OAuth client: %w", err)
+	if err = insertClient(ctx, tx, c); err != nil {
+		return err
 	}
 	return tx.Commit(ctx)
+}
+
+func (s *Store) CreateWithAudit(ctx context.Context, c *models.OAuthClient, ownerID *string, limit int, mutation audit.MutationAudit) error {
+	prepareSecretMetadata(c, time.Now().UTC())
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("starting OAuth client creation: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	c.OwnerID = nil
+	if ownerID != nil {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, *ownerID); err != nil {
+			return fmt.Errorf("locking client owner: %w", err)
+		}
+		if err := requireActiveOwner(ctx, tx, *ownerID); err != nil {
+			return err
+		}
+		var count int
+		if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM oauth_clients WHERE owner_id=$1`, *ownerID).Scan(&count); err != nil {
+			return fmt.Errorf("counting owner clients: %w", err)
+		}
+		if count >= limit {
+			return ErrClientQuotaExceeded
+		}
+		c.OwnerID = ownerID
+	}
+	if err := insertClient(ctx, tx, c); err != nil {
+		return err
+	}
+	if err := audit.EnqueueMutationTx(ctx, tx, mutation.WithTarget("client", c.ID)); err != nil {
+		return fmt.Errorf("auditing OAuth client creation: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("committing OAuth client creation: %w", err)
+	}
+	return nil
 }
 
 func (s *Store) GetByID(ctx context.Context, id string) (*models.OAuthClient, error) {
@@ -69,20 +134,124 @@ func (s *Store) GetByID(ctx context.Context, id string) (*models.OAuthClient, er
 	return c, nil
 }
 
-func (s *Store) Update(ctx context.Context, c *models.OAuthClient) error {
-	result, err := s.db.Exec(ctx, `UPDATE oauth_clients SET name=$2,redirect_uris=$3,post_logout_redirect_uris=$4,grants=$5,scopes=$6,metadata=$7,updated_at=NOW() WHERE id=$1`, c.ID, c.Name, c.RedirectURIs, c.PostLogoutRedirectURIs, c.Grants, c.Scopes, c.Metadata)
+func (s *Store) Update(ctx context.Context, c *models.OAuthClient, mutation audit.MutationAudit) error {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("starting client update: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	result, err := tx.Exec(ctx, `UPDATE oauth_clients SET name=$2,redirect_uris=$3,post_logout_redirect_uris=$4,grants=$5,scopes=$6,metadata=$7,updated_at=NOW() WHERE id=$1`, c.ID, c.Name, c.RedirectURIs, c.PostLogoutRedirectURIs, c.Grants, c.Scopes, c.Metadata)
 	if err != nil {
 		return fmt.Errorf("updating client: %w", err)
 	}
 	if result.RowsAffected() == 0 {
 		return pgx.ErrNoRows
 	}
+	if err := audit.EnqueueMutationTx(ctx, tx, mutation.WithTarget("client", c.ID)); err != nil {
+		return fmt.Errorf("auditing client update: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("committing client update: %w", err)
+	}
 	return nil
 }
-func (s *Store) Delete(ctx context.Context, id string) error {
-	result, err := s.db.Exec(ctx, `DELETE FROM oauth_clients WHERE id=$1`, id)
+
+func (s *Store) UpdateOwner(ctx context.Context, clientID string, ownerID *string, limit int, mutation audit.MutationAudit) (*models.OAuthClient, error) {
+	tx, err := s.db.Begin(ctx)
 	if err != nil {
-		return err
+		return nil, fmt.Errorf("starting client owner update: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	current, err := scanClient(tx.QueryRow(ctx, `SELECT `+clientSelectCols+` FROM oauth_clients WHERE id=$1 FOR UPDATE`, clientID))
+	if err != nil {
+		return nil, err
+	}
+	oldOwnerID := current.OwnerID
+	oldValue, newValue := ownerIDValue(oldOwnerID), ownerIDValue(ownerID)
+	ownersToLock := make([]string, 0, 2)
+	if oldValue != "" {
+		ownersToLock = append(ownersToLock, oldValue)
+	}
+	if newValue != "" && newValue != oldValue {
+		ownersToLock = append(ownersToLock, newValue)
+	}
+	sort.Strings(ownersToLock)
+	for _, lockedOwnerID := range ownersToLock {
+		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, lockedOwnerID); err != nil {
+			return nil, fmt.Errorf("locking client owner: %w", err)
+		}
+	}
+
+	if ownerID != nil && newValue != oldValue {
+		if err := requireActiveOwner(ctx, tx, *ownerID); err != nil {
+			return nil, err
+		}
+	}
+	if newValue != "" && newValue != oldValue {
+		var count int
+		if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM oauth_clients WHERE owner_id=$1`, newValue).Scan(&count); err != nil {
+			return nil, fmt.Errorf("counting owner clients: %w", err)
+		}
+		if count >= limit {
+			return nil, ErrClientQuotaExceeded
+		}
+	}
+
+	updated := current
+	if oldValue != newValue {
+		var ownerArgument any
+		if ownerID != nil {
+			ownerArgument = *ownerID
+		}
+		updated, err = scanClient(tx.QueryRow(ctx, `
+			UPDATE oauth_clients SET owner_id=$2,updated_at=NOW()
+			WHERE id=$1 RETURNING `+clientSelectCols,
+			clientID, ownerArgument,
+		))
+		if err != nil {
+			return nil, fmt.Errorf("updating client owner: %w", err)
+		}
+	}
+	audited := mutation.WithTarget("client", clientID).WithDetails(map[string]any{
+		"old_owner_id": nullableOwnerID(oldOwnerID),
+		"new_owner_id": nullableOwnerID(ownerID),
+	})
+	if err := audit.EnqueueMutationTx(ctx, tx, audited); err != nil {
+		return nil, fmt.Errorf("auditing client owner update: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("committing client owner update: %w", err)
+	}
+	return updated, nil
+}
+
+func (s *Store) Delete(ctx context.Context, id string, mutation audit.MutationAudit) error {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("starting client deletion: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	result, err := tx.Exec(ctx, `DELETE FROM oauth_clients WHERE id=$1`, id)
+	if err != nil {
+		return fmt.Errorf("deleting client: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return pgx.ErrNoRows
+	}
+	if err := audit.EnqueueMutationTx(ctx, tx, mutation.WithTarget("client", id)); err != nil {
+		return fmt.Errorf("auditing client deletion: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("committing client deletion: %w", err)
+	}
+	return nil
+}
+
+func (s *Store) DeleteForOwner(ctx context.Context, id, ownerID string) error {
+	result, err := s.db.Exec(ctx, `DELETE FROM oauth_clients WHERE id=$1 AND owner_id=$2`, id, ownerID)
+	if err != nil {
+		return fmt.Errorf("deleting owned client: %w", err)
 	}
 	if result.RowsAffected() == 0 {
 		return pgx.ErrNoRows
@@ -138,15 +307,120 @@ func (s *Store) list(ctx context.Context, p models.Pagination, ownerID string, o
 }
 
 func (s *Store) AuthenticateClient(ctx context.Context, clientID, clientSecret string) (*models.OAuthClient, error) {
-	c, err := s.GetByID(ctx, clientID)
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("invalid client credentials")
+	}
+	defer tx.Rollback(ctx)
+	c, err := scanClient(tx.QueryRow(ctx, `SELECT `+clientSelectCols+` FROM oauth_clients WHERE id=$1 FOR UPDATE`, clientID))
 	if err != nil {
 		return nil, fmt.Errorf("invalid client credentials")
 	}
 	if c.SecretHash == nil || !crypto.VerifyClientSecret(clientSecret, *c.SecretHash) {
 		return nil, fmt.Errorf("invalid client credentials")
 	}
+	usedAt := time.Now().UTC()
+	if _, err := tx.Exec(ctx, `UPDATE oauth_clients SET secret_last_used_at=$2 WHERE id=$1`, clientID, usedAt); err != nil {
+		return nil, fmt.Errorf("invalid client credentials")
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("invalid client credentials")
+	}
+	c.SecretLastUsedAt = &usedAt
 	return c, nil
 }
+
+func (s *Store) RotateSecret(ctx context.Context, clientID, secretHash, secretHint string, rotatedAt time.Time, mutation audit.MutationAudit) (int64, error) {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("starting client secret rotation: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	var version int64
+	if err := tx.QueryRow(ctx, `
+		UPDATE oauth_clients SET secret_hash=$2,secret_hint=$3,secret_version=secret_version+1,
+		       secret_rotated_at=$4,secret_last_used_at=NULL,updated_at=$4
+		WHERE id=$1 AND is_public=FALSE
+		RETURNING secret_version
+	`, clientID, secretHash, secretHint, rotatedAt).Scan(&version); err != nil {
+		return 0, err
+	}
+	if err := audit.EnqueueMutationTx(ctx, tx, mutation.WithTarget("client", clientID)); err != nil {
+		return 0, fmt.Errorf("auditing client secret rotation: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("committing client secret rotation: %w", err)
+	}
+	return version, nil
+}
+
+func (s *Store) RotateSecretForOwner(ctx context.Context, clientID, ownerID, secretHash, secretHint string, rotatedAt time.Time) (int64, error) {
+	return s.rotateSecret(ctx, clientID, ownerID, true, secretHash, secretHint, rotatedAt)
+}
+
+func (s *Store) rotateSecret(ctx context.Context, clientID, ownerID string, owned bool, secretHash, secretHint string, rotatedAt time.Time) (int64, error) {
+	query := `
+		UPDATE oauth_clients SET secret_hash=$2,secret_hint=$3,secret_version=secret_version+1,
+		       secret_rotated_at=$4,secret_last_used_at=NULL,updated_at=$4
+		WHERE id=$1 AND is_public=FALSE`
+	args := []any{clientID, secretHash, secretHint, rotatedAt}
+	if owned {
+		query += ` AND owner_id=$5`
+		args = append(args, ownerID)
+	}
+	query += ` RETURNING secret_version`
+	var version int64
+	if err := s.db.QueryRow(ctx, query, args...).Scan(&version); err != nil {
+		return 0, err
+	}
+	return version, nil
+}
+
+func prepareSecretMetadata(c *models.OAuthClient, now time.Time) {
+	if c.IsPublic {
+		c.SecretHash = nil
+		c.SecretHint = nil
+		c.SecretVersion = 0
+		c.SecretRotatedAt = nil
+		c.SecretLastUsedAt = nil
+		return
+	}
+	if c.SecretVersion <= 0 {
+		c.SecretVersion = 1
+	}
+	if c.SecretRotatedAt == nil {
+		c.SecretRotatedAt = &now
+	}
+}
+
+func requireActiveOwner(ctx context.Context, tx pgx.Tx, ownerID string) error {
+	var status string
+	if err := tx.QueryRow(ctx, `SELECT status FROM users WHERE id=$1 FOR SHARE`, ownerID).Scan(&status); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return ErrClientOwnerUnavailable
+		}
+		return fmt.Errorf("checking client owner: %w", err)
+	}
+	if status != "active" {
+		return ErrClientOwnerUnavailable
+	}
+	return nil
+}
+
+func ownerIDValue(ownerID *string) string {
+	if ownerID == nil {
+		return ""
+	}
+	return *ownerID
+}
+
+func nullableOwnerID(ownerID *string) any {
+	if ownerID == nil {
+		return nil
+	}
+	return *ownerID
+}
+
 func (s *Store) CountByOwner(ctx context.Context, ownerID string) (int64, error) {
 	var count int64
 	err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM oauth_clients WHERE owner_id=$1`, ownerID).Scan(&count)

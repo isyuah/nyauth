@@ -12,17 +12,43 @@
   let error = $state('');
   let loading = $state(false);
   let providers = $state<Array<{ name: string; type: string }>>([]);
-  let returnTo = $derived(safeReturnPath($page.url.searchParams.get('return_to'), '/dashboard'));
+  let providersLoading = $state(true);
+  let providersError = $state('');
+  let cleanedReturnTo = $state<string | null>(null);
+  let returnTo = $derived(cleanedReturnTo ?? safeReturnPath($page.url.searchParams.get('return_to'), '/dashboard'));
+
+  async function loadProviders() {
+    providersLoading = true;
+    providersError = '';
+    try {
+      providers = await api.getProviders();
+    } catch (cause) {
+      providers = [];
+      providersError = cause instanceof Error ? cause.message : '外部登录方式加载失败';
+    } finally {
+      providersLoading = false;
+    }
+  }
 
   onMount(async () => {
     const providerError = consumeProviderAuthError();
-    if (providerError) error = providerError;
-    const existing = await sessionStore.initialize();
-    if (existing) {
-      goto(existing.must_change_password ? '/change-password' : returnTo);
-      return;
+    if (providerError) {
+      error = providerError.message;
+      const cleanURL = new URL(providerError.cleanPath, window.location.origin);
+      cleanedReturnTo = safeReturnPath(cleanURL.searchParams.get('return_to'), '/dashboard');
     }
-    try { providers = await api.getProviders(); } catch {}
+    try {
+      const existing = await sessionStore.initialize(true);
+      if (existing) {
+        goto(existing.must_change_password
+          ? `/change-password?return_to=${encodeURIComponent(returnTo)}`
+          : returnTo);
+        return;
+      }
+    } catch (cause) {
+      error = cause instanceof Error ? `会话检查失败：${cause.message}` : '暂时无法连接认证服务';
+    }
+    await loadProviders();
   });
 
   async function handleLogin(e: Event) {
@@ -57,13 +83,13 @@
 
 <svelte:head><title>登录 - Nya</title></svelte:head>
 
-<div class="min-h-screen flex items-center justify-center px-4" style="background: var(--nya-gradient-soft)">
+<main class="min-h-screen flex items-center justify-center px-4" style="background: var(--nya-gradient-soft)">
   <div class="w-full max-w-[400px]">
     <!-- 品牌区 -->
     <div class="text-center mb-8">
       <div class="relative inline-block">
-        <span class="text-display bg-nya-gradient-brand bg-clip-text text-transparent">Nya</span>
-        <svg class="absolute -top-3 -left-2 w-8 h-5" viewBox="0 0 24 16" fill="none">
+        <h1 class="text-[38px] font-bold leading-none text-nya-primary">Nya</h1>
+        <svg aria-hidden="true" focusable="false" class="absolute -top-3 -left-2 w-8 h-5" viewBox="0 0 24 16" fill="none">
           <path d="M2 16L8 2L12 10L16 2L22 16" stroke="var(--nya-primary)" stroke-width="2" stroke-linecap="round" fill="var(--nya-primary-soft)"/>
         </svg>
       </div>
@@ -73,21 +99,30 @@
     <!-- 登录卡片 -->
     <div class="bg-nya-surface rounded-nya-lg shadow-nya-sm border border-nya-border p-8">
       {#if error}
-        <div class="mb-5 px-4 py-3 bg-nya-danger-soft border border-nya-danger/20 rounded-nya-sm text-small text-nya-danger">
+        <div role="alert" class="mb-5 px-4 py-3 bg-nya-danger-soft border border-nya-danger/20 rounded-nya-sm text-small text-nya-danger">
           {error}
         </div>
       {/if}
 
       <form onsubmit={handleLogin} class="space-y-4">
-        <Input id="username" label="用户名" bind:value={username} required placeholder="输入用户名" />
-        <Input id="password" type="password" label="密码" bind:value={password} required placeholder="输入密码" />
+        <Input id="username" label="用户名" bind:value={username} required autocomplete="username" placeholder="输入用户名" />
+        <Input id="password" type="password" label="密码" bind:value={password} required autocomplete="current-password" placeholder="输入密码" />
 
-        <Button type="submit" {loading} size="lg" variant="primary">
+        <div class="flex justify-end"><a href="/forgot-password" class="text-small text-nya-primary hover:underline">忘记密码？</a></div>
+
+        <Button type="submit" {loading} size="lg" variant="primary" fullWidth>
           {loading ? '登录中...' : '登录'}
         </Button>
       </form>
 
-      {#if providers.length > 0}
+      {#if providersLoading}
+        <p class="mt-5 text-center text-small text-nya-text-tertiary" role="status">正在加载外部登录方式…</p>
+      {:else if providersError}
+        <div class="mt-5 flex items-center justify-between gap-3 rounded-nya-sm bg-nya-warning-soft px-3 py-2">
+          <p class="text-small text-nya-warning" role="alert">外部登录方式暂时不可用</p>
+          <Button variant="ghost" size="sm" onclick={loadProviders}>重试</Button>
+        </div>
+      {:else if providers.length > 0}
         <div class="mt-6">
           <div class="relative my-4">
             <div class="absolute inset-0 flex items-center"><div class="w-full border-t border-nya-divider"></div></div>
@@ -107,4 +142,4 @@
       {/if}
     </div>
   </div>
-</div>
+</main>

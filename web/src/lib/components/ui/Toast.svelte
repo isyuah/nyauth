@@ -1,5 +1,4 @@
 <script lang="ts">
-  import { onMount } from 'svelte';
   import { CheckCircle, AlertCircle, AlertTriangle, Info, X } from 'lucide-svelte';
 
   let toasts = $state<Array<{ id: number; type: string; message: string }>>([]);
@@ -32,7 +31,7 @@
   };
 </script>
 
-<div class="fixed top-4 right-4 z-[100] flex flex-col gap-2">
+<div class="fixed right-4 top-4 z-[100] flex flex-col gap-2" aria-live="polite" aria-atomic="false">
   {#each toasts as toast (toast.id)}
     <div class="flex items-center gap-3 pl-4 pr-3 py-3 bg-nya-surface border-l-4 rounded-nya-sm shadow-nya-md animate-toast {colors[toast.type]}">
       {#if icons[toast.type]}
@@ -40,7 +39,7 @@
         <Icon size={18} />
       {/if}
       <span class="text-body text-nya-text-primary flex-1">{toast.message}</span>
-      <button onclick={() => removeToast(toast.id)} class="p-1 hover:bg-nya-surface-hover rounded-nya-xs">
+      <button onclick={() => removeToast(toast.id)} class="rounded-nya-xs p-1 hover:bg-nya-surface-muted" aria-label="关闭通知">
         <X size={14} class="text-nya-text-tertiary" />
       </button>
     </div>

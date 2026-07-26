@@ -19,9 +19,19 @@ func TestDescribeMutation(t *testing.T) {
 		successAlreadyAudited   bool
 	}{
 		{http.MethodPut, "/api/me", "/api/me", "", models.AuditUserProfileUpdated, "user", false},
+		{http.MethodPost, "/api/me/password/set", "/api/me/password/set", "", models.AuditUserPasswordSet, "user", true},
+		{http.MethodDelete, "/api/me/identities/identity-1", "/api/me/identities/{id}", "identity-1", models.AuditIdentityUnbound, "identity", true},
 		{http.MethodPost, "/api/admin/users", "/api/admin/users", "", models.AuditUserCreated, "user", false},
 		{http.MethodPost, "/api/admin/users/target/suspend", "/api/admin/users/{id}/suspend", "target", models.AuditUserSuspended, "user", true},
-		{http.MethodPut, "/api/admin/clients/client-1", "/api/admin/clients/{id}", "client-1", models.AuditClientUpdated, "client", false},
+		{http.MethodPost, "/api/admin/users/target/reset-password", "/api/admin/users/{id}/reset-password", "target", models.AuditUserPasswordReset, "user", true},
+		{http.MethodDelete, "/api/admin/users/target/sessions", "/api/admin/users/{id}/sessions", "target", models.AuditUserSessionsRevoked, "user", true},
+		{http.MethodDelete, "/api/admin/users/target", "/api/admin/users/{id}", "target", models.AuditUserDeleted, "user", true},
+		{http.MethodPost, "/api/admin/clients", "/api/admin/clients", "", models.AuditClientCreated, "client", true},
+		{http.MethodPut, "/api/admin/clients/client-1", "/api/admin/clients/{id}", "client-1", models.AuditClientUpdated, "client", true},
+		{http.MethodPut, "/api/admin/clients/client-1/owner", "/api/admin/clients/{id}/owner", "client-1", models.AuditClientOwnerChanged, "client", true},
+		{http.MethodPost, "/api/admin/clients/client-1/rotate-secret", "/api/admin/clients/{id}/rotate-secret", "client-1", models.AuditClientSecretRotated, "client", true},
+		{http.MethodDelete, "/api/admin/clients/client-1", "/api/admin/clients/{id}", "client-1", models.AuditClientDeleted, "client", true},
+		{http.MethodPost, "/api/my/clients/client-1/rotate-secret", "/api/my/clients/{id}/rotate-secret", "client-1", models.AuditClientSecretRotated, "client", true},
 		{http.MethodPost, "/api/admin/providers/github/test", "/api/admin/providers/{id}/test", "github", models.AuditProviderTested, "provider", true},
 	}
 	for _, test := range tests {
@@ -44,5 +54,75 @@ func TestDescribeMutation(t *testing.T) {
 				t.Fatalf("target ID = %q, want %q", descriptor.targetID, test.id)
 			}
 		})
+	}
+}
+
+func TestDescribeAdminSessionRevocationIsTransactionalHighRisk(t *testing.T) {
+	actor := &models.User{ID: uuid.New(), Username: "admin"}
+	routeContext := chi.NewRouteContext()
+	routeContext.RoutePatterns = append(routeContext.RoutePatterns, "/api/admin/users/{id}/sessions")
+	routeContext.URLParams.Add("id", "user-1")
+	request := httptest.NewRequest(http.MethodDelete, "/api/admin/users/user-1/sessions", nil)
+	request = request.WithContext(context.WithValue(request.Context(), chi.RouteCtxKey, routeContext))
+
+	descriptor, ok := describeMutation(request, actor)
+	if !ok {
+		t.Fatal("administrator session revocation was not described")
+	}
+	if descriptor.event != models.AuditUserSessionsRevoked || descriptor.targetType != "user" ||
+		descriptor.targetID != "user-1" || descriptor.riskLevel != "high" || !descriptor.successAlreadyAudited {
+		t.Fatalf("unexpected descriptor: %#v", descriptor)
+	}
+}
+
+func TestDescribeClientOwnerMutationIsTransactionalHighRisk(t *testing.T) {
+	actor := &models.User{ID: uuid.New(), Username: "admin"}
+	routeContext := chi.NewRouteContext()
+	routeContext.RoutePatterns = append(routeContext.RoutePatterns, "/api/admin/clients/{id}/owner")
+	routeContext.URLParams.Add("id", "client-1")
+	request := httptest.NewRequest(http.MethodPut, "/api/admin/clients/client-1/owner", nil)
+	request = request.WithContext(context.WithValue(request.Context(), chi.RouteCtxKey, routeContext))
+
+	descriptor, ok := describeMutation(request, actor)
+	if !ok {
+		t.Fatal("client owner mutation was not described")
+	}
+	if descriptor.event != models.AuditClientOwnerChanged || descriptor.riskLevel != "high" || !descriptor.successAlreadyAudited {
+		t.Fatalf("unexpected descriptor: %#v", descriptor)
+	}
+}
+
+func TestDescribeAdminIdentityRemoval(t *testing.T) {
+	actor := &models.User{ID: uuid.New(), Username: "admin"}
+	routeContext := chi.NewRouteContext()
+	routeContext.RoutePatterns = append(routeContext.RoutePatterns, "/api/admin/users/{id}/identities/{identity_id}")
+	routeContext.URLParams.Add("id", "user-1")
+	routeContext.URLParams.Add("identity_id", "identity-1")
+	request := httptest.NewRequest(http.MethodDelete, "/api/admin/users/user-1/identities/identity-1", nil)
+	request = request.WithContext(context.WithValue(request.Context(), chi.RouteCtxKey, routeContext))
+
+	descriptor, ok := describeMutation(request, actor)
+	if !ok {
+		t.Fatal("admin identity removal was not described")
+	}
+	if descriptor.event != models.AuditIdentityUnbound || descriptor.targetType != "identity" || descriptor.targetID != "identity-1" || !descriptor.successAlreadyAudited {
+		t.Fatalf("unexpected descriptor: %#v", descriptor)
+	}
+}
+
+func TestDescribeAuthorizationRevocation(t *testing.T) {
+	actor := &models.User{ID: uuid.New(), Username: "alice"}
+	routeContext := chi.NewRouteContext()
+	routeContext.RoutePatterns = append(routeContext.RoutePatterns, "/api/me/authorizations/{client_id}")
+	routeContext.URLParams.Add("client_id", "client-1")
+	request := httptest.NewRequest(http.MethodDelete, "/api/me/authorizations/client-1", nil)
+	request = request.WithContext(context.WithValue(request.Context(), chi.RouteCtxKey, routeContext))
+
+	descriptor, ok := describeMutation(request, actor)
+	if !ok {
+		t.Fatal("authorization revocation was not described")
+	}
+	if descriptor.event != models.AuditAuthorizationRevoked || descriptor.targetType != "client" || descriptor.targetID != "client-1" || !descriptor.successAlreadyAudited {
+		t.Fatalf("unexpected descriptor: %#v", descriptor)
 	}
 }

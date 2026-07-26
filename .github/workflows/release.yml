@@ -1,0 +1,467 @@
+name: Release container
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: read
+
+env:
+  REGISTRY: ghcr.io
+
+jobs:
+  quality:
+    name: Quality and security gates
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: nyauth
+          POSTGRES_USER: nyauth
+          POSTGRES_PASSWORD: release-database-password-0123456789
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U nyauth -d nyauth"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      NYAUTH_TEST_DATABASE_DSN: postgres://nyauth:release-database-password-0123456789@127.0.0.1:5432/nyauth?sslmode=disable
+      NYAUTH_TEST_REDIS_ADDR: 127.0.0.1:6379
+      NYAUTH_TEST_REDIS_DB: "0"
+      NYAUTH_DATABASE_DSN_FILE: .release-secrets/database-runtime-dsn
+      NYAUTH_DATABASE_MIGRATION_DSN_FILE: .release-secrets/database-migration-dsn
+      NYAUTH_DATABASE_RUNTIME_PASSWORD_FILE: .release-secrets/database-runtime-password
+      NYAUTH_REDIS_PASSWORD_FILE: .release-secrets/redis-password
+      NYAUTH_AUTH_MASTER_KEY_FILE: .release-secrets/auth-master-key
+      POSTGRES_PASSWORD_FILE: .release-secrets/postgres-password
+      NYAUTH_AUTH_ISSUER: https://auth.release.invalid
+      NYAUTH_TRUSTED_PROXY_CIDRS: 172.30.0.0/24
+      NYAUTH_IMAGE: ghcr.io/nyasharp/nyauth@sha256:1111111111111111111111111111111111111111111111111111111111111111
+      NYAUTH_REDIS_ADDR: redis.release.invalid:6379
+      NYAUTH_BACKEND_NETWORK: nyauth-release-backend
+      NYAUTH_PROXY_NETWORK: nyauth-release-proxy
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Scan repository secrets
+        uses: gitleaks/gitleaks-action@dcedce43c6f43de0b836d1fe38946645c9c638dc # v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Scan source, dependencies, and configuration
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          scanners: vuln,secret,misconfig
+          format: table
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+      - name: Run Go race tests
+        run: go test -race ./...
+      - name: Run Go vet
+        run: go vet ./...
+      - name: Install govulncheck
+        run: go install golang.org/x/vuln/cmd/govulncheck@v1.6.0
+      - name: Scan Go packages
+        run: govulncheck ./...
+      - name: Install Web dependencies
+        working-directory: web
+        run: npm ci
+      - name: Audit Web dependencies
+        working-directory: web
+        run: npm audit --audit-level=high
+      - name: Check Web types and accessibility
+        working-directory: web
+        run: npm run check
+      - name: Run Web unit tests
+        working-directory: web
+        run: npm run test:unit
+      - name: Build Web application
+        working-directory: web
+        run: npm run build
+      - name: Install Playwright Chromium
+        working-directory: web
+        run: npx playwright install --with-deps chromium
+      - name: Run Web end-to-end, accessibility, and visual tests
+        working-directory: web
+        run: npm run test:e2e
+      - name: Create disposable Compose secret files
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p .release-secrets
+          printf '%s' 'postgres://nyauth_runtime:release-runtime-database-password@postgres:5432/nyauth?sslmode=disable' > .release-secrets/database-runtime-dsn
+          printf '%s' 'postgres://nyauth_migrator:release-migration-database-password@postgres:5432/nyauth?sslmode=disable' > .release-secrets/database-migration-dsn
+          printf '%s' 'release-runtime-database-password' > .release-secrets/database-runtime-password
+          printf '%s' 'release-redis-password-0123456789' > .release-secrets/redis-password
+          printf '%s' 'cmVsZWFzZS1tYXN0ZXIta2V5LTAxMjM0NTY3ODlhYmM=' > .release-secrets/auth-master-key
+          printf '%s' 'release-migration-database-password' > .release-secrets/postgres-password
+      - name: Validate development Compose
+        run: docker compose -f docker-compose.yml config --quiet
+      - name: Validate production Compose
+        run: docker compose -f docker-compose.prod.yml config --quiet
+      - name: Validate HA Compose
+        run: docker compose -f docker-compose.ha.yml config --quiet
+
+  candidate:
+    name: Build candidate image
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      image: ${{ steps.image.outputs.name }}
+      candidate-ref: ${{ steps.image.outputs.candidate-ref }}
+      digest: ${{ steps.build.outputs.digest }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - name: Resolve candidate image reference
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          image="${REGISTRY}/${GITHUB_REPOSITORY,,}"
+          echo "name=${image}" >> "${GITHUB_OUTPUT}"
+          echo "candidate-ref=${image}:candidate-${GITHUB_SHA}" >> "${GITHUB_OUTPUT}"
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push SHA candidate
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          push: true
+          platforms: linux/amd64,linux/arm64
+          tags: ${{ steps.image.outputs.candidate-ref }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.version=${{ github.ref_name }}
+            org.opencontainers.image.revision=${{ github.sha }}
+          build-args: |
+            VERSION=${{ github.ref_name }}
+            VCS_REF=${{ github.sha }}
+          provenance: mode=max
+          sbom: true
+
+  verify:
+    name: Verify, sign, and attest candidate
+    needs: candidate
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      contents: read
+      packages: write
+      id-token: write
+      attestations: write
+    env:
+      IMAGE: ${{ needs.candidate.outputs.image }}
+      DIGEST: ${{ needs.candidate.outputs.digest }}
+      IMAGE_REFERENCE: ${{ needs.candidate.outputs.image }}@${{ needs.candidate.outputs.digest }}
+      SMOKE_POSTGRES_PASSWORD: release-smoke-postgres-password-0123456789
+      SMOKE_RUNTIME_POSTGRES_PASSWORD: release-smoke-runtime-postgres-password-0123456789
+      SMOKE_REDIS_PASSWORD: release-smoke-redis-password-0123456789
+      SMOKE_MASTER_KEY: cmVsZWFzZS1tYXN0ZXIta2V5LTAxMjM0NTY3ODlhYmM=
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Inspect candidate manifest and attestations
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p release-evidence
+          printf '%s\n' "${DIGEST}" > release-evidence/digest.txt
+          printf '%s\n' "${{ needs.candidate.outputs.candidate-ref }}" > release-evidence/candidate-reference.txt
+
+          docker buildx imagetools inspect "${IMAGE_REFERENCE}" > release-evidence/manifest.txt
+          docker buildx imagetools inspect --raw "${IMAGE_REFERENCE}" > release-evidence/manifest.json
+          jq -e '
+            any(.manifests[]?; .platform.os == "linux" and .platform.architecture == "amd64") and
+            any(.manifests[]?; .platform.os == "linux" and .platform.architecture == "arm64")
+          ' release-evidence/manifest.json >/dev/null
+
+          docker buildx imagetools inspect --format '{{ json .SBOM }}' "${IMAGE_REFERENCE}" > release-evidence/sbom.json
+          docker buildx imagetools inspect --format '{{ json .Provenance }}' "${IMAGE_REFERENCE}" > release-evidence/provenance.json
+          jq -e '. != null and . != {} and . != [] and . != ""' release-evidence/sbom.json >/dev/null
+          jq -e '. != null and . != {} and . != [] and . != ""' release-evidence/provenance.json >/dev/null
+          printf 'sbom=present\nprovenance=present\nplatforms=linux/amd64,linux/arm64\n' > release-evidence/attestation-checks.txt
+      - name: Scan amd64 candidate image
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        env:
+          TRIVY_PLATFORM: linux/amd64
+        with:
+          image-ref: ${{ env.IMAGE_REFERENCE }}
+          format: table
+          output: release-evidence/trivy-amd64.txt
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+      - name: Scan arm64 candidate image
+        uses: aquasecurity/trivy-action@57a97c7e7821a5776cebc9bb87c984fa69cba8f1 # 0.35.0
+        env:
+          TRIVY_PLATFORM: linux/arm64
+        with:
+          image-ref: ${{ env.IMAGE_REFERENCE }}
+          format: table
+          output: release-evidence/trivy-arm64.txt
+          exit-code: "1"
+          ignore-unfixed: true
+          severity: HIGH,CRITICAL
+      - name: Start isolated smoke dependencies
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker network create nyauth-release-smoke
+          docker run --detach --name nyauth-release-postgres --network nyauth-release-smoke \
+            --tmpfs /var/lib/postgresql/data \
+            --env POSTGRES_DB=nyauth \
+            --env POSTGRES_USER=nyauth_migrator \
+            --env "POSTGRES_PASSWORD=${SMOKE_POSTGRES_PASSWORD}" \
+            postgres:16-alpine
+          docker run --detach --name nyauth-release-redis --network nyauth-release-smoke \
+            --tmpfs /data \
+            redis:7-alpine redis-server --save '' --appendonly no --maxmemory 384mb --maxmemory-policy noeviction \
+            --requirepass "${SMOKE_REDIS_PASSWORD}"
+
+          for attempt in $(seq 1 60); do
+            if docker exec nyauth-release-postgres pg_isready -U nyauth_migrator -d nyauth >/dev/null 2>&1 && \
+              docker exec nyauth-release-redis redis-cli -a "${SMOKE_REDIS_PASSWORD}" ping 2>/dev/null | grep -q PONG; then
+              break
+            fi
+            if test "${attempt}" -eq 60; then exit 1; fi
+            sleep 1
+          done
+
+          docker exec --env "PGPASSWORD=${SMOKE_POSTGRES_PASSWORD}" nyauth-release-postgres \
+            psql --set=ON_ERROR_STOP=1 --username nyauth_migrator --dbname nyauth --command \
+            "CREATE ROLE nyauth_runtime LOGIN PASSWORD '${SMOKE_RUNTIME_POSTGRES_PASSWORD}' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS;"
+      - name: Migrate and start final amd64 image
+        shell: bash
+        run: |
+          set -euo pipefail
+          migration_env=(
+            --env NYAUTH_ENVIRONMENT=production
+            --env "NYAUTH_DATABASE_DSN=postgres://nyauth_migrator:${SMOKE_POSTGRES_PASSWORD}@nyauth-release-postgres:5432/nyauth?sslmode=disable"
+            --env NYAUTH_DATABASE_RUNTIME_ROLE=nyauth_runtime
+            --env NYAUTH_AUDIT_RETENTION=8760h
+          )
+          runtime_env=(
+            --env NYAUTH_ENVIRONMENT=development
+            --env "NYAUTH_DATABASE_DSN=postgres://nyauth_runtime:${SMOKE_RUNTIME_POSTGRES_PASSWORD}@nyauth-release-postgres:5432/nyauth?sslmode=disable"
+            --env NYAUTH_DATABASE_RUNTIME_ROLE=nyauth_runtime
+            --env NYAUTH_REDIS_ADDR=nyauth-release-redis:6379
+            --env "NYAUTH_REDIS_PASSWORD=${SMOKE_REDIS_PASSWORD}"
+            --env NYAUTH_AUTH_ISSUER=http://127.0.0.1:18080
+            --env "NYAUTH_AUTH_MASTER_KEY=${SMOKE_MASTER_KEY}"
+            --env NYAUTH_BOOTSTRAP_ADMIN_USERNAME=release-smoke-admin
+            --env NYAUTH_BOOTSTRAP_ADMIN_PASSWORD=release-smoke-admin-password-0123456789
+          )
+
+          docker run --rm --platform linux/amd64 --network nyauth-release-smoke \
+            "${migration_env[@]}" "${IMAGE_REFERENCE}" migrate
+          docker run --detach --platform linux/amd64 --name nyauth-release-app \
+            --network nyauth-release-smoke --publish 127.0.0.1:18080:8080 \
+            "${runtime_env[@]}" "${IMAGE_REFERENCE}" serve
+
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent --show-error http://127.0.0.1:18080/readyz >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs nyauth-release-app
+          exit 1
+      - name: Verify amd64 endpoints and arm64 executable
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error http://127.0.0.1:18080/livez | tee release-evidence/livez.json
+          curl --fail --silent --show-error http://127.0.0.1:18080/readyz | tee release-evidence/readyz.json
+          curl --fail --silent --show-error http://127.0.0.1:18080/.well-known/openid-configuration | tee release-evidence/discovery.json
+          docker exec --env "PGPASSWORD=${SMOKE_RUNTIME_POSTGRES_PASSWORD}" nyauth-release-postgres \
+            psql --tuples-only --no-align --username nyauth_runtime --dbname nyauth \
+            --command 'SELECT current_user' | grep -qx nyauth_runtime
+          if docker exec --env "PGPASSWORD=${SMOKE_RUNTIME_POSTGRES_PASSWORD}" nyauth-release-postgres \
+            psql --set=ON_ERROR_STOP=1 --username nyauth_runtime --dbname nyauth \
+            --command 'CREATE TABLE release_runtime_ddl_probe(id integer)'; then
+            echo 'runtime database role unexpectedly has DDL permission' >&2
+            exit 1
+          fi
+          docker run --rm --platform linux/arm64 --network nyauth-release-smoke \
+            "${IMAGE_REFERENCE}" healthcheck -url http://nyauth-release-app:8080/livez -timeout 10s \
+            2>&1 | tee release-evidence/arm64-executable.txt
+      - name: Run standard OAuth/OIDC flow against candidate digest
+        env:
+          NYAUTH_EXAMPLE_ISSUER: http://127.0.0.1:18080
+          NYAUTH_EXAMPLE_ADMIN_USERNAME: release-smoke-admin
+          NYAUTH_EXAMPLE_ADMIN_PASSWORD: release-smoke-admin-password-0123456789
+          NYAUTH_EXAMPLE_ADMIN_NEW_PASSWORD: release-smoke-admin-password-after-change-0123456789
+        run: go test ./examples/oidc_bff -run TestStandardOAuthOIDCBFFFlow -count=1 -v
+      - name: Print smoke logs on failure
+        if: failure()
+        shell: bash
+        run: |
+          docker logs nyauth-release-app 2>&1 || true
+          docker logs nyauth-release-postgres 2>&1 || true
+          docker logs nyauth-release-redis 2>&1 || true
+      - name: Remove isolated smoke resources
+        if: always()
+        shell: bash
+        run: |
+          docker rm --force nyauth-release-app nyauth-release-redis nyauth-release-postgres 2>/dev/null || true
+          docker network rm nyauth-release-smoke 2>/dev/null || true
+      - uses: sigstore/cosign-installer@f713795cb21599bc4e5c4b58cbad1da852d7eeb9 # v3
+      - name: Sign immutable candidate digest
+        shell: bash
+        run: cosign sign --yes "${IMAGE_REFERENCE}" 2>&1 | tee release-evidence/cosign-sign.txt
+      - name: Verify keyless signature
+        shell: bash
+        run: |
+          set -euo pipefail
+          identity="${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/.github/workflows/release.yml@${GITHUB_REF}"
+          cosign verify \
+            --certificate-identity "${identity}" \
+            --certificate-oidc-issuer "https://token.actions.githubusercontent.com" \
+            "${IMAGE_REFERENCE}" 2>&1 | tee release-evidence/cosign-verify.txt
+      - name: Create GitHub provenance attestation
+        uses: actions/attest-build-provenance@96b4a1ef7235a096b17240c259729fdd70c83d45 # v2
+        with:
+          subject-name: ${{ needs.candidate.outputs.image }}
+          subject-digest: ${{ needs.candidate.outputs.digest }}
+          push-to-registry: true
+      - name: Verify GitHub provenance attestation
+        shell: bash
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+          gh attestation verify "oci://${IMAGE_REFERENCE}" --repo "${GITHUB_REPOSITORY}" \
+            2>&1 | tee release-evidence/github-attestation-verify.txt
+      - name: Upload candidate evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-candidate-evidence-${{ github.run_id }}
+          path: release-evidence
+          if-no-files-found: error
+          retention-days: 90
+
+  promote:
+    name: Promote verified digest to release tags
+    needs:
+      - candidate
+      - verify
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      packages: write
+    env:
+      IMAGE: ${{ needs.candidate.outputs.image }}
+      DIGEST: ${{ needs.candidate.outputs.digest }}
+      IMAGE_REFERENCE: ${{ needs.candidate.outputs.image }}@${{ needs.candidate.outputs.digest }}
+    steps:
+      - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+      - uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Resolve semantic release tags
+        id: metadata
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ${{ needs.candidate.outputs.image }}
+          flavor: latest=false
+          tags: |
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+      - name: Promote immutable digest
+        shell: bash
+        env:
+          PROMOTION_TAGS: ${{ steps.metadata.outputs.tags }}
+          IMMUTABLE_VERSION_TAG: ${{ needs.candidate.outputs.image }}:${{ steps.metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          mkdir -p promotion-evidence
+          promotion_args=()
+          tags=()
+          while IFS= read -r tag; do
+            if [[ -n "${tag}" ]]; then
+              tags+=("${tag}")
+              promotion_args+=(--tag "${tag}")
+            fi
+          done <<< "${PROMOTION_TAGS}"
+          if [[ "${#tags[@]}" -eq 0 ]]; then
+            echo 'No semantic release tags were generated' >&2
+            exit 1
+          fi
+
+          if existing_inspect="$(docker buildx imagetools inspect "${IMMUTABLE_VERSION_TAG}" 2>/dev/null)"; then
+            existing_digest="$(awk '$1 == "Digest:" {print $2; exit}' <<< "${existing_inspect}")"
+            if [[ "${existing_digest}" != "${DIGEST}" ]]; then
+              echo "Refusing to overwrite ${IMMUTABLE_VERSION_TAG} at ${existing_digest}" >&2
+              exit 1
+            fi
+          fi
+
+          docker buildx imagetools create "${promotion_args[@]}" "${IMAGE_REFERENCE}"
+          printf 'source=%s\n' "${IMAGE_REFERENCE}" > promotion-evidence/promotion.txt
+          for tag in "${tags[@]}"; do
+            inspect="$(docker buildx imagetools inspect "${tag}")"
+            promoted_digest="$(awk '$1 == "Digest:" {print $2; exit}' <<< "${inspect}")"
+            if [[ "${promoted_digest}" != "${DIGEST}" ]]; then
+              echo "Promoted tag ${tag} resolved to ${promoted_digest}, expected ${DIGEST}" >&2
+              exit 1
+            fi
+            printf 'tag=%s digest=%s\n' "${tag}" "${promoted_digest}" | tee -a promotion-evidence/promotion.txt
+          done
+      - name: Upload promotion evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: release-promotion-evidence-${{ github.run_id }}
+          path: promotion-evidence
+          if-no-files-found: error
+          retention-days: 90

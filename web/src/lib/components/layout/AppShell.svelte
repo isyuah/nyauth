@@ -1,57 +1,76 @@
 <script lang="ts">
+  import type { Snippet } from 'svelte';
+  import { Dialog } from 'bits-ui';
   import Sidebar from './Sidebar.svelte';
   import Topbar from './Topbar.svelte';
-  import type { Snippet } from 'svelte';
 
-  let { children }: { children: Snippet } = $props();
+  let {
+    section = 'user',
+    children,
+  }: {
+    section?: 'admin' | 'user';
+    children: Snippet;
+  } = $props();
+
   let sidebarCollapsed = $state(false);
   let mobileMenuOpen = $state(false);
   let isMobile = $state(false);
 
-  // Detect mobile on mount and resize
-  function checkMobile() {
-    isMobile = typeof window !== 'undefined' && window.innerWidth < 768;
-    if (isMobile) sidebarCollapsed = true;
+  function checkViewport() {
+    isMobile = window.innerWidth < 768;
+    if (isMobile) {
+      sidebarCollapsed = true;
+    } else {
+      mobileMenuOpen = false;
+    }
   }
 
   $effect(() => {
-    checkMobile();
-    if (typeof window !== 'undefined') {
-      window.addEventListener('resize', checkMobile);
-      return () => window.removeEventListener('resize', checkMobile);
-    }
+    if (typeof window === 'undefined') return;
+    checkViewport();
+    window.addEventListener('resize', checkViewport);
+    return () => window.removeEventListener('resize', checkViewport);
   });
-
-  function closeMobileMenu() {
-    mobileMenuOpen = false;
-  }
 </script>
 
-<div class="min-h-screen bg-[var(--nya-bg)] text-[var(--nya-text-primary)]">
-  <!-- Mobile overlay -->
-  {#if isMobile && mobileMenuOpen}
-    <!-- svelte-ignore a11y_click_events_have_key_events a11y_no_static_element_interactions -->
-    <div class="fixed inset-0 bg-black/30 z-40 md:hidden" onclick={closeMobileMenu}></div>
+<div class="min-h-screen bg-nya-bg text-nya-text-primary">
+  {#if isMobile}
+    <Dialog.Root bind:open={mobileMenuOpen}>
+      <Dialog.Portal>
+        <Dialog.Overlay class="fixed inset-0 z-40 bg-black/30" />
+        <Dialog.Content id="mobile-navigation" class="fixed inset-y-0 left-0 z-50 w-[248px] outline-none">
+          <Dialog.Title class="sr-only">{section === 'admin' ? '管理后台导航' : '用户中心导航'}</Dialog.Title>
+          <Sidebar
+            {section}
+            collapsed={false}
+            mobile={true}
+            mobileOpen={true}
+            onNavigate={() => (mobileMenuOpen = false)}
+          />
+        </Dialog.Content>
+      </Dialog.Portal>
+    </Dialog.Root>
+  {:else}
+    <Sidebar
+      {section}
+      collapsed={sidebarCollapsed}
+      mobile={false}
+      mobileOpen={false}
+    />
   {/if}
 
-  <Sidebar
-    collapsed={isMobile ? false : sidebarCollapsed}
-    mobile={isMobile}
-    mobileOpen={mobileMenuOpen}
-    onNavigate={closeMobileMenu}
-  />
-
   <div
-    class="min-h-screen transition-all duration-300"
+    class="min-h-screen transition-[margin] duration-300"
     style="margin-left: {isMobile ? '0' : (sidebarCollapsed ? '72px' : '248px')};"
   >
     <Topbar
       bind:collapsed={sidebarCollapsed}
       {isMobile}
+      {mobileMenuOpen}
+      {section}
       onMenuClick={() => (mobileMenuOpen = !mobileMenuOpen)}
     />
-
-    <main style="padding: {isMobile ? '16px' : '20px 28px 32px'};">
+    <main class="px-4 py-5 md:px-7 md:pb-8">
       {@render children()}
     </main>
   </div>

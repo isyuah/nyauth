@@ -1,0 +1,324 @@
+name: Isolated recovery drill
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: Workflow run ID containing the protected PostgreSQL backup artifact
+        required: true
+        type: string
+      artifact_name:
+        description: Artifact containing one backup and recovery-manifest.json
+        required: true
+        default: nyauth-recovery-backup
+        type: string
+      expected_backup_sha256:
+        description: Trusted SHA-256 for the database backup from the approved backup system
+        required: true
+        type: string
+      recovery_reference_time:
+        description: RFC3339 incident or drill cutoff used to calculate RPO
+        required: true
+        type: string
+      recovery_point:
+        description: RFC3339 PostgreSQL recovery point represented by the artifact
+        required: true
+        type: string
+      max_rpo_minutes:
+        description: Maximum accepted difference between reference time and recovery point
+        required: true
+        default: 60
+        type: number
+      max_application_rto_minutes:
+        description: Maximum accepted time for artifact restore and application verification
+        required: true
+        default: 40
+        type: number
+      oauth_smoke:
+        description: Run the standard OAuth/OIDC flow with recovery-drill credentials
+        required: true
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  drill:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    environment: recovery-drill
+    env:
+      POSTGRES_PASSWORD: recovery-drill-postgres-password
+      REDIS_PASSWORD: recovery-drill-redis-password-0123456789
+      NYAUTH_RECOVERY_MASTER_KEY: ${{ secrets.NYAUTH_RECOVERY_MASTER_KEY }}
+      NYAUTH_RECOVERY_TEST_USERNAME: ${{ secrets.NYAUTH_RECOVERY_TEST_USERNAME }}
+      NYAUTH_RECOVERY_TEST_PASSWORD: ${{ secrets.NYAUTH_RECOVERY_TEST_PASSWORD }}
+      NYAUTH_RECOVERY_TEST_NEW_PASSWORD: ${{ secrets.NYAUTH_RECOVERY_TEST_NEW_PASSWORD }}
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Build recovery candidate image before downloading protected data
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker build --tag nyauth:recovery-drill .
+      - name: Download protected backup artifact
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          repository: ${{ github.repository }}
+          run-id: ${{ inputs.source_run_id }}
+          name: ${{ inputs.artifact_name }}
+          path: .recovery-input
+      - name: Validate backup and recovery secrets
+        shell: bash
+        env:
+          RECOVERY_REFERENCE_TIME: ${{ inputs.recovery_reference_time }}
+          RECOVERY_POINT: ${{ inputs.recovery_point }}
+          MAX_RPO_MINUTES: ${{ inputs.max_rpo_minutes }}
+          EXPECTED_BACKUP_SHA256: ${{ inputs.expected_backup_sha256 }}
+        run: |
+          set -euo pipefail
+          date +%s > .recovery-start-epoch
+          date --utc --iso-8601=seconds > .recovery-started-at
+          mapfile -t backups < <(find .recovery-input -maxdepth 1 -type f \( -name '*.dump' -o -name '*.sql' -o -name '*.sql.gz' \))
+          test "${#backups[@]}" -eq 1
+          mapfile -d '' -t artifact_files < <(find .recovery-input -type f -print0)
+          test "${#artifact_files[@]}" -eq 2
+          manifest=.recovery-input/recovery-manifest.json
+          test -f "${manifest}"
+          test -n "${NYAUTH_RECOVERY_MASTER_KEY}"
+          test "${#EXPECTED_BACKUP_SHA256}" -eq 64
+          case "${EXPECTED_BACKUP_SHA256}" in
+            *[!0-9a-f]*) echo 'expected_backup_sha256 must be 64 lowercase hexadecimal characters' >&2; exit 1 ;;
+          esac
+          reference_epoch="$(date --date="${RECOVERY_REFERENCE_TIME}" +%s)"
+          recovery_epoch="$(date --date="${RECOVERY_POINT}" +%s)"
+          test "${recovery_epoch}" -le "${reference_epoch}"
+          rpo_seconds=$((reference_epoch - recovery_epoch))
+          test "${rpo_seconds}" -le "$((MAX_RPO_MINUTES * 60))"
+          printf '%s\n' "$((rpo_seconds / 60))" > .recovery-rpo-minutes
+          jq --exit-status --arg recovery_point "${RECOVERY_POINT}" '
+            .format_version == 1 and
+            .recovery_point == $recovery_point and
+            (.backup_created_at | type == "string") and
+            (.backup_created_at | length > 0) and
+            (.counts | type == "object") and
+            ([.counts.users, .counts.oauth_clients, .counts.oauth_providers, .counts.jwk_keys, .counts.audit_logs, .counts.email_outbox]
+              | all(type == "number" and . >= 0 and floor == .))
+          ' "${manifest}" >/dev/null
+          backup_created_at="$(jq --raw-output '.backup_created_at' "${manifest}")"
+          backup_epoch="$(date --date="${backup_created_at}" +%s)"
+          test "${backup_epoch}" -le "${recovery_epoch}"
+          printf '%s\n' "${backups[0]}" > .recovery-backup-path
+          actual_backup_sha256="$(sha256sum "${backups[0]}" | cut -d' ' -f1)"
+          test "${actual_backup_sha256}" = "${EXPECTED_BACKUP_SHA256}"
+          printf '%s\n' "${actual_backup_sha256}" > .recovery-backup-sha256
+          printf '%s\n' "${EXPECTED_BACKUP_SHA256}" > .recovery-expected-backup-sha256
+          stat --format='%s' "${backups[0]}" > .recovery-backup-bytes
+          mkdir -p .recovery-secrets
+          printf '%s' "${NYAUTH_RECOVERY_MASTER_KEY}" > .recovery-secrets/master-key
+          chmod 600 .recovery-secrets/master-key
+      - name: Start isolated PostgreSQL and empty Redis
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker network create nyauth-recovery-drill
+          docker run --detach --name nyauth-recovery-postgres --network nyauth-recovery-drill \
+            --env POSTGRES_DB=nyauth --env POSTGRES_USER=postgres --env POSTGRES_PASSWORD="${POSTGRES_PASSWORD}" \
+            postgres:16-alpine
+          docker run --detach --name nyauth-recovery-redis --network nyauth-recovery-drill \
+            redis:7-alpine redis-server --save '' --appendonly no --maxmemory-policy noeviction --requirepass "${REDIS_PASSWORD}"
+          for attempt in $(seq 1 60); do
+            if docker exec nyauth-recovery-postgres pg_isready -U postgres -d nyauth >/dev/null 2>&1 && \
+               docker exec nyauth-recovery-redis redis-cli -a "${REDIS_PASSWORD}" ping 2>/dev/null | grep -q PONG; then
+              exit 0
+            fi
+            sleep 1
+          done
+          exit 1
+      - name: Restore PostgreSQL backup
+        shell: bash
+        run: |
+          set -euo pipefail
+          backup="$(cat .recovery-backup-path)"
+          case "${backup}" in
+            *.dump)
+              docker cp "${backup}" nyauth-recovery-postgres:/tmp/nyauth.dump
+              docker exec --env PGPASSWORD="${POSTGRES_PASSWORD}" nyauth-recovery-postgres \
+                pg_restore --username postgres --dbname nyauth --clean --if-exists --no-owner --no-privileges /tmp/nyauth.dump
+              ;;
+            *.sql.gz)
+              gzip --decompress --stdout "${backup}" > .recovery-input/nyauth.sql
+              docker cp .recovery-input/nyauth.sql nyauth-recovery-postgres:/tmp/nyauth.sql
+              docker exec --env PGPASSWORD="${POSTGRES_PASSWORD}" nyauth-recovery-postgres \
+                psql --set ON_ERROR_STOP=1 --username postgres --dbname nyauth --file /tmp/nyauth.sql
+              ;;
+            *.sql)
+              docker cp "${backup}" nyauth-recovery-postgres:/tmp/nyauth.sql
+              docker exec --env PGPASSWORD="${POSTGRES_PASSWORD}" nyauth-recovery-postgres \
+                psql --set ON_ERROR_STOP=1 --username postgres --dbname nyauth --file /tmp/nyauth.sql
+              ;;
+          esac
+      - name: Compare restored resource counts with backup manifest
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker exec --env PGPASSWORD="${POSTGRES_PASSWORD}" nyauth-recovery-postgres \
+            psql --tuples-only --no-align --username postgres --dbname nyauth --command "
+              SELECT json_build_object(
+                'users',(SELECT COUNT(*) FROM users),
+                'oauth_clients',(SELECT COUNT(*) FROM oauth_clients),
+                'oauth_providers',(SELECT COUNT(*) FROM oauth_providers),
+                'jwk_keys',(SELECT COUNT(*) FROM jwk_keys),
+                'audit_logs',(SELECT COUNT(*) FROM audit_logs),
+                'email_outbox',(SELECT COUNT(*) FROM email_outbox)
+              )::text
+            " | sed '/^[[:space:]]*$/d' > .recovery-restored-counts.json
+          jq --sort-keys '.counts' .recovery-input/recovery-manifest.json > .recovery-expected-counts.json
+          jq --sort-keys '.' .recovery-restored-counts.json > .recovery-actual-counts.json
+          diff --unified .recovery-expected-counts.json .recovery-actual-counts.json
+      - name: Verify restored encrypted state without mutation
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --network nyauth-recovery-drill \
+            --volume "${PWD}/.recovery-secrets/master-key:/run/secrets/master-key:ro" \
+            --env NYAUTH_ENVIRONMENT=development \
+            --env NYAUTH_DATABASE_DSN="postgres://postgres:${POSTGRES_PASSWORD}@nyauth-recovery-postgres:5432/nyauth?sslmode=disable" \
+            --env NYAUTH_REDIS_ADDR=nyauth-recovery-redis:6379 \
+            --env NYAUTH_REDIS_PASSWORD="${REDIS_PASSWORD}" \
+            --env NYAUTH_AUTH_ISSUER=http://127.0.0.1:18080 \
+            --env NYAUTH_AUTH_MASTER_KEY_FILE=/run/secrets/master-key \
+            nyauth:recovery-drill verify-recovery > .recovery-verification.json
+          jq --exit-status '
+            .schema_dirty == false and
+            .jwk_envelope_verified == true and
+            .provider_envelopes_verified == .counts.oauth_providers and
+            .email_envelopes_sampled <= .email_envelope_rows
+          ' .recovery-verification.json >/dev/null
+      - name: Start isolated Nyauth
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --detach --name nyauth-recovery-app --network nyauth-recovery-drill \
+            --publish 127.0.0.1:18080:8080 \
+            --volume "${PWD}/.recovery-secrets/master-key:/run/secrets/master-key:ro" \
+            --env NYAUTH_ENVIRONMENT=development \
+            --env NYAUTH_DATABASE_DSN="postgres://postgres:${POSTGRES_PASSWORD}@nyauth-recovery-postgres:5432/nyauth?sslmode=disable" \
+            --env NYAUTH_REDIS_ADDR=nyauth-recovery-redis:6379 \
+            --env NYAUTH_REDIS_PASSWORD="${REDIS_PASSWORD}" \
+            --env NYAUTH_AUTH_ISSUER=http://127.0.0.1:18080 \
+            --env NYAUTH_AUTH_MASTER_KEY_FILE=/run/secrets/master-key \
+            --env NYAUTH_BOOTSTRAP_ADMIN_USERNAME=recovery-drill-admin \
+            nyauth:recovery-drill serve
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent --show-error http://127.0.0.1:18080/readyz >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker logs nyauth-recovery-app
+          exit 1
+      - name: Verify recovered dependencies and protocol metadata
+        shell: bash
+        env:
+          MAX_APPLICATION_RTO_MINUTES: ${{ inputs.max_application_rto_minutes }}
+        run: |
+          set -euo pipefail
+          curl --fail --silent --show-error http://127.0.0.1:18080/livez >/dev/null
+          curl --fail --silent --show-error http://127.0.0.1:18080/readyz >/dev/null
+          curl --fail --silent --show-error http://127.0.0.1:18080/.well-known/openid-configuration >/dev/null
+          curl --fail --silent --show-error http://127.0.0.1:18080/.well-known/jwks.json >/dev/null
+          docker exec --env PGPASSWORD="${POSTGRES_PASSWORD}" nyauth-recovery-postgres \
+            psql --tuples-only --no-align --username postgres --dbname nyauth \
+            --command "SELECT version,dirty FROM schema_migrations" > .recovery-schema
+          completed_epoch="$(date +%s)"
+          started_epoch="$(cat .recovery-start-epoch)"
+          application_rto_seconds=$((completed_epoch - started_epoch))
+          test "${application_rto_seconds}" -le "$((MAX_APPLICATION_RTO_MINUTES * 60))"
+          printf '%s\n' "$(((application_rto_seconds + 59) / 60))" > .recovery-application-rto-minutes
+      - name: Run optional OAuth/OIDC smoke
+        if: ${{ inputs.oauth_smoke }}
+        shell: bash
+        env:
+          NYAUTH_EXAMPLE_ISSUER: http://127.0.0.1:18080
+          NYAUTH_EXAMPLE_ADMIN_USERNAME: ${{ secrets.NYAUTH_RECOVERY_TEST_USERNAME }}
+          NYAUTH_EXAMPLE_ADMIN_PASSWORD: ${{ secrets.NYAUTH_RECOVERY_TEST_PASSWORD }}
+          NYAUTH_EXAMPLE_ADMIN_NEW_PASSWORD: ${{ secrets.NYAUTH_RECOVERY_TEST_NEW_PASSWORD }}
+        run: |
+          set -euo pipefail
+          test -n "${NYAUTH_EXAMPLE_ADMIN_USERNAME}"
+          test -n "${NYAUTH_EXAMPLE_ADMIN_PASSWORD}"
+          go test ./examples/oidc_bff -run TestStandardOAuthOIDCBFFFlow -count=1
+      - name: Produce recovery evidence
+        if: always()
+        shell: bash
+        env:
+          SOURCE_RUN_ID: ${{ inputs.source_run_id }}
+          EXPECTED_BACKUP_SHA256: ${{ inputs.expected_backup_sha256 }}
+          RECOVERY_REFERENCE_TIME: ${{ inputs.recovery_reference_time }}
+          RECOVERY_POINT: ${{ inputs.recovery_point }}
+          MAX_RPO_MINUTES: ${{ inputs.max_rpo_minutes }}
+          MAX_APPLICATION_RTO_MINUTES: ${{ inputs.max_application_rto_minutes }}
+          OAUTH_SMOKE: ${{ inputs.oauth_smoke }}
+          JOB_STATUS: ${{ job.status }}
+        run: |
+          {
+            echo '# Nyauth recovery drill'
+            echo
+            echo "- Run: ${GITHUB_SERVER_URL}/${GITHUB_REPOSITORY}/actions/runs/${GITHUB_RUN_ID}"
+            echo "- Source backup run: ${SOURCE_RUN_ID}"
+            echo "- Result: ${JOB_STATUS}"
+            echo "- Started at: $(cat .recovery-started-at 2>/dev/null || echo unavailable)"
+            echo "- Completed at: $(date --utc --iso-8601=seconds)"
+            echo "- Recovery reference time: ${RECOVERY_REFERENCE_TIME}"
+            echo "- Recovery point: ${RECOVERY_POINT}"
+            echo "- Measured RPO minutes: $(cat .recovery-rpo-minutes 2>/dev/null || echo unavailable) / limit ${MAX_RPO_MINUTES}"
+            echo "- Application restore and verification minutes: $(cat .recovery-application-rto-minutes 2>/dev/null || echo unavailable) / limit ${MAX_APPLICATION_RTO_MINUTES}"
+            echo "- Backup SHA-256: $(cat .recovery-backup-sha256 2>/dev/null || echo unavailable)"
+            echo "- Trusted expected SHA-256: ${EXPECTED_BACKUP_SHA256}"
+            echo "- Backup bytes: $(cat .recovery-backup-bytes 2>/dev/null || echo unavailable)"
+            if test -f .recovery-schema; then
+              echo "- Restored schema: $(tr '\n' ' ' < .recovery-schema)"
+            fi
+            echo "- Redis restore policy: empty instance"
+            echo "- OAuth smoke requested: ${OAUTH_SMOKE}"
+            if test -f .recovery-actual-counts.json; then
+              echo
+              echo '## Restored resource counts'
+              echo '```json'
+              jq '.' .recovery-actual-counts.json
+              echo '```'
+            fi
+            if test -f .recovery-verification.json; then
+              echo
+              echo '## Envelope verification'
+              echo '```json'
+              jq '{schema_version,schema_dirty,counts,jwk_envelope_verified,provider_envelopes_verified,email_envelope_rows,email_envelopes_sampled,email_envelope_sample_limit}' .recovery-verification.json
+              echo '```'
+            fi
+          } > recovery-drill-report.md
+      - name: Upload recovery evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: recovery-drill-report-${{ github.run_id }}
+          path: recovery-drill-report.md
+          retention-days: 90
+      - name: Remove isolated recovery resources
+        if: always()
+        shell: bash
+        run: |
+          docker rm --force nyauth-recovery-app nyauth-recovery-redis nyauth-recovery-postgres 2>/dev/null || true
+          docker network rm nyauth-recovery-drill 2>/dev/null || true
+          rm -rf .recovery-input .recovery-secrets
+          rm -f .recovery-*.json .recovery-*.json.* .recovery-backup-path .recovery-schema \
+            .recovery-start-epoch .recovery-started-at .recovery-rpo-minutes \
+            .recovery-application-rto-minutes .recovery-backup-sha256 \
+            .recovery-expected-backup-sha256 .recovery-backup-bytes

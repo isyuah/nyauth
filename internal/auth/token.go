@@ -21,18 +21,21 @@ import (
 const jwtClockSkew = 2 * time.Minute
 
 var (
-	ErrInvalidToken   = errors.New("invalid token")
-	ErrClientMismatch = errors.New("token does not belong to client")
+	ErrInvalidToken               = errors.New("invalid token")
+	ErrClientMismatch             = errors.New("token does not belong to client")
+	ErrRefreshTokenReuse          = errors.New("refresh token reuse detected")
+	ErrTokenValidationUnavailable = errors.New("token validation unavailable")
 )
 
 // TokenService handles JWT generation, validation, and opaque refresh rotation.
 type TokenService struct {
-	jwkManager *JWKManager
-	session    *session.Store
-	users      *user.Service
-	issuer     string
-	accessTTL  time.Duration
-	refreshTTL time.Duration
+	jwkManager      *JWKManager
+	session         *session.Store
+	users           *user.Service
+	issuer          string
+	accessTTL       time.Duration
+	refreshTTL      time.Duration
+	publicKeyLoader func(context.Context, string) (*rsa.PublicKey, error)
 }
 
 func NewTokenService(jwkManager *JWKManager, sessionStore *session.Store, issuer string, accessTTL, refreshTTL time.Duration) *TokenService {
@@ -59,31 +62,23 @@ type Claims struct {
 	Nonce       string `json:"nonce,omitempty"`
 }
 
-// GenerateTokenPair is retained for internal callers and never implicitly issues refresh tokens.
-func (ts *TokenService) GenerateTokenPair(ctx context.Context, clientID, subject string, scopes []string) (*TokenPair, error) {
-	authVersion := int64(0)
-	if id, err := uuid.Parse(subject); err == nil && ts.users != nil {
-		u, err := ts.users.GetByID(ctx, id)
-		if err != nil || u.Status != models.UserStatusActive {
-			return nil, ErrInvalidToken
-		}
-		authVersion = u.AuthVersion
-	}
-	return ts.generateTokenPair(ctx, clientID, subject, scopes, authVersion, false, "")
-}
-
-func (ts *TokenService) GenerateAuthorizationCodeTokenPair(ctx context.Context, clientID, userID string, scopes []string, authVersion int64, issueRefresh bool) (*TokenPair, error) {
-	if authVersion <= 0 {
+func (ts *TokenService) GenerateAuthorizationCodeTokenPair(ctx context.Context, clientID, userID string, scopes []string, authVersion, authorizationIssuedAt int64, issueRefresh bool) (*TokenPair, error) {
+	if authVersion <= 0 || authorizationIssuedAt <= 0 {
 		return nil, fmt.Errorf("invalid user auth version")
 	}
-	return ts.generateTokenPair(ctx, clientID, userID, scopes, authVersion, issueRefresh, "")
+	if err := ts.validateAuthorization(ctx, &session.TokenData{
+		ClientID: clientID, UserID: userID, AuthVersion: authVersion, AuthorizationIssuedAt: authorizationIssuedAt,
+	}); err != nil {
+		return nil, err
+	}
+	return ts.generateTokenPair(ctx, clientID, userID, scopes, authVersion, issueRefresh, "", authorizationIssuedAt)
 }
 
 func (ts *TokenService) GenerateClientTokenPair(ctx context.Context, clientID string, scopes []string) (*TokenPair, error) {
-	return ts.generateTokenPair(ctx, clientID, clientID, scopes, 0, false, "")
+	return ts.generateTokenPair(ctx, clientID, clientID, scopes, 0, false, "", 0)
 }
 
-func (ts *TokenService) generateTokenPair(ctx context.Context, clientID, subject string, scopes []string, authVersion int64, issueRefresh bool, familyKey string) (*TokenPair, error) {
+func (ts *TokenService) generateTokenPair(ctx context.Context, clientID, subject string, scopes []string, authVersion int64, issueRefresh bool, familyKey string, authorizationIssuedAt int64) (*TokenPair, error) {
 	access, jti, err := ts.signAccessToken(ctx, clientID, subject, scopes, authVersion)
 	if err != nil {
 		return nil, err
@@ -94,13 +89,13 @@ func (ts *TokenService) generateTokenPair(ctx context.Context, clientID, subject
 		if err != nil {
 			return nil, fmt.Errorf("generating refresh token: %w", err)
 		}
-		refreshData := &session.TokenData{ClientID: clientID, UserID: subject, Scopes: scopes, TokenUse: "refresh", AuthVersion: authVersion}
+		refreshData := &session.TokenData{ClientID: clientID, UserID: subject, Scopes: scopes, TokenUse: "refresh", AuthVersion: authVersion, AuthorizationIssuedAt: authorizationIssuedAt}
 		if err := ts.session.SaveRefreshToken(ctx, refresh, refreshData, ts.refreshTTL); err != nil {
 			return nil, fmt.Errorf("storing refresh token: %w", err)
 		}
 		familyKey = refreshData.FamilyKey
 	}
-	data := &session.TokenData{ClientID: clientID, UserID: subject, Scopes: scopes, TokenUse: "access", AuthVersion: authVersion, FamilyKey: familyKey}
+	data := &session.TokenData{ClientID: clientID, UserID: subject, Scopes: scopes, TokenUse: "access", AuthVersion: authVersion, FamilyKey: familyKey, AuthorizationIssuedAt: authorizationIssuedAt}
 	var saveErr error
 	if familyKey == "" {
 		saveErr = ts.session.SaveToken(ctx, jti, data, ts.accessTTL)
@@ -172,15 +167,30 @@ func (ts *TokenService) GenerateIDToken(ctx context.Context, clientID, userID st
 
 func (ts *TokenService) ValidateAccessToken(ctx context.Context, tokenString string) (*Claims, error) {
 	claims, err := ts.parseSignedToken(ctx, tokenString)
-	if err != nil || claims.TokenUse != "access" || claims.ID == "" || len(claims.Audience) != 1 {
+	if err != nil {
+		if errors.Is(err, ErrTokenValidationUnavailable) {
+			return nil, err
+		}
+		return nil, ErrInvalidToken
+	}
+	if claims.TokenUse != "access" || claims.ID == "" || len(claims.Audience) != 1 {
 		return nil, ErrInvalidToken
 	}
 	metadata, err := ts.session.GetToken(ctx, claims.ID)
-	if err != nil || metadata.TokenUse != "access" || metadata.ClientID != claims.Audience[0] || metadata.UserID != claims.Subject ||
+	if err != nil {
+		if errors.Is(err, session.ErrNotFound) {
+			return nil, ErrInvalidToken
+		}
+		return nil, fmt.Errorf("%w: loading access-token metadata: %v", ErrTokenValidationUnavailable, err)
+	}
+	if metadata.TokenUse != "access" || metadata.ClientID != claims.Audience[0] || metadata.UserID != claims.Subject ||
 		metadata.AuthVersion != claims.AuthVersion || joinScopes(metadata.Scopes) != claims.Scope {
 		return nil, ErrInvalidToken
 	}
 	if err := ts.validateUser(ctx, claims.Subject, claims.AuthVersion); err != nil {
+		return nil, err
+	}
+	if err := ts.validateAuthorization(ctx, metadata); err != nil {
 		return nil, err
 	}
 	return claims, nil
@@ -208,9 +218,12 @@ func (ts *TokenService) parseSignedToken(ctx context.Context, tokenString string
 	if !ok || kid == "" {
 		return nil, ErrInvalidToken
 	}
-	publicKey, err := ts.getPublicKey(ctx, kid)
+	publicKey, err := ts.loadPublicKey(ctx, kid)
 	if err != nil {
-		return nil, ErrInvalidToken
+		if errors.Is(err, ErrInvalidToken) {
+			return nil, ErrInvalidToken
+		}
+		return nil, fmt.Errorf("%w: loading verification key: %v", ErrTokenValidationUnavailable, err)
 	}
 	claims := &Claims{}
 	parsed, err := jwt.ParseWithClaims(tokenString, claims, func(token *jwt.Token) (interface{}, error) {
@@ -226,7 +239,7 @@ func (ts *TokenService) parseSignedToken(ctx context.Context, tokenString string
 }
 
 func (ts *TokenService) RefreshToken(ctx context.Context, refreshToken, clientID string, allowedScopes []string) (*TokenPair, error) {
-	data, _, err := ts.session.GetRefreshTokenState(ctx, refreshToken)
+	data, used, err := ts.session.GetRefreshTokenState(ctx, refreshToken)
 	if err != nil {
 		return nil, ErrInvalidToken
 	}
@@ -237,7 +250,17 @@ func (ts *TokenService) RefreshToken(ctx context.Context, refreshToken, clientID
 		_ = ts.session.RevokeRefreshTokenForClient(ctx, refreshToken, clientID, ts.refreshTTL)
 		return nil, ErrInvalidToken
 	}
+	if used {
+		if err := ts.session.RevokeRefreshTokenForClient(ctx, refreshToken, clientID, ts.refreshTTL); err != nil && !errors.Is(err, session.ErrNotFound) {
+			return nil, fmt.Errorf("revoking reused refresh token family: %w", err)
+		}
+		return nil, ErrRefreshTokenReuse
+	}
 	if err := ts.validateUser(ctx, data.UserID, data.AuthVersion); err != nil {
+		_ = ts.session.RevokeRefreshTokenForClient(ctx, refreshToken, clientID, ts.refreshTTL)
+		return nil, err
+	}
+	if err := ts.validateAuthorization(ctx, data); err != nil {
 		_ = ts.session.RevokeRefreshTokenForClient(ctx, refreshToken, clientID, ts.refreshTTL)
 		return nil, err
 	}
@@ -245,17 +268,27 @@ func (ts *TokenService) RefreshToken(ctx context.Context, refreshToken, clientID
 	if err != nil {
 		return nil, fmt.Errorf("generating refresh token: %w", err)
 	}
-	data, err = ts.session.RotateRefreshToken(ctx, refreshToken, newRefresh, data, ts.refreshTTL)
+	access, jti, err := ts.signAccessToken(ctx, data.ClientID, data.UserID, data.Scopes, data.AuthVersion)
 	if err != nil {
-		return nil, ErrInvalidToken
-	}
-	result, err := ts.generateTokenPair(ctx, data.ClientID, data.UserID, data.Scopes, data.AuthVersion, false, data.FamilyKey)
-	if err != nil {
-		_ = ts.session.RevokeRefreshTokenForClient(ctx, newRefresh, clientID, ts.refreshTTL)
 		return nil, err
 	}
-	result.RefreshToken = newRefresh
-	return result, nil
+	accessData := &session.TokenData{
+		ClientID: data.ClientID, UserID: data.UserID, Scopes: data.Scopes, TokenUse: "access",
+		AuthVersion: data.AuthVersion, FamilyKey: data.FamilyKey, AuthorizationIssuedAt: data.AuthorizationIssuedAt,
+	}
+	_, err = ts.session.RotateRefreshTokenAndStoreAccess(
+		ctx, refreshToken, newRefresh, jti, data, accessData, ts.refreshTTL, ts.accessTTL,
+	)
+	if err != nil {
+		if errors.Is(err, session.ErrRefreshTokenReuse) {
+			return nil, ErrRefreshTokenReuse
+		}
+		return nil, ErrInvalidToken
+	}
+	return &TokenPair{
+		AccessToken: access, TokenType: "Bearer", ExpiresIn: int(ts.accessTTL.Seconds()),
+		RefreshToken: newRefresh, Scope: joinScopes(data.Scopes),
+	}, nil
 }
 
 // RevokeTokenForClient revokes only tokens owned by the authenticated client.
@@ -269,22 +302,13 @@ func (ts *TokenService) RevokeTokenForClient(ctx context.Context, token, clientI
 	}
 	claims, err := ts.ValidateAccessToken(ctx, token)
 	if err != nil {
-		return nil
+		if errors.Is(err, ErrInvalidToken) {
+			return nil
+		}
+		return err
 	} // RFC 7009 does not reveal invalid tokens.
 	if len(claims.Audience) != 1 || claims.Audience[0] != clientID {
 		return ErrClientMismatch
-	}
-	return ts.session.RevokeToken(ctx, claims.ID)
-}
-
-// RevokeToken is retained for internal trusted callers. HTTP handlers use RevokeTokenForClient.
-func (ts *TokenService) RevokeToken(ctx context.Context, token string) error {
-	if data, _, err := ts.session.GetRefreshTokenState(ctx, token); err == nil {
-		return ts.session.RevokeRefreshTokenForClient(ctx, token, data.ClientID, ts.refreshTTL)
-	}
-	claims, err := ts.ValidateAccessToken(ctx, token)
-	if err != nil {
-		return err
 	}
 	return ts.session.RevokeToken(ctx, claims.ID)
 }
@@ -299,6 +323,9 @@ func (ts *TokenService) IntrospectTokenForClient(ctx context.Context, tokenStrin
 		return map[string]interface{}{"active": false}, nil
 	}
 	if err := ts.validateUser(ctx, data.UserID, data.AuthVersion); err != nil {
+		return map[string]interface{}{"active": false}, nil
+	}
+	if err := ts.validateAuthorization(ctx, data); err != nil {
 		return map[string]interface{}{"active": false}, nil
 	}
 	return map[string]interface{}{
@@ -335,7 +362,30 @@ func (ts *TokenService) validateUser(ctx context.Context, subject string, authVe
 		return ErrInvalidToken
 	}
 	u, err := ts.users.GetByID(ctx, id)
-	if err != nil || u.Status != models.UserStatusActive || u.AuthVersion != authVersion {
+	if err != nil {
+		if user.IsNotFound(err) {
+			return ErrInvalidToken
+		}
+		return fmt.Errorf("%w: loading token subject: %v", ErrTokenValidationUnavailable, err)
+	}
+	if u.Status != models.UserStatusActive || u.AuthVersion != authVersion {
+		return ErrInvalidToken
+	}
+	return nil
+}
+
+func (ts *TokenService) validateAuthorization(ctx context.Context, data *session.TokenData) error {
+	if data.AuthVersion == 0 {
+		return nil
+	}
+	if data.AuthorizationIssuedAt <= 0 || data.UserID == "" || data.ClientID == "" {
+		return ErrInvalidToken
+	}
+	revoked, err := ts.session.IsUserClientAuthorizationRevoked(ctx, data.UserID, data.ClientID, data.AuthorizationIssuedAt)
+	if err != nil {
+		return fmt.Errorf("%w: loading authorization state: %v", ErrTokenValidationUnavailable, err)
+	}
+	if revoked {
 		return ErrInvalidToken
 	}
 	return nil
@@ -364,7 +414,14 @@ func (ts *TokenService) getPublicKey(ctx context.Context, kid string) (*rsa.Publ
 		}
 		return publicKey, nil
 	}
-	return nil, fmt.Errorf("verification key %q not found", kid)
+	return nil, ErrInvalidToken
+}
+
+func (ts *TokenService) loadPublicKey(ctx context.Context, kid string) (*rsa.PublicKey, error) {
+	if ts.publicKeyLoader != nil {
+		return ts.publicKeyLoader(ctx, kid)
+	}
+	return ts.getPublicKey(ctx, kid)
 }
 
 func joinScopes(scopes []string) string { return strings.Join(scopes, " ") }

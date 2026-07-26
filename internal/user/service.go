@@ -8,7 +8,9 @@ import (
 	"strings"
 
 	"github.com/google/uuid"
+	"github.com/nyasharp/nyauth/internal/audit"
 	"github.com/nyasharp/nyauth/internal/crypto"
+	"github.com/nyasharp/nyauth/internal/passwordpolicy"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
 
@@ -16,6 +18,7 @@ var (
 	ErrInvalidCredentials  = errors.New("invalid credentials")
 	ErrInvalidInput        = errors.New("invalid input")
 	ErrPasswordUnavailable = errors.New("password login is not available for this account")
+	ErrPasswordConfigured  = errors.New("a local password is already configured")
 )
 
 type serviceStore interface {
@@ -23,11 +26,15 @@ type serviceStore interface {
 	GetByID(ctx context.Context, id uuid.UUID) (*models.User, error)
 	GetByUsername(ctx context.Context, username string) (*models.User, error)
 	UpdateSelf(ctx context.Context, id uuid.UUID, req models.UpdateUserRequest) (*models.User, error)
-	UpdateAdmin(ctx context.Context, id uuid.UUID, req models.AdminUpdateUserRequest) (*models.User, error)
-	UpdatePassword(ctx context.Context, id uuid.UUID, passwordHash string, mustChange bool) (*models.User, error)
-	Delete(ctx context.Context, id uuid.UUID) error
-	List(ctx context.Context, p models.Pagination, search string) (*models.PaginatedResponse[models.User], error)
+	UpdateAdmin(ctx context.Context, id uuid.UUID, req models.AdminUpdateUserRequest, mutation audit.MutationAudit) (*models.User, error)
+	UpdatePassword(ctx context.Context, id uuid.UUID, passwordHash string, mustChange bool, mutation audit.MutationAudit) (*models.User, error)
+	ResetPassword(ctx context.Context, id uuid.UUID, passwordHash string, mutation audit.MutationAudit) (*models.User, error)
+	SetPasswordIfMissing(ctx context.Context, id uuid.UUID, passwordHash string, mutation audit.MutationAudit) (*models.User, error)
+	RevokeSessions(ctx context.Context, id uuid.UUID, mutation audit.MutationAudit) (int64, error)
+	Delete(ctx context.Context, id uuid.UUID, mutation audit.MutationAudit) error
+	List(ctx context.Context, p models.Pagination, search string, status models.UserStatus) (*models.PaginatedResponse[models.User], error)
 	RecordLogin(ctx context.Context, id uuid.UUID, ip string) error
+	RecordAuthentication(ctx context.Context, id uuid.UUID) (*models.User, error)
 	Count(ctx context.Context) (int64, error)
 	BootstrapAdmin(ctx context.Context, u *models.User) (bool, error)
 }
@@ -61,8 +68,8 @@ func validateEmail(email string) error {
 }
 
 func validatePassword(password string) error {
-	if len(password) < 12 || len(password) > 1024 {
-		return fmt.Errorf("%w: password must be 12 to 1024 characters", ErrInvalidInput)
+	if err := passwordpolicy.Validate(password); err != nil {
+		return fmt.Errorf("%w: %s", ErrInvalidInput, err)
 	}
 	return nil
 }
@@ -85,7 +92,7 @@ func (s *Service) Create(ctx context.Context, req models.CreateUserRequest) (*mo
 	}
 	u := &models.User{
 		ID: uuid.New(), Username: req.Username, PasswordHash: &hash,
-		Status: models.UserStatusActive, Role: "user", AuthVersion: 1,
+		Status: models.UserStatusActive, Role: "user", AuthVersion: 1, SessionVersion: 1,
 		Metadata: req.Metadata,
 	}
 	if req.Email != "" {
@@ -119,7 +126,7 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req models.UpdateUse
 	return s.store.UpdateSelf(ctx, id, req)
 }
 
-func (s *Service) AdminUpdate(ctx context.Context, id uuid.UUID, req models.AdminUpdateUserRequest) (*models.User, error) {
+func (s *Service) AdminUpdate(ctx context.Context, id uuid.UUID, req models.AdminUpdateUserRequest, mutation audit.MutationAudit) (*models.User, error) {
 	if req.Email != nil {
 		trimmed := strings.TrimSpace(*req.Email)
 		if err := validateEmail(trimmed); err != nil {
@@ -133,10 +140,41 @@ func (s *Service) AdminUpdate(ctx context.Context, id uuid.UUID, req models.Admi
 	if req.Role != nil && *req.Role != "admin" && *req.Role != "user" {
 		return nil, fmt.Errorf("%w: invalid user role", ErrInvalidInput)
 	}
-	return s.store.UpdateAdmin(ctx, id, req)
+	if err := validateAdminUpdateAudit(req, mutation); err != nil {
+		return nil, err
+	}
+	return s.store.UpdateAdmin(ctx, id, req, mutation)
 }
 
-func (s *Service) ResetPassword(ctx context.Context, id uuid.UUID, newPassword string) (*models.User, error) {
+func validateAdminUpdateAudit(req models.AdminUpdateUserRequest, mutation audit.MutationAudit) error {
+	profileFieldsPresent := req.Email != nil || req.DisplayName != nil || req.AvatarURL != nil || req.Metadata != nil
+	switch mutation.Event {
+	case models.AuditUserUpdated:
+		if req.Role != nil || req.Status != nil {
+			return fmt.Errorf("%w: role and status require their dedicated endpoints", ErrInvalidInput)
+		}
+	case models.AuditUserRoleChanged:
+		if req.Role == nil || req.Status != nil || profileFieldsPresent {
+			return fmt.Errorf("%w: role endpoint accepts only role", ErrInvalidInput)
+		}
+	case models.AuditUserSuspended:
+		if req.Status == nil || *req.Status != models.UserStatusSuspended || req.Role != nil || profileFieldsPresent {
+			return fmt.Errorf("%w: suspend endpoint accepts only suspended status", ErrInvalidInput)
+		}
+	case models.AuditUserActivated:
+		if req.Status == nil || *req.Status != models.UserStatusActive || req.Role != nil || profileFieldsPresent {
+			return fmt.Errorf("%w: activate endpoint accepts only active status", ErrInvalidInput)
+		}
+	default:
+		return fmt.Errorf("%w: invalid management audit event", ErrInvalidInput)
+	}
+	return nil
+}
+
+func (s *Service) ResetPassword(ctx context.Context, id uuid.UUID, newPassword string, mutation audit.MutationAudit) (*models.User, error) {
+	if err := mutation.ValidateEvent(models.AuditUserPasswordReset); err != nil {
+		return nil, fmt.Errorf("%w: invalid management audit event", ErrInvalidInput)
+	}
 	if err := validatePassword(newPassword); err != nil {
 		return nil, err
 	}
@@ -144,10 +182,13 @@ func (s *Service) ResetPassword(ctx context.Context, id uuid.UUID, newPassword s
 	if err != nil {
 		return nil, fmt.Errorf("hashing password: %w", err)
 	}
-	return s.store.UpdatePassword(ctx, id, hash, true)
+	return s.store.ResetPassword(ctx, id, hash, mutation)
 }
 
-func (s *Service) ChangePassword(ctx context.Context, id uuid.UUID, currentPassword, newPassword string) (*models.User, error) {
+func (s *Service) ChangePassword(ctx context.Context, id uuid.UUID, currentPassword, newPassword string, mutation audit.MutationAudit) (*models.User, error) {
+	if err := mutation.ValidateEvent(models.AuditUserPasswordChanged); err != nil {
+		return nil, fmt.Errorf("%w: invalid password-change audit event", ErrInvalidInput)
+	}
 	if err := validatePassword(newPassword); err != nil {
 		return nil, err
 	}
@@ -166,23 +207,96 @@ func (s *Service) ChangePassword(ctx context.Context, id uuid.UUID, currentPassw
 	if err != nil {
 		return nil, fmt.Errorf("hashing password: %w", err)
 	}
-	return s.store.UpdatePassword(ctx, id, hash, false)
+	return s.store.UpdatePassword(ctx, id, hash, false, mutation)
 }
 
-func (s *Service) Delete(ctx context.Context, id uuid.UUID) error { return s.store.Delete(ctx, id) }
+// SetPassword adds the local-password capability to an external-only account.
+// The handler must require recent authentication before calling this method.
+func (s *Service) SetPassword(ctx context.Context, id uuid.UUID, newPassword string, mutation audit.MutationAudit) (*models.User, error) {
+	if err := mutation.ValidateEvent(models.AuditUserPasswordSet); err != nil {
+		return nil, fmt.Errorf("%w: invalid password-configuration audit event", ErrInvalidInput)
+	}
+	if err := validatePassword(newPassword); err != nil {
+		return nil, err
+	}
+	u, err := s.store.GetByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	if u.PasswordHash != nil {
+		return nil, ErrPasswordConfigured
+	}
+	hash, err := crypto.HashPassword(newPassword)
+	if err != nil {
+		return nil, fmt.Errorf("hashing password: %w", err)
+	}
+	return s.store.SetPasswordIfMissing(ctx, id, hash, mutation)
+}
 
-func (s *Service) List(ctx context.Context, page, pageSize int, search string) (*models.PaginatedResponse[models.User], error) {
-	return s.store.List(ctx, models.NewPagination(page, pageSize), search)
+// Reauthenticate verifies the existing local factor and records a fresh
+// authentication instant without changing the password or login history.
+func (s *Service) Reauthenticate(ctx context.Context, id uuid.UUID, password string) (*models.User, error) {
+	u, err := s.store.GetByID(ctx, id)
+	if err != nil || u == nil || u.Status != models.UserStatusActive {
+		return nil, ErrInvalidCredentials
+	}
+	if u.PasswordHash == nil {
+		return nil, ErrPasswordUnavailable
+	}
+	ok, verifyErr := crypto.VerifyPassword(password, *u.PasswordHash)
+	if verifyErr != nil || !ok {
+		return nil, ErrInvalidCredentials
+	}
+	return s.store.RecordAuthentication(ctx, id)
+}
+
+func (s *Service) RecordAuthentication(ctx context.Context, id uuid.UUID) (*models.User, error) {
+	return s.store.RecordAuthentication(ctx, id)
+}
+
+func (s *Service) Delete(ctx context.Context, id uuid.UUID, mutation audit.MutationAudit) error {
+	if err := mutation.ValidateEvent(models.AuditUserDeleted); err != nil {
+		return fmt.Errorf("%w: invalid management audit event", ErrInvalidInput)
+	}
+	return s.store.Delete(ctx, id, mutation)
+}
+
+// RevokeSessions advances only the browser-session generation. OAuth tokens
+// remain bound to auth_version and are intentionally unaffected.
+func (s *Service) RevokeSessions(ctx context.Context, id uuid.UUID, mutation audit.MutationAudit) (int64, error) {
+	if err := mutation.ValidateEvent(models.AuditUserSessionsRevoked); err != nil {
+		return 0, fmt.Errorf("%w: invalid session-revocation audit event", ErrInvalidInput)
+	}
+	return s.store.RevokeSessions(ctx, id, mutation)
+}
+
+func (s *Service) List(ctx context.Context, page, pageSize int, search string, status models.UserStatus) (*models.PaginatedResponse[models.User], error) {
+	if status != "" && status != models.UserStatusActive && status != models.UserStatusSuspended && status != models.UserStatusPending {
+		return nil, fmt.Errorf("%w: invalid user status", ErrInvalidInput)
+	}
+	return s.store.List(ctx, models.NewPagination(page, pageSize), search, status)
 }
 
 func (s *Service) Authenticate(ctx context.Context, username, password string) (*models.User, error) {
-	u, lookupErr := s.store.GetByUsername(ctx, strings.TrimSpace(username))
+	username = strings.TrimSpace(username)
+	validUsername := validateUsername(username) == nil
+	validPassword := passwordpolicy.Validate(password) == nil
+
+	var u *models.User
+	lookupErr := ErrInvalidCredentials
+	if validUsername {
+		u, lookupErr = s.store.GetByUsername(ctx, username)
+	}
 	hash := crypto.DummyPasswordHash
-	if lookupErr == nil && u.PasswordHash != nil {
+	if lookupErr == nil && u != nil && u.PasswordHash != nil {
 		hash = *u.PasswordHash
 	}
-	ok, verifyErr := crypto.VerifyPassword(password, hash)
-	if lookupErr != nil || verifyErr != nil || !ok || u == nil || u.PasswordHash == nil || u.Status != models.UserStatusActive {
+	candidate := password
+	if !validPassword {
+		candidate = "invalid-login-password"
+	}
+	ok, verifyErr := crypto.VerifyPassword(candidate, hash)
+	if !validUsername || !validPassword || lookupErr != nil || verifyErr != nil || !ok || u == nil || u.PasswordHash == nil || u.Status != models.UserStatusActive {
 		return nil, ErrInvalidCredentials
 	}
 	return u, nil
@@ -238,7 +352,7 @@ func (s *Service) BootstrapInitialAdmin(ctx context.Context, username, configure
 		return nil, fmt.Errorf("hashing bootstrap password: %w", err)
 	}
 	displayName := "Administrator"
-	u := &models.User{ID: uuid.New(), Username: username, Email: nil, PasswordHash: &hash, DisplayName: &displayName, Status: models.UserStatusActive, Role: "admin", AuthVersion: 1, MustChangePassword: true, Metadata: map[string]string{}}
+	u := &models.User{ID: uuid.New(), Username: username, Email: nil, PasswordHash: &hash, DisplayName: &displayName, Status: models.UserStatusActive, Role: "admin", AuthVersion: 1, SessionVersion: 1, MustChangePassword: true, Metadata: map[string]string{}}
 	if email != "" {
 		u.Email = &email
 	}

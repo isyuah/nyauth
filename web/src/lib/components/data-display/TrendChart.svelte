@@ -1,5 +1,5 @@
 <script lang="ts">
-  import { onMount, onDestroy } from 'svelte';
+  import { onDestroy } from 'svelte';
   import { Chart, registerables } from 'chart.js';
 
   Chart.register(...registerables);
@@ -14,7 +14,7 @@
     height?: string;
   } = $props();
 
-  let canvas: HTMLCanvasElement;
+  let canvas = $state<HTMLCanvasElement>();
   let chart: Chart | undefined;
 
   function createChart() {
@@ -83,15 +83,12 @@
 
   $effect(() => {
     // Reactively recreate chart when data changes
-    labels; values;
+    labels;
+    values;
     if (canvas) {
-      // Small delay to let canvas mount
-      setTimeout(createChart, 50);
+      const timer = setTimeout(createChart, 50);
+      return () => clearTimeout(timer);
     }
-  });
-
-  onMount(() => {
-    createChart();
   });
 
   onDestroy(() => {

@@ -1,10 +1,12 @@
 package server
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -12,8 +14,12 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/nyasharp/nyauth/internal/audit"
+	"github.com/nyasharp/nyauth/internal/authorization"
 	"github.com/nyasharp/nyauth/internal/client"
+	"github.com/nyasharp/nyauth/internal/identity"
+	"github.com/nyasharp/nyauth/internal/session"
 	"github.com/nyasharp/nyauth/internal/user"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
@@ -41,8 +47,13 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 func writeAPIError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
 }
-func sessionResponse(current *models.User, dataCSRF string) *models.SessionResponse {
-	return &models.SessionResponse{User: current, CSRFToken: dataCSRF, MustChangePassword: current.MustChangePassword}
+func sessionResponse(current *models.User, data *session.SessionData) *models.SessionResponse {
+	authenticatedAt := data.AuthenticatedAt
+	return &models.SessionResponse{
+		User: current, CSRFToken: data.CSRFToken, MustChangePassword: current.MustChangePassword,
+		HasPassword: current.PasswordHash != nil, EmailVerified: current.EmailVerifiedAt != nil,
+		AuthenticatedAt: &authenticatedAt,
+	}
 }
 
 func setSessionNoStoreHeaders(w http.ResponseWriter) {
@@ -65,30 +76,38 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	ip := requestIP(r)
 	allowed, retry, err := s.loginLimiter.Reserve(r.Context(), ip, strings.ToLower(request.Username))
 	if err != nil {
+		s.telemetry.RecordRateLimit(r.Context(), "login", "login", "error")
+		s.telemetry.RecordAuthEvent(r.Context(), "login", "unavailable")
 		writeAPIError(w, http.StatusServiceUnavailable, "login temporarily unavailable")
 		return
 	}
 	if !allowed {
+		s.telemetry.RecordRateLimit(r.Context(), "login", "login", "rejected")
+		s.telemetry.RecordAuthEvent(r.Context(), "login", "rate_limited")
 		seconds := int64((retry + time.Second - 1) / time.Second)
 		w.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
 		writeAPIError(w, http.StatusTooManyRequests, "too many login attempts")
 		return
 	}
+	s.telemetry.RecordRateLimit(r.Context(), "login", "login", "allowed")
 	current, err := s.userService.Authenticate(r.Context(), request.Username, request.Password)
 	if err != nil {
-		audit.RecordResult(r.Context(), s.auditStore, models.AuditUserLoginFailed, nil, request.Username, "failure", ip)
+		s.telemetry.RecordAuthEvent(r.Context(), "login", "invalid_credentials")
+		s.enqueueAuditResult(r.Context(), models.AuditUserLoginFailed, nil, truncateAuditValue(request.Username, maxAuditActorNameLength), "failure", "medium", ip, truncateAuditValue(r.UserAgent(), maxAuditUserAgentLength), map[string]any{"authentication_method": "password"})
 		writeAPIError(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
 	authenticated, err := s.sessionMiddleware.CreateSession(w, r, current)
 	if err != nil {
+		s.telemetry.RecordAuthEvent(r.Context(), "login", "session_error")
 		writeAPIError(w, http.StatusInternalServerError, "failed to create session")
 		return
 	}
 	_ = s.loginLimiter.ResetIdentity(r.Context(), ip, strings.ToLower(request.Username))
-	audit.RecordResult(r.Context(), s.auditStore, models.AuditUserLogin, &current.ID, current.Username, "success", ip)
+	s.enqueueAuditResult(r.Context(), models.AuditUserLogin, &current.ID, current.Username, "success", "low", ip, truncateAuditValue(r.UserAgent(), maxAuditUserAgentLength), map[string]any{"authentication_method": "password"})
 	_ = s.userService.RecordLogin(r.Context(), current.ID, ip)
-	writeJSON(w, http.StatusOK, sessionResponse(current, authenticated.Data.CSRFToken))
+	s.telemetry.RecordAuthEvent(r.Context(), "login", "success")
+	writeJSON(w, http.StatusOK, sessionResponse(current, authenticated.Data))
 }
 
 func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
@@ -99,7 +118,7 @@ func (s *Server) handleSession(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
-	writeJSON(w, http.StatusOK, sessionResponse(current, authenticated.Data.CSRFToken))
+	writeJSON(w, http.StatusOK, sessionResponse(current, authenticated.Data))
 }
 func (s *Server) handleLogout(w http.ResponseWriter, r *http.Request) {
 	s.sessionMiddleware.DestroySession(w, r)
@@ -119,12 +138,15 @@ func (s *Server) handleUpdateMe(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
-	var request models.UpdateUserRequest
+	var request struct {
+		DisplayName *string `json:"display_name,omitempty"`
+		AvatarURL   *string `json:"avatar_url,omitempty"`
+	}
 	if err := decodeJSON(w, r, &request); err != nil {
 		writeAPIError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	updated, err := s.userService.Update(r.Context(), current.ID, request)
+	updated, err := s.userService.Update(r.Context(), current.ID, models.UpdateUserRequest{DisplayName: request.DisplayName, AvatarURL: request.AvatarURL})
 	if err != nil {
 		if user.IsInvalidInput(err) {
 			writeAPIError(w, http.StatusBadRequest, err.Error())
@@ -147,7 +169,12 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	updated, err := s.userService.ChangePassword(r.Context(), current.ID, request.CurrentPassword, request.NewPassword)
+	mutation, ok := audit.MutationAuditFromContext(r.Context())
+	if !ok {
+		writeAPIError(w, http.StatusInternalServerError, "audit context unavailable")
+		return
+	}
+	updated, err := s.userService.ChangePassword(r.Context(), current.ID, request.CurrentPassword, request.NewPassword, mutation)
 	if err != nil {
 		switch {
 		case errors.Is(err, user.ErrInvalidCredentials):
@@ -161,13 +188,13 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	s.revokeUserSecurityState(r.Context(), current.ID, "password_change")
 	authenticated, err := s.sessionMiddleware.RotateSession(w, r, updated)
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "password changed; please sign in again")
 		return
 	}
-	audit.RecordWithTarget(r.Context(), s.auditStore, "user.password_changed", &updated.ID, updated.Username, "user", updated.ID.String(), requestIP(r))
-	writeJSON(w, http.StatusOK, sessionResponse(updated, authenticated.Data.CSRFToken))
+	writeJSON(w, http.StatusOK, sessionResponse(updated, authenticated.Data))
 }
 
 func (s *Server) handleListProviders(w http.ResponseWriter, r *http.Request) {
@@ -196,20 +223,111 @@ func (s *Server) handleUserIdentities(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, items)
 }
-func (s *Server) handleSuspendUser(w http.ResponseWriter, r *http.Request) {
-	s.handleUserStatus(w, r, models.UserStatusSuspended, models.AuditUserSuspended)
+
+func (s *Server) handleAdminDeleteUserIdentity(w http.ResponseWriter, r *http.Request) {
+	userID, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid user ID")
+		return
+	}
+	identityID, err := uuid.Parse(chi.URLParam(r, "identity_id"))
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid identity ID")
+		return
+	}
+	mutation, ok := audit.MutationAuditFromContext(r.Context())
+	if !ok {
+		writeAPIError(w, http.StatusInternalServerError, "audit context unavailable")
+		return
+	}
+	if err := s.identityStore.DeleteOwned(r.Context(), userID, identityID, mutation); err != nil {
+		switch {
+		case errors.Is(err, identity.ErrLastAuthenticationMethod):
+			writeAPIError(w, http.StatusConflict, err.Error())
+		case identity.IsNotFound(err):
+			writeAPIError(w, http.StatusNotFound, "identity not found")
+		default:
+			writeAPIError(w, http.StatusInternalServerError, "failed to remove identity")
+		}
+		return
+	}
+	s.revokeUserSecurityState(r.Context(), userID, "admin_identity_removal")
+	if current := currentUserFromContext(r); current != nil && current.ID == userID {
+		s.sessionMiddleware.DestroySession(w, r)
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
-func (s *Server) handleActivateUser(w http.ResponseWriter, r *http.Request) {
-	s.handleUserStatus(w, r, models.UserStatusActive, models.AuditUserActivated)
-}
-func (s *Server) handleUserStatus(w http.ResponseWriter, r *http.Request, status models.UserStatus, event string) {
-	actor := currentUserFromContext(r)
+
+func (s *Server) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
 		writeAPIError(w, http.StatusBadRequest, "invalid user ID")
 		return
 	}
-	updated, err := s.userService.AdminUpdate(r.Context(), id, models.AdminUpdateUserRequest{Status: &status})
+	var request models.AdminUpdateUserRequest
+	if err := decodeJSON(w, r, &request); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	mutation, ok := audit.MutationAuditFromContext(r.Context())
+	if !ok {
+		writeAPIError(w, http.StatusInternalServerError, "audit context unavailable")
+		return
+	}
+	before, err := s.userService.GetByID(r.Context(), id)
+	if err != nil {
+		if user.IsNotFound(err) {
+			writeAPIError(w, http.StatusNotFound, "user not found")
+		} else {
+			writeAPIError(w, http.StatusInternalServerError, "failed to get user")
+		}
+		return
+	}
+	updated, err := s.userService.AdminUpdate(r.Context(), id, request, mutation)
+	if err != nil {
+		switch {
+		case errors.Is(err, user.ErrLastActiveAdmin):
+			writeAPIError(w, http.StatusConflict, err.Error())
+		case user.IsInvalidInput(err):
+			writeAPIError(w, http.StatusBadRequest, err.Error())
+		default:
+			writeAPIError(w, http.StatusInternalServerError, "failed to update user")
+		}
+		return
+	}
+	if request.Email != nil && !strings.EqualFold(strings.TrimSpace(stringValue(before.Email)), strings.TrimSpace(*request.Email)) {
+		s.revokeUserSecurityState(r.Context(), id, "admin_email_change")
+		if current := currentUserFromContext(r); current != nil && current.ID == id {
+			s.sessionMiddleware.DestroySession(w, r)
+		}
+	}
+	writeJSON(w, http.StatusOK, updated)
+}
+
+func stringValue(value *string) string {
+	if value == nil {
+		return ""
+	}
+	return *value
+}
+func (s *Server) handleSuspendUser(w http.ResponseWriter, r *http.Request) {
+	s.handleUserStatus(w, r, models.UserStatusSuspended)
+}
+func (s *Server) handleActivateUser(w http.ResponseWriter, r *http.Request) {
+	s.handleUserStatus(w, r, models.UserStatusActive)
+}
+func (s *Server) handleUserStatus(w http.ResponseWriter, r *http.Request, status models.UserStatus) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid user ID")
+		return
+	}
+	mutation, ok := audit.MutationAuditFromContext(r.Context())
+	if !ok {
+		writeAPIError(w, http.StatusInternalServerError, "audit context unavailable")
+		return
+	}
+	updated, err := s.userService.AdminUpdate(r.Context(), id, models.AdminUpdateUserRequest{Status: &status}, mutation)
 	if err != nil {
 		if errors.Is(err, user.ErrLastActiveAdmin) {
 			writeAPIError(w, http.StatusConflict, err.Error())
@@ -218,11 +336,13 @@ func (s *Server) handleUserStatus(w http.ResponseWriter, r *http.Request, status
 		}
 		return
 	}
-	audit.RecordWithTarget(r.Context(), s.auditStore, event, &actor.ID, actor.Username, "user", id.String(), requestIP(r))
+	s.revokeUserSecurityState(r.Context(), id, "status_change")
+	if current := currentUserFromContext(r); current != nil && current.ID == id {
+		s.sessionMiddleware.DestroySession(w, r)
+	}
 	writeJSON(w, http.StatusOK, updated)
 }
 func (s *Server) handleUpdateUserRole(w http.ResponseWriter, r *http.Request) {
-	actor := currentUserFromContext(r)
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
 		writeAPIError(w, http.StatusBadRequest, "invalid user ID")
@@ -235,7 +355,12 @@ func (s *Server) handleUpdateUserRole(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, "role must be admin or user")
 		return
 	}
-	updated, err := s.userService.AdminUpdate(r.Context(), id, models.AdminUpdateUserRequest{Role: &request.Role})
+	mutation, ok := audit.MutationAuditFromContext(r.Context())
+	if !ok {
+		writeAPIError(w, http.StatusInternalServerError, "audit context unavailable")
+		return
+	}
+	updated, err := s.userService.AdminUpdate(r.Context(), id, models.AdminUpdateUserRequest{Role: &request.Role}, mutation)
 	if err != nil {
 		if errors.Is(err, user.ErrLastActiveAdmin) {
 			writeAPIError(w, http.StatusConflict, err.Error())
@@ -244,14 +369,80 @@ func (s *Server) handleUpdateUserRole(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	audit.RecordWithTarget(r.Context(), s.auditStore, "user.role_changed", &actor.ID, actor.Username, "user", id.String(), requestIP(r))
+	s.revokeUserSecurityState(r.Context(), id, "role_change")
+	if current := currentUserFromContext(r); current != nil && current.ID == id {
+		s.sessionMiddleware.DestroySession(w, r)
+	}
 	writeJSON(w, http.StatusOK, updated)
+}
+
+func (s *Server) handleAdminResetPassword(w http.ResponseWriter, r *http.Request) {
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid user ID")
+		return
+	}
+	var request struct {
+		Password string `json:"password"`
+	}
+	if err := decodeJSON(w, r, &request); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	mutation, ok := audit.MutationAuditFromContext(r.Context())
+	if !ok {
+		writeAPIError(w, http.StatusInternalServerError, "audit context unavailable")
+		return
+	}
+	if _, err := s.userService.ResetPassword(r.Context(), id, request.Password, mutation); err != nil {
+		if user.IsInvalidInput(err) {
+			writeAPIError(w, http.StatusBadRequest, err.Error())
+		} else {
+			writeAPIError(w, http.StatusInternalServerError, "failed to reset password")
+		}
+		return
+	}
+	s.revokeUserSecurityState(r.Context(), id, "admin_password_reset")
+	if current := currentUserFromContext(r); current != nil && current.ID == id {
+		s.sessionMiddleware.DestroySession(w, r)
+	}
+	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) revokeUserSecurityState(ctx context.Context, userID uuid.UUID, operation string) {
+	if _, err := s.sessionStore.DeleteUserSessions(ctx, userID.String()); err != nil {
+		slog.ErrorContext(ctx, "user session cleanup failed", "operation", operation, "error_class", "redis_error")
+	}
+	if _, err := s.sessionStore.RevokeRefreshFamiliesForUser(ctx, userID.String(), s.cfg.Auth.RefreshTokenTTL); err != nil {
+		slog.ErrorContext(ctx, "refresh family cleanup failed", "operation", operation, "error_class", "redis_error")
+	}
 }
 
 func (s *Server) handleListAuditLogs(w http.ResponseWriter, r *http.Request) {
 	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
 	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
-	result, err := s.auditStore.List(r.Context(), page, pageSize, r.URL.Query().Get("event"))
+	filter := audit.ListFilter{
+		Event: r.URL.Query().Get("event"), Result: r.URL.Query().Get("result"),
+		RiskLevel: r.URL.Query().Get("risk"), Actor: r.URL.Query().Get("actor"),
+		Target: r.URL.Query().Get("target"), IPAddress: r.URL.Query().Get("ip"),
+	}
+	if value := r.URL.Query().Get("from"); value != "" {
+		parsed, parseErr := time.Parse(time.RFC3339, value)
+		if parseErr != nil {
+			writeAPIError(w, http.StatusBadRequest, "from must be RFC3339")
+			return
+		}
+		filter.CreatedFrom = &parsed
+	}
+	if value := r.URL.Query().Get("to"); value != "" {
+		parsed, parseErr := time.Parse(time.RFC3339, value)
+		if parseErr != nil {
+			writeAPIError(w, http.StatusBadRequest, "to must be RFC3339")
+			return
+		}
+		filter.CreatedTo = &parsed
+	}
+	result, err := s.auditStore.List(r.Context(), page, pageSize, filter)
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "failed to list audit logs")
 		return
@@ -268,6 +459,96 @@ func (s *Server) handleListMyClients(w http.ResponseWriter, r *http.Request) {
 	}
 	writeJSON(w, http.StatusOK, result)
 }
+
+func (s *Server) handleRotateMyClientSecret(w http.ResponseWriter, r *http.Request) {
+	setSessionNoStoreHeaders(w)
+	current := currentUserFromContext(r)
+	if current == nil {
+		writeAPIError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	id := chi.URLParam(r, "id")
+	result, err := s.clientService.RotateSecretForOwner(r.Context(), id, current.ID.String())
+	if err != nil {
+		switch {
+		case errors.Is(err, client.ErrClientNotOwned), errors.Is(err, pgx.ErrNoRows):
+			writeAPIError(w, http.StatusNotFound, "application not found")
+		case errors.Is(err, client.ErrPublicClientSecret):
+			writeAPIError(w, http.StatusConflict, err.Error())
+		default:
+			writeAPIError(w, http.StatusInternalServerError, "failed to rotate application secret")
+		}
+		return
+	}
+	s.enqueueAuditTargetResult(r.Context(), models.AuditClientSecretRotated, &current.ID, current.Username, "client", id, "success", "medium", requestIP(r), truncateAuditValue(r.UserAgent(), maxAuditUserAgentLength), nil)
+	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) handleListMyAuthorizations(w http.ResponseWriter, r *http.Request) {
+	setSessionNoStoreHeaders(w)
+	current := currentUserFromContext(r)
+	if current == nil {
+		writeAPIError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	items, err := s.authorizationStore.ListByUser(r.Context(), current.ID)
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "failed to list OAuth authorizations")
+		return
+	}
+	active := items[:0]
+	for index := range items {
+		revoked, checkErr := s.sessionStore.IsUserClientAuthorizationRevoked(
+			r.Context(), current.ID.String(), items[index].ClientID, items[index].GrantedAt.UnixMicro(),
+		)
+		if checkErr != nil {
+			writeAPIError(w, http.StatusServiceUnavailable, "OAuth authorizations temporarily unavailable")
+			return
+		}
+		if !revoked {
+			active = append(active, items[index])
+		}
+	}
+	writeJSON(w, http.StatusOK, active)
+}
+
+func (s *Server) handleRevokeMyAuthorization(w http.ResponseWriter, r *http.Request) {
+	setSessionNoStoreHeaders(w)
+	current := currentUserFromContext(r)
+	if current == nil {
+		writeAPIError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	clientID := strings.TrimSpace(chi.URLParam(r, "client_id"))
+	if clientID == "" || len(clientID) > 64 {
+		writeAPIError(w, http.StatusBadRequest, "invalid client ID")
+		return
+	}
+
+	tokenTTL := s.cfg.Auth.RefreshTokenTTL
+	if s.cfg.Auth.AccessTokenTTL > tokenTTL {
+		tokenTTL = s.cfg.Auth.AccessTokenTTL
+	}
+	revokedAt, err := s.sessionStore.RevokeUserClientAuthorization(r.Context(), current.ID.String(), clientID, tokenTTL+5*time.Minute)
+	if err != nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "authorization revocation temporarily unavailable")
+		return
+	}
+	if err := s.authorizationStore.Revoke(r.Context(), current.ID, clientID, time.UnixMicro(revokedAt).UTC()); err != nil {
+		switch {
+		case authorization.IsNotFound(err):
+			writeAPIError(w, http.StatusNotFound, "OAuth authorization not found")
+		case errors.Is(err, authorization.ErrAuthorizationNewer):
+			writeAPIError(w, http.StatusConflict, "OAuth authorization changed; retry revocation")
+		default:
+			writeAPIError(w, http.StatusInternalServerError, "failed to revoke OAuth authorization")
+		}
+		return
+	}
+	s.enqueueAuditTargetResult(r.Context(), models.AuditAuthorizationRevoked, &current.ID, current.Username, "client", clientID, "success", "medium", requestIP(r), truncateAuditValue(r.UserAgent(), maxAuditUserAgentLength), nil)
+	w.WriteHeader(http.StatusNoContent)
+}
+
 func (s *Server) handleCreateMyClient(w http.ResponseWriter, r *http.Request) {
 	current := currentUserFromContext(r)
 	var request models.CreateClientRequest
@@ -287,7 +568,7 @@ func (s *Server) handleCreateMyClient(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	audit.RecordWithTarget(r.Context(), s.auditStore, models.AuditClientCreated, &current.ID, current.Username, "client", result.ID, requestIP(r))
+	s.enqueueAuditTargetResult(r.Context(), models.AuditClientCreated, &current.ID, current.Username, "client", result.ID, "success", "low", requestIP(r), truncateAuditValue(r.UserAgent(), maxAuditUserAgentLength), nil)
 	writeJSON(w, http.StatusCreated, result)
 }
 func (s *Server) handleDeleteMyClient(w http.ResponseWriter, r *http.Request) {
@@ -302,10 +583,10 @@ func (s *Server) handleDeleteMyClient(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusForbidden, "application is not owned by current user")
 		return
 	}
-	if err := s.clientService.Delete(r.Context(), id); err != nil {
+	if err := s.clientService.DeleteForOwner(r.Context(), id, current.ID.String()); err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "failed to delete application")
 		return
 	}
-	audit.RecordWithTarget(r.Context(), s.auditStore, models.AuditClientDeleted, &current.ID, current.Username, "client", id, requestIP(r))
+	s.enqueueAuditTargetResult(r.Context(), models.AuditClientDeleted, &current.ID, current.Username, "client", id, "success", "medium", requestIP(r), truncateAuditValue(r.UserAgent(), maxAuditUserAgentLength), nil)
 	w.WriteHeader(http.StatusNoContent)
 }

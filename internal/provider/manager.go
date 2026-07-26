@@ -4,30 +4,41 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"sort"
 	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"github.com/nyasharp/nyauth/internal/config"
+	"github.com/nyasharp/nyauth/internal/audit"
 	"github.com/nyasharp/nyauth/internal/crypto"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
 
 const providerSecretPurpose = "provider-client-secret"
 
-var ErrProviderNotFound = errors.New("provider not found")
+var (
+	ErrProviderNotFound         = errors.New("provider not found")
+	ErrProviderRevisionConflict = errors.New("provider was changed concurrently")
+)
+
+type TelemetrySink func(context.Context, string, string, string, string, time.Duration)
 
 // Manager owns an immutable-at-read-time snapshot of enabled providers.
 type Manager struct {
-	mutationMu      sync.Mutex
-	mu              sync.RWMutex
-	providers       map[string]Provider
-	staticProviders map[string]Provider
-	db              *pgxpool.Pool
-	masterKeys      map[string][]byte
-	activeKeyID     string
-	production      bool
+	mutationMu       sync.Mutex
+	mu               sync.RWMutex
+	providers        map[string]Provider
+	db               *pgxpool.Pool
+	masterKeys       map[string][]byte
+	activeKeyID      string
+	production       bool
+	snapshotRevision atomic.Uint64
+	ready            atomic.Bool
+	telemetryMu      sync.RWMutex
+	telemetrySink    TelemetrySink
 }
 
 // NewManager creates a provider manager. The optional production flag enables
@@ -36,9 +47,29 @@ func NewManager(db *pgxpool.Pool, masterKey []byte, production ...bool) *Manager
 	isProduction := len(production) > 0 && production[0]
 	keyCopy := append([]byte(nil), masterKey...)
 	return &Manager{
-		providers: make(map[string]Provider), staticProviders: make(map[string]Provider),
-		db: db, masterKeys: map[string][]byte{"primary": keyCopy}, activeKeyID: "primary",
+		providers: make(map[string]Provider),
+		db:        db, masterKeys: map[string][]byte{"primary": keyCopy}, activeKeyID: "primary",
 		production: isProduction,
+	}
+}
+
+func (m *Manager) SetTelemetrySink(sink TelemetrySink) {
+	if m != nil {
+		m.telemetryMu.Lock()
+		m.telemetrySink = sink
+		m.telemetryMu.Unlock()
+	}
+}
+
+func (m *Manager) recordTelemetry(ctx context.Context, operation, result, reason string, duration time.Duration) {
+	if m == nil {
+		return
+	}
+	m.telemetryMu.RLock()
+	sink := m.telemetrySink
+	m.telemetryMu.RUnlock()
+	if sink != nil {
+		sink(ctx, operation, "none", result, reason, duration)
 	}
 }
 
@@ -57,35 +88,29 @@ func NewManagerWithKeyring(db *pgxpool.Pool, masterKeys map[string][]byte, activ
 		keys[keyID] = append([]byte(nil), key...)
 	}
 	return &Manager{
-		providers: make(map[string]Provider), staticProviders: make(map[string]Provider),
-		db: db, masterKeys: keys, activeKeyID: activeKeyID, production: production,
+		providers: make(map[string]Provider),
+		db:        db, masterKeys: keys, activeKeyID: activeKeyID, production: production,
 	}, nil
 }
 
-// LoadStatic replaces the static provider snapshot.
-func (m *Manager) LoadStatic(cfg map[string]config.ProviderConfig) {
-	staticProviders := make(map[string]Provider, len(cfg))
-	for name, providerConfig := range cfg {
-		configured, err := m.providerFromConfig(name, providerConfig.Type, providerConfig.ClientID, providerConfig.ClientSecret,
-			providerConfig.Scopes, providerConfig.DiscoveryURL, providerConfig.AuthorizationURL,
-			providerConfig.TokenURL, providerConfig.UserinfoURL)
-		if err != nil {
-			fmt.Printf("warning: external provider %s was not loaded: %v\n", name, err)
-			continue
-		}
-		staticProviders[name] = configured
+// LoadDynamic atomically replaces the runtime snapshot with currently enabled
+// database providers. Disabled and deleted providers are removed immediately.
+func (m *Manager) LoadDynamic(ctx context.Context) error {
+	started := time.Now()
+	m.mutationMu.Lock()
+	defer m.mutationMu.Unlock()
+	err := m.loadDynamic(ctx)
+	if err != nil {
+		m.recordTelemetry(ctx, "synchronization", "failure", "load_failed", time.Since(started))
+		return err
 	}
-	m.mu.Lock()
-	m.staticProviders = staticProviders
-	m.providers = cloneProviders(staticProviders)
-	m.mu.Unlock()
+	m.recordTelemetry(ctx, "synchronization", "success", "none", time.Since(started))
+	return nil
 }
 
-// LoadDynamic atomically replaces the runtime snapshot with static providers
-// plus currently enabled database providers. Disabled and deleted providers are
-// therefore removed immediately after a successful reload.
-func (m *Manager) LoadDynamic(ctx context.Context) error {
+func (m *Manager) loadDynamic(ctx context.Context) error {
 	if m.db == nil {
+		m.ready.Store(true)
 		return nil
 	}
 	rows, err := m.db.Query(ctx, `
@@ -98,7 +123,6 @@ func (m *Manager) LoadDynamic(ctx context.Context) error {
 	defer rows.Close()
 
 	dynamicProviders := make(map[string]Provider)
-	dynamicNames := make(map[string]struct{})
 	for rows.Next() {
 		var name, providerType, clientID, encryptedSecret string
 		var enabled bool
@@ -107,7 +131,6 @@ func (m *Manager) LoadDynamic(ctx context.Context) error {
 		if err := rows.Scan(&name, &providerType, &clientID, &encryptedSecret, &scopes, &discoveryURL, &authorizationURL, &tokenURL, &userinfoURL, &enabled); err != nil {
 			return fmt.Errorf("scanning provider: %w", err)
 		}
-		dynamicNames[name] = struct{}{}
 		if !enabled {
 			continue
 		}
@@ -127,15 +150,10 @@ func (m *Manager) LoadDynamic(ctx context.Context) error {
 	}
 
 	m.mu.Lock()
-	next := cloneProviders(m.staticProviders)
-	for name := range dynamicNames {
-		delete(next, name)
-	}
-	for name, configured := range dynamicProviders {
-		next[name] = configured
-	}
-	m.providers = next
+	m.providers = dynamicProviders
 	m.mu.Unlock()
+	m.snapshotRevision.Add(1)
+	m.ready.Store(true)
 	return nil
 }
 
@@ -198,11 +216,17 @@ type ProviderInfo struct {
 	Type string `json:"type"`
 }
 
-func (m *Manager) CreateProvider(ctx context.Context, req models.CreateProviderRequest) (*models.ExternalProvider, error) {
+func (m *Manager) CreateProvider(ctx context.Context, req models.CreateProviderRequest, mutation audit.MutationAudit) (*models.ExternalProvider, error) {
 	m.mutationMu.Lock()
 	defer m.mutationMu.Unlock()
+	if err := mutation.ValidateEvent(models.AuditProviderCreated); err != nil {
+		return nil, fmt.Errorf("invalid provider creation audit context: %w", err)
+	}
 	if m.db == nil {
 		return nil, errors.New("provider database is unavailable")
+	}
+	if req.Enabled == nil {
+		return nil, errors.New("provider enabled state must be explicitly set")
 	}
 	runtimeProvider, err := m.providerFromConfig(req.Name, req.Type, req.ClientID, req.ClientSecret, req.Scopes,
 		req.DiscoveryURL, req.AuthorizationURL, req.TokenURL, req.UserinfoURL)
@@ -215,7 +239,7 @@ func (m *Manager) CreateProvider(ctx context.Context, req models.CreateProviderR
 	}
 	configured := &models.ExternalProvider{
 		Name: req.Name, Type: req.Type, ClientID: req.ClientID,
-		ClientSecret: encryptedSecret, Scopes: req.Scopes, Enabled: true,
+		ClientSecret: encryptedSecret, Scopes: req.Scopes, Enabled: *req.Enabled,
 	}
 	if req.DiscoveryURL != "" {
 		configured.DiscoveryURL = &req.DiscoveryURL
@@ -229,22 +253,39 @@ func (m *Manager) CreateProvider(ctx context.Context, req models.CreateProviderR
 	if req.UserinfoURL != "" {
 		configured.UserinfoURL = &req.UserinfoURL
 	}
-	_, err = m.db.Exec(ctx, `
+	tx, err := m.db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("starting provider creation: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	err = tx.QueryRow(ctx, `
 		INSERT INTO oauth_providers (name, type, client_id, client_secret, scopes, discovery_url, authorization_url, token_url, userinfo_url, enabled)
 		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		RETURNING id,revision,metadata,created_at,updated_at
 	`, configured.Name, configured.Type, configured.ClientID, configured.ClientSecret, configured.Scopes,
-		configured.DiscoveryURL, configured.AuthorizationURL, configured.TokenURL, configured.UserinfoURL, configured.Enabled)
+		configured.DiscoveryURL, configured.AuthorizationURL, configured.TokenURL, configured.UserinfoURL, configured.Enabled).
+		Scan(&configured.ID, &configured.Revision, &configured.Metadata, &configured.CreatedAt, &configured.UpdatedAt)
 	if err != nil {
 		return nil, fmt.Errorf("inserting provider: %w", err)
 	}
-	m.setDynamicProvider(req.Name, runtimeProvider, true)
+	if err := audit.EnqueueMutationTx(ctx, tx, mutation.WithTarget("provider", configured.Name)); err != nil {
+		return nil, fmt.Errorf("auditing provider creation: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("committing provider creation: %w", err)
+	}
+	m.setDynamicProvider(req.Name, runtimeProvider, configured.Enabled)
+	m.notifyChange(ctx, req.Name, "created")
 	return configured, nil
 }
 
 // UpdateProvider validates the complete candidate before persisting it.
-func (m *Manager) UpdateProvider(ctx context.Context, name string, req models.UpdateProviderRequest) (*models.ExternalProvider, error) {
+func (m *Manager) UpdateProvider(ctx context.Context, name string, req models.UpdateProviderRequest, mutation audit.MutationAudit) (*models.ExternalProvider, error) {
 	m.mutationMu.Lock()
 	defer m.mutationMu.Unlock()
+	if err := mutation.ValidateEvent(models.AuditProviderUpdated); err != nil {
+		return nil, fmt.Errorf("invalid provider update audit context: %w", err)
+	}
 	if m.db == nil {
 		return nil, errors.New("provider database is unavailable")
 	}
@@ -252,11 +293,11 @@ func (m *Manager) UpdateProvider(ctx context.Context, name string, req models.Up
 	var encryptedSecret string
 	err := m.db.QueryRow(ctx, `
 		SELECT id,name,type,client_id,client_secret,scopes,discovery_url,authorization_url,
-		       token_url,userinfo_url,enabled,metadata,created_at,updated_at
+		       token_url,userinfo_url,enabled,revision,metadata,created_at,updated_at
 		FROM oauth_providers WHERE name=$1
 	`, name).Scan(&current.ID, &current.Name, &current.Type, &current.ClientID, &encryptedSecret,
 		&current.Scopes, &current.DiscoveryURL, &current.AuthorizationURL, &current.TokenURL,
-		&current.UserinfoURL, &current.Enabled, &current.Metadata, &current.CreatedAt, &current.UpdatedAt)
+		&current.UserinfoURL, &current.Enabled, &current.Revision, &current.Metadata, &current.CreatedAt, &current.UpdatedAt)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return nil, ErrProviderNotFound
@@ -311,62 +352,112 @@ func (m *Manager) UpdateProvider(ctx context.Context, name string, req models.Up
 			return nil, fmt.Errorf("encrypting provider secret: %w", err)
 		}
 	}
-	tag, err := m.db.Exec(ctx, `
-		UPDATE oauth_providers SET client_id=$2,client_secret=$3,scopes=$4,discovery_url=$5,
-		       authorization_url=$6,token_url=$7,userinfo_url=$8,enabled=$9,updated_at=NOW()
-		WHERE name=$1
-	`, name, current.ClientID, encryptedSecret, current.Scopes, current.DiscoveryURL,
-		current.AuthorizationURL, current.TokenURL, current.UserinfoURL, current.Enabled)
+	tx, err := m.db.Begin(ctx)
 	if err != nil {
+		return nil, fmt.Errorf("starting provider update: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	err = tx.QueryRow(ctx, `
+		UPDATE oauth_providers SET client_id=$2,client_secret=$3,scopes=$4,discovery_url=$5,
+		       authorization_url=$6,token_url=$7,userinfo_url=$8,enabled=$9,
+		       revision=revision+1,updated_at=NOW()
+		WHERE name=$1 AND revision=$10
+		RETURNING revision,updated_at
+	`, name, current.ClientID, encryptedSecret, current.Scopes, current.DiscoveryURL,
+		current.AuthorizationURL, current.TokenURL, current.UserinfoURL, current.Enabled, current.Revision).
+		Scan(&current.Revision, &current.UpdatedAt)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			var exists bool
+			if existsErr := tx.QueryRow(ctx, `SELECT EXISTS (SELECT 1 FROM oauth_providers WHERE name=$1)`, name).Scan(&exists); existsErr != nil {
+				return nil, fmt.Errorf("checking provider revision: %w", existsErr)
+			}
+			if !exists {
+				return nil, ErrProviderNotFound
+			}
+			return nil, ErrProviderRevisionConflict
+		}
 		return nil, fmt.Errorf("updating provider: %w", err)
 	}
-	if tag.RowsAffected() == 0 {
-		return nil, ErrProviderNotFound
+	if err := audit.EnqueueMutationTx(ctx, tx, mutation.WithTarget("provider", name)); err != nil {
+		return nil, fmt.Errorf("auditing provider update: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("committing provider update: %w", err)
 	}
 	m.setDynamicProvider(name, runtimeProvider, current.Enabled)
+	m.notifyChange(ctx, name, "updated")
 	return &current, nil
 }
 
-func (m *Manager) DeleteProvider(ctx context.Context, name string) error {
+func (m *Manager) DeleteProvider(ctx context.Context, name string, mutation audit.MutationAudit) error {
 	m.mutationMu.Lock()
 	defer m.mutationMu.Unlock()
+	if err := mutation.ValidateEvent(models.AuditProviderDeleted); err != nil {
+		return fmt.Errorf("invalid provider deletion audit context: %w", err)
+	}
 	if m.db == nil {
 		return errors.New("provider database is unavailable")
 	}
-	tag, err := m.db.Exec(ctx, `DELETE FROM oauth_providers WHERE name=$1`, name)
+	tx, err := m.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("starting provider deletion: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	tag, err := tx.Exec(ctx, `DELETE FROM oauth_providers WHERE name=$1`, name)
 	if err != nil {
 		return fmt.Errorf("deleting provider: %w", err)
 	}
 	if tag.RowsAffected() == 0 {
 		return ErrProviderNotFound
 	}
-	m.restoreStaticProvider(name)
+	if err := audit.EnqueueMutationTx(ctx, tx, mutation.WithTarget("provider", name)); err != nil {
+		return fmt.Errorf("auditing provider deletion: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("committing provider deletion: %w", err)
+	}
+	m.removeDynamicProvider(name)
+	m.notifyChange(ctx, name, "deleted")
 	return nil
 }
 
 // setDynamicProvider updates one runtime entry after its database mutation has
-// committed. A disabled dynamic row deliberately shadows a same-name static
-// provider, matching LoadDynamic semantics.
+// committed.
 func (m *Manager) setDynamicProvider(name string, configured Provider, enabled bool) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if enabled {
 		m.providers[name] = configured
+		m.snapshotRevision.Add(1)
+		m.ready.Store(true)
 		return
 	}
 	delete(m.providers, name)
+	m.snapshotRevision.Add(1)
+	m.ready.Store(true)
 }
 
-// restoreStaticProvider removes a deleted dynamic override and restores a
-// same-name static provider when one exists.
-func (m *Manager) restoreStaticProvider(name string) {
+func (m *Manager) removeDynamicProvider(name string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if configured, ok := m.staticProviders[name]; ok {
-		m.providers[name] = configured
+	delete(m.providers, name)
+	m.snapshotRevision.Add(1)
+	m.ready.Store(true)
+}
+
+func (m *Manager) Ready() bool { return m.ready.Load() }
+
+func (m *Manager) SnapshotRevision() uint64 { return m.snapshotRevision.Load() }
+
+func (m *Manager) notifyChange(ctx context.Context, name, action string) {
+	if m.db == nil {
 		return
 	}
-	delete(m.providers, name)
+	if _, err := m.db.Exec(ctx, `SELECT pg_notify('nyauth_provider_changed', $1)`, action+":"+name); err != nil {
+		m.recordTelemetry(ctx, "synchronization", "failure", "notification_publish_failed", 0)
+		slog.ErrorContext(ctx, "provider change notification failed", "provider", name, "action", action, "error", err)
+	}
 }
 
 // EncryptSecret creates the only accepted persisted representation of a
@@ -379,20 +470,41 @@ func (m *Manager) EncryptSecret(providerName, plaintext string) (string, error) 
 	return crypto.EncryptEnvelope(key, m.activeKeyID, providerSecretPurpose, []byte(plaintext), []byte(providerName))
 }
 
+// VerifyStoredSecrets authenticates every restored provider envelope without
+// installing providers or making upstream network requests.
+func (m *Manager) VerifyStoredSecrets(ctx context.Context) (int64, error) {
+	if m == nil || m.db == nil {
+		return 0, errors.New("provider database is unavailable")
+	}
+	rows, err := m.db.Query(ctx, `SELECT name,client_secret FROM oauth_providers ORDER BY name`)
+	if err != nil {
+		return 0, fmt.Errorf("querying provider envelopes: %w", err)
+	}
+	defer rows.Close()
+
+	var verified int64
+	for rows.Next() {
+		var name, ciphertext string
+		if err := rows.Scan(&name, &ciphertext); err != nil {
+			return 0, fmt.Errorf("scanning provider envelope: %w", err)
+		}
+		if _, err := m.decryptSecret(name, ciphertext); err != nil {
+			return 0, fmt.Errorf("verifying provider %q envelope: %w", name, err)
+		}
+		verified++
+	}
+	if err := rows.Err(); err != nil {
+		return 0, fmt.Errorf("iterating provider envelopes: %w", err)
+	}
+	return verified, nil
+}
+
 func (m *Manager) decryptSecret(providerName, ciphertext string) (string, error) {
 	plaintext, err := crypto.DecryptEnvelope(m.masterKeys, providerSecretPurpose, ciphertext, []byte(providerName))
 	if err != nil {
 		return "", err
 	}
 	return string(plaintext), nil
-}
-
-func cloneProviders(source map[string]Provider) map[string]Provider {
-	cloned := make(map[string]Provider, len(source))
-	for name, configured := range source {
-		cloned[name] = configured
-	}
-	return cloned
 }
 
 func valueOrEmpty(value *string) string {

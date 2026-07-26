@@ -5,17 +5,50 @@ server:
   port: 8080
   secure_cookie: false
   trusted_proxy_cidrs: []
+  readiness_timeout: 3s
+  shutdown_timeout: 30s
   tls:
     enabled: false
     cert_file: ""
     key_file: ""
 database:
   driver: postgres
-  dsn: "postgres://nyauth:local-dev-only@localhost:5432/nyauth?sslmode=disable"
+  dsn: "postgres://nyauth_runtime:local-dev-only-runtime-postgres@localhost:5432/nyauth?sslmode=disable"
+  runtime_role: nyauth_runtime
+  max_conns: 25
+  min_conns: 5
+  max_conn_lifetime: 1h
+  max_conn_idle_time: 30m
+  health_check_period: 1m
+  connect_timeout: 5s
+  statement_timeout: 15s
+  tls:
+    mode: disable
+    root_ca_file: ""
+    client_cert_file: ""
+    client_key_file: ""
+    server_name: ""
 redis:
   addr: "localhost:6379"
+  username: ""
   password: ""
   db: 0
+  pool_size: 20
+  min_idle_conns: 2
+  max_idle_conns: 20
+  dial_timeout: 5s
+  read_timeout: 3s
+  write_timeout: 3s
+  pool_timeout: 4s
+  conn_max_idle_time: 30m
+  conn_max_lifetime: 1h
+  tls:
+    enabled: false
+    root_ca_file: ""
+    client_cert_file: ""
+    client_key_file: ""
+    server_name: ""
+    insecure_skip_verify: false
 auth:
   issuer: "http://localhost:8080"
   access_token_ttl: 3600
@@ -27,12 +60,21 @@ auth:
     algorithm: RS256
     key_size: 2048
     rotation_interval: 720h
-providers: {}
 admin:
   username: admin
-  password: local-dev-only-admin
   email: admin@localhost
 web:
   enabled: true
   title: "nyauth"
   logo_url: ""
+audit:
+  retention: 8760h
+telemetry:
+  # Prometheus remains enabled on the internal /metrics route.
+  otlp:
+    enabled: false
+    endpoint: ""
+    # Prefer NYAUTH_TELEMETRY_OTLP_AUTHORIZATION_FILE for collector credentials.
+    authorization: ""
+    export_interval: 30s
+    timeout: 10s

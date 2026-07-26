@@ -1,4 +1,10 @@
+DROP TABLE IF EXISTS login_stats_daily;
+DROP TABLE IF EXISTS system_stats_snapshot;
+DROP TABLE IF EXISTS audit_event_outbox;
 DROP TABLE IF EXISTS audit_logs;
+DROP TABLE IF EXISTS email_outbox;
+DROP TABLE IF EXISTS account_action_tokens;
+DROP TABLE IF EXISTS oauth_authorizations;
 DROP TABLE IF EXISTS identities;
 DROP TABLE IF EXISTS oauth_providers;
 DROP TABLE IF EXISTS jwk_keys;

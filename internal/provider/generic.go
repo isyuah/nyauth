@@ -20,19 +20,18 @@ import (
 
 // GenericOIDC implements a discovery-backed OpenID Connect provider.
 type GenericOIDC struct {
-	name               string
-	clientID           string
-	clientSecret       string
-	scopes             []string
-	authorizationURL   string
-	tokenURL           string
-	userinfoURL        string
-	issuer             string
-	jwksURL            string
-	supportedAlgs      []string
-	client             *http.Client
-	verifier           *oidc.IDTokenVerifier
-	configurationError error
+	name             string
+	clientID         string
+	clientSecret     string
+	scopes           []string
+	authorizationURL string
+	tokenURL         string
+	userinfoURL      string
+	issuer           string
+	jwksURL          string
+	supportedAlgs    []string
+	client           *http.Client
+	verifier         *oidc.IDTokenVerifier
 }
 
 type oidcDiscovery struct {
@@ -92,21 +91,6 @@ func NewGenericOIDCWithMode(name, clientID, clientSecret string, scopes []string
 	), nil
 }
 
-// NewGenericOIDCFromURLs is retained for source compatibility, but explicit
-// endpoints cannot establish an issuer or signing-key trust root. Authentication
-// is therefore rejected until the provider is configured through discovery.
-func NewGenericOIDCFromURLs(name, clientID, clientSecret string, scopes []string, authURL, tokenURL, userinfoURL string) *GenericOIDC {
-	if len(scopes) == 0 {
-		scopes = []string{"openid", "email", "profile"}
-	}
-	return &GenericOIDC{
-		name: name, clientID: clientID, clientSecret: clientSecret,
-		scopes: append([]string(nil), scopes...), authorizationURL: authURL,
-		tokenURL: tokenURL, userinfoURL: userinfoURL, client: newProviderHTTPClient(false),
-		configurationError: errors.New("explicit OIDC endpoints are unsafe; configure an HTTPS discovery URL"),
-	}
-}
-
 func newConfiguredOIDC(name, clientID, clientSecret string, scopes []string, issuer, authURL, tokenURL, userinfoURL, jwksURL string, algs []string, client *http.Client) *GenericOIDC {
 	safeAlgs := filterAsymmetricSigningAlgorithms(algs)
 	if len(safeAlgs) == 0 {
@@ -135,9 +119,6 @@ func (g *GenericOIDC) AuthorizationURL(state, nonce, redirectURI string) string 
 }
 
 func (g *GenericOIDC) Authenticate(ctx context.Context, code, redirectURI, nonce string) (*models.ExternalUser, error) {
-	if g.configurationError != nil {
-		return nil, g.configurationError
-	}
 	if strings.TrimSpace(code) == "" {
 		return nil, errors.New("authorization code is required")
 	}

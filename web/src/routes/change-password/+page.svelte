@@ -3,9 +3,11 @@
   import { page } from '$app/stores';
   import { onMount } from 'svelte';
   import { api } from '$lib/api';
+  import { PASSWORD_REQUIREMENT, passwordPolicyError } from '$lib/password-policy';
   import { safeReturnPath, sessionStore } from '$lib/stores';
   import Button from '$lib/components/ui/Button.svelte';
   import Input from '$lib/components/ui/Input.svelte';
+  import ResourceState from '$lib/components/ui/ResourceState.svelte';
   import { KeyRound } from 'lucide-svelte';
 
   let currentPassword = $state('');
@@ -14,19 +16,34 @@
   let error = $state('');
   let loading = $state(false);
   let ready = $state(false);
+  let sessionError = $state('');
   let returnTo = $derived(safeReturnPath($page.url.searchParams.get('return_to'), '/dashboard'));
 
-  onMount(async () => {
-    const session = await sessionStore.initialize();
-    if (!session) goto(`/login?return_to=${encodeURIComponent('/change-password')}`);
-    else ready = true;
-  });
+  async function initialize() {
+    sessionError = '';
+    try {
+      const session = await sessionStore.initialize(true);
+      if (!session) {
+        const path = `/change-password?return_to=${encodeURIComponent(returnTo)}`;
+        await goto(`/login?return_to=${encodeURIComponent(path)}`);
+      } else if (!session.has_password) {
+        await goto('/profile');
+      } else {
+        ready = true;
+      }
+    } catch (cause) {
+      sessionError = cause instanceof Error ? cause.message : '无法验证当前会话';
+    }
+  }
+
+  onMount(initialize);
 
   async function submit(event: Event) {
     event.preventDefault();
     error = '';
-    if (newPassword.length < 12) {
-      error = '新密码至少需要 12 个字符';
+    const policyError = passwordPolicyError(newPassword);
+    if (policyError) {
+      error = policyError;
       return;
     }
     if (newPassword !== confirmation) {
@@ -51,7 +68,9 @@
 
 <svelte:head><title>修改密码 - Nya</title></svelte:head>
 
-{#if ready}
+{#if sessionError}
+  <div class="min-h-screen bg-nya-bg p-6"><div class="mx-auto max-w-xl pt-24"><ResourceState loading={false} error={sessionError} onretry={initialize}>{#snippet children()}{/snippet}</ResourceState></div></div>
+{:else if ready}
   <div class="min-h-screen flex items-center justify-center px-4 bg-[var(--nya-bg)]">
     <div class="w-full max-w-[420px] bg-[var(--nya-surface)] border border-[var(--nya-border)] p-8" style="border-radius: var(--nya-radius-card); box-shadow: var(--nya-shadow-card);">
       <div class="flex items-center gap-3 mb-2">
@@ -60,13 +79,13 @@
       </div>
       <p class="mb-6" style="font-size: 13px; color: var(--nya-text-secondary);">更新密码后，其他已登录设备和现有令牌会立即失效。</p>
       {#if error}
-        <div class="mb-4 px-4 py-3 rounded-lg" style="background: var(--nya-danger-soft); color: var(--nya-danger); font-size: 13px;">{error}</div>
+        <div class="mb-4 px-4 py-3 rounded-lg" style="background: var(--nya-danger-soft); color: var(--nya-danger); font-size: 13px;" role="alert" aria-live="assertive">{error}</div>
       {/if}
       <form onsubmit={submit} class="space-y-4">
-        <Input label="当前密码" type="password" bind:value={currentPassword} required autocomplete="current-password" />
-        <Input label="新密码" type="password" bind:value={newPassword} required autocomplete="new-password" />
-        <Input label="确认新密码" type="password" bind:value={confirmation} required autocomplete="new-password" />
-        <Button type="submit" variant="primary" size="lg" {loading}>确认修改</Button>
+        <Input id="current-password" label="当前密码" type="password" bind:value={currentPassword} required autocomplete="current-password" />
+        <div><Input id="new-password" label="新密码" type="password" bind:value={newPassword} required autocomplete="new-password" /><p class="mt-1.5 text-small text-nya-text-tertiary">{PASSWORD_REQUIREMENT}</p></div>
+        <Input id="confirm-password" label="确认新密码" type="password" bind:value={confirmation} required autocomplete="new-password" />
+        <Button type="submit" variant="primary" size="lg" {loading} fullWidth>确认修改</Button>
       </form>
     </div>
   </div>

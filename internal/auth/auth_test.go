@@ -2,6 +2,8 @@ package auth
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/json"
@@ -13,10 +15,31 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	"github.com/golang-jwt/jwt/v5"
+	"github.com/google/uuid"
 	"github.com/nyasharp/nyauth/internal/config"
 	"github.com/nyasharp/nyauth/internal/session"
+	"github.com/nyasharp/nyauth/pkg/models"
 	"github.com/redis/go-redis/v9"
 )
+
+type tokenMetadataFailureHook struct{}
+
+func (tokenMetadataFailureHook) DialHook(next redis.DialHook) redis.DialHook { return next }
+func (tokenMetadataFailureHook) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		args := cmd.Args()
+		if cmd.Name() == "get" && len(args) > 1 {
+			if key, ok := args[1].(string); ok && strings.HasPrefix(key, "nyauth:token:") {
+				return errors.New("token metadata store unavailable")
+			}
+		}
+		return next(ctx, cmd)
+	}
+}
+func (tokenMetadataFailureHook) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
+}
 
 func TestValidatePKCES256RFC7636(t *testing.T) {
 	verifier := "dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk"
@@ -97,6 +120,66 @@ func TestRefreshWrongClientDoesNotMutateToken(t *testing.T) {
 	}
 }
 
+func TestRevokeAccessTokenReportsMetadataStoreFailure(t *testing.T) {
+	mini := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: mini.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+	store := session.NewStore(client)
+	ctx := context.Background()
+	const issuer = "https://issuer.test"
+	const clientID = "client"
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC()
+	jti := uuid.NewString()
+	claims := &Claims{RegisteredClaims: jwt.RegisteredClaims{
+		Issuer: issuer, Subject: clientID, Audience: jwt.ClaimStrings{clientID}, ID: jti,
+		ExpiresAt: jwt.NewNumericDate(now.Add(time.Hour)), IssuedAt: jwt.NewNumericDate(now), NotBefore: jwt.NewNumericDate(now),
+	}, Scope: "openid", TokenUse: "access"}
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	token.Header["kid"] = "test-key"
+	signed, err := token.SignedString(privateKey)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := store.SaveToken(ctx, jti, &session.TokenData{
+		ClientID: clientID, UserID: clientID, Scopes: []string{"openid"}, TokenUse: "access",
+	}, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	client.AddHook(tokenMetadataFailureHook{})
+	service := &TokenService{
+		session: store, issuer: issuer, refreshTTL: time.Hour,
+		publicKeyLoader: func(context.Context, string) (*rsa.PublicKey, error) { return &privateKey.PublicKey, nil },
+	}
+
+	err = service.RevokeTokenForClient(ctx, signed, clientID)
+	if !errors.Is(err, ErrTokenValidationUnavailable) {
+		t.Fatalf("revocation error = %v, want ErrTokenValidationUnavailable", err)
+	}
+}
+
+func TestRefreshReuseIsReportedDistinctly(t *testing.T) {
+	mini := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: mini.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+	store := session.NewStore(client)
+	ctx := context.Background()
+	data := &session.TokenData{ClientID: "client", UserID: "client", Scopes: []string{"offline_access"}, TokenUse: "refresh"}
+	if err := store.SaveRefreshToken(ctx, "old-refresh", data, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.RotateRefreshToken(ctx, "old-refresh", "current-refresh", data, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	service := &TokenService{session: store, refreshTTL: time.Hour}
+	if _, err := service.RefreshToken(ctx, "old-refresh", "client", []string{"offline_access"}); !errors.Is(err, ErrRefreshTokenReuse) {
+		t.Fatalf("refresh reuse error = %v", err)
+	}
+}
+
 func TestConfidentialIntrospectionSupportsOwnedRefreshTokens(t *testing.T) {
 	mini := miniredis.RunT(t)
 	client := redis.NewClient(&redis.Options{Addr: mini.Addr()})
@@ -151,6 +234,25 @@ func TestAddQueryPreservesExistingParameters(t *testing.T) {
 	}
 	if got != "https://client.example/cb?code=a%2Bb%26c&state=x+y&tenant=one" {
 		t.Fatalf("unexpected redirect URL: %s", got)
+	}
+}
+
+func TestOAuthOpaqueParameterBounds(t *testing.T) {
+	t.Parallel()
+	if !validOAuthOpaqueParameter("", maxOAuthStateBytes, true) {
+		t.Fatal("optional empty state was rejected")
+	}
+	if validOAuthOpaqueParameter("", maxOIDCNonceBytes, false) {
+		t.Fatal("required empty nonce was accepted")
+	}
+	if !validOAuthOpaqueParameter(strings.Repeat("s", maxOAuthStateBytes), maxOAuthStateBytes, true) {
+		t.Fatal("maximum-length state was rejected")
+	}
+	if validOAuthOpaqueParameter(strings.Repeat("s", maxOAuthStateBytes+1), maxOAuthStateBytes, true) {
+		t.Fatal("oversized state was accepted")
+	}
+	if validOAuthOpaqueParameter(string([]byte{0xff}), maxOIDCNonceBytes, false) {
+		t.Fatal("invalid UTF-8 nonce was accepted")
 	}
 }
 
@@ -286,6 +388,123 @@ func TestOAuthFormEndpointsRejectOversizedBodies(t *testing.T) {
 	}
 }
 
+func TestUnsupportedGrantAuditDoesNotPersistRequestSecrets(t *testing.T) {
+	handler := &Handler{}
+	var captured SecurityAuditEvent
+	var metricGrant, metricResult, metricReason string
+	handler.SetSecurityAuditSink(func(_ context.Context, event SecurityAuditEvent) error {
+		captured = event
+		return nil
+	})
+	handler.SetGrantMetricSink(func(_ context.Context, grantType, result, reason string) {
+		metricGrant, metricResult, metricReason = grantType, result, reason
+	})
+	request := httptest.NewRequest(http.MethodPost, "/token", strings.NewReader("grant_type=private_extension&code=must-not-be-audited&refresh_token=must-not-be-audited"))
+	request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+	response := httptest.NewRecorder()
+	handler.Token(response, request)
+	if response.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d", response.Code)
+	}
+	if captured.Event != models.AuditTokenGrantFailed || captured.AggregateID != "unsupported" || captured.Result != "failure" {
+		t.Fatalf("unexpected audit event: %#v", captured)
+	}
+	if captured.Details["grant_type"] != "unsupported" || captured.Details["failure_reason"] != "unsupported_grant_type" {
+		t.Fatalf("unexpected audit details: %#v", captured.Details)
+	}
+	if metricGrant != "unsupported" || metricResult != "failure" || metricReason != "unsupported_grant_type" {
+		t.Fatalf("unexpected grant metric: grant=%q result=%q reason=%q", metricGrant, metricResult, metricReason)
+	}
+	for _, key := range []string{"code", "refresh_token", "token", "nonce"} {
+		if _, exists := captured.Details[key]; exists {
+			t.Fatalf("sensitive field %q was included in audit details", key)
+		}
+	}
+}
+
+func TestOAuthRevocationAndEndSessionAuditsUseRealActorsWithoutCredentials(t *testing.T) {
+	handler := &Handler{}
+	events := make([]SecurityAuditEvent, 0, 2)
+	handler.SetSecurityAuditSink(func(_ context.Context, event SecurityAuditEvent) error {
+		events = append(events, event)
+		return nil
+	})
+
+	handler.recordTokenRevocationAudit(context.Background(), "client_123", true, "failure", "high", "client_binding_mismatch")
+	userID := uuid.New()
+	handler.recordEndSessionAudit(context.Background(), &userID, "alice", "client_123", "success", "medium", "")
+
+	if len(events) != 2 {
+		t.Fatalf("audit event count = %d, want 2", len(events))
+	}
+	revocation := events[0]
+	if revocation.Event != models.AuditTokenRevoked || revocation.ActorID != nil || revocation.ActorName != "client_123" ||
+		revocation.AggregateType != "client" || revocation.AggregateID != "client_123" || revocation.Result != "failure" {
+		t.Fatalf("unexpected token revocation audit: %#v", revocation)
+	}
+	if revocation.Details["operation"] != "token_revocation" || revocation.Details["failure_reason"] != "client_binding_mismatch" {
+		t.Fatalf("unexpected token revocation details: %#v", revocation.Details)
+	}
+
+	logout := events[1]
+	if logout.Event != models.AuditUserLogout || logout.ActorID == nil || *logout.ActorID != userID || logout.ActorName != "alice" ||
+		logout.AggregateType != "client" || logout.AggregateID != "client_123" || logout.Result != "success" {
+		t.Fatalf("unexpected end-session audit: %#v", logout)
+	}
+	if logout.Details["operation"] != "oidc_end_session" {
+		t.Fatalf("unexpected end-session details: %#v", logout.Details)
+	}
+
+	for _, event := range events {
+		for _, key := range []string{"token", "code", "cookie", "nonce", "csrf", "secret"} {
+			if _, exists := event.Details[key]; exists {
+				t.Fatalf("sensitive detail %q was included in %#v", key, event)
+			}
+		}
+	}
+	if targetType, targetID := oauthAuditTarget("client?token=must-not-be-audited", "revoke"); targetType != "oauth_endpoint" || targetID != "revoke" {
+		t.Fatalf("unsafe client identifier became an audit target: type=%q id=%q", targetType, targetID)
+	}
+}
+
+func TestOAuthAuditSinkFailureDoesNotLeakInternalError(t *testing.T) {
+	handler := &Handler{config: &config.Config{}}
+	handler.SetSecurityAuditSink(func(context.Context, SecurityAuditEvent) error {
+		return errors.New("postgres connection details must stay internal")
+	})
+
+	tests := []struct {
+		name       string
+		request    *http.Request
+		handle     func(http.ResponseWriter, *http.Request)
+		wantStatus int
+	}{
+		{
+			name: "revoke", request: httptest.NewRequest(http.MethodPost, "/revoke", strings.NewReader("client_id=client_123")),
+			handle: handler.Revoke, wantStatus: http.StatusBadRequest,
+		},
+		{
+			name: "end session", request: httptest.NewRequest(http.MethodGet, "/end_session?post_logout_redirect_uri=https%3A%2F%2Fclient.example%2Flogout", nil),
+			handle: handler.EndSession, wantStatus: http.StatusBadRequest,
+		},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			if test.request.Body != nil {
+				test.request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+			}
+			response := httptest.NewRecorder()
+			test.handle(response, test.request)
+			if response.Code != test.wantStatus {
+				t.Fatalf("status = %d, want %d; body=%s", response.Code, test.wantStatus, response.Body.String())
+			}
+			if strings.Contains(response.Body.String(), "postgres connection") {
+				t.Fatalf("internal audit error leaked in response: %s", response.Body.String())
+			}
+		})
+	}
+}
+
 func TestTokenAndIntrospectionResponsesDisableCaching(t *testing.T) {
 	handler := &Handler{}
 	tests := []struct {
@@ -309,5 +528,54 @@ func TestTokenAndIntrospectionResponsesDisableCaching(t *testing.T) {
 				t.Fatalf("Pragma = %q", got)
 			}
 		})
+	}
+}
+
+func TestAuthorizationRevocationInvalidatesOnlyEarlierUserTokens(t *testing.T) {
+	mini := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: mini.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+	store := session.NewStore(client)
+	service := &TokenService{session: store}
+	ctx := context.Background()
+	mini.SetTime(time.Date(2026, 7, 26, 9, 30, 0, 0, time.UTC))
+
+	revokedAt, err := store.RevokeUserClientAuthorization(ctx, "user-1", "client-1", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	oldToken := &session.TokenData{ClientID: "client-1", UserID: "user-1", AuthVersion: 1, AuthorizationIssuedAt: revokedAt - 1}
+	if err := service.validateAuthorization(ctx, oldToken); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("old authorization validation error = %v", err)
+	}
+	newToken := &session.TokenData{ClientID: "client-1", UserID: "user-1", AuthVersion: 1, AuthorizationIssuedAt: revokedAt + 1}
+	if err := service.validateAuthorization(ctx, newToken); err != nil {
+		t.Fatalf("new authorization was rejected: %v", err)
+	}
+	clientCredentials := &session.TokenData{ClientID: "client-1", UserID: "client-1", AuthVersion: 0}
+	if err := service.validateAuthorization(ctx, clientCredentials); err != nil {
+		t.Fatalf("client credentials token was affected by user revocation: %v", err)
+	}
+	missingIssuedAt := &session.TokenData{ClientID: "client-1", UserID: "user-1", AuthVersion: 1}
+	if err := service.validateAuthorization(ctx, missingIssuedAt); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("user token without authorization time error = %v", err)
+	}
+}
+
+func TestRevokedAuthorizationCodeCannotIssueTokens(t *testing.T) {
+	mini := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: mini.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+	store := session.NewStore(client)
+	service := &TokenService{session: store}
+	ctx := context.Background()
+	mini.SetTime(time.Date(2026, 7, 26, 9, 45, 0, 0, time.UTC))
+	revokedAt, err := store.RevokeUserClientAuthorization(ctx, "user-1", "client-1", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, err = service.GenerateAuthorizationCodeTokenPair(ctx, "client-1", "user-1", []string{"openid"}, 1, revokedAt-1, false)
+	if !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("revoked authorization code issuance error = %v", err)
 	}
 }

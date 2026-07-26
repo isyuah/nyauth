@@ -16,6 +16,7 @@
     role="switch"
     {disabled}
     aria-checked={checked}
+    aria-label={label || '切换选项'}
     onclick={() => !disabled && (checked = !checked)}
     class="relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 border-transparent transition-colors duration-fast ease-standard focus:outline-none focus:ring-2 focus:ring-nya-primary/24
       {checked ? 'bg-nya-primary' : 'bg-nya-border-strong'}"

@@ -1,5 +1,19 @@
 <script lang="ts">
   import { onMount } from 'svelte';
+  import { goto } from '$app/navigation';
+
+  interface TokenResponse {
+    access_token?: string;
+    id_token?: string;
+    refresh_token?: string;
+    token_type?: string;
+    expires_in?: number;
+    [key: string]: unknown;
+  }
+
+  type UserInfo = Record<string, unknown>;
+
+  const enabled = import.meta.env.DEV || import.meta.env.VITE_ENABLE_TEST_CLIENT === 'true';
 
   // Config
   let clientId = $state('nya-test-client');
@@ -11,10 +25,11 @@
   let codeVerifier = $state('');
   let codeChallenge = $state('');
   let oauthState = $state('');
+  let oauthNonce = $state('');
   let authCode = $state('');
   let returnedState = $state('');
-  let tokens = $state<any>(null);
-  let userInfo = $state<any>(null);
+  let tokens = $state<TokenResponse | null>(null);
+  let userInfo = $state<UserInfo | null>(null);
   let error = $state('');
   let logs = $state<string[]>([]);
 
@@ -25,6 +40,7 @@
   function clearPendingAuthorization() {
     sessionStorage.removeItem('nya_pkce_verifier');
     sessionStorage.removeItem('nya_state');
+    sessionStorage.removeItem('nya_nonce');
   }
 
   function secureEqual(left: string, right: string): boolean {
@@ -37,6 +53,10 @@
   }
 
   onMount(() => {
+    if (!enabled) {
+      goto('/dashboard', { replaceState: true });
+      return;
+    }
     if (typeof window !== 'undefined') {
       redirectUri = `${window.location.origin}/test-client`;
     }
@@ -118,6 +138,11 @@
     crypto.getRandomValues(bytes);
     oauthState = base64url(bytes);
     sessionStorage.setItem('nya_state', oauthState);
+
+    const nonceBytes = new Uint8Array(32);
+    crypto.getRandomValues(nonceBytes);
+    oauthNonce = base64url(nonceBytes);
+    sessionStorage.setItem('nya_nonce', oauthNonce);
   }
 
   async function startAuth() {
@@ -133,6 +158,7 @@
       redirect_uri: redirectUri,
       scope: scopes.join(' '),
       state: oauthState,
+      nonce: oauthNonce,
     });
 
     params.set('code_challenge', codeChallenge);
@@ -165,7 +191,7 @@
         headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
         body: params,
       });
-      const data = await res.json();
+      const data = await res.json() as TokenResponse & { error?: string; error_description?: string };
       if (res.ok) {
         tokens = data;
         step = 3;
@@ -190,7 +216,7 @@
       const res = await fetch('/userinfo', {
         headers: { Authorization: `Bearer ${tokens.access_token}` },
       });
-      userInfo = await res.json();
+      userInfo = await res.json() as UserInfo;
       step = 4;
       log('用户信息获取成功！');
     } catch (e) {

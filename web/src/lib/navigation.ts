@@ -7,6 +7,8 @@ const providerAuthErrors: Record<string, string> = {
   session_changed: '当前会话已变化，请重新发起身份绑定。',
   identity_already_bound: '该外部身份已绑定到其他账户。',
   binding_failed: '外部身份绑定失败，请稍后重试。',
+  identity_mismatch: '本次验证的外部身份与当前账户不匹配。',
+  reauthentication_failed: '重新认证失败，请稍后重试。',
   account_unavailable: '该账户当前不可用，请联系管理员。',
   session_failed: '登录会话创建失败，请稍后重试。',
 };
@@ -17,7 +19,14 @@ export interface ProviderAuthErrorResult {
 }
 
 export function safeReturnPath(value: string | null | undefined, fallback = '/dashboard'): string {
-  if (!value || !value.startsWith('/') || value.startsWith('//') || value.includes('\\')) return fallback;
+  if (
+    !value ||
+    value.length > 2048 ||
+    !value.startsWith('/') ||
+    value.startsWith('//') ||
+    value.includes('\\') ||
+    /[\u0000-\u001f\u007f]/.test(value)
+  ) return fallback;
   try {
     const parsed = new URL(value, 'https://local.invalid');
     return parsed.origin === 'https://local.invalid' ? `${parsed.pathname}${parsed.search}${parsed.hash}` : fallback;

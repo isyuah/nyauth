@@ -8,6 +8,9 @@
     loading = false,
     type = 'button',
     onclick,
+    ariaLabel,
+    title,
+    fullWidth = false,
     children,
   }: {
     variant?: 'primary' | 'secondary' | 'soft' | 'ghost' | 'danger';
@@ -16,6 +19,9 @@
     loading?: boolean;
     type?: 'button' | 'submit' | 'reset';
     onclick?: (e: MouseEvent) => void;
+    ariaLabel?: string;
+    title?: string;
+    fullWidth?: boolean;
     children: Snippet;
   } = $props();
 
@@ -34,8 +40,12 @@
 
 <button
   {type}
-  {disabled}
+  disabled={disabled || loading}
   {onclick}
+  aria-label={ariaLabel}
+  aria-busy={loading}
+  {title}
+  class:w-full={fullWidth}
   style="{styles[variant]}; height: {heights[size]}; padding: {paddings[size]}; font-size: {fontSizes[size]}; font-weight: 550; border-radius: 9px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; cursor: {disabled || loading ? 'not-allowed' : 'pointer'}; opacity: {disabled || loading ? 0.5 : 1}; transition: all 0.15s;"
 >
   {#if loading}

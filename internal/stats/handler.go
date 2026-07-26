@@ -4,60 +4,48 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/nyasharp/nyauth/internal/session"
 	"github.com/nyasharp/nyauth/pkg/models"
 	"github.com/redis/go-redis/v9"
 )
 
+const (
+	statsRefreshLockID = int64(0x4e5953544154) // "NYSTAT"
+	statsHistoryDays   = 90
+)
+
 // Handler handles stats API endpoints.
 type Handler struct {
-	db  *pgxpool.Pool
-	rdb *redis.Client
+	db       *pgxpool.Pool
+	sessions *session.Store
 }
 
 // NewHandler creates a new stats handler.
 func NewHandler(db *pgxpool.Pool, rdb *redis.Client) *Handler {
-	return &Handler{db: db, rdb: rdb}
+	return &Handler{db: db, sessions: session.NewStore(rdb)}
 }
 
 // GetStats returns system-wide statistics.
 func (h *Handler) GetStats(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	stats := models.DashboardStats{}
-
-	// User count
-	if err := h.db.QueryRow(ctx, `SELECT COUNT(*) FROM users`).Scan(&stats.UserCount); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load statistics"})
-		return
-	}
-
-	// App count
-	if err := h.db.QueryRow(ctx, `SELECT COUNT(*) FROM oauth_clients`).Scan(&stats.AppCount); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load statistics"})
-		return
-	}
-
-	// Login count (7 days)
-	if err := h.db.QueryRow(ctx, `SELECT COUNT(*) FROM audit_logs WHERE event = 'user.login' AND result='success' AND created_at >= NOW() - INTERVAL '7 days'`).Scan(&stats.LoginCount7d); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load statistics"})
-		return
-	}
-
-	// Active sessions (count distinct tokens in Redis)
-	activeSessions, err := h.countActiveSessions(ctx)
-	if err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load statistics"})
-		return
-	}
-	stats.ActiveSessions = activeSessions
-
-	// Failed logins (7 days)
-	if err := h.db.QueryRow(ctx, `SELECT COUNT(*) FROM audit_logs WHERE event = 'user.login_failed' AND result='failure' AND created_at >= NOW() - INTERVAL '7 days'`).Scan(&stats.FailedLogins7d); err != nil {
-		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load statistics"})
+	if err := h.db.QueryRow(ctx, `
+		SELECT user_count, app_count, active_sessions, login_count_7d, failed_logins_7d
+		FROM system_stats_snapshot
+		WHERE singleton = TRUE
+	`).Scan(&stats.UserCount, &stats.AppCount, &stats.ActiveSessions, &stats.LoginCount7d, &stats.FailedLogins7d); err != nil {
+		status := http.StatusInternalServerError
+		if err == pgx.ErrNoRows {
+			status = http.StatusServiceUnavailable
+		}
+		writeJSON(w, status, map[string]string{"error": "statistics are not available"})
 		return
 	}
 
@@ -72,22 +60,40 @@ func (h *Handler) GetLoginTrend(w http.ResponseWriter, r *http.Request) {
 		days = d
 	}
 
-	trend := models.LoginTrend{}
-	for i := days - 1; i >= 0; i-- {
-		day := time.Now().AddDate(0, 0, -i)
-		label := day.Format("01-02")
-		trend.Labels = append(trend.Labels, label)
-
+	today := utcDay(time.Now())
+	start := today.AddDate(0, 0, -(days - 1))
+	counts := make(map[string]int64, days)
+	rows, err := h.db.Query(ctx, `
+		SELECT day, successful_logins
+		FROM login_stats_daily
+		WHERE day >= $1 AND day <= $2
+		ORDER BY day
+	`, start, today)
+	if err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load login trend"})
+		return
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var day time.Time
 		var count int64
-		if err := h.db.QueryRow(ctx, `
-			SELECT COUNT(*) FROM audit_logs
-			WHERE event = 'user.login'
-			AND created_at >= $1::date AND created_at < ($1::date + INTERVAL '1 day')
-		`, day.Format("2006-01-02")).Scan(&count); err != nil {
+		if err := rows.Scan(&day, &count); err != nil {
 			writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load login trend"})
 			return
 		}
-		trend.Values = append(trend.Values, count)
+		counts[day.UTC().Format("2006-01-02")] = count
+	}
+	if err := rows.Err(); err != nil {
+		writeJSON(w, http.StatusInternalServerError, map[string]string{"error": "failed to load login trend"})
+		return
+	}
+
+	trend := models.LoginTrend{}
+	for i := days - 1; i >= 0; i-- {
+		day := today.AddDate(0, 0, -i)
+		label := day.Format("01-02")
+		trend.Labels = append(trend.Labels, label)
+		trend.Values = append(trend.Values, counts[day.Format("2006-01-02")])
 	}
 
 	writeJSON(w, http.StatusOK, trend)
@@ -141,12 +147,94 @@ func (h *Handler) GetRecentLogins(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *Handler) countActiveSessions(ctx context.Context) (int64, error) {
-	var count int64
-	iter := h.rdb.Scan(ctx, 0, "nyauth:session:*", 1000).Iterator()
-	for iter.Next(ctx) {
-		count++
+	return h.sessions.CountActiveSessions(ctx)
+}
+
+// Refresh rebuilds the bounded dashboard aggregates. Only one application
+// instance performs the work at a time; other instances keep serving the last
+// committed snapshot.
+func (h *Handler) Refresh(ctx context.Context) error {
+	if h == nil || h.db == nil || h.sessions == nil {
+		return fmt.Errorf("statistics refresher is unavailable")
 	}
-	return count, iter.Err()
+	activeSessions, err := h.countActiveSessions(ctx)
+	if err != nil {
+		return fmt.Errorf("counting active sessions: %w", err)
+	}
+	now := time.Now().UTC()
+	today := utcDay(now)
+	historyStart := today.AddDate(0, 0, -(statsHistoryDays - 1))
+
+	tx, err := h.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("starting statistics refresh: %w", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+	var acquired bool
+	if err := tx.QueryRow(ctx, `SELECT pg_try_advisory_xact_lock($1)`, statsRefreshLockID).Scan(&acquired); err != nil {
+		return fmt.Errorf("locking statistics refresh: %w", err)
+	}
+	if !acquired {
+		return nil
+	}
+
+	if _, err := tx.Exec(ctx, `DELETE FROM login_stats_daily WHERE day < $1`, historyStart); err != nil {
+		return fmt.Errorf("pruning login aggregates: %w", err)
+	}
+
+	var userCount, appCount, loginCount7d, failedLogins7d int64
+	if err := tx.QueryRow(ctx, `
+		SELECT
+			(SELECT COUNT(*) FROM users),
+			(SELECT COUNT(*) FROM oauth_clients),
+			COALESCE((SELECT SUM(successful_logins) FROM login_stats_daily WHERE day >= $1), 0),
+			COALESCE((SELECT SUM(failed_logins) FROM login_stats_daily WHERE day >= $1), 0)
+	`, today.AddDate(0, 0, -6)).Scan(&userCount, &appCount, &loginCount7d, &failedLogins7d); err != nil {
+		return fmt.Errorf("calculating statistics snapshot: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO system_stats_snapshot (
+			singleton, user_count, app_count, active_sessions,
+			login_count_7d, failed_logins_7d, refreshed_at
+		) VALUES (TRUE, $1, $2, $3, $4, $5, $6)
+		ON CONFLICT (singleton) DO UPDATE SET
+			user_count = EXCLUDED.user_count,
+			app_count = EXCLUDED.app_count,
+			active_sessions = EXCLUDED.active_sessions,
+			login_count_7d = EXCLUDED.login_count_7d,
+			failed_logins_7d = EXCLUDED.failed_logins_7d,
+			refreshed_at = EXCLUDED.refreshed_at
+	`, userCount, appCount, activeSessions, loginCount7d, failedLogins7d, now); err != nil {
+		return fmt.Errorf("writing statistics snapshot: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("committing statistics refresh: %w", err)
+	}
+	return nil
+}
+
+// Run refreshes the aggregate snapshot until the server shuts down.
+func (h *Handler) Run(ctx context.Context, interval time.Duration) {
+	if interval <= 0 {
+		interval = time.Minute
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			if err := h.Refresh(ctx); err != nil && ctx.Err() == nil {
+				slog.WarnContext(ctx, "statistics refresh failed", "error_class", "dependency_unavailable")
+			}
+		}
+	}
+}
+
+func utcDay(value time.Time) time.Time {
+	value = value.UTC()
+	return time.Date(value.Year(), value.Month(), value.Day(), 0, 0, 0, 0, time.UTC)
 }
 
 func relativeTime(t time.Time) string {

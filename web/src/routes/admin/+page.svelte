@@ -1,217 +1,148 @@
 <script lang="ts">
-  import { api } from '$lib/api';
   import { onMount } from 'svelte';
-  import { goto } from '$app/navigation';
-  import { Users, AppWindow, LogIn, Activity, AlertTriangle } from 'lucide-svelte';
+  import { api, type DashboardStats, type OIDCDiscoveryDocument, type RecentLogin, type SystemStatus } from '$lib/api';
+  import { sessionStore } from '$lib/stores';
+  import PageHeader from '$lib/components/layout/PageHeader.svelte';
+  import ResourceState from '$lib/components/ui/ResourceState.svelte';
+  import StatusBadge from '$lib/components/data-display/StatusBadge.svelte';
   import TrendChart from '$lib/components/data-display/TrendChart.svelte';
+  import { Activity, AlertTriangle, AppWindow, Database, KeyRound, LogIn, Server, Users } from 'lucide-svelte';
 
-  let stats = $state({
-    userCount: 0,
-    appCount: 0,
-    loginCount7d: 0,
-    activeSessions: 0,
-    failedLogins7d: 0,
-  });
-  let recentLogins = $state<Array<{user: string; role: string; result: string; ip: string; time: string; avatar: string}>>([]);
+  let stats = $state<DashboardStats | null>(null);
+  let recentLogins = $state<RecentLogin[]>([]);
   let trendData = $state<number[]>([]);
   let trendLabels = $state<string[]>([]);
+  let systemStatus = $state<SystemStatus | null>(null);
+  let discovery = $state<OIDCDiscoveryDocument | null>(null);
   let loading = $state(true);
   let error = $state('');
+  let systemError = $state('');
 
-  onMount(async () => {
+  let currentUser = $derived($sessionStore.session?.user);
+  let statCards = $derived(stats ? [
+    { label: '用户总数', value: stats.user_count, icon: Users, bg: 'var(--nya-primary-soft)', fg: 'var(--nya-primary)' },
+    { label: '应用总数', value: stats.app_count, icon: AppWindow, bg: 'var(--nya-blue-soft)', fg: 'var(--nya-blue)' },
+    { label: '7 日登录次数', value: stats.login_count_7d, icon: LogIn, bg: 'var(--nya-mint-soft)', fg: 'var(--nya-mint)' },
+    { label: '活跃会话', value: stats.active_sessions, icon: Activity, bg: 'var(--nya-orange-soft)', fg: 'var(--nya-orange)' },
+    { label: '7 日失败登录', value: stats.failed_logins_7d, icon: AlertTriangle, bg: 'var(--nya-pink-soft)', fg: 'var(--nya-pink)' },
+  ] : []);
+
+  async function loadDashboard() {
+    loading = true;
+    error = '';
+    systemError = '';
     try {
-      const [s, trend, logins] = await Promise.all([
+      const [statsResult, trend, logins] = await Promise.all([
         api.admin.getStats(),
         api.admin.getLoginTrend(7),
         api.admin.getRecentLogins(5),
       ]);
-      stats = {
-        userCount: Number(s?.user_count) || 0,
-        appCount: Number(s?.app_count) || 0,
-        loginCount7d: Number(s?.login_count_7d) || 0,
-        activeSessions: Number(s?.active_sessions) || 0,
-        failedLogins7d: Number(s?.failed_logins_7d) || 0,
-      };
-      trendData = (trend?.values || []).map(Number);
-      trendLabels = trend?.labels || [];
-      recentLogins = (logins || []).map((l: any) => ({
-        user: l.username || '-',
-        role: '用户',
-        result: l.result === 'success' ? '成功' : '失败',
-        ip: l.ip || '-',
-        time: l.time || '-',
-        avatar: (l.username || '?')[0].toUpperCase(),
-      }));
-    } catch (e: any) {
-      if (e?.message?.includes('401') || e?.message?.includes('invalid token')) {
-        goto('/login');
-        return;
-      }
-      error = e?.message || '加载失败';
-    } finally { loading = false; }
-  });
+      stats = statsResult;
+      trendData = trend.values;
+      trendLabels = trend.labels;
+      recentLogins = logins;
+    } catch (cause) {
+      error = cause instanceof Error ? cause.message : '仪表盘加载失败';
+    }
 
-  const statCards = $derived([
-    { label: '用户总数', value: stats.userCount, icon: Users, bg: 'var(--nya-primary-soft)', fg: 'var(--nya-primary)', trend: '' },
-    { label: '应用总数', value: stats.appCount, icon: AppWindow, bg: 'var(--nya-blue-soft)', fg: 'var(--nya-blue)', trend: '' },
-    { label: '7 日登录次数', value: stats.loginCount7d, icon: LogIn, bg: 'var(--nya-mint-soft)', fg: 'var(--nya-mint)', trend: '' },
-    { label: '活跃会话', value: stats.activeSessions, icon: Activity, bg: 'var(--nya-orange-soft)', fg: 'var(--nya-orange)', trend: '' },
-    { label: '7 日失败登录', value: stats.failedLogins7d, icon: AlertTriangle, bg: 'var(--nya-pink-soft)', fg: 'var(--nya-pink)', trend: '' },
-  ]);
+    const [statusResult, discoveryResult] = await Promise.allSettled([
+      api.admin.getSystemStatus(),
+      api.discovery(),
+    ]);
+    if (statusResult.status === 'fulfilled') systemStatus = statusResult.value;
+    else {
+      systemStatus = null;
+      systemError = statusResult.reason instanceof Error ? statusResult.reason.message : '系统状态不可用';
+    }
+    if (discoveryResult.status === 'fulfilled') discovery = discoveryResult.value;
+    else discovery = null;
+    loading = false;
+  }
+
+  onMount(loadDashboard);
 </script>
 
 <svelte:head><title>仪表盘 - Nya</title></svelte:head>
 
-<!-- 页面头部 §7.1 -->
-<div style="margin-bottom: 20px;">
-  <h1 style="font-size: 24px; line-height: 32px; font-weight: 700; color: var(--nya-text-primary); margin: 0;">仪表盘</h1>
-  <p style="font-size: 14px; line-height: 21px; color: var(--nya-text-secondary); margin-top: 4px;">欢迎回来，Nya Admin！今天也要元气满满喵～</p>
-</div>
+<PageHeader
+  title="仪表盘"
+  description={currentUser ? `欢迎回来，${currentUser.display_name || currentUser.username}` : '查看认证服务的真实运行数据'}
+/>
 
-<!-- 统计卡 §0.6: 5 列 → 响应式降列 -->
-<div class="grid" style="gap: 16px; margin-bottom: 16px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));">
-  {#each statCards as card}
-    <div
-      class="bg-[var(--nya-surface)] border border-[var(--nya-border)]"
-      style="min-height: 112px; padding: 20px; border-radius: var(--nya-radius-card); box-shadow: var(--nya-shadow-card); display: grid; grid-template-columns: 48px 1fr; column-gap: 14px; align-items: center;"
-    >
-      <div
-        class="flex items-center justify-center rounded-full"
-        style="width: 46px; height: 46px; background: {card.bg};"
-      >
-        <card.icon size={22} color={card.fg} />
-      </div>
-      <div>
-        <p style="font-size: 13px; color: var(--nya-text-tertiary); line-height: 19px;">{card.label}</p>
-        <p style="font-size: 28px; font-weight: 720; line-height: 34px; color: var(--nya-text-primary); font-variant-numeric: tabular-nums;">
-          {(card.value ?? 0).toLocaleString()}
-        </p>
-        {#if card.trend}
-          <p style="font-size: 12px; color: var(--nya-text-tertiary); line-height: 18px;">{card.trend}</p>
-        {/if}
-      </div>
-    </div>
-  {/each}
-</div>
-
-<!-- 主内容区 §0.6: 5:5:2 网格 → 移动端单列 -->
-<div class="grid" style="gap: 16px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));">
-
-  <!-- 登录趋势 §7.3 -->
-  <div class="bg-[var(--nya-surface)] border border-[var(--nya-border)]" style="min-height: 310px; padding: 20px; border-radius: var(--nya-radius-card); box-shadow: var(--nya-shadow-card);">
-    <div class="flex items-center justify-between" style="margin-bottom: 16px;">
-      <h3 style="font-size: 16px; font-weight: 650; color: var(--nya-text-primary);">登录趋势</h3>
-      <span style="font-size: 12px; color: var(--nya-text-tertiary); background: var(--nya-surface-muted); padding: 2px 8px; border-radius: var(--nya-radius-pill);">7 天</span>
-    </div>
-    {#if trendData.length > 0 && trendData.some(v => v > 0)}
-      <TrendChart labels={trendLabels} values={trendData} height="220px" />
-    {:else}
-      <div class="flex flex-col items-center justify-center" style="height: 220px; color: var(--nya-text-tertiary);">
-        <LogIn size={32} style="margin-bottom: 8px; opacity: 0.4;" />
-        <p style="font-size: 13px;">暂无登录数据</p>
-      </div>
-    {/if}
-  </div>
-
-  <!-- 最近登录 §7.4 -->
-  <div class="bg-[var(--nya-surface)] border border-[var(--nya-border)]" style="min-height: 310px; padding: 20px; border-radius: var(--nya-radius-card); box-shadow: var(--nya-shadow-card);">
-    <div class="flex items-center justify-between" style="margin-bottom: 16px;">
-      <h3 style="font-size: 16px; font-weight: 650; color: var(--nya-text-primary);">最近登录</h3>
-      <a href="/admin" style="font-size: 12px; color: var(--nya-primary); text-decoration: none;">查看全部</a>
-    </div>
-    {#if recentLogins.length > 0}
-      <div>
-        {#each recentLogins as entry}
-          <div class="flex items-center" style="height: 52px; border-bottom: 1px solid var(--nya-divider); gap: 10px;">
-            <div class="shrink-0 flex items-center justify-center rounded-full" style="width: 30px; height: 30px; background: var(--nya-primary-soft); font-size: 12px; font-weight: 600; color: var(--nya-primary);">
-              {entry.avatar}
-            </div>
-            <div class="flex-1 min-w-0">
-              <p style="font-size: 13px; font-weight: 500; color: var(--nya-text-primary); white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">{entry.user}</p>
-            </div>
-            <span style="font-size: 11px; padding: 1px 6px; border-radius: var(--nya-radius-pill); background: {entry.role === '管理员' ? 'var(--nya-pink-soft)' : 'var(--nya-surface-muted)'}; color: {entry.role === '管理员' ? 'var(--nya-pink)' : 'var(--nya-text-tertiary)'}; font-weight: 550;">
-              {entry.role}
-            </span>
-            <span style="font-size: 12px; color: {entry.result === '成功' ? 'var(--nya-success)' : 'var(--nya-danger)'};">{entry.result}</span>
-            <span style="font-size: 12px; color: var(--nya-text-tertiary); font-family: monospace; min-width: 90px;">{entry.ip}</span>
-            <span style="font-size: 12px; color: var(--nya-text-tertiary); white-space: nowrap;">{entry.time}</span>
-          </div>
+<ResourceState {loading} {error} empty={!stats} emptyTitle="暂无统计数据" onretry={loadDashboard}>
+  {#snippet children()}
+    {#if stats}
+      <div class="grid gap-4 [grid-template-columns:repeat(auto-fit,minmax(180px,1fr))]">
+        {#each statCards as card}
+          <section class="grid min-h-28 grid-cols-[48px_1fr] items-center gap-3.5 rounded-nya-card border border-nya-border bg-nya-surface p-5 shadow-nya-card">
+            <span class="flex h-[46px] w-[46px] items-center justify-center rounded-full" style="background: {card.bg};"><card.icon size={22} color={card.fg} /></span>
+            <div><p class="text-body text-nya-text-tertiary">{card.label}</p><p class="text-[28px] font-bold tabular-nums text-nya-text-primary">{card.value.toLocaleString()}</p></div>
+          </section>
         {/each}
       </div>
-    {:else}
-      <div class="flex flex-col items-center justify-center" style="height: 240px; color: var(--nya-text-tertiary);">
-        <Users size={32} style="margin-bottom: 8px; opacity: 0.4;" />
-        <p style="font-size: 13px;">尚无登录记录</p>
+
+      <div class="mt-4 grid gap-4 xl:grid-cols-2">
+        <section class="min-h-[310px] rounded-nya-card border border-nya-border bg-nya-surface p-5 shadow-nya-card">
+          <div class="mb-4 flex items-center justify-between"><h2 class="text-card-title text-nya-text-primary">登录趋势</h2><span class="rounded-nya-pill bg-nya-surface-muted px-2 py-0.5 text-small text-nya-text-tertiary">7 天</span></div>
+          <TrendChart labels={trendLabels} values={trendData} height="220px" />
+        </section>
+
+        <section class="min-h-[310px] rounded-nya-card border border-nya-border bg-nya-surface p-5 shadow-nya-card">
+          <div class="mb-4 flex items-center justify-between"><h2 class="text-card-title text-nya-text-primary">最近登录</h2><span class="text-small text-nya-text-tertiary">最近 {recentLogins.length} 条</span></div>
+          {#if recentLogins.length > 0}
+            <div class="divide-y divide-nya-divider">
+              {#each recentLogins as entry}
+                <div class="grid min-h-[52px] grid-cols-[minmax(100px,1fr)_auto_auto] items-center gap-3 text-small">
+                  <div class="flex min-w-0 items-center gap-2.5"><span class="flex h-8 w-8 shrink-0 items-center justify-center rounded-full bg-nya-primary-soft font-semibold text-nya-primary">{entry.username.slice(0, 1).toUpperCase()}</span><span class="truncate font-medium text-nya-text-primary">{entry.username}</span></div>
+                  <span class={entry.result === 'success' ? 'text-nya-success' : 'text-nya-danger'}>{entry.result === 'success' ? '成功' : '失败'}</span>
+                  <span class="text-nya-text-tertiary">{entry.time}</span>
+                </div>
+              {/each}
+            </div>
+          {:else}
+            <div class="flex h-56 flex-col items-center justify-center text-nya-text-tertiary"><Users size={30} class="mb-2 opacity-50" /><p class="text-body">尚无登录记录</p></div>
+          {/if}
+        </section>
       </div>
+
+      <div class="mt-4 grid gap-4 lg:grid-cols-2">
+        <section class="rounded-nya-card border border-nya-border bg-nya-surface p-5 shadow-nya-card">
+          <div class="mb-4 flex items-center gap-2"><KeyRound size={18} class="text-nya-primary" /><h2 class="text-card-title text-nya-text-primary">OIDC 配置</h2></div>
+          {#if discovery}
+            <dl class="space-y-3 text-small">
+              <div class="grid grid-cols-[90px_1fr] gap-3"><dt class="text-nya-text-tertiary">Issuer</dt><dd class="break-all font-mono text-nya-text-primary">{discovery.issuer}</dd></div>
+              <div class="grid grid-cols-[90px_1fr] gap-3"><dt class="text-nya-text-tertiary">Discovery</dt><dd><a href="/.well-known/openid-configuration" target="_blank" rel="noreferrer" class="text-nya-primary hover:underline">查看配置文档</a></dd></div>
+              <div class="grid grid-cols-[90px_1fr] gap-3"><dt class="text-nya-text-tertiary">JWKS</dt><dd><a href={discovery.jwks_uri} target="_blank" rel="noreferrer" class="break-all text-nya-primary hover:underline">{discovery.jwks_uri}</a></dd></div>
+            </dl>
+          {:else}
+            <p class="text-body text-nya-text-tertiary">Discovery 文档当前不可用。</p>
+          {/if}
+        </section>
+
+        <section class="rounded-nya-card border border-nya-border bg-nya-surface p-5 shadow-nya-card">
+          <div class="mb-4 flex items-center gap-2"><Server size={18} class="text-nya-primary" /><h2 class="text-card-title text-nya-text-primary">系统状态</h2></div>
+          {#if systemStatus}
+            <dl class="space-y-3 text-small">
+              <div class="flex items-center justify-between gap-3"><dt class="text-nya-text-tertiary">版本 / 总体状态</dt><dd class="flex items-center gap-2"><span class="font-mono text-nya-text-primary">{systemStatus.version}</span><StatusBadge status={systemStatus.status} /></dd></div>
+              <div class="flex items-center justify-between gap-3"><dt class="text-nya-text-tertiary">Schema</dt><dd class="flex items-center gap-2"><span class="font-mono">{systemStatus.schema.version} / {systemStatus.schema.required_version}</span><StatusBadge status={systemStatus.schema.status} /></dd></div>
+              <div class="flex items-center justify-between gap-3"><dt class="flex items-center gap-1.5 text-nya-text-tertiary"><Database size={14} /> PostgreSQL</dt><dd class="flex items-center gap-2"><span>{systemStatus.services.postgresql.latency_ms} ms</span><StatusBadge status={systemStatus.services.postgresql.status} /></dd></div>
+              <div class="flex items-center justify-between gap-3"><dt class="text-nya-text-tertiary">Redis</dt><dd class="flex items-center gap-2"><span>{systemStatus.services.redis.latency_ms} ms</span><StatusBadge status={systemStatus.services.redis.status} /></dd></div>
+              <div class="flex items-center justify-between gap-3"><dt class="text-nya-text-tertiary">JWK</dt><dd class="flex items-center gap-2"><span>{systemStatus.services.jwk.latency_ms} ms</span><StatusBadge status={systemStatus.services.jwk.status} /></dd></div>
+              <div class="flex items-center justify-between gap-3"><dt class="text-nya-text-tertiary">活动签名密钥</dt>{#if systemStatus.active_signing_key}<dd class="flex min-w-0 items-center gap-2"><span class="max-w-[160px] truncate font-mono" title={systemStatus.active_signing_key.kid}>{systemStatus.active_signing_key.kid}</span><StatusBadge status={systemStatus.active_signing_key.status} /></dd>{:else}<dd class="text-nya-text-tertiary">无</dd>{/if}</div>
+              <div class="flex items-center justify-between gap-3"><dt class="text-nya-text-tertiary">Provider 快照</dt><dd class="flex items-center gap-2"><span>revision {systemStatus.services.providers.snapshot_revision}</span><StatusBadge status={systemStatus.services.providers.status} /></dd></div>
+            </dl>
+          {:else}
+            <div class="rounded-nya-sm bg-nya-warning-soft px-3 py-2 text-small text-nya-warning" role="status">系统状态不可用{systemError ? `：${systemError}` : ''}</div>
+          {/if}
+        </section>
+      </div>
+
+      <section class="mt-4 rounded-nya-card border border-nya-border bg-nya-surface p-5 shadow-nya-card">
+        <div class="flex items-start gap-3">
+          <AlertTriangle size={18} class={stats.failed_logins_7d > 0 ? 'mt-0.5 text-nya-warning' : 'mt-0.5 text-nya-success'} />
+          <div><h2 class="text-card-title text-nya-text-primary">安全摘要</h2><p class="mt-1 text-body text-nya-text-secondary">{stats.failed_logins_7d > 0 ? `过去 7 天记录到 ${stats.failed_logins_7d} 次失败登录，请结合审计日志核查。` : '过去 7 天没有记录到失败登录。'}</p></div>
+        </div>
+      </section>
     {/if}
-  </div>
-
-  <!-- Nya 提示卡 §7.5 -->
-  <div
-    class="border border-[var(--nya-primary-border)]"
-    style="min-height: 310px; padding: 20px; border-radius: var(--nya-radius-card); box-shadow: var(--nya-shadow-card); background: linear-gradient(135deg, #f8f5ff 0%, #fff0f6 100%); display: flex; flex-direction: column; align-items: center;"
-  >
-    <!-- 猫系占位插画 §2.3: 占 55%-65% -->
-    <svg width="100" height="100" viewBox="0 0 112 100" fill="none" style="margin-top: 10px; margin-bottom: 8px;">
-      <path d="M28 58 L38 18 L50 52" stroke="#8b6cff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.7" fill="#f1edff"/>
-      <path d="M62 52 L74 18 L84 58" stroke="#8b6cff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.7" fill="#f1edff"/>
-      <ellipse cx="56" cy="64" rx="30" ry="24" fill="#f8f5ff" stroke="#8b6cff" stroke-width="2" opacity="0.6"/>
-      <circle cx="46" cy="62" r="3.5" fill="#8b6cff" opacity="0.7"/>
-      <circle cx="66" cy="62" r="3.5" fill="#8b6cff" opacity="0.7"/>
-      <path d="M52 68 Q56 73 60 68" stroke="#8b6cff" stroke-width="1.5" stroke-linecap="round" fill="none" opacity="0.5"/>
-      <circle cx="16" cy="38" r="2.5" fill="#c28bff" opacity="0.5"/>
-      <circle cx="96" cy="32" r="2" fill="#ff9bcb" opacity="0.5"/>
-      <circle cx="56" cy="12" r="2" fill="#c28bff" opacity="0.4"/>
-      <text x="56" y="95" text-anchor="middle" fill="#8b6cff" font-size="10" opacity="0.5">🐾</text>
-    </svg>
-
-    <p style="font-size: 15px; font-weight: 650; color: var(--nya-primary); margin-bottom: 6px;">Nya 提示</p>
-    {#if stats.userCount === 0 && stats.appCount === 0}
-      <p style="font-size: 13px; color: var(--nya-text-secondary); text-align: center; line-height: 1.5;">
-        还没有用户和应用<br/>创建第一个用户或应用开始使用吧！
-      </p>
-    {:else}
-      <p style="font-size: 13px; color: var(--nya-text-secondary); text-align: center; line-height: 1.5;">
-        系统运行良好！<br/>所有服务正常，最近未发现异常登录。
-      </p>
-    {/if}
-  </div>
-</div>
-
-<!-- OIDC 配置（次级信息 §7.6 后） -->
-<div class="grid" style="gap: 16px; margin-top: 16px; grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));">
-  <div class="bg-[var(--nya-surface)] border border-[var(--nya-border)]" style="padding: 20px; border-radius: var(--nya-radius-card); box-shadow: var(--nya-shadow-card);">
-    <h3 style="font-size: 16px; font-weight: 650; color: var(--nya-text-primary); margin-bottom: 12px;">OIDC 配置</h3>
-    <div class="space-y-2">
-      <div class="flex items-center gap-2">
-        <span style="font-size: 12px; color: var(--nya-text-tertiary); min-width: 80px;">Issuer</span>
-        <code style="font-size: 12px; padding: 2px 8px; background: var(--nya-surface-muted); border-radius: 6px; color: var(--nya-text-primary);">http://localhost:8080</code>
-      </div>
-      <div class="flex items-center gap-2">
-        <span style="font-size: 12px; color: var(--nya-text-tertiary); min-width: 80px;">Discovery</span>
-        <a href="/.well-known/openid-configuration" target="_blank" style="font-size: 12px; color: var(--nya-primary); text-decoration: none;">/.well-known/openid-configuration</a>
-      </div>
-      <div class="flex items-center gap-2">
-        <span style="font-size: 12px; color: var(--nya-text-tertiary); min-width: 80px;">JWKS</span>
-        <a href="/.well-known/jwks.json" target="_blank" style="font-size: 12px; color: var(--nya-primary); text-decoration: none;">/.well-known/jwks.json</a>
-      </div>
-    </div>
-  </div>
-  <div class="bg-[var(--nya-surface)] border border-[var(--nya-border)]" style="padding: 20px; border-radius: var(--nya-radius-card); box-shadow: var(--nya-shadow-card);">
-    <h3 style="font-size: 16px; font-weight: 650; color: var(--nya-text-primary); margin-bottom: 12px;">系统信息</h3>
-    <div class="space-y-2">
-      <div class="flex items-center gap-2">
-        <span style="font-size: 12px; color: var(--nya-text-tertiary); min-width: 80px;">版本</span>
-        <span style="font-size: 12px; color: var(--nya-text-primary);">0.2.0</span>
-      </div>
-      <div class="flex items-center gap-2">
-        <span style="font-size: 12px; color: var(--nya-text-tertiary); min-width: 80px;">数据库</span>
-        <span style="font-size: 12px; color: var(--nya-success);">PostgreSQL 已连接</span>
-      </div>
-      <div class="flex items-center gap-2">
-        <span style="font-size: 12px; color: var(--nya-text-tertiary); min-width: 80px;">缓存</span>
-        <span style="font-size: 12px; color: var(--nya-success);">Redis 已连接</span>
-      </div>
-    </div>
-  </div>
-</div>
+  {/snippet}
+</ResourceState>

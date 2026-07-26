@@ -1,6 +1,9 @@
 package models
 
 import (
+	"bytes"
+	"encoding/json"
+	"fmt"
 	"strings"
 	"time"
 )
@@ -9,6 +12,10 @@ import (
 type OAuthClient struct {
 	ID                     string            `json:"id" db:"id"`
 	SecretHash             *string           `json:"-" db:"secret_hash"`
+	SecretHint             *string           `json:"secret_hint,omitempty" db:"secret_hint"`
+	SecretVersion          int64             `json:"secret_version" db:"secret_version"`
+	SecretRotatedAt        *time.Time        `json:"secret_rotated_at,omitempty" db:"secret_rotated_at"`
+	SecretLastUsedAt       *time.Time        `json:"secret_last_used_at,omitempty" db:"secret_last_used_at"`
 	Name                   string            `json:"name" db:"name"`
 	RedirectURIs           []string          `json:"redirect_uris" db:"redirect_uris"`
 	PostLogoutRedirectURIs []string          `json:"post_logout_redirect_uris" db:"post_logout_redirect_uris"`
@@ -29,6 +36,7 @@ type CreateClientRequest struct {
 	Grants                 []string          `json:"grants" validate:"required,min=1"`
 	Scopes                 []string          `json:"scopes"`
 	IsPublic               bool              `json:"is_public"`
+	OwnerID                *string           `json:"owner_id,omitempty"`
 	Metadata               map[string]string `json:"metadata,omitempty"`
 }
 
@@ -43,10 +51,50 @@ type UpdateClientRequest struct {
 	Metadata               map[string]string `json:"metadata,omitempty"`
 }
 
+// UpdateClientOwnerRequest assigns a client to an active user. A null owner
+// removes the current ownership assignment.
+type UpdateClientOwnerRequest struct {
+	OwnerID *string `json:"owner_id"`
+}
+
+func (r *UpdateClientOwnerRequest) UnmarshalJSON(data []byte) error {
+	var payload struct {
+		OwnerID json.RawMessage `json:"owner_id"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(data))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&payload); err != nil {
+		return err
+	}
+	if len(payload.OwnerID) == 0 {
+		return fmt.Errorf("owner_id is required")
+	}
+	if bytes.Equal(bytes.TrimSpace(payload.OwnerID), []byte("null")) {
+		r.OwnerID = nil
+		return nil
+	}
+	var ownerID string
+	if err := json.Unmarshal(payload.OwnerID, &ownerID); err != nil {
+		return fmt.Errorf("owner_id must be a string or null")
+	}
+	r.OwnerID = &ownerID
+	return nil
+}
+
 // CreateClientResponse includes the client secret in plaintext (only returned at creation).
 type CreateClientResponse struct {
 	OAuthClient
 	Secret string `json:"secret,omitempty"`
+}
+
+// RotateClientSecretResponse contains the newly generated secret. The Secret
+// field is returned exactly once and is never persisted in plaintext.
+type RotateClientSecretResponse struct {
+	ClientID        string    `json:"client_id"`
+	Secret          string    `json:"secret"`
+	SecretHint      string    `json:"secret_hint"`
+	SecretVersion   int64     `json:"secret_version"`
+	SecretRotatedAt time.Time `json:"secret_rotated_at"`
 }
 
 // Grant types
@@ -54,7 +102,6 @@ const (
 	GrantAuthorizationCode = "authorization_code"
 	GrantClientCredentials = "client_credentials"
 	GrantRefreshToken      = "refresh_token"
-	GrantDeviceCode        = "urn:ietf:params:oauth:grant-type:device_code"
 )
 
 // HasGrant checks if a client supports a specific grant type.

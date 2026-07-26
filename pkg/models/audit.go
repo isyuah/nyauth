@@ -18,35 +18,45 @@ type AuditLog struct {
 	UserAgent  *string                `json:"-" db:"user_agent"`
 	Result     string                 `json:"result" db:"result"`
 	RiskLevel  string                 `json:"risk_level" db:"risk_level"`
-	Metadata   map[string]interface{} `json:"metadata,omitempty" db:"metadata"`
+	Details    map[string]interface{} `json:"details,omitempty" db:"details"`
 	CreatedAt  time.Time              `json:"created_at" db:"created_at"`
 }
 
 // Audit event types
 const (
-	AuditUserLogin           = "user.login"
-	AuditUserLoginFailed     = "user.login_failed"
-	AuditUserCreated         = "user.created"
-	AuditUserUpdated         = "user.updated"
-	AuditUserDeleted         = "user.deleted"
-	AuditUserPasswordReset   = "user.password_reset"
-	AuditUserSuspended       = "user.suspended"
-	AuditUserActivated       = "user.activated"
-	AuditUserRoleChanged     = "user.role_changed"
-	AuditUserProfileUpdated  = "user.profile_updated"
-	AuditUserLogout          = "user.logout"
-	AuditIdentityBindStarted = "identity.bind_started"
-	AuditConsentAccepted     = "consent.accepted"
-	AuditConsentDenied       = "consent.denied"
-	AuditClientCreated       = "client.created"
-	AuditClientUpdated       = "client.updated"
-	AuditClientDeleted       = "client.deleted"
-	AuditProviderCreated     = "provider.created"
-	AuditProviderUpdated     = "provider.updated"
-	AuditProviderTested      = "provider.tested"
-	AuditProviderDeleted     = "provider.deleted"
-	AuditTokenIssued         = "token.issued"
-	AuditTokenRevoked        = "token.revoked"
+	AuditUserLogin            = "user.login"
+	AuditUserLoginFailed      = "user.login_failed"
+	AuditUserCreated          = "user.created"
+	AuditUserUpdated          = "user.updated"
+	AuditUserDeleted          = "user.deleted"
+	AuditUserPasswordReset    = "user.password_reset"
+	AuditUserSuspended        = "user.suspended"
+	AuditUserActivated        = "user.activated"
+	AuditUserRoleChanged      = "user.role_changed"
+	AuditUserProfileUpdated   = "user.profile_updated"
+	AuditUserLogout           = "user.logout"
+	AuditUserSessionsRevoked  = "session.user_revoked"
+	AuditIdentityBindStarted  = "identity.bind_started"
+	AuditIdentityBound        = "identity.bound"
+	AuditIdentityUnbound      = "identity.unbound"
+	AuditUserPasswordChanged  = "user.password_changed"
+	AuditUserPasswordSet      = "user.password_configured"
+	AuditConsentAccepted      = "consent.accepted"
+	AuditConsentDenied        = "consent.denied"
+	AuditClientCreated        = "client.created"
+	AuditClientUpdated        = "client.updated"
+	AuditClientOwnerChanged   = "client.owner_changed"
+	AuditClientDeleted        = "client.deleted"
+	AuditClientSecretRotated  = "client.secret_rotated"
+	AuditAuthorizationRevoked = "authorization.revoked"
+	AuditProviderCreated      = "provider.created"
+	AuditProviderUpdated      = "provider.updated"
+	AuditProviderTested       = "provider.tested"
+	AuditProviderDeleted      = "provider.deleted"
+	AuditTokenIssued          = "token.issued"
+	AuditTokenGrantFailed     = "token.grant_failed"
+	AuditRefreshTokenReuse    = "token.refresh_reuse"
+	AuditTokenRevoked         = "token.revoked"
 )
 
 // DashboardStats holds system statistics.

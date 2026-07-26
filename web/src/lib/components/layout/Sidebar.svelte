@@ -3,116 +3,141 @@
   import { goto } from '$app/navigation';
   import { api } from '$lib/api';
   import { sessionStore } from '$lib/stores';
-  import { LayoutDashboard, Users, AppWindow, KeyRound, LogOut, FlaskConical } from 'lucide-svelte';
+  import {
+    AppWindow,
+    FlaskConical,
+    Gauge,
+    KeyRound,
+    LayoutDashboard,
+    LogOut,
+    ScrollText,
+    Server,
+    ShieldCheck,
+    UserRound,
+    Users,
+  } from 'lucide-svelte';
 
   let {
+    section = 'user',
     collapsed = false,
     mobile = false,
     mobileOpen = false,
     onNavigate = () => {},
   }: {
+    section?: 'admin' | 'user';
     collapsed?: boolean;
     mobile?: boolean;
     mobileOpen?: boolean;
     onNavigate?: () => void;
   } = $props();
 
-  const navItems = [
+  const adminItems = [
     { href: '/admin', icon: LayoutDashboard, label: '仪表盘' },
     { href: '/admin/users', icon: Users, label: '用户管理' },
     { href: '/admin/clients', icon: AppWindow, label: '应用管理' },
     { href: '/admin/providers', icon: KeyRound, label: '身份提供者' },
+    { href: '/admin/audit', icon: ScrollText, label: '审计日志' },
+    { href: '/admin/system', icon: Server, label: '系统状态' },
   ];
 
-  async function handleLogout() {
-    try { await api.logout(); } finally { sessionStore.clear(); goto('/login'); }
-  }
+  const userItems = [
+    { href: '/dashboard', icon: Gauge, label: '概览' },
+    { href: '/dashboard/apps', icon: AppWindow, label: '我的应用' },
+    { href: '/profile', icon: UserRound, label: '个人资料' },
+  ];
 
-  function nav(href: string) {
-    goto(href);
-    onNavigate();
-  }
-
-  // Compute sidebar visibility
+  const testClientEnabled = import.meta.env.DEV || import.meta.env.VITE_ENABLE_TEST_CLIENT === 'true';
   let visible = $derived(mobile ? mobileOpen : true);
   let width = $derived(mobile ? '248px' : (collapsed ? '72px' : '248px'));
-  let showLabels = $derived(mobile ? true : !collapsed);
+  let showLabels = $derived(mobile || !collapsed);
+  let navItems = $derived(section === 'admin' ? adminItems : userItems);
+  let user = $derived($sessionStore.session?.user ?? null);
+  let initials = $derived((user?.display_name || user?.username || '?').slice(0, 1).toUpperCase());
+
+  function isActive(href: string): boolean {
+    return $page.url.pathname === href || (href !== '/admin' && href !== '/dashboard' && $page.url.pathname.startsWith(`${href}/`));
+  }
+
+  async function handleLogout() {
+    try {
+      await api.logout();
+    } finally {
+      sessionStore.clear();
+      await goto('/login');
+    }
+  }
 </script>
 
 {#if visible}
   <aside
-    class="fixed inset-y-0 left-0 flex flex-col bg-[var(--nya-bg-sidebar)] border-r border-[var(--nya-border)] z-50 transition-all duration-300"
+    class="fixed inset-y-0 left-0 z-50 flex flex-col border-r border-nya-border bg-[var(--nya-bg-sidebar)] transition-[width] duration-300"
     class:shadow-nya-popup={mobile}
     style="width: {width};"
+    aria-label={section === 'admin' ? '管理后台导航' : '用户中心导航'}
   >
-    <!-- 品牌区 §2.2: 168px -->
-    <div class="flex flex-col items-center justify-center overflow-hidden shrink-0" style="height: 168px; padding: 22px 20px 14px; background: linear-gradient(135deg, #f8f5ff 0%, #fff0f6 100%);">
-      <span class="select-none" style="font-size: 36px; line-height: 1; font-weight: 750; background: linear-gradient(135deg, #8A6CFF 0%, #C28BFF 52%, #FF9BCB 100%); -webkit-background-clip: text; -webkit-text-fill-color: transparent;">
-        Nya
-      </span>
+    <a href={section === 'admin' ? '/admin' : '/dashboard'} onclick={onNavigate} class="flex h-[132px] shrink-0 flex-col items-center justify-center overflow-hidden bg-gradient-to-br from-[#f8f5ff] to-[#fff0f6] px-5">
+      <span class="select-none bg-gradient-to-br from-[#8A6CFF] via-[#C28BFF] to-[#FF9BCB] bg-clip-text text-[34px] font-bold leading-none text-transparent">Nya</span>
       {#if showLabels}
-        <svg class="mt-2" width="112" height="70" viewBox="0 0 112 70" fill="none">
-          <path d="M28 42 L38 12 L48 38" stroke="#8b6cff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.7" fill="#f1edff"/>
-          <path d="M64 38 L74 12 L84 42" stroke="#8b6cff" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round" opacity="0.7" fill="#f1edff"/>
-          <ellipse cx="56" cy="46" rx="28" ry="22" fill="#f8f5ff" stroke="#8b6cff" stroke-width="2" opacity="0.6"/>
-          <circle cx="46" cy="44" r="3" fill="#8b6cff" opacity="0.7"/>
-          <circle cx="66" cy="44" r="3" fill="#8b6cff" opacity="0.7"/>
-          <path d="M53 50 Q56 54 59 50" stroke="#8b6cff" stroke-width="1.5" stroke-linecap="round" fill="none" opacity="0.5"/>
-          <circle cx="18" cy="28" r="2" fill="#c28bff" opacity="0.5"/>
-          <circle cx="94" cy="22" r="1.5" fill="#ff9bcb" opacity="0.5"/>
-          <circle cx="56" cy="8" r="1.5" fill="#c28bff" opacity="0.4"/>
-        </svg>
+        <span class="mt-2 text-small text-nya-text-tertiary">{section === 'admin' ? '管理后台' : '用户中心'}</span>
       {/if}
-    </div>
+    </a>
 
-    <!-- 导航 -->
-    <nav class="flex-1 py-2 overflow-y-auto" style="padding: 8px 12px;">
+    <nav class="flex-1 overflow-y-auto px-3 py-3">
       {#each navItems as item}
-        {@const isExact = $page.url.pathname === item.href}
-        {@const isPrefix = item.href !== '/admin' && $page.url.pathname.startsWith(item.href)}
-        {@const active = isExact || isPrefix}
-        <button
-          onclick={() => nav(item.href)}
-          class="w-full flex items-center mb-0.5 transition-all duration-150 text-left"
-          style="height: 44px; padding: 0 14px; border-radius: 10px; gap: 12px; font-size: 14px; font-weight: {active ? 600 : 500}; color: {active ? 'var(--nya-primary)' : 'var(--nya-text-secondary)'}; background: {active ? 'var(--nya-primary-soft)' : 'transparent'};"
+        <a
+          href={item.href}
+          onclick={onNavigate}
+          aria-current={isActive(item.href) ? 'page' : undefined}
+          class="mb-0.5 flex h-11 items-center gap-3 rounded-nya-md px-3.5 text-left text-body-medium transition-colors {isActive(item.href) ? 'bg-nya-primary-soft text-nya-primary' : 'text-nya-text-secondary hover:bg-nya-surface-muted hover:text-nya-text-primary'}"
+          title={!showLabels ? item.label : undefined}
         >
           <item.icon size={18} class="shrink-0" />
-          {#if showLabels}
-            <span>{item.label}</span>
-          {/if}
-        </button>
+          {#if showLabels}<span>{item.label}</span>{/if}
+        </a>
       {/each}
 
-      <!-- 测试客户端入口 -->
-      <button
-        onclick={() => nav('/test-client')}
-        class="w-full flex items-center mb-0.5 transition-all duration-150 text-left"
-        style="height: 44px; padding: 0 14px; border-radius: 10px; gap: 12px; font-size: 14px; font-weight: 500; color: var(--nya-text-tertiary);"
-      >
-        <FlaskConical size={18} class="shrink-0" />
-        {#if showLabels}
-          <span>OAuth 测试</span>
-        {/if}
-      </button>
+      {#if user?.role === 'admin'}
+        <div class="my-2 border-t border-nya-divider"></div>
+        <a
+          href={section === 'admin' ? '/dashboard' : '/admin'}
+          onclick={onNavigate}
+          class="mb-0.5 flex h-11 items-center gap-3 rounded-nya-md px-3.5 text-body-medium text-nya-text-secondary transition-colors hover:bg-nya-surface-muted hover:text-nya-text-primary"
+          title={!showLabels ? (section === 'admin' ? '用户中心' : '管理后台') : undefined}
+        >
+          <ShieldCheck size={18} class="shrink-0" />
+          {#if showLabels}<span>{section === 'admin' ? '用户中心' : '管理后台'}</span>{/if}
+        </a>
+      {/if}
+
+      {#if testClientEnabled}
+        <a
+          href="/test-client"
+          onclick={onNavigate}
+          class="mb-0.5 flex h-11 items-center gap-3 rounded-nya-md px-3.5 text-body-medium text-nya-text-tertiary transition-colors hover:bg-nya-surface-muted hover:text-nya-text-primary"
+          title={!showLabels ? 'OAuth 测试' : undefined}
+        >
+          <FlaskConical size={18} class="shrink-0" />
+          {#if showLabels}<span>OAuth 测试</span>{/if}
+        </a>
+      {/if}
     </nav>
 
-    <!-- 管理员卡片 -->
-    <div class="shrink-0" style="padding: 12px;">
+    <div class="shrink-0 p-3">
       {#if showLabels}
-        <div class="flex items-center bg-[var(--nya-surface)] border border-[var(--nya-border)]" style="height: 60px; padding: 0 14px; border-radius: var(--nya-radius-md); gap: 10px;">
-          <button onclick={() => nav('/profile')} class="shrink-0 flex items-center justify-center rounded-full bg-[var(--nya-primary-soft)] hover:ring-2 hover:ring-[var(--nya-primary-border)] transition-all" style="width: 34px; height: 34px;">
-            <span style="font-size: 13px; font-weight: 600; color: var(--nya-primary);">A</span>
-          </button>
-          <button onclick={() => nav('/profile')} class="flex-1 min-w-0 text-left hover:opacity-80 transition-opacity">
-            <p style="font-size: 14px; font-weight: 600; color: var(--nya-text-primary);">Nya Admin</p>
-            <p style="font-size: 12px; color: var(--nya-text-tertiary);">超级管理员</p>
-          </button>
-          <button onclick={handleLogout} class="shrink-0 p-1.5 rounded-lg text-[var(--nya-text-tertiary)] hover:bg-[var(--nya-danger-soft)] hover:text-[var(--nya-danger)]" title="退出">
+        <div class="flex min-h-[60px] items-center gap-2.5 rounded-nya-md border border-nya-border bg-nya-surface px-3.5">
+          <a href="/profile" onclick={onNavigate} class="flex h-9 w-9 shrink-0 items-center justify-center overflow-hidden rounded-full bg-nya-primary-soft text-small font-semibold text-nya-primary" aria-label="打开个人资料">
+            {#if user?.avatar_url}<img src={user.avatar_url} alt="" class="h-full w-full object-cover" />{:else}{initials}{/if}
+          </a>
+          <a href="/profile" onclick={onNavigate} class="min-w-0 flex-1 text-left">
+            <p class="truncate text-body-medium font-semibold text-nya-text-primary">{user?.display_name || user?.username || '当前用户'}</p>
+            <p class="text-small text-nya-text-tertiary">{user?.role === 'admin' ? '管理员' : '用户'}</p>
+          </a>
+          <button type="button" onclick={handleLogout} class="shrink-0 rounded-lg p-1.5 text-nya-text-tertiary hover:bg-nya-danger-soft hover:text-nya-danger" aria-label="退出登录" title="退出登录">
             <LogOut size={16} />
           </button>
         </div>
       {:else}
-        <button onclick={handleLogout} class="w-full flex items-center justify-center p-2 rounded-lg text-[var(--nya-text-tertiary)] hover:bg-[var(--nya-danger-soft)] hover:text-[var(--nya-danger)]" title="退出登录">
+        <button type="button" onclick={handleLogout} class="flex w-full items-center justify-center rounded-lg p-2 text-nya-text-tertiary hover:bg-nya-danger-soft hover:text-nya-danger" aria-label="退出登录" title="退出登录">
           <LogOut size={16} />
         </button>
       {/if}

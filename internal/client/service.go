@@ -7,16 +7,31 @@ import (
 	"net"
 	"net/url"
 	"strings"
+	"time"
 
+	"github.com/google/uuid"
+	"github.com/nyasharp/nyauth/internal/audit"
 	"github.com/nyasharp/nyauth/internal/crypto"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
 
-var ErrInvalidClient = errors.New("invalid OAuth client")
+var (
+	ErrInvalidClient      = errors.New("invalid OAuth client")
+	ErrPublicClientSecret = errors.New("public OAuth clients do not have a client secret")
+	ErrClientNotOwned     = errors.New("OAuth client is not owned by current user")
+)
 
-type Service struct{ store *Store }
+const maxClientsPerOwner = 10
 
-func NewService(store *Store) *Service { return &Service{store: store} }
+type Service struct {
+	store          *Store
+	generateSecret func() (string, error)
+	clock          func() time.Time
+}
+
+func NewService(store *Store) *Service {
+	return &Service{store: store, generateSecret: crypto.GenerateClientSecret, clock: time.Now}
+}
 
 func validateRedirectURI(value string) error {
 	u, err := url.Parse(value)
@@ -90,7 +105,7 @@ func (s *Service) buildClient(req models.CreateClientRequest) (*models.OAuthClie
 	secret := ""
 	var secretHash *string
 	if !req.IsPublic {
-		secret, err = crypto.GenerateClientSecret()
+		secret, err = s.generateSecret()
 		if err != nil {
 			return nil, "", fmt.Errorf("generating client secret: %w", err)
 		}
@@ -98,6 +113,13 @@ func (s *Service) buildClient(req models.CreateClientRequest) (*models.OAuthClie
 		secretHash = &hash
 	}
 	c := &models.OAuthClient{ID: id, SecretHash: secretHash, Name: strings.TrimSpace(req.Name), RedirectURIs: req.RedirectURIs, PostLogoutRedirectURIs: req.PostLogoutRedirectURIs, Grants: req.Grants, Scopes: req.Scopes, IsPublic: req.IsPublic, Metadata: req.Metadata}
+	if !req.IsPublic {
+		hint := clientSecretHint(secret)
+		rotatedAt := s.clock().UTC()
+		c.SecretHint = &hint
+		c.SecretVersion = 1
+		c.SecretRotatedAt = &rotatedAt
+	}
 	if c.Metadata == nil {
 		c.Metadata = map[string]string{}
 	}
@@ -107,6 +129,9 @@ func response(c *models.OAuthClient, secret string) *models.CreateClientResponse
 	return &models.CreateClientResponse{OAuthClient: *c, Secret: secret}
 }
 func (s *Service) Create(ctx context.Context, req models.CreateClientRequest) (*models.CreateClientResponse, error) {
+	if req.OwnerID != nil {
+		return nil, fmt.Errorf("%w: owner_id requires the audited admin creation path", ErrInvalidClient)
+	}
 	c, secret, err := s.buildClient(req)
 	if err != nil {
 		return nil, err
@@ -116,12 +141,36 @@ func (s *Service) Create(ctx context.Context, req models.CreateClientRequest) (*
 	}
 	return response(c, secret), nil
 }
-func (s *Service) CreateForOwner(ctx context.Context, ownerID string, limit int, req models.CreateClientRequest) (*models.CreateClientResponse, error) {
+func (s *Service) CreateAdmin(ctx context.Context, req models.CreateClientRequest, mutation audit.MutationAudit) (*models.CreateClientResponse, error) {
+	if err := mutation.ValidateEvent(models.AuditClientCreated); err != nil {
+		return nil, fmt.Errorf("invalid client creation audit context: %w", err)
+	}
+	ownerID, err := normalizeOwnerID(req.OwnerID)
+	if err != nil {
+		return nil, err
+	}
 	c, secret, err := s.buildClient(req)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.store.CreateForOwner(ctx, c, ownerID, limit); err != nil {
+	if err := s.store.CreateWithAudit(ctx, c, ownerID, maxClientsPerOwner, mutation); err != nil {
+		return nil, err
+	}
+	return response(c, secret), nil
+}
+func (s *Service) CreateForOwner(ctx context.Context, ownerID string, limit int, req models.CreateClientRequest) (*models.CreateClientResponse, error) {
+	if req.OwnerID != nil {
+		return nil, fmt.Errorf("%w: owner_id is managed by the self-service route", ErrInvalidClient)
+	}
+	normalizedOwnerID, err := normalizeOwnerID(&ownerID)
+	if err != nil {
+		return nil, err
+	}
+	c, secret, err := s.buildClient(req)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.store.CreateForOwner(ctx, c, *normalizedOwnerID, limit); err != nil {
 		return nil, err
 	}
 	return response(c, secret), nil
@@ -129,7 +178,10 @@ func (s *Service) CreateForOwner(ctx context.Context, ownerID string, limit int,
 func (s *Service) GetByID(ctx context.Context, id string) (*models.OAuthClient, error) {
 	return s.store.GetByID(ctx, id)
 }
-func (s *Service) Update(ctx context.Context, id string, req models.UpdateClientRequest) (*models.OAuthClient, error) {
+func (s *Service) Update(ctx context.Context, id string, req models.UpdateClientRequest, mutation audit.MutationAudit) (*models.OAuthClient, error) {
+	if err := mutation.ValidateEvent(models.AuditClientUpdated); err != nil {
+		return nil, fmt.Errorf("invalid client update audit context: %w", err)
+	}
 	c, err := s.store.GetByID(ctx, id)
 	if err != nil {
 		return nil, err
@@ -159,12 +211,30 @@ func (s *Service) Update(ctx context.Context, id string, req models.UpdateClient
 	if err := validateRequest(check); err != nil {
 		return nil, err
 	}
-	if err := s.store.Update(ctx, c); err != nil {
+	if err := s.store.Update(ctx, c, mutation); err != nil {
 		return nil, err
 	}
 	return c, nil
 }
-func (s *Service) Delete(ctx context.Context, id string) error { return s.store.Delete(ctx, id) }
+func (s *Service) UpdateOwner(ctx context.Context, id string, req models.UpdateClientOwnerRequest, mutation audit.MutationAudit) (*models.OAuthClient, error) {
+	if err := mutation.ValidateEvent(models.AuditClientOwnerChanged); err != nil {
+		return nil, fmt.Errorf("invalid client owner audit context: %w", err)
+	}
+	ownerID, err := normalizeOwnerID(req.OwnerID)
+	if err != nil {
+		return nil, err
+	}
+	return s.store.UpdateOwner(ctx, id, ownerID, maxClientsPerOwner, mutation)
+}
+func (s *Service) Delete(ctx context.Context, id string, mutation audit.MutationAudit) error {
+	if err := mutation.ValidateEvent(models.AuditClientDeleted); err != nil {
+		return fmt.Errorf("invalid client deletion audit context: %w", err)
+	}
+	return s.store.Delete(ctx, id, mutation)
+}
+func (s *Service) DeleteForOwner(ctx context.Context, id, ownerID string) error {
+	return s.store.DeleteForOwner(ctx, id, ownerID)
+}
 func (s *Service) List(ctx context.Context, page, pageSize int) (*models.PaginatedResponse[models.OAuthClient], error) {
 	return s.store.List(ctx, models.NewPagination(page, pageSize))
 }
@@ -177,5 +247,77 @@ func (s *Service) ListByOwner(ctx context.Context, ownerID string, page, pageSiz
 func (s *Service) CountByOwner(ctx context.Context, ownerID string) (int64, error) {
 	return s.store.CountByOwner(ctx, ownerID)
 }
+func (s *Service) RotateSecret(ctx context.Context, clientID string, mutation audit.MutationAudit) (*models.RotateClientSecretResponse, error) {
+	if err := mutation.ValidateEvent(models.AuditClientSecretRotated); err != nil {
+		return nil, fmt.Errorf("invalid client rotation audit context: %w", err)
+	}
+	registered, err := s.store.GetByID(ctx, clientID)
+	if err != nil {
+		return nil, err
+	}
+	if registered.IsPublic {
+		return nil, ErrPublicClientSecret
+	}
+	return s.rotateSecret(ctx, clientID, "", false, mutation)
+}
+func (s *Service) RotateSecretForOwner(ctx context.Context, clientID, ownerID string) (*models.RotateClientSecretResponse, error) {
+	registered, err := s.store.GetByID(ctx, clientID)
+	if err != nil {
+		return nil, err
+	}
+	if registered.OwnerID == nil || *registered.OwnerID != ownerID {
+		return nil, ErrClientNotOwned
+	}
+	if registered.IsPublic {
+		return nil, ErrPublicClientSecret
+	}
+	return s.rotateSecret(ctx, clientID, ownerID, true, audit.MutationAudit{})
+}
+func (s *Service) rotateSecret(ctx context.Context, clientID, ownerID string, owned bool, mutation audit.MutationAudit) (*models.RotateClientSecretResponse, error) {
+	secret, err := s.generateSecret()
+	if err != nil {
+		return nil, fmt.Errorf("generating client secret: %w", err)
+	}
+	hint := clientSecretHint(secret)
+	rotatedAt := s.clock().UTC()
+	secretHash := crypto.HashClientSecret(secret)
+	var version int64
+	if owned {
+		version, err = s.store.RotateSecretForOwner(ctx, clientID, ownerID, secretHash, hint, rotatedAt)
+	} else {
+		version, err = s.store.RotateSecret(ctx, clientID, secretHash, hint, rotatedAt, mutation)
+	}
+	if err != nil {
+		return nil, err
+	}
+	return &models.RotateClientSecretResponse{
+		ClientID: clientID, Secret: secret, SecretHint: hint,
+		SecretVersion: version, SecretRotatedAt: rotatedAt,
+	}, nil
+}
 func (s *Service) GetStore() *Store  { return s.store }
 func IsInvalidClient(err error) bool { return errors.Is(err, ErrInvalidClient) }
+
+func clientSecretHint(secret string) string {
+	const length = 6
+	if len(secret) <= length {
+		return secret
+	}
+	return secret[len(secret)-length:]
+}
+
+func normalizeOwnerID(ownerID *string) (*string, error) {
+	if ownerID == nil {
+		return nil, nil
+	}
+	value := strings.TrimSpace(*ownerID)
+	if value == "" {
+		return nil, fmt.Errorf("%w: owner_id must be a UUID or null", ErrInvalidClient)
+	}
+	parsed, err := uuid.Parse(value)
+	if err != nil {
+		return nil, fmt.Errorf("%w: owner_id must be a UUID or null", ErrInvalidClient)
+	}
+	canonical := parsed.String()
+	return &canonical, nil
+}

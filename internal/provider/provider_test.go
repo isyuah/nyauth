@@ -247,10 +247,9 @@ func TestProductionModeAppliesNetworkPolicyToBuiltinProviders(t *testing.T) {
 func TestDynamicSnapshotMutationDoesNotReloadUnrelatedProviders(t *testing.T) {
 	t.Parallel()
 	manager := NewManager(nil, make([]byte, 32))
-	static := NewGitHub("shared", "static-client", "secret", nil)
+	unrelated := NewGitHub("unrelated", "unrelated-client", "secret", nil)
 	dynamic := NewGitHub("shared", "dynamic-client", "secret", nil)
-	manager.staticProviders["shared"] = static
-	manager.providers["shared"] = static
+	manager.providers["unrelated"] = unrelated
 
 	manager.setDynamicProvider("shared", dynamic, true)
 	if got, ok := manager.Get("shared"); !ok || got != dynamic {
@@ -258,11 +257,40 @@ func TestDynamicSnapshotMutationDoesNotReloadUnrelatedProviders(t *testing.T) {
 	}
 	manager.setDynamicProvider("shared", nil, false)
 	if _, ok := manager.Get("shared"); ok {
-		t.Fatal("disabled dynamic provider did not shadow the static provider")
+		t.Fatal("disabled dynamic provider remained available")
 	}
-	manager.restoreStaticProvider("shared")
-	if got, ok := manager.Get("shared"); !ok || got != static {
-		t.Fatalf("deleting dynamic override did not restore static provider: %T, %v", got, ok)
+	manager.removeDynamicProvider("shared")
+	if got, ok := manager.Get("unrelated"); !ok || got != unrelated {
+		t.Fatalf("unrelated provider changed during snapshot mutation: %T, %v", got, ok)
+	}
+}
+
+func TestManagerReportsSynchronizationAndValidationTelemetry(t *testing.T) {
+	manager := NewManager(nil, make([]byte, 32))
+	type event struct {
+		operation string
+		intent    string
+		result    string
+		reason    string
+	}
+	var events []event
+	manager.SetTelemetrySink(func(_ context.Context, operation, intent, result, reason string, _ time.Duration) {
+		events = append(events, event{operation: operation, intent: intent, result: result, reason: reason})
+	})
+	if err := manager.LoadDynamic(context.Background()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := manager.ValidateStoredProvider(context.Background(), "private-provider-name"); err == nil {
+		t.Fatal("ValidateStoredProvider unexpectedly succeeded without a database")
+	}
+	if len(events) != 2 {
+		t.Fatalf("events = %#v", events)
+	}
+	if events[0] != (event{operation: "synchronization", intent: "none", result: "success", reason: "none"}) {
+		t.Fatalf("synchronization event = %#v", events[0])
+	}
+	if events[1] != (event{operation: "validation", intent: "none", result: "failure", reason: "database_unavailable"}) {
+		t.Fatalf("validation event = %#v", events[1])
 	}
 }
 

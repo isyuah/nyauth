@@ -2,16 +2,57 @@ name: nyauth
 
 x-nyauth-environment: &nyauth-environment
   NYAUTH_ENVIRONMENT: production
-  NYAUTH_DATABASE_DSN: "${NYAUTH_DATABASE_DSN:?set NYAUTH_DATABASE_DSN}"
-  NYAUTH_REDIS_ADDR: "redis:6379"
-  NYAUTH_REDIS_PASSWORD: "${NYAUTH_REDIS_PASSWORD:?set NYAUTH_REDIS_PASSWORD}"
+  NYAUTH_DATABASE_DSN_FILE: "/run/secrets/database_runtime_dsn"
+  NYAUTH_DATABASE_RUNTIME_ROLE: "${NYAUTH_DATABASE_RUNTIME_ROLE:-nyauth_runtime}"
+  NYAUTH_REDIS_ADDR: "${NYAUTH_REDIS_ADDR:-redis:6379}"
+  NYAUTH_REDIS_PASSWORD_FILE: "/run/secrets/redis_password"
   NYAUTH_AUTH_ISSUER: "${NYAUTH_AUTH_ISSUER:?set NYAUTH_AUTH_ISSUER}"
-  NYAUTH_AUTH_MASTER_KEY: "${NYAUTH_AUTH_MASTER_KEY:?set NYAUTH_AUTH_MASTER_KEY}"
+  NYAUTH_AUTH_MASTER_KEY_FILE: "/run/secrets/auth_master_key"
   NYAUTH_SERVER_SECURE_COOKIE: "true"
   NYAUTH_SERVER_TRUSTED_PROXY_CIDRS: "${NYAUTH_TRUSTED_PROXY_CIDRS:?set NYAUTH_TRUSTED_PROXY_CIDRS}"
   NYAUTH_BOOTSTRAP_ADMIN_USERNAME: "${NYAUTH_BOOTSTRAP_ADMIN_USERNAME:-}"
-  NYAUTH_BOOTSTRAP_ADMIN_PASSWORD: "${NYAUTH_BOOTSTRAP_ADMIN_PASSWORD:-}"
+  # Passed through only when set; otherwise the application generates a one-time password.
+  NYAUTH_BOOTSTRAP_ADMIN_PASSWORD:
   NYAUTH_BOOTSTRAP_ADMIN_EMAIL: "${NYAUTH_BOOTSTRAP_ADMIN_EMAIL:-}"
+  NYAUTH_MAIL_ENABLED: "${NYAUTH_MAIL_ENABLED:-false}"
+  NYAUTH_MAIL_FROM_ADDRESS: "${NYAUTH_MAIL_FROM_ADDRESS:-}"
+  NYAUTH_MAIL_FROM_NAME: "${NYAUTH_MAIL_FROM_NAME:-Nyauth}"
+  NYAUTH_MAIL_PUBLIC_BASE_URL: "${NYAUTH_MAIL_PUBLIC_BASE_URL:-}"
+  NYAUTH_MAIL_SMTP_HOST: "${NYAUTH_MAIL_SMTP_HOST:-}"
+  NYAUTH_MAIL_SMTP_PORT: "${NYAUTH_MAIL_SMTP_PORT:-587}"
+  NYAUTH_MAIL_SMTP_USERNAME: "${NYAUTH_MAIL_SMTP_USERNAME:-}"
+  # Passed through only when explicitly set; use a Compose override to mount
+  # NYAUTH_MAIL_SMTP_PASSWORD_FILE when file-backed SMTP credentials are used.
+  NYAUTH_MAIL_SMTP_PASSWORD:
+  NYAUTH_MAIL_SMTP_TLS_MODE: "${NYAUTH_MAIL_SMTP_TLS_MODE:-starttls}"
+  NYAUTH_MAIL_SMTP_CONNECT_TIMEOUT: "${NYAUTH_MAIL_SMTP_CONNECT_TIMEOUT:-10s}"
+  NYAUTH_MAIL_SMTP_SEND_TIMEOUT: "${NYAUTH_MAIL_SMTP_SEND_TIMEOUT:-30s}"
+  NYAUTH_AUDIT_RETENTION: "${NYAUTH_AUDIT_RETENTION:-8760h}"
+  NYAUTH_TELEMETRY_OTLP_ENABLED: "${NYAUTH_TELEMETRY_OTLP_ENABLED:-false}"
+  NYAUTH_TELEMETRY_OTLP_ENDPOINT: "${NYAUTH_TELEMETRY_OTLP_ENDPOINT:-}"
+  # Passed through only when explicitly set; file-backed authorization can be
+  # mounted by an environment-specific Compose override.
+  NYAUTH_TELEMETRY_OTLP_AUTHORIZATION:
+  NYAUTH_TELEMETRY_OTLP_EXPORT_INTERVAL: "${NYAUTH_TELEMETRY_OTLP_EXPORT_INTERVAL:-30s}"
+  NYAUTH_TELEMETRY_OTLP_TIMEOUT: "${NYAUTH_TELEMETRY_OTLP_TIMEOUT:-10s}"
+
+x-nyauth-maintenance-environment: &nyauth-maintenance-environment
+  NYAUTH_ENVIRONMENT: production
+  NYAUTH_DATABASE_DSN_FILE: "/run/secrets/database_migration_dsn"
+  NYAUTH_DATABASE_RUNTIME_ROLE: "${NYAUTH_DATABASE_RUNTIME_ROLE:-nyauth_runtime}"
+  NYAUTH_DATABASE_MAX_CONNS: "${NYAUTH_DATABASE_MAX_CONNS:-50}"
+  NYAUTH_DATABASE_MIN_CONNS: "${NYAUTH_DATABASE_MIN_CONNS:-5}"
+  NYAUTH_DATABASE_MAX_CONN_LIFETIME: "${NYAUTH_DATABASE_MAX_CONN_LIFETIME:-1h}"
+  NYAUTH_DATABASE_MAX_CONN_IDLE_TIME: "${NYAUTH_DATABASE_MAX_CONN_IDLE_TIME:-30m}"
+  NYAUTH_DATABASE_HEALTH_CHECK_PERIOD: "${NYAUTH_DATABASE_HEALTH_CHECK_PERIOD:-1m}"
+  NYAUTH_DATABASE_CONNECT_TIMEOUT: "${NYAUTH_DATABASE_CONNECT_TIMEOUT:-5s}"
+  NYAUTH_DATABASE_STATEMENT_TIMEOUT: "${NYAUTH_DATABASE_STATEMENT_TIMEOUT:-15s}"
+  NYAUTH_DATABASE_TLS_MODE: "${NYAUTH_DATABASE_TLS_MODE:-}"
+  NYAUTH_DATABASE_TLS_ROOT_CA_FILE: "${NYAUTH_DATABASE_TLS_ROOT_CA_FILE:-}"
+  NYAUTH_DATABASE_TLS_CLIENT_CERT_FILE: "${NYAUTH_DATABASE_TLS_CLIENT_CERT_FILE:-}"
+  NYAUTH_DATABASE_TLS_CLIENT_KEY_FILE: "${NYAUTH_DATABASE_TLS_CLIENT_KEY_FILE:-}"
+  NYAUTH_DATABASE_TLS_SERVER_NAME: "${NYAUTH_DATABASE_TLS_SERVER_NAME:-}"
+  NYAUTH_AUDIT_RETENTION: "${NYAUTH_AUDIT_RETENTION:-8760h}"
 
 x-hardened-nyauth: &hardened-nyauth
   image: "${NYAUTH_IMAGE:?set NYAUTH_IMAGE to an immutable image tag or digest}"
@@ -25,59 +66,111 @@ x-hardened-nyauth: &hardened-nyauth
   security_opt:
     - no-new-privileges:true
   environment: *nyauth-environment
-  volumes:
-    - ./config.production.yaml:/etc/nyauth/config.yaml:ro
 
 services:
   postgres:
     image: postgres:16-alpine
     restart: unless-stopped
+    stop_grace_period: 60s
+    pids_limit: 300
+    mem_limit: 1g
+    cpus: 2.0
     environment:
       POSTGRES_DB: "${POSTGRES_DB:-nyauth}"
-      POSTGRES_USER: "${POSTGRES_USER:-nyauth}"
-      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}"
+      POSTGRES_USER: "nyauth_migrator"
+      POSTGRES_PASSWORD_FILE: "/run/secrets/postgres_password"
+      NYAUTH_RUNTIME_DB_PASSWORD_FILE: "/run/secrets/database_runtime_password"
+    secrets:
+      - postgres_password
+      - database_runtime_password
     volumes:
       - pgdata:/var/lib/postgresql/data
+      - ./docker/postgres/init-runtime-role.sh:/docker-entrypoint-initdb.d/010-nyauth-runtime-role.sh:ro
     networks:
       - backend
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      test: ["CMD-SHELL", "pg_isready -U nyauth_migrator -d \"$${POSTGRES_DB}\""]
       interval: 10s
       timeout: 5s
       retries: 10
+      start_period: 20s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
 
   redis:
     image: redis:7-alpine
     restart: unless-stopped
+    stop_grace_period: 20s
+    pids_limit: 100
+    mem_limit: 512m
+    cpus: 1.0
     environment:
-      REDIS_PASSWORD: "${NYAUTH_REDIS_PASSWORD:?set NYAUTH_REDIS_PASSWORD}"
-    command: ["sh", "-c", "exec redis-server --appendonly yes --requirepass \"$${REDIS_PASSWORD}\""]
-    volumes:
-      - redisdata:/data
+      REDIS_MAXMEMORY: "${NYAUTH_REDIS_MAXMEMORY:-384mb}"
+    command: ["sh", "-ec", "REDIS_PASSWORD=$$(cat /run/secrets/redis_password); exec redis-server --save '' --appendonly no --maxmemory \"$$REDIS_MAXMEMORY\" --maxmemory-policy noeviction --requirepass \"$$REDIS_PASSWORD\""]
+    secrets:
+      - redis_password
     networks:
       - backend
     healthcheck:
-      test: ["CMD-SHELL", "REDISCLI_AUTH=\"$${REDIS_PASSWORD}\" redis-cli ping | grep -q PONG"]
+      test: ["CMD-SHELL", "REDISCLI_AUTH=$$(cat /run/secrets/redis_password) redis-cli ping | grep -q PONG"]
       interval: 10s
       timeout: 5s
       retries: 10
+      start_period: 10s
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
 
   migrate:
     <<: *hardened-nyauth
     restart: "no"
-    command: ["migrate", "-config", "/etc/nyauth/config.yaml"]
+    stop_grace_period: 30s
+    pids_limit: 100
+    mem_limit: 256m
+    cpus: 0.5
+    command: ["migrate"]
+    healthcheck:
+      disable: true
+    environment:
+      <<: *nyauth-maintenance-environment
+    secrets:
+      - database_migration_dsn
     networks:
       - backend
     depends_on:
       postgres:
         condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
 
   nyauth:
     <<: *hardened-nyauth
     restart: unless-stopped
-    command: ["serve", "-config", "/etc/nyauth/config.yaml"]
+    stop_grace_period: 40s
+    pids_limit: 200
+    mem_limit: 512m
+    cpus: 1.0
+    command: ["serve"]
+    secrets:
+      - database_runtime_dsn
+      - redis_password
+      - auth_master_key
     expose:
       - "8080"
+    healthcheck:
+      test: ["CMD", "nyauth", "healthcheck", "-url", "http://127.0.0.1:8080/readyz", "-timeout", "3s"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
     networks:
       - backend
       - proxy
@@ -86,13 +179,32 @@ services:
         condition: service_completed_successfully
       redis:
         condition: service_healthy
+    logging:
+      driver: json-file
+      options:
+        max-size: "20m"
+        max-file: "5"
 
 networks:
   backend:
     internal: true
   proxy:
-    name: "${NYAUTH_PROXY_NETWORK:-nyauth-proxy}"
+    external: true
+    name: "${NYAUTH_PROXY_NETWORK:?set the external reverse-proxy network}"
 
 volumes:
   pgdata:
-  redisdata:
+
+secrets:
+  database_runtime_dsn:
+    file: "${NYAUTH_DATABASE_DSN_FILE:?set NYAUTH_DATABASE_DSN_FILE to the runtime DSN secret file}"
+  database_migration_dsn:
+    file: "${NYAUTH_DATABASE_MIGRATION_DSN_FILE:?set NYAUTH_DATABASE_MIGRATION_DSN_FILE to the migration DSN secret file}"
+  database_runtime_password:
+    file: "${NYAUTH_DATABASE_RUNTIME_PASSWORD_FILE:?set NYAUTH_DATABASE_RUNTIME_PASSWORD_FILE to the nyauth_runtime password secret file}"
+  redis_password:
+    file: "${NYAUTH_REDIS_PASSWORD_FILE:?set NYAUTH_REDIS_PASSWORD_FILE to the Redis password secret file}"
+  auth_master_key:
+    file: "${NYAUTH_AUTH_MASTER_KEY_FILE:?set NYAUTH_AUTH_MASTER_KEY_FILE to the Base64 master-key secret file}"
+  postgres_password:
+    file: "${POSTGRES_PASSWORD_FILE:?set POSTGRES_PASSWORD_FILE to the PostgreSQL container password secret file}"

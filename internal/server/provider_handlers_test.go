@@ -89,3 +89,18 @@ func TestEmptyProviderUpdate(t *testing.T) {
 		t.Fatal("an explicit empty scope list was mistaken for an empty update")
 	}
 }
+
+func TestValidateProviderRequestRequiresExplicitEnabled(t *testing.T) {
+	t.Parallel()
+	request := models.CreateProviderRequest{
+		Name: "github", Type: "github", ClientID: "client", ClientSecret: "secret",
+	}
+	if err := validateProviderRequest(request); err == nil {
+		t.Fatal("provider creation accepted a missing enabled state")
+	}
+	enabled := false
+	request.Enabled = &enabled
+	if err := validateProviderRequest(request); err != nil {
+		t.Fatalf("provider creation rejected explicit enabled=false: %v", err)
+	}
+}

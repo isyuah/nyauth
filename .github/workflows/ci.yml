@@ -24,8 +24,19 @@ jobs:
           --health-interval 5s
           --health-timeout 5s
           --health-retries 10
+      redis:
+        image: redis:7-alpine
+        ports:
+          - 6379:6379
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
     env:
       NYAUTH_TEST_DATABASE_DSN: postgres://nyauth:ci-database-password-0123456789@127.0.0.1:5432/nyauth?sslmode=disable
+      NYAUTH_TEST_REDIS_ADDR: 127.0.0.1:6379
+      NYAUTH_TEST_REDIS_DB: "0"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -34,6 +45,8 @@ jobs:
           cache: true
       - name: Run Go race tests
         run: go test -race ./...
+      - name: Run Go vet
+        run: go vet ./...
 
   web:
     runs-on: ubuntu-latest
@@ -48,6 +61,7 @@ jobs:
           cache: npm
           cache-dependency-path: web/package-lock.json
       - run: npm ci
+      - run: npm audit --audit-level=high
       - run: npm run check
       - run: npm run test:unit
       - run: npm run build
@@ -69,40 +83,95 @@ jobs:
         run: npx playwright install --with-deps chromium
       - run: npm run test:e2e
 
-  typescript-sdk:
-    runs-on: ubuntu-latest
-    defaults:
-      run:
-        working-directory: sdk/ts
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 20
-          cache: npm
-          cache-dependency-path: sdk/ts/package-lock.json
-      - run: npm ci
-      - run: npm run build
-      - name: Verify RFC 7636 S256 vector
-        run: >-
-          node --input-type=module -e
-          "import {computeS256Challenge} from './dist/index.js';
-          const got = await computeS256Challenge('dBjftJeZ4CVP-mB92K27uhbUJU1p1r_wW1gFWFOEjXk');
-          if (got !== 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM') throw new Error(got);"
-
   compose-config:
     runs-on: ubuntu-latest
     env:
-      NYAUTH_DATABASE_DSN: postgres://nyauth:ci-database-password@postgres:5432/nyauth?sslmode=disable
-      NYAUTH_REDIS_PASSWORD: ci-redis-password-0123456789
+      NYAUTH_DATABASE_DSN_FILE: .ci-secrets/database-runtime-dsn
+      NYAUTH_DATABASE_MIGRATION_DSN_FILE: .ci-secrets/database-migration-dsn
+      NYAUTH_DATABASE_RUNTIME_PASSWORD_FILE: .ci-secrets/database-runtime-password
+      NYAUTH_REDIS_PASSWORD_FILE: .ci-secrets/redis-password
+      NYAUTH_AUTH_MASTER_KEY_FILE: .ci-secrets/auth-master-key
+      POSTGRES_PASSWORD_FILE: .ci-secrets/postgres-password
       NYAUTH_AUTH_ISSUER: https://auth.ci.invalid
-      NYAUTH_AUTH_MASTER_KEY: Y2ktbWFzdGVyLWtleS0wMTIzNDU2Nzg5YWJjZGVmZ2g=
       NYAUTH_TRUSTED_PROXY_CIDRS: 172.30.0.0/24
       NYAUTH_IMAGE: ghcr.io/nyasharp/nyauth@sha256:1111111111111111111111111111111111111111111111111111111111111111
-      POSTGRES_PASSWORD: ci-database-password-0123456789
+      NYAUTH_REDIS_ADDR: redis.ci.invalid:6379
+      NYAUTH_BACKEND_NETWORK: nyauth-ci-backend
+      NYAUTH_PROXY_NETWORK: nyauth-ci-proxy
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: Create disposable Compose secret files
+        shell: bash
+        run: |
+          mkdir -p .ci-secrets
+          printf '%s' 'postgres://nyauth_runtime:ci-runtime-database-password@postgres:5432/nyauth?sslmode=disable' > .ci-secrets/database-runtime-dsn
+          printf '%s' 'postgres://nyauth_migrator:ci-migration-database-password@postgres:5432/nyauth?sslmode=disable' > .ci-secrets/database-migration-dsn
+          printf '%s' 'ci-runtime-database-password' > .ci-secrets/database-runtime-password
+          printf '%s' 'ci-redis-password-0123456789' > .ci-secrets/redis-password
+          printf '%s' 'Y2ktbWFzdGVyLWtleS0wMTIzNDU2Nzg5YWJjZGVmZ2g=' > .ci-secrets/auth-master-key
+          printf '%s' 'ci-migration-database-password' > .ci-secrets/postgres-password
       - name: Validate development Compose
         run: docker compose -f docker-compose.yml config --quiet
       - name: Validate production Compose
         run: docker compose -f docker-compose.prod.yml config --quiet
+      - name: Validate HA Compose
+        run: docker compose -f docker-compose.ha.yml config --quiet
+      - name: Start development stack and verify readiness
+        shell: bash
+        run: |
+          docker compose -f docker-compose.yml up --build --detach
+          for attempt in $(seq 1 60); do
+            if curl --fail --silent --show-error http://127.0.0.1:8080/readyz >/dev/null; then
+              exit 0
+            fi
+            sleep 2
+          done
+          docker compose -f docker-compose.yml ps
+          docker compose -f docker-compose.yml logs --no-color
+          exit 1
+      - name: Verify runtime database privileges
+        shell: bash
+        env:
+          RUNTIME_DATABASE_PASSWORD: local-dev-only-runtime-postgres
+        run: |
+          set -euo pipefail
+          runtime_psql=(
+            docker compose -f docker-compose.yml exec -T
+            --env "PGPASSWORD=${RUNTIME_DATABASE_PASSWORD}"
+            postgres psql --set=ON_ERROR_STOP=1
+            --username nyauth_runtime --dbname nyauth
+          )
+
+          "${runtime_psql[@]}" --command 'SELECT COUNT(*) FROM users;'
+          "${runtime_psql[@]}" <<'SQL'
+          BEGIN;
+          UPDATE users SET updated_at = updated_at WHERE username = 'admin';
+          ROLLBACK;
+          SQL
+
+          if "${runtime_psql[@]}" <<'SQL'
+          BEGIN;
+          CREATE TABLE ci_runtime_ddl_probe(id integer);
+          ROLLBACK;
+          SQL
+          then
+            echo 'nyauth_runtime unexpectedly has CREATE TABLE permission' >&2
+            exit 1
+          fi
+      - name: Verify removed health route
+        shell: bash
+        run: test "$(curl --silent --output /dev/null --write-out '%{http_code}' http://127.0.0.1:8080/health)" = "404"
+      - name: Run standard OAuth/OIDC BFF smoke flow
+        env:
+          NYAUTH_EXAMPLE_ISSUER: http://localhost:8080
+          NYAUTH_EXAMPLE_ADMIN_USERNAME: admin
+          NYAUTH_EXAMPLE_ADMIN_PASSWORD: local-dev-only-admin
+          NYAUTH_EXAMPLE_ADMIN_NEW_PASSWORD: local-dev-only-admin-after-change
+        run: go test ./examples/oidc_bff -run TestStandardOAuthOIDCBFFFlow -count=1 -v
+      - name: Stop disposable development stack
+        if: always()
+        run: docker compose -f docker-compose.yml down --volumes --remove-orphans

@@ -1,25 +1,29 @@
 <script lang="ts">
+  import { Tabs } from 'bits-ui';
+
   let {
     tabs = [],
     active = $bindable(''),
   }: {
-    tabs: Array<{ value: string; label: string }>;
+    tabs: Array<{ value: string; label: string; disabled?: boolean }>;
     active?: string;
   } = $props();
 
-  if (!active && tabs.length > 0) active = tabs[0].value;
+  $effect(() => {
+    if (!active && tabs.length > 0) active = tabs[0].value;
+  });
 </script>
 
-<div class="flex border-b border-nya-divider gap-1">
-  {#each tabs as tab}
-    <button
-      onclick={() => (active = tab.value)}
-      class="px-4 py-2.5 text-body-medium transition-colors duration-fast border-b-2 -mb-px
-        {active === tab.value
-          ? 'text-nya-primary border-nya-primary'
-          : 'text-nya-text-secondary border-transparent hover:text-nya-text-primary hover:border-nya-border'}"
-    >
-      {tab.label}
-    </button>
-  {/each}
-</div>
+<Tabs.Root value={active} onValueChange={(value) => (active = value)}>
+  <Tabs.List class="flex gap-1 border-b border-nya-divider" aria-label="页面分区">
+    {#each tabs as tab}
+      <Tabs.Trigger
+        value={tab.value}
+        disabled={tab.disabled}
+        class="-mb-px border-b-2 border-transparent px-4 py-2.5 text-body-medium text-nya-text-secondary transition-colors hover:text-nya-text-primary data-[state=active]:border-nya-primary data-[state=active]:text-nya-primary"
+      >
+        {tab.label}
+      </Tabs.Trigger>
+    {/each}
+  </Tabs.List>
+</Tabs.Root>

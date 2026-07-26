@@ -1,4 +1,6 @@
 <script lang="ts">
+  import type { Component } from 'svelte';
+
   let {
     title = '',
     value = '0',
@@ -9,7 +11,7 @@
   }: {
     title: string;
     value: string;
-    icon?: any;
+    icon?: Component<{ size?: number | string }>;
     color?: 'primary' | 'pink' | 'blue' | 'mint' | 'orange';
     trend?: string;
     trendUp?: boolean;
@@ -32,7 +34,7 @@
   {/if}
   <div class="flex-1 min-w-0">
     <p class="text-small text-nya-text-tertiary mb-0.5">{title}</p>
-    <p class="text-stat-value text-nya-text-primary font-variant-numeric tabular-nums">{value}</p>
+    <p class="text-stat-value text-nya-text-primary tabular-nums">{value}</p>
     {#if trend}
       <p class="text-micro {trendUp ? 'text-nya-success' : 'text-nya-text-tertiary'}">{trend}</p>
     {/if}

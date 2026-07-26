@@ -8,6 +8,8 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/nyasharp/nyauth/internal/account"
+	"github.com/nyasharp/nyauth/internal/audit"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
 
@@ -15,12 +17,17 @@ var ErrLastActiveAdmin = errors.New("cannot remove the last active administrator
 
 // Store handles user persistence.
 type Store struct {
-	db *pgxpool.Pool
+	db                  *pgxpool.Pool
+	notificationBuilder account.SecurityNotificationBuilder
 }
 
 func NewStore(db *pgxpool.Pool) *Store { return &Store{db: db} }
 
-const userSelectCols = `id, username, email, password_hash, display_name, avatar_url, status, role, auth_version, must_change_password, last_login_at, last_login_ip, metadata, created_at, updated_at`
+func (s *Store) SetSecurityNotificationBuilder(builder account.SecurityNotificationBuilder) {
+	s.notificationBuilder = builder
+}
+
+const userSelectCols = `id, username, email, email_verified_at, password_hash, password_changed_at, display_name, avatar_url, status, role, auth_version, session_version, must_change_password, last_authenticated_at, last_login_at, last_login_ip, metadata, created_at, updated_at`
 
 type rowScanner interface {
 	Scan(dest ...any) error
@@ -29,8 +36,9 @@ type rowScanner interface {
 func scanUser(row rowScanner) (*models.User, error) {
 	u := &models.User{}
 	if err := row.Scan(
-		&u.ID, &u.Username, &u.Email, &u.PasswordHash, &u.DisplayName, &u.AvatarURL,
-		&u.Status, &u.Role, &u.AuthVersion, &u.MustChangePassword, &u.LastLoginAt,
+		&u.ID, &u.Username, &u.Email, &u.EmailVerifiedAt, &u.PasswordHash, &u.PasswordChangedAt,
+		&u.DisplayName, &u.AvatarURL, &u.Status, &u.Role, &u.AuthVersion, &u.SessionVersion,
+		&u.MustChangePassword, &u.LastAuthenticatedAt, &u.LastLoginAt,
 		&u.LastLoginIP, &u.Metadata, &u.CreatedAt, &u.UpdatedAt,
 	); err != nil {
 		return nil, err
@@ -38,14 +46,28 @@ func scanUser(row rowScanner) (*models.User, error) {
 	return u, nil
 }
 
+func (s *Store) enqueueSecurityNotification(ctx context.Context, tx pgx.Tx, user *models.User, notice account.SecurityNotice) error {
+	if s.notificationBuilder == nil {
+		return nil
+	}
+	email, err := s.notificationBuilder.BuildSecurityNotification(user, notice)
+	if err != nil {
+		return fmt.Errorf("building security notification: %w", err)
+	}
+	if err := account.EnqueueEmailTx(ctx, tx, email); err != nil {
+		return fmt.Errorf("queueing security notification: %w", err)
+	}
+	return nil
+}
+
 func (s *Store) Create(ctx context.Context, u *models.User) error {
 	_, err := s.db.Exec(ctx, `
 		INSERT INTO users (
-			id, username, email, password_hash, display_name, avatar_url,
-			status, role, auth_version, must_change_password, metadata
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+			id, username, email, password_hash, password_changed_at, display_name, avatar_url,
+			status, role, auth_version, session_version, must_change_password, metadata
+		) VALUES ($1,$2,$3,$4,NOW(),$5,$6,$7,$8,$9,$10,$11,$12)
 	`, u.ID, u.Username, u.Email, u.PasswordHash, u.DisplayName, u.AvatarURL,
-		u.Status, u.Role, u.AuthVersion, u.MustChangePassword, u.Metadata)
+		u.Status, u.Role, u.AuthVersion, u.SessionVersion, u.MustChangePassword, u.Metadata)
 	if err != nil {
 		return fmt.Errorf("inserting user: %w", err)
 	}
@@ -69,7 +91,7 @@ func (s *Store) GetByUsername(ctx context.Context, username string) (*models.Use
 }
 
 func (s *Store) GetByEmail(ctx context.Context, email string) (*models.User, error) {
-	u, err := scanUser(s.db.QueryRow(ctx, `SELECT `+userSelectCols+` FROM users WHERE email=$1`, email))
+	u, err := scanUser(s.db.QueryRow(ctx, `SELECT `+userSelectCols+` FROM users WHERE LOWER(BTRIM(email))=LOWER(BTRIM($1))`, email))
 	if err != nil {
 		return nil, fmt.Errorf("getting user by email: %w", err)
 	}
@@ -95,6 +117,7 @@ func (s *Store) UpdateSelf(ctx context.Context, id uuid.UUID, req models.UpdateU
 	u, err := scanUser(s.db.QueryRow(ctx, `
 		UPDATE users SET
 			email=CASE WHEN $2 THEN $3::text ELSE email END,
+			email_verified_at=CASE WHEN $2 AND LOWER(COALESCE($3::text, '')) <> LOWER(COALESCE(email, '')) THEN NULL ELSE email_verified_at END,
 			display_name=CASE WHEN $4 THEN $5::text ELSE display_name END,
 			avatar_url=CASE WHEN $6 THEN $7::text ELSE avatar_url END,
 			updated_at=NOW()
@@ -109,7 +132,7 @@ func (s *Store) UpdateSelf(ctx context.Context, id uuid.UUID, req models.UpdateU
 	return u, nil
 }
 
-func (s *Store) UpdateAdmin(ctx context.Context, id uuid.UUID, req models.AdminUpdateUserRequest) (*models.User, error) {
+func (s *Store) UpdateAdmin(ctx context.Context, id uuid.UUID, req models.AdminUpdateUserRequest, mutation audit.MutationAudit) (*models.User, error) {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return nil, err
@@ -147,9 +170,14 @@ func (s *Store) UpdateAdmin(ctx context.Context, id uuid.UUID, req models.AdminU
 	u, err := scanUser(tx.QueryRow(ctx, `
 		UPDATE users SET
 			email=CASE WHEN $2 THEN $3::text ELSE email END,
+			email_verified_at=CASE WHEN $2 AND LOWER(COALESCE($3::text, '')) <> LOWER(COALESCE(email, '')) THEN NULL ELSE email_verified_at END,
 			display_name=CASE WHEN $4 THEN $5::text ELSE display_name END,
 			avatar_url=CASE WHEN $6 THEN $7::text ELSE avatar_url END,
-			auth_version=CASE WHEN $8 AND $9::text <> status THEN auth_version+1 ELSE auth_version END,
+			auth_version=CASE WHEN
+				($2 AND LOWER(COALESCE($3::text, '')) <> LOWER(COALESCE(email, '')))
+				OR ($8 AND $9::text <> status)
+				OR ($10 AND $11::text <> role)
+				THEN auth_version+1 ELSE auth_version END,
 			status=CASE WHEN $8 THEN $9::text ELSE status END,
 			role=CASE WHEN $10 THEN $11::text ELSE role END,
 			metadata=CASE WHEN $12 THEN $13::jsonb ELSE metadata END,
@@ -162,6 +190,21 @@ func (s *Store) UpdateAdmin(ctx context.Context, id uuid.UUID, req models.AdminU
 	if err != nil {
 		return nil, fmt.Errorf("updating user: %w", err)
 	}
+	var notice *account.SecurityNotice
+	switch mutation.Event {
+	case models.AuditUserRoleChanged:
+		notice = &account.SecurityNotice{MessageType: account.MessageRoleChanged, Role: u.Role}
+	case models.AuditUserSuspended, models.AuditUserActivated:
+		notice = &account.SecurityNotice{MessageType: account.MessageStatusChanged, Status: string(u.Status)}
+	}
+	if notice != nil {
+		if err := s.enqueueSecurityNotification(ctx, tx, u, *notice); err != nil {
+			return nil, err
+		}
+	}
+	if err := audit.EnqueueMutationTx(ctx, tx, mutation.WithTarget("user", id.String())); err != nil {
+		return nil, fmt.Errorf("auditing user update: %w", err)
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
@@ -170,18 +213,115 @@ func (s *Store) UpdateAdmin(ctx context.Context, id uuid.UUID, req models.AdminU
 
 // UpdatePassword changes the password, invalidates prior credentials, and sets
 // whether the user must change it again at the next login.
-func (s *Store) UpdatePassword(ctx context.Context, id uuid.UUID, passwordHash string, mustChange bool) (*models.User, error) {
-	u, err := scanUser(s.db.QueryRow(ctx, `
+func (s *Store) UpdatePassword(ctx context.Context, id uuid.UUID, passwordHash string, mustChange bool, mutation audit.MutationAudit) (*models.User, error) {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("starting password change: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	u, err := scanUser(tx.QueryRow(ctx, `
 		UPDATE users SET password_hash=$2, auth_version=auth_version+1,
-			must_change_password=$3, updated_at=NOW()
+			password_changed_at=NOW(), must_change_password=$3, updated_at=NOW()
 		WHERE id=$1 RETURNING `+userSelectCols, id, passwordHash, mustChange))
 	if err != nil {
 		return nil, fmt.Errorf("updating password: %w", err)
 	}
+	if err := s.enqueueSecurityNotification(ctx, tx, u, account.SecurityNotice{MessageType: account.MessagePasswordChanged}); err != nil {
+		return nil, err
+	}
+	if err := audit.EnqueueMutationTx(ctx, tx, mutation.WithTarget("user", id.String())); err != nil {
+		return nil, fmt.Errorf("auditing password change: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("committing password change: %w", err)
+	}
 	return u, nil
 }
 
-func (s *Store) Delete(ctx context.Context, id uuid.UUID) error {
+// ResetPassword changes an administrator-selected password and queues the
+// successful high-risk audit event in the same transaction.
+func (s *Store) ResetPassword(ctx context.Context, id uuid.UUID, passwordHash string, mutation audit.MutationAudit) (*models.User, error) {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("starting password reset: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	u, err := scanUser(tx.QueryRow(ctx, `
+		UPDATE users SET password_hash=$2, auth_version=auth_version+1,
+			password_changed_at=NOW(), must_change_password=TRUE, updated_at=NOW()
+		WHERE id=$1 RETURNING `+userSelectCols, id, passwordHash))
+	if err != nil {
+		return nil, fmt.Errorf("resetting password: %w", err)
+	}
+	if err := s.enqueueSecurityNotification(ctx, tx, u, account.SecurityNotice{MessageType: account.MessagePasswordResetAdmin}); err != nil {
+		return nil, err
+	}
+	if err := audit.EnqueueMutationTx(ctx, tx, mutation.WithTarget("user", id.String())); err != nil {
+		return nil, fmt.Errorf("auditing password reset: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("committing password reset: %w", err)
+	}
+	return u, nil
+}
+
+func (s *Store) SetPasswordIfMissing(ctx context.Context, id uuid.UUID, passwordHash string, mutation audit.MutationAudit) (*models.User, error) {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("starting password configuration: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	u, err := scanUser(tx.QueryRow(ctx, `
+		UPDATE users SET password_hash=$2,auth_version=auth_version+1,
+			password_changed_at=NOW(),must_change_password=FALSE,updated_at=NOW()
+		WHERE id=$1 AND password_hash IS NULL RETURNING `+userSelectCols, id, passwordHash))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrPasswordConfigured
+	}
+	if err != nil {
+		return nil, fmt.Errorf("setting password: %w", err)
+	}
+	if err := s.enqueueSecurityNotification(ctx, tx, u, account.SecurityNotice{MessageType: account.MessagePasswordConfigured}); err != nil {
+		return nil, err
+	}
+	if err := audit.EnqueueMutationTx(ctx, tx, mutation.WithTarget("user", id.String())); err != nil {
+		return nil, fmt.Errorf("auditing password configuration: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("committing password configuration: %w", err)
+	}
+	return u, nil
+}
+
+// RevokeSessions advances the authoritative browser-session generation and
+// records the successful management mutation in the same transaction.
+func (s *Store) RevokeSessions(ctx context.Context, id uuid.UUID, mutation audit.MutationAudit) (int64, error) {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("starting session revocation: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	var sessionVersion int64
+	if err := tx.QueryRow(ctx, `
+		UPDATE users SET session_version=session_version+1,updated_at=NOW()
+		WHERE id=$1 RETURNING session_version
+	`, id).Scan(&sessionVersion); err != nil {
+		return 0, fmt.Errorf("advancing session version: %w", err)
+	}
+	mutation = mutation.WithTarget("user", id.String()).WithDetails(map[string]any{
+		"session_version": sessionVersion,
+	})
+	if err := audit.EnqueueMutationTx(ctx, tx, mutation); err != nil {
+		return 0, fmt.Errorf("auditing session revocation: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("committing session revocation: %w", err)
+	}
+	return sessionVersion, nil
+}
+
+func (s *Store) Delete(ctx context.Context, id uuid.UUID, mutation audit.MutationAudit) error {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return err
@@ -211,6 +351,9 @@ func (s *Store) Delete(ctx context.Context, id uuid.UUID) error {
 	if result.RowsAffected() == 0 {
 		return pgx.ErrNoRows
 	}
+	if err := audit.EnqueueMutationTx(ctx, tx, mutation.WithTarget("user", id.String())); err != nil {
+		return fmt.Errorf("auditing user deletion: %w", err)
+	}
 	return tx.Commit(ctx)
 }
 
@@ -238,8 +381,8 @@ func (s *Store) BootstrapAdmin(ctx context.Context, u *models.User) (bool, error
 		return false, tx.Commit(ctx)
 	}
 	_, err = tx.Exec(ctx, `
-		INSERT INTO users (id,username,email,password_hash,display_name,status,role,auth_version,must_change_password,metadata)
-		VALUES ($1,$2,$3,$4,$5,'active','admin',1,TRUE,$6)
+		INSERT INTO users (id,username,email,password_hash,password_changed_at,display_name,status,role,auth_version,must_change_password,metadata)
+		VALUES ($1,$2,$3,$4,NOW(),$5,'active','admin',1,TRUE,$6)
 	`, u.ID, u.Username, u.Email, u.PasswordHash, u.DisplayName, u.Metadata)
 	if err != nil {
 		return false, err
@@ -247,25 +390,24 @@ func (s *Store) BootstrapAdmin(ctx context.Context, u *models.User) (bool, error
 	return true, tx.Commit(ctx)
 }
 
-func (s *Store) List(ctx context.Context, p models.Pagination, search string) (*models.PaginatedResponse[models.User], error) {
+func (s *Store) List(ctx context.Context, p models.Pagination, search string, status models.UserStatus) (*models.PaginatedResponse[models.User], error) {
 	var total int64
-	countQuery := `SELECT COUNT(*) FROM users`
-	args := []any{}
-	if search != "" {
-		countQuery += ` WHERE username ILIKE $1 OR COALESCE(email,'') ILIKE $1 OR COALESCE(display_name,'') ILIKE $1`
-		args = append(args, "%"+search+"%")
-	}
-	if err := s.db.QueryRow(ctx, countQuery, args...).Scan(&total); err != nil {
+	if err := s.db.QueryRow(ctx, `
+		SELECT COUNT(*) FROM users
+		WHERE ($1::text='' OR status=$1)
+		  AND ($2::text='' OR username ILIKE '%' || $2 || '%'
+		       OR COALESCE(email,'') ILIKE '%' || $2 || '%'
+		       OR COALESCE(display_name,'') ILIKE '%' || $2 || '%')
+	`, status, search).Scan(&total); err != nil {
 		return nil, fmt.Errorf("counting users: %w", err)
 	}
-	query := `SELECT ` + userSelectCols + ` FROM users`
-	listArgs := []any{p.PageSize, p.Offset()}
-	if search != "" {
-		query += ` WHERE username ILIKE $3 OR COALESCE(email,'') ILIKE $3 OR COALESCE(display_name,'') ILIKE $3`
-		listArgs = append(listArgs, "%"+search+"%")
-	}
-	query += ` ORDER BY created_at DESC, id DESC LIMIT $1 OFFSET $2`
-	rows, err := s.db.Query(ctx, query, listArgs...)
+	rows, err := s.db.Query(ctx, `SELECT `+userSelectCols+` FROM users
+		WHERE ($1::text='' OR status=$1)
+		  AND ($2::text='' OR username ILIKE '%' || $2 || '%'
+		       OR COALESCE(email,'') ILIKE '%' || $2 || '%'
+		       OR COALESCE(display_name,'') ILIKE '%' || $2 || '%')
+		ORDER BY created_at DESC, id DESC LIMIT $3 OFFSET $4
+	`, status, search, p.PageSize, p.Offset())
 	if err != nil {
 		return nil, fmt.Errorf("listing users: %w", err)
 	}
@@ -286,8 +428,18 @@ func (s *Store) List(ctx context.Context, p models.Pagination, search string) (*
 }
 
 func (s *Store) RecordLogin(ctx context.Context, id uuid.UUID, ip string) error {
-	_, err := s.db.Exec(ctx, `UPDATE users SET last_login_at=NOW(), last_login_ip=$2, updated_at=NOW() WHERE id=$1`, id, ip)
+	_, err := s.db.Exec(ctx, `UPDATE users SET last_authenticated_at=NOW(), last_login_at=NOW(), last_login_ip=$2, updated_at=NOW() WHERE id=$1`, id, ip)
 	return err
+}
+
+func (s *Store) RecordAuthentication(ctx context.Context, id uuid.UUID) (*models.User, error) {
+	u, err := scanUser(s.db.QueryRow(ctx, `
+		UPDATE users SET last_authenticated_at=NOW(),updated_at=NOW()
+		WHERE id=$1 RETURNING `+userSelectCols, id))
+	if err != nil {
+		return nil, fmt.Errorf("recording authentication: %w", err)
+	}
+	return u, nil
 }
 
 // IsNotFound reports whether a store error was caused by a missing row.

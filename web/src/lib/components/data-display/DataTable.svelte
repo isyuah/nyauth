@@ -1,5 +1,13 @@
-<script lang="ts">
+<script lang="ts" generics="T extends Record<string, unknown>">
   import type { Snippet } from 'svelte';
+
+  interface Column<Row extends Record<string, unknown>> {
+    key: keyof Row & string;
+    label: string;
+    width?: string;
+    mono?: boolean;
+    render?: Snippet<[Row]>;
+  }
 
   let {
     columns = [],
@@ -8,12 +16,19 @@
     onRowClick,
     actions,
   }: {
-    columns: Array<{ key: string; label: string; width?: string; mono?: boolean; render?: Snippet<[any]> }>;
-    data: any[];
+    columns: Column<T>[];
+    data: T[];
     emptyText?: string;
-    onRowClick?: (row: any) => void;
-    actions?: Snippet<[any]>;
+    onRowClick?: (row: T) => void;
+    actions?: Snippet<[T]>;
   } = $props();
+
+  function activateRow(event: KeyboardEvent, row: T) {
+    if (event.key === 'Enter' || event.key === ' ') {
+      event.preventDefault();
+      onRowClick?.(row);
+    }
+  }
 </script>
 
 <div class="overflow-x-auto">
@@ -22,32 +37,38 @@
       <tr class="border-b border-nya-divider">
         {#each columns as col}
           <th
-            class="text-left px-4 h-[42px] text-micro font-medium text-nya-text-tertiary uppercase tracking-wider"
+            scope="col"
+            class="h-[42px] px-4 text-left text-micro font-medium uppercase tracking-wider text-nya-text-tertiary"
             style={col.width ? `width: ${col.width}` : ''}
           >
             {col.label}
           </th>
         {/each}
         {#if actions}
-          <th class="text-right px-4 h-[42px] text-micro font-medium text-nya-text-tertiary w-20">操作</th>
+          <th scope="col" class="h-[42px] w-20 px-4 text-right text-micro font-medium text-nya-text-tertiary">操作</th>
         {/if}
       </tr>
     </thead>
     <tbody>
-      {#each data as row, i}
+      {#each data as row}
         <tr
-          class="border-b border-nya-divider/50 hover:bg-nya-surface-hover transition-colors duration-fast {onRowClick ? 'cursor-pointer' : ''}"
+          class="border-b border-nya-divider/50 transition-colors hover:bg-nya-surface-muted {onRowClick ? 'cursor-pointer' : ''}"
+          role={onRowClick ? 'button' : undefined}
+          tabindex={onRowClick ? 0 : undefined}
           onclick={() => onRowClick?.(row)}
+          onkeydown={(event) => activateRow(event, row)}
         >
           {#each columns as col}
-            <td class="px-4 h-12 text-body text-nya-text-primary {col.mono ? 'font-mono text-small' : ''}">
-              {row[col.key] ?? '-'}
+            <td class="h-12 px-4 text-body text-nya-text-primary {col.mono ? 'font-mono text-small' : ''}">
+              {#if col.render}
+                {@render col.render(row)}
+              {:else}
+                {String(row[col.key] ?? '-')}
+              {/if}
             </td>
           {/each}
           {#if actions}
-            <td class="px-4 h-12 text-right">
-              {@render actions(row)}
-            </td>
+            <td class="h-12 px-4 text-right">{@render actions(row)}</td>
           {/if}
         </tr>
       {/each}

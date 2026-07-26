@@ -1,25 +1,33 @@
 package server
 
 import (
-	"log"
+	"fmt"
+	"log/slog"
 	"net/http"
 	"net/url"
+	"runtime/debug"
 	"strings"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 )
 
-var sensitiveQueryParameters = map[string]struct{}{
-	"access_token":  {},
-	"client_secret": {},
-	"code":          {},
-	"code_verifier": {},
-	"id_token_hint": {},
-	"password":      {},
-	"refresh_token": {},
-	"state":         {},
-	"token":         {},
+var safeQueryParameters = map[string]struct{}{
+	"client_id":             {},
+	"code_challenge_method": {},
+	"days":                  {},
+	"event":                 {},
+	"format":                {},
+	"grant_type":            {},
+	"limit":                 {},
+	"page":                  {},
+	"page_size":             {},
+	"response_type":         {},
+	"result":                {},
+	"risk":                  {},
+	"scope":                 {},
+	"token_type_hint":       {},
 }
 
 func redactedRequestLogger(next http.Handler) http.Handler {
@@ -31,27 +39,67 @@ func redactedRequestLogger(next http.Handler) http.Handler {
 			if status == 0 {
 				status = http.StatusOK
 			}
-			log.Printf("[%s] %q from %s - %d %dB in %s",
-				middleware.GetReqID(r.Context()),
-				r.Method+" "+redactedRequestURI(r.URL)+" "+r.Proto,
-				r.RemoteAddr,
-				status,
-				wrapped.BytesWritten(),
-				time.Since(started),
+			route := chi.RouteContext(r.Context()).RoutePattern()
+			if route == "" {
+				route = "unmatched"
+			}
+			level := slog.LevelInfo
+			if status >= http.StatusInternalServerError {
+				level = slog.LevelError
+			} else if status >= http.StatusBadRequest {
+				level = slog.LevelWarn
+			}
+			slog.LogAttrs(r.Context(), level, "http request completed",
+				slog.String("request_id", middleware.GetReqID(r.Context())),
+				slog.String("http.method", r.Method),
+				slog.String("http.route", route),
+				slog.String("http.target", redactedRequestURI(r.URL, route)),
+				slog.Int("http.status_code", status),
+				slog.Int("http.response_bytes", wrapped.BytesWritten()),
+				slog.Int64("http.duration_ms", time.Since(started).Milliseconds()),
+				slog.String("client.address", requestIP(r)),
+				slog.String("error.class", httpErrorClass(status)),
 			)
 		}()
 		next.ServeHTTP(wrapped, r)
 	})
 }
 
-func redactedRequestURI(target *url.URL) string {
-	path := target.EscapedPath()
-	if path == "" {
-		path = "/"
+func structuredRecoverer(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		defer func() {
+			if recovered := recover(); recovered != nil {
+				slog.ErrorContext(r.Context(), "http handler panic recovered",
+					"request_id", middleware.GetReqID(r.Context()),
+					"panic_type", fmt.Sprintf("%T", recovered),
+					"stack", string(debug.Stack()),
+				)
+				http.Error(w, http.StatusText(http.StatusInternalServerError), http.StatusInternalServerError)
+			}
+		}()
+		next.ServeHTTP(w, r)
+	})
+}
+
+func httpErrorClass(status int) string {
+	switch {
+	case status >= http.StatusInternalServerError:
+		return "server_error"
+	case status >= http.StatusBadRequest:
+		return "client_error"
+	default:
+		return "none"
+	}
+}
+
+func redactedRequestURI(target *url.URL, route string) string {
+	path := strings.TrimSpace(route)
+	if path == "" || path == "unmatched" {
+		path = "/[unmatched]"
 	}
 	query := target.Query()
 	for key := range query {
-		if isSensitiveQueryParameter(key) {
+		if !isSafeQueryParameter(key) {
 			query.Set(key, "[REDACTED]")
 		}
 	}
@@ -61,9 +109,9 @@ func redactedRequestURI(target *url.URL) string {
 	return path
 }
 
-func isSensitiveQueryParameter(key string) bool {
-	for sensitive := range sensitiveQueryParameters {
-		if strings.EqualFold(key, sensitive) {
+func isSafeQueryParameter(key string) bool {
+	for safe := range safeQueryParameters {
+		if strings.EqualFold(key, safe) {
 			return true
 		}
 	}

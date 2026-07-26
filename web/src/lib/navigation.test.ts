@@ -11,6 +11,8 @@ describe('safeReturnPath', () => {
     '//evil.example/callback',
     '/\\evil.example/callback',
     'dashboard',
+    `/${'a'.repeat(2048)}`,
+    '/dashboard\n/admin',
   ])('rejects unsafe return path %s', (value) => {
     expect(safeReturnPath(value, '/safe')).toBe('/safe');
   });
@@ -38,6 +40,16 @@ describe('cleanProviderAuthError', () => {
   it('uses a generic message for unknown server codes', () => {
     expect(cleanProviderAuthError('https://auth.example/profile?auth_error=unknown_code')).toEqual({
       message: '外部身份验证失败，请重新尝试。',
+      cleanPath: '/profile',
+    });
+  });
+
+  it.each([
+    ['identity_mismatch', '本次验证的外部身份与当前账户不匹配。'],
+    ['reauthentication_failed', '重新认证失败，请稍后重试。'],
+  ])('maps the reauthentication error %s', (code, message) => {
+    expect(cleanProviderAuthError(`https://auth.example/profile?auth_error=${code}`)).toEqual({
+      message,
       cleanPath: '/profile',
     });
   });

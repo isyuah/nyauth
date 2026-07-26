@@ -7,6 +7,7 @@ web/.svelte-kit
 web/test-results
 web/playwright-report
 web/blob-report
+.pnpm-store
 sdk/ts/node_modules
 sdk/ts/dist
 *.md
@@ -18,6 +19,12 @@ sdk/ts/dist
 .env.*
 !.env.example
 !.env.*.example
+.ci-secrets/
+.release-secrets/
+.recovery-input/
+.recovery-secrets/
+.recovery-*
+secrets/
 config.yaml
 config.yml
 config.*.yaml

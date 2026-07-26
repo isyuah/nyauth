@@ -6,12 +6,14 @@
 :root {
   color-scheme: light;
 
-  --nya-primary: #7c5cff;
-  --nya-primary-hover: #6d4cf5;
-  --nya-primary-active: #5f41e6;
+  --nya-primary: #704de8;
+  --nya-primary-rgb: 112 77 232;
+  --nya-primary-hover: #6846e8;
+  --nya-primary-active: #5c3bd6;
   --nya-primary-soft: #f1edff;
   --nya-primary-softer: #f8f5ff;
   --nya-primary-border: #dcd2ff;
+  --nya-gradient-soft: linear-gradient(135deg, var(--nya-primary-softer), var(--nya-pink-soft));
 
   --nya-pink: #f56fa7;
   --nya-pink-soft: #fff0f6;
@@ -25,36 +27,72 @@
   --nya-success: #18b77a;
   --nya-success-soft: #ebfaf3;
   --nya-warning: #ed8b2d;
+  --nya-warning-rgb: 237 139 45;
   --nya-warning-soft: #fff5e9;
   --nya-danger: #ec4b6f;
+  --nya-danger-rgb: 236 75 111;
   --nya-danger-soft: #fff0f3;
   --nya-info: #348ff0;
+  --nya-info-rgb: 52 143 240;
   --nya-info-soft: #edf6ff;
 
+  --nya-page: var(--nya-bg);
   --nya-bg: #faf9ff;
   --nya-bg-sidebar: #fffaff;
   --nya-surface: #ffffff;
+  --nya-surface-soft: #fbfaff;
   --nya-surface-subtle: #fbfaff;
   --nya-surface-muted: #f6f4fb;
+  --nya-surface-hover: #f8f6fd;
 
   --nya-text-primary: #202235;
   --nya-text-secondary: #62677f;
-  --nya-text-tertiary: #9398ac;
+  --nya-text-tertiary: #686e82;
   --nya-text-disabled: #b9bdcb;
 
   --nya-border: #e9e6f1;
   --nya-border-strong: #ddd8e9;
   --nya-divider: #eeebf4;
+  --nya-divider-rgb: 238 235 244;
 
   --nya-shadow-card: 0 5px 18px rgba(80, 61, 130, 0.055);
   --nya-shadow-hover: 0 9px 26px rgba(80, 61, 130, 0.09);
   --nya-shadow-popup: 0 18px 50px rgba(62, 48, 98, 0.15);
+  --nya-shadow-xs: var(--nya-shadow-card);
+  --nya-shadow-sm: var(--nya-shadow-hover);
+  --nya-shadow-md: 0 12px 34px rgba(62, 48, 98, 0.12);
 
+  --nya-radius-xs: 6px;
   --nya-radius-sm: 8px;
   --nya-radius-md: 10px;
   --nya-radius-card: 12px;
   --nya-radius-lg: 16px;
   --nya-radius-pill: 999px;
+  --nya-radius-full: var(--nya-radius-pill);
+
+  --nya-font-size-body: 14px;
+  --nya-line-height-body: 21px;
+  --nya-font-weight-body: 400;
+  --nya-line-height-navigation: 20px;
+  --nya-font-weight-navigation: 520;
+  --nya-font-size-small: 13px;
+  --nya-line-height-small: 19px;
+  --nya-font-size-micro: 12px;
+  --nya-line-height-micro: 18px;
+  --nya-font-size-card-title: 16px;
+  --nya-line-height-card-title: 24px;
+  --nya-font-weight-card-title: 650;
+  --nya-font-size-section-title: 20px;
+  --nya-line-height-section-title: 28px;
+  --nya-font-weight-section-title: 700;
+  --nya-font-size-stat-value: 28px;
+  --nya-line-height-stat-value: 34px;
+  --nya-font-weight-stat-value: 720;
+
+  --nya-duration-fast: 150ms;
+  --nya-duration-normal: 200ms;
+  --nya-ease-standard: cubic-bezier(0.4, 0, 0.2, 1);
+  --nya-ease-emphasized: cubic-bezier(0.2, 0, 0, 1);
 }
 
 /* ===== Base (§0.4: font-size 16px, min-width 1024px) ===== */

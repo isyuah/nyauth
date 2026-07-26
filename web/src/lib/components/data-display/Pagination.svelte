@@ -3,10 +3,12 @@
     page = $bindable(1),
     pageSize = 20,
     total = 0,
+    onchange,
   }: {
     page?: number;
     pageSize?: number;
     total?: number;
+    onchange?: (page: number) => void | Promise<void>;
   } = $props();
 
   let totalPages = $derived(Math.max(1, Math.ceil(total / pageSize)));
@@ -20,16 +22,16 @@
     <div class="flex items-center gap-1">
       <button
         disabled={page <= 1}
-        onclick={() => page--}
-        class="px-2.5 py-1 rounded-nya-xs hover:bg-nya-surface-hover disabled:opacity-40 disabled:cursor-not-allowed"
+        onclick={() => { page -= 1; onchange?.(page); }}
+        class="px-2.5 py-1 rounded-nya-xs hover:bg-nya-surface-muted disabled:opacity-40 disabled:cursor-not-allowed"
       >
         上一页
       </button>
       <span class="px-2 text-nya-text-primary">{page} / {totalPages}</span>
       <button
         disabled={page >= totalPages}
-        onclick={() => page++}
-        class="px-2.5 py-1 rounded-nya-xs hover:bg-nya-surface-hover disabled:opacity-40 disabled:cursor-not-allowed"
+        onclick={() => { page += 1; onchange?.(page); }}
+        class="px-2.5 py-1 rounded-nya-xs hover:bg-nya-surface-muted disabled:opacity-40 disabled:cursor-not-allowed"
       >
         下一页
       </button>

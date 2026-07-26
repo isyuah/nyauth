@@ -1,6 +1,6 @@
 {
   "name": "nyauth-web",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "private": true,
   "scripts": {
     "dev": "vite dev",
@@ -12,6 +12,7 @@
     "test:e2e": "playwright test"
   },
   "devDependencies": {
+    "@axe-core/playwright": "^4.12.1",
     "@playwright/test": "^1.62.0",
     "@sveltejs/adapter-static": "^3.0.0",
     "@sveltejs/kit": "^2.0.0",
@@ -26,6 +27,7 @@
     "vitest": "^4.1.10"
   },
   "dependencies": {
+    "bits-ui": "^2.18.1",
     "chart.js": "^4.5.1",
     "lucide-svelte": "^0.468.0"
   },

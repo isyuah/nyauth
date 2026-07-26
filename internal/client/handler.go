@@ -11,6 +11,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/jackc/pgx/v5"
+	"github.com/nyasharp/nyauth/internal/audit"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
 
@@ -18,10 +19,12 @@ const maxHandlerBody = 1 << 20
 
 type handlerService interface {
 	List(ctx context.Context, page, pageSize int) (*models.PaginatedResponse[models.OAuthClient], error)
-	Create(ctx context.Context, req models.CreateClientRequest) (*models.CreateClientResponse, error)
+	CreateAdmin(ctx context.Context, req models.CreateClientRequest, mutation audit.MutationAudit) (*models.CreateClientResponse, error)
 	GetByID(ctx context.Context, id string) (*models.OAuthClient, error)
-	Update(ctx context.Context, id string, req models.UpdateClientRequest) (*models.OAuthClient, error)
-	Delete(ctx context.Context, id string) error
+	Update(ctx context.Context, id string, req models.UpdateClientRequest, mutation audit.MutationAudit) (*models.OAuthClient, error)
+	UpdateOwner(ctx context.Context, id string, req models.UpdateClientOwnerRequest, mutation audit.MutationAudit) (*models.OAuthClient, error)
+	Delete(ctx context.Context, id string, mutation audit.MutationAudit) error
+	RotateSecret(ctx context.Context, id string, mutation audit.MutationAudit) (*models.RotateClientSecretResponse, error)
 }
 
 // Handler handles HTTP requests for client operations.
@@ -55,7 +58,9 @@ func (h *Handler) Routes() chi.Router {
 	r.Route("/{id}", func(r chi.Router) {
 		r.Get("/", h.Get)
 		r.Put("/", h.Update)
+		r.Put("/owner", h.UpdateOwner)
 		r.Delete("/", h.Delete)
+		r.Post("/rotate-secret", h.RotateSecret)
 	})
 	return r
 }
@@ -78,14 +83,20 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-
-	result, err := h.service.Create(r.Context(), req)
+	mutation, ok := audit.MutationAuditFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "audit context unavailable")
+		return
+	}
+	result, err := h.service.CreateAdmin(r.Context(), req, mutation)
 	if err != nil {
 		switch {
 		case IsInvalidClient(err):
 			writeError(w, http.StatusBadRequest, err.Error())
 		case errors.Is(err, ErrClientQuotaExceeded):
 			writeError(w, http.StatusConflict, "client quota exceeded")
+		case errors.Is(err, ErrClientOwnerUnavailable):
+			writeError(w, http.StatusConflict, "client owner is unavailable")
 		default:
 			writeError(w, http.StatusInternalServerError, "failed to create client")
 		}
@@ -117,8 +128,13 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
+	mutation, ok := audit.MutationAuditFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "audit context unavailable")
+		return
+	}
 
-	client, err := h.service.Update(r.Context(), id, req)
+	client, err := h.service.Update(r.Context(), id, req, mutation)
 	if err != nil {
 		switch {
 		case IsInvalidClient(err):
@@ -133,10 +149,45 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, client)
 }
 
+func (h *Handler) UpdateOwner(w http.ResponseWriter, r *http.Request) {
+	var req models.UpdateClientOwnerRequest
+	if err := decodeHandlerJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	mutation, ok := audit.MutationAuditFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "audit context unavailable")
+		return
+	}
+	updated, err := h.service.UpdateOwner(r.Context(), chi.URLParam(r, "id"), req, mutation)
+	if err != nil {
+		switch {
+		case IsInvalidClient(err):
+			writeError(w, http.StatusBadRequest, err.Error())
+		case errors.Is(err, pgx.ErrNoRows):
+			writeError(w, http.StatusNotFound, "client not found")
+		case errors.Is(err, ErrClientOwnerUnavailable):
+			writeError(w, http.StatusConflict, "client owner is unavailable")
+		case errors.Is(err, ErrClientQuotaExceeded):
+			writeError(w, http.StatusConflict, "client quota exceeded")
+		default:
+			writeError(w, http.StatusInternalServerError, "failed to update client owner")
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, updated)
+}
+
 func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 	id := chi.URLParam(r, "id")
 
-	if err := h.service.Delete(r.Context(), id); err != nil {
+	mutation, ok := audit.MutationAuditFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "audit context unavailable")
+		return
+	}
+	if err := h.service.Delete(r.Context(), id, mutation); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "client not found")
 		} else {
@@ -145,6 +196,29 @@ func (h *Handler) Delete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (h *Handler) RotateSecret(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
+	mutation, ok := audit.MutationAuditFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "audit context unavailable")
+		return
+	}
+	result, err := h.service.RotateSecret(r.Context(), chi.URLParam(r, "id"), mutation)
+	if err != nil {
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			writeError(w, http.StatusNotFound, "client not found")
+		case errors.Is(err, ErrPublicClientSecret):
+			writeError(w, http.StatusConflict, err.Error())
+		default:
+			writeError(w, http.StatusInternalServerError, "failed to rotate client secret")
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, result)
 }
 
 func writeJSON(w http.ResponseWriter, status int, v interface{}) {

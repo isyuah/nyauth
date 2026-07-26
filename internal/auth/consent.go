@@ -5,7 +5,11 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"net/url"
+	"time"
 
+	"github.com/google/uuid"
+	"github.com/nyasharp/nyauth/internal/authorization"
 	"github.com/nyasharp/nyauth/internal/client"
 	"github.com/nyasharp/nyauth/internal/config"
 	internalcrypto "github.com/nyasharp/nyauth/internal/crypto"
@@ -13,13 +17,14 @@ import (
 )
 
 type ConsentHandler struct {
-	sessionStore *session.Store
-	clientStore  *client.Store
-	config       *config.Config
+	sessionStore       *session.Store
+	clientStore        *client.Store
+	authorizationStore *authorization.Store
+	config             *config.Config
 }
 
-func NewConsentHandler(sessionStore *session.Store, _ *TokenService, clientStore *client.Store, cfg *config.Config) *ConsentHandler {
-	return &ConsentHandler{sessionStore: sessionStore, clientStore: clientStore, config: cfg}
+func NewConsentHandler(sessionStore *session.Store, _ *TokenService, clientStore *client.Store, authorizationStore *authorization.Store, cfg *config.Config) *ConsentHandler {
+	return &ConsentHandler{sessionStore: sessionStore, clientStore: clientStore, authorizationStore: authorizationStore, config: cfg}
 }
 
 func (h *ConsentHandler) GetConsent(w http.ResponseWriter, r *http.Request) {
@@ -39,9 +44,19 @@ func (h *ConsentHandler) GetConsent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_or_expired_challenge")
 		return
 	}
+	publisherType := "user_registered"
+	if cl.OwnerID == nil {
+		publisherType = "system_managed"
+	}
+	redirectOrigin := ""
+	if parsed, parseErr := url.Parse(data.RedirectURI); parseErr == nil && parsed.Scheme != "" && parsed.Host != "" {
+		redirectOrigin = parsed.Scheme + "://" + parsed.Host
+	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"challenge": challenge, "client_name": cl.Name, "client_id": cl.ID,
 		"scopes": data.Scopes, "redirect_uri": data.RedirectURI,
+		"redirect_origin": redirectOrigin, "publisher_type": publisherType,
+		"verification_status": "unverified",
 	})
 }
 
@@ -61,6 +76,24 @@ func (h *ConsentHandler) AcceptConsent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_or_expired_challenge")
 		return
 	}
+	userID, err := uuid.Parse(data.UserID)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "server_error")
+		return
+	}
+	tokenTTL := h.config.Auth.RefreshTokenTTL
+	if h.config.Auth.AccessTokenTTL > tokenTTL {
+		tokenTTL = h.config.Auth.AccessTokenTTL
+	}
+	authorizationIssuedAt, err := h.sessionStore.AuthorizationIssueTime(r.Context(), data.UserID, data.ClientID, tokenTTL+5*time.Minute)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "server_error")
+		return
+	}
+	if err := h.authorizationStore.Upsert(r.Context(), userID, data.ClientID, data.Scopes, time.UnixMicro(authorizationIssuedAt).UTC()); err != nil {
+		writeError(w, http.StatusInternalServerError, "server_error")
+		return
+	}
 	code, err := internalcrypto.GenerateRandomString(32)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "server_error")
@@ -69,6 +102,7 @@ func (h *ConsentHandler) AcceptConsent(w http.ResponseWriter, r *http.Request) {
 	authorization := &session.AuthorizationData{
 		ClientID: data.ClientID, UserID: data.UserID, RedirectURI: data.RedirectURI, Scopes: data.Scopes,
 		CodeChallenge: data.CodeChallenge, ChallengeMethod: "S256", Nonce: data.Nonce, AuthVersion: data.AuthVersion,
+		AuthorizationIssuedAt: authorizationIssuedAt,
 	}
 	if err := h.sessionStore.SaveAuthorizationCode(r.Context(), code, authorization, h.config.Auth.AuthorizationCodeTTL); err != nil {
 		writeError(w, http.StatusInternalServerError, "server_error")

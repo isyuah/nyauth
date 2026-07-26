@@ -1,69 +1,45 @@
 <script lang="ts">
-  import { api } from '$lib/api';
-  import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
-  import { AppWindow, User, KeyRound } from 'lucide-svelte';
+  import { onMount } from 'svelte';
+  import { api, type User } from '$lib/api';
+  import ResourceState from '$lib/components/ui/ResourceState.svelte';
+  import { AppWindow, KeyRound, UserRound } from 'lucide-svelte';
 
-  let me = $state<any>(null);
+  const testClientEnabled = import.meta.env.DEV || import.meta.env.VITE_ENABLE_TEST_CLIENT === 'true';
+  let me = $state<User | null>(null);
   let appCount = $state(0);
   let identityCount = $state(0);
   let loading = $state(true);
   let error = $state('');
 
-  onMount(async () => {
+  async function loadOverview() {
+    loading = true;
+    error = '';
     try {
-      me = await api.getMe();
-      const apps = await api.my.getClients();
-      appCount = apps?.total || 0;
-      const identities = await api.getMyIdentities();
+      const [user, apps, identities] = await Promise.all([api.getMe(), api.my.getClients(), api.getMyIdentities()]);
+      me = user;
+      appCount = apps.total;
       identityCount = identities.length;
-    } catch (err) {
-      error = err instanceof Error ? err.message : '概览加载失败';
-    } finally { loading = false; }
-  });
+    } catch (cause) {
+      error = cause instanceof Error ? cause.message : '概览加载失败';
+    } finally {
+      loading = false;
+    }
+  }
+
+  onMount(loadOverview);
 </script>
 
 <svelte:head><title>用户中心 - Nya</title></svelte:head>
 
-<div style="margin-bottom: 24px;">
-  <h1 style="font-size: 24px; font-weight: 700; color: var(--nya-text-primary); margin: 0;">
-    欢迎回来{me?.display_name ? `，${me.display_name}` : ''}！
-  </h1>
-  <p style="font-size: 14px; color: var(--nya-text-secondary); margin-top: 4px;">管理你的账户和应用</p>
-</div>
+<div class="mb-6"><h1 class="text-2xl font-bold text-nya-text-primary">欢迎回来{me?.display_name ? `，${me.display_name}` : ''}</h1><p class="mt-1 text-body text-nya-text-secondary">管理账户资料和 OAuth 应用</p></div>
 
-{#if error}
-  <div class="mb-4 px-4 py-3 rounded-lg" style="background: var(--nya-danger-soft); color: var(--nya-danger); font-size: 13px;">{error}</div>
-{/if}
-
-<div class="grid" style="gap: 16px; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));">
-  <button onclick={() => goto('/dashboard/apps')} class="bg-[var(--nya-surface)] border border-[var(--nya-border)] text-left transition-all hover:shadow-nya-hover" style="min-height: 100px; padding: 20px; border-radius: var(--nya-radius-card); box-shadow: var(--nya-shadow-card);">
-    <div class="flex items-center gap-3 mb-3">
-      <div class="flex items-center justify-center rounded-full" style="width: 40px; height: 40px; background: var(--nya-blue-soft);">
-        <AppWindow size={20} style="color: var(--nya-blue);" />
-      </div>
-      <span style="font-size: 13px; color: var(--nya-text-tertiary);">我的应用</span>
+<ResourceState {loading} {error} empty={!me} emptyTitle="无法显示账户概览" onretry={loadOverview}>
+  {#snippet children()}
+    <div class="grid gap-4 [grid-template-columns:repeat(auto-fit,minmax(220px,1fr))]">
+      <button type="button" onclick={() => goto('/dashboard/apps')} class="min-h-28 rounded-nya-card border border-nya-border bg-nya-surface p-5 text-left shadow-nya-card transition-shadow hover:shadow-nya-hover"><div class="mb-3 flex items-center gap-3"><span class="flex h-10 w-10 items-center justify-center rounded-full bg-nya-blue-soft"><AppWindow size={20} class="text-nya-blue" /></span><span class="text-body text-nya-text-tertiary">我的应用</span></div><p class="text-[28px] font-bold text-nya-text-primary">{appCount}</p></button>
+      <button type="button" onclick={() => goto('/profile')} class="min-h-28 rounded-nya-card border border-nya-border bg-nya-surface p-5 text-left shadow-nya-card transition-shadow hover:shadow-nya-hover"><div class="mb-3 flex items-center gap-3"><span class="flex h-10 w-10 items-center justify-center rounded-full bg-nya-primary-soft"><UserRound size={20} class="text-nya-primary" /></span><span class="text-body text-nya-text-tertiary">个人资料</span></div><p class="text-body text-nya-text-secondary">{identityCount} 个外部身份已绑定</p></button>
+      {#if testClientEnabled}<button type="button" onclick={() => goto('/test-client')} class="min-h-28 rounded-nya-card border border-nya-border bg-nya-surface p-5 text-left shadow-nya-card transition-shadow hover:shadow-nya-hover"><div class="mb-3 flex items-center gap-3"><span class="flex h-10 w-10 items-center justify-center rounded-full bg-nya-mint-soft"><KeyRound size={20} class="text-nya-mint" /></span><span class="text-body text-nya-text-tertiary">OAuth 测试</span></div><p class="text-body text-nya-text-secondary">仅开发环境可用</p></button>{/if}
     </div>
-    <p style="font-size: 28px; font-weight: 720; color: var(--nya-text-primary);">{appCount}</p>
-  </button>
-
-  <button onclick={() => goto('/profile')} class="bg-[var(--nya-surface)] border border-[var(--nya-border)] text-left transition-all hover:shadow-nya-hover" style="min-height: 100px; padding: 20px; border-radius: var(--nya-radius-card); box-shadow: var(--nya-shadow-card);">
-    <div class="flex items-center gap-3 mb-3">
-      <div class="flex items-center justify-center rounded-full" style="width: 40px; height: 40px; background: var(--nya-primary-soft);">
-        <User size={20} style="color: var(--nya-primary);" />
-      </div>
-      <span style="font-size: 13px; color: var(--nya-text-tertiary);">个人资料</span>
-    </div>
-    <p style="font-size: 14px; color: var(--nya-text-secondary);">{identityCount} 个外部身份已绑定</p>
-  </button>
-
-  <button onclick={() => goto('/test-client')} class="bg-[var(--nya-surface)] border border-[var(--nya-border)] text-left transition-all hover:shadow-nya-hover" style="min-height: 100px; padding: 20px; border-radius: var(--nya-radius-card); box-shadow: var(--nya-shadow-card);">
-    <div class="flex items-center gap-3 mb-3">
-      <div class="flex items-center justify-center rounded-full" style="width: 40px; height: 40px; background: var(--nya-mint-soft);">
-        <KeyRound size={20} style="color: var(--nya-mint);" />
-      </div>
-      <span style="font-size: 13px; color: var(--nya-text-tertiary);">OAuth 测试</span>
-    </div>
-    <p style="font-size: 14px; color: var(--nya-text-secondary);">测试 OAuth 授权流程</p>
-  </button>
-</div>
+  {/snippet}
+</ResourceState>

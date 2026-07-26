@@ -12,6 +12,7 @@
 /web/test-results/
 /web/playwright-report/
 /web/blob-report/
+/.pnpm-store/
 
 # SDK build artifacts
 /sdk/ts/dist/
@@ -40,6 +41,7 @@ config.*.yml
 .env.*
 !.env.example
 !.env.*.example
+/.ci-secrets/
 
 # Database
 *.db
