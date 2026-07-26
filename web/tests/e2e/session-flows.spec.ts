@@ -2331,6 +2331,78 @@ test('SMTP candidate is saved, tested, activated, rolled back and disabled with 
   expect(disableBody).toEqual({ expected_revision: 14 });
 });
 
+test('SMTP rate limiting disables only the affected operation and shows a retry countdown', async ({ page }) => {
+  const state: MockState = {
+    authenticated: true,
+    mustChangePassword: false,
+    role: 'admin',
+    csrfToken: 'csrf-mail-rate-limit',
+    systemStatus,
+  };
+  await installAPIMocks(page, state);
+  await page.route('**/api/admin/settings/registration', (route) => fulfillJSON(route, 200, {
+    mode: 'closed', require_email_verification: true, allowed_email_domains: [],
+    pending_registration_ttl: '72h', invite_default_ttl: '168h', invite_default_max_uses: 1,
+  }));
+
+  const candidateID = '10000000-0000-0000-0000-000000000099';
+  const candidate: MailConfig = {
+    ...mailSettings.active!,
+    source: 'database',
+    id: candidateID,
+    revision: 9,
+    created_at: '2026-07-27T01:00:00Z',
+  };
+  const runtimeSettings: MailSettings = {
+    ...mailSettings,
+    mode: 'active',
+    state_revision: 30,
+    candidate,
+  };
+  let testAttempts = 0;
+
+  await page.route('**/api/admin/settings/mail**', async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    if (path === '/api/admin/settings/mail' && request.method() === 'GET') {
+      await fulfillJSON(route, 200, runtimeSettings);
+      return;
+    }
+    if (path === '/api/admin/settings/mail/candidate/test' && request.method() === 'POST') {
+      testAttempts += 1;
+      if (testAttempts === 1) {
+        await fulfillJSON(
+          route,
+          429,
+          { error: 'too many mail settings operations' },
+          { 'Retry-After': '2' },
+        );
+        return;
+      }
+      await fulfillJSON(route, 200, {
+        result: 'success', tested_at: '2026-07-27T01:01:00Z', state_revision: 31,
+      });
+      return;
+    }
+    await fulfillJSON(route, 404, { error: `unmocked mail endpoint: ${path}` });
+  });
+
+  await page.goto('/admin/system');
+  await page.getByLabel('测试邮件收件地址').fill('operator@example.com');
+  const testButton = page.getByRole('button', { name: /发送真实测试/ });
+  await testButton.click();
+
+  await expect(page.getByRole('alert')).toContainText('请在 2 秒后重试');
+  await expect(testButton).toBeDisabled();
+  await expect(testButton).toContainText(/发送真实测试（[12] 秒）/);
+  await expect(page.getByRole('button', { name: '保存候选配置' })).toBeEnabled();
+
+  await expect(testButton).toBeEnabled({ timeout: 5_000 });
+  await testButton.click();
+  await expect(page.getByText(/测试邮件已成功发送/)).toBeVisible();
+  expect(testAttempts).toBe(2);
+});
+
 test('provider reauthentication restores SMTP fields once without retaining or replaying the password', async ({ page }) => {
   const state: MockState = {
     authenticated: true,

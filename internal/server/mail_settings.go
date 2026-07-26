@@ -178,7 +178,7 @@ func (s *Server) currentMailSettings(r *http.Request) (mailSettingsResponse, err
 }
 
 func (s *Server) handleSaveMailCandidate(w http.ResponseWriter, r *http.Request) {
-	mutation, ok := s.authorizeMailMutation(w, r, "candidate-save")
+	mutation, ok := s.authorizeMailMutation(w, r, mailSettingsActionCandidateSave)
 	if !ok {
 		return
 	}
@@ -233,7 +233,7 @@ func (s *Server) mailSettingsFromRequest(request saveMailCandidateRequest) (mail
 }
 
 func (s *Server) handleTestMailCandidate(w http.ResponseWriter, r *http.Request) {
-	mutation, ok := s.authorizeMailMutation(w, r, "candidate-test")
+	mutation, ok := s.authorizeMailMutation(w, r, mailSettingsActionCandidateTest)
 	if !ok {
 		return
 	}
@@ -293,7 +293,7 @@ func (s *Server) handleTestMailCandidate(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleActivateMailCandidate(w http.ResponseWriter, r *http.Request) {
-	mutation, ok := s.authorizeMailMutation(w, r, "activate")
+	mutation, ok := s.authorizeMailMutation(w, r, mailSettingsActionActivate)
 	if !ok {
 		return
 	}
@@ -319,7 +319,7 @@ func (s *Server) handleActivateMailCandidate(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *Server) handleRollbackMailSettings(w http.ResponseWriter, r *http.Request) {
-	mutation, ok := s.authorizeMailMutation(w, r, "rollback")
+	mutation, ok := s.authorizeMailMutation(w, r, mailSettingsActionRollback)
 	if !ok {
 		return
 	}
@@ -340,7 +340,7 @@ func (s *Server) handleRollbackMailSettings(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *Server) handleDisableMail(w http.ResponseWriter, r *http.Request) {
-	mutation, ok := s.authorizeMailMutation(w, r, "disable")
+	mutation, ok := s.authorizeMailMutation(w, r, mailSettingsActionDisable)
 	if !ok {
 		return
 	}
@@ -369,11 +369,11 @@ func (s *Server) authorizeMailMutation(w http.ResponseWriter, r *http.Request, a
 	if !s.requireRecentAuthentication(w, r) {
 		return audit.MutationAudit{}, false
 	}
-	if s.accountLimiter == nil {
+	if s.mailSettingsLimiter == nil {
 		writeAPIError(w, http.StatusServiceUnavailable, "mail settings are temporarily unavailable")
 		return audit.MutationAudit{}, false
 	}
-	allowed, retry, err := s.accountLimiter.Reserve(r.Context(), "mail-"+action, requestIP(r), current.ID.String())
+	allowed, retry, err := s.mailSettingsLimiter.Reserve(r.Context(), action, requestIP(r), current.ID.String())
 	if err != nil {
 		writeAPIError(w, http.StatusServiceUnavailable, "mail settings are temporarily unavailable")
 		return audit.MutationAudit{}, false

@@ -41,36 +41,37 @@ import (
 )
 
 type Server struct {
-	cfg                *config.Config
-	db                 *pgxpool.Pool
-	rdb                *redis.Client
-	webFS              embed.FS
-	router             *chi.Mux
-	trustedProxies     []*net.IPNet
-	userService        *user.Service
-	clientService      *client.Service
-	providerMgr        *provider.Manager
-	identityStore      *identity.Store
-	sessionStore       *session.Store
-	tokenService       *auth.TokenService
-	jwkManager         *auth.JWKManager
-	authHandler        *auth.Handler
-	consentHandler     *auth.ConsentHandler
-	sessionMiddleware  *SessionMiddleware
-	loginLimiter       *LoginLimiter
-	auditStore         *audit.Store
-	auditDispatcher    *audit.Dispatcher
-	authorizationStore *authorization.Store
-	statsHandler       *stats.Handler
-	settingsMgr        *settings.Manager
-	inviteStore        *invite.Store
-	registrationStore  *registration.Store
-	telemetry          *telemetry.Runtime
-	accountService     accountActionService
-	accountLimiter     *AccountActionLimiter
-	mailManager        *mailruntime.Manager
-	emailDispatcher    *account.Dispatcher
-	readiness          readinessState
+	cfg                 *config.Config
+	db                  *pgxpool.Pool
+	rdb                 *redis.Client
+	webFS               embed.FS
+	router              *chi.Mux
+	trustedProxies      []*net.IPNet
+	userService         *user.Service
+	clientService       *client.Service
+	providerMgr         *provider.Manager
+	identityStore       *identity.Store
+	sessionStore        *session.Store
+	tokenService        *auth.TokenService
+	jwkManager          *auth.JWKManager
+	authHandler         *auth.Handler
+	consentHandler      *auth.ConsentHandler
+	sessionMiddleware   *SessionMiddleware
+	loginLimiter        *LoginLimiter
+	auditStore          *audit.Store
+	auditDispatcher     *audit.Dispatcher
+	authorizationStore  *authorization.Store
+	statsHandler        *stats.Handler
+	settingsMgr         *settings.Manager
+	inviteStore         *invite.Store
+	registrationStore   *registration.Store
+	telemetry           *telemetry.Runtime
+	accountService      accountActionService
+	accountLimiter      *AccountActionLimiter
+	mailSettingsLimiter *MailSettingsLimiter
+	mailManager         *mailruntime.Manager
+	emailDispatcher     *account.Dispatcher
+	readiness           readinessState
 }
 
 func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS, telemetryRuntime *telemetry.Runtime) (*Server, error) {
@@ -87,7 +88,7 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 	providerMgr := provider.NewManager(db, cfg.Auth.MasterKey, cfg.IsProduction())
 	authHandler := auth.NewHandler(tokenService, jwkManager, userService, clientStore, sessionStore, cfg)
 	consentHandler := auth.NewConsentHandler(sessionStore, tokenService, clientStore, authorizationStore, cfg)
-	s := &Server{cfg: cfg, db: db, rdb: rdb, webFS: webFS, trustedProxies: parseTrustedProxyCIDRs(cfg.Server.TrustedProxyCIDRs), userService: userService, clientService: clientService, providerMgr: providerMgr, identityStore: identityStore, sessionStore: sessionStore, tokenService: tokenService, jwkManager: jwkManager, authHandler: authHandler, consentHandler: consentHandler, sessionMiddleware: NewSessionMiddleware(sessionStore, cfg.Server.SecureCookie), loginLimiter: NewLoginLimiter(rdb), accountLimiter: NewAccountActionLimiter(rdb), auditStore: audit.NewStore(db), authorizationStore: authorizationStore, statsHandler: stats.NewHandler(db, rdb), settingsMgr: settings.NewManager(db, settings.Branding{Title: cfg.Web.Title, LogoURL: cfg.Web.LogoURL}), inviteStore: invite.NewStore(db), registrationStore: registration.NewStore(db), telemetry: telemetryRuntime}
+	s := &Server{cfg: cfg, db: db, rdb: rdb, webFS: webFS, trustedProxies: parseTrustedProxyCIDRs(cfg.Server.TrustedProxyCIDRs), userService: userService, clientService: clientService, providerMgr: providerMgr, identityStore: identityStore, sessionStore: sessionStore, tokenService: tokenService, jwkManager: jwkManager, authHandler: authHandler, consentHandler: consentHandler, sessionMiddleware: NewSessionMiddleware(sessionStore, cfg.Server.SecureCookie), loginLimiter: NewLoginLimiter(rdb), accountLimiter: NewAccountActionLimiter(rdb), mailSettingsLimiter: NewMailSettingsLimiter(rdb), auditStore: audit.NewStore(db), authorizationStore: authorizationStore, statsHandler: stats.NewHandler(db, rdb), settingsMgr: settings.NewManager(db, settings.Branding{Title: cfg.Web.Title, LogoURL: cfg.Web.LogoURL}), inviteStore: invite.NewStore(db), registrationStore: registration.NewStore(db), telemetry: telemetryRuntime}
 	if err := telemetryRuntime.BindPoolObservers(db, rdb); err != nil {
 		return nil, fmt.Errorf("configuring dependency pool metrics: %w", err)
 	}

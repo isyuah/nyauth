@@ -40,6 +40,25 @@ type AccountActionLimiter struct {
 	ipLimit      int
 }
 
+// MailSettingsLimiter protects trusted administrator mutations without
+// applying the much tighter limits used by public account actions. Each
+// operation has its own bucket so troubleshooting a candidate does not block
+// activation, rollback, or disable operations.
+type MailSettingsLimiter struct {
+	rdb           *redis.Client
+	window        time.Duration
+	ipLimit       int
+	subjectLimits map[string]int
+}
+
+const (
+	mailSettingsActionCandidateSave = "candidate-save"
+	mailSettingsActionCandidateTest = "candidate-test"
+	mailSettingsActionActivate      = "activate"
+	mailSettingsActionRollback      = "rollback"
+	mailSettingsActionDisable       = "disable"
+)
+
 func NewLoginLimiter(rdb *redis.Client) *LoginLimiter {
 	return &LoginLimiter{rdb: rdb, window: 5 * time.Minute, identityLimit: 5, ipLimit: 30}
 }
@@ -47,10 +66,27 @@ func NewLoginLimiter(rdb *redis.Client) *LoginLimiter {
 func NewAccountActionLimiter(rdb *redis.Client) *AccountActionLimiter {
 	return &AccountActionLimiter{rdb: rdb, window: 15 * time.Minute, subjectLimit: 5, ipLimit: 20}
 }
+
+func NewMailSettingsLimiter(rdb *redis.Client) *MailSettingsLimiter {
+	return &MailSettingsLimiter{
+		rdb:     rdb,
+		window:  15 * time.Minute,
+		ipLimit: 200,
+		subjectLimits: map[string]int{
+			mailSettingsActionCandidateSave: 60,
+			mailSettingsActionCandidateTest: 30,
+			mailSettingsActionActivate:      30,
+			mailSettingsActionRollback:      30,
+			mailSettingsActionDisable:       30,
+		},
+	}
+}
+
 func limitDigest(value string) string {
 	sum := sha256.Sum256([]byte(value))
 	return hex.EncodeToString(sum[:])
 }
+
 func (l *LoginLimiter) Reserve(ctx context.Context, ip, username string) (bool, time.Duration, error) {
 	keys := []string{"nyauth:login-limit:identity:" + limitDigest(ip+"\x00"+username), "nyauth:login-limit:ip:" + limitDigest(ip)}
 	values, err := loginLimitScript.Run(ctx, l.rdb, keys, l.identityLimit, l.ipLimit, l.window.Milliseconds()).Slice()
@@ -78,24 +114,48 @@ func (l *LoginLimiter) ResetIdentity(ctx context.Context, ip, username string) e
 }
 
 func (l *AccountActionLimiter) Reserve(ctx context.Context, action, ip, subject string) (bool, time.Duration, error) {
-	keys := []string{
-		"nyauth:account-limit:subject:" + action + ":" + limitDigest(ip+"\x00"+subject),
-		"nyauth:account-limit:ip:" + action + ":" + limitDigest(ip),
+	return reserveSubjectIPLimit(
+		ctx, l.rdb, "nyauth:account-limit", action, ip, subject,
+		l.subjectLimit, l.ipLimit, l.window,
+	)
+}
+
+func (l *MailSettingsLimiter) Reserve(ctx context.Context, action, ip, subject string) (bool, time.Duration, error) {
+	subjectLimit, ok := l.subjectLimits[action]
+	if !ok {
+		return false, 0, fmt.Errorf("unsupported mail settings rate limit action %q", action)
 	}
-	values, err := loginLimitScript.Run(ctx, l.rdb, keys, l.subjectLimit, l.ipLimit, l.window.Milliseconds()).Slice()
+	return reserveSubjectIPLimit(
+		ctx, l.rdb, "nyauth:mail-settings-limit", action, ip, subject,
+		subjectLimit, l.ipLimit, l.window,
+	)
+}
+
+func reserveSubjectIPLimit(
+	ctx context.Context,
+	rdb *redis.Client,
+	keyPrefix, action, ip, subject string,
+	subjectLimit, ipLimit int,
+	window time.Duration,
+) (bool, time.Duration, error) {
+	keys := []string{
+		keyPrefix + ":subject:" + action + ":" + limitDigest(ip+"\x00"+subject),
+		keyPrefix + ":ip:" + action + ":" + limitDigest(ip),
+	}
+	values, err := loginLimitScript.Run(ctx, rdb, keys, subjectLimit, ipLimit, window.Milliseconds()).Slice()
 	if err != nil {
 		return false, 0, err
 	}
 	if len(values) != 2 {
-		return false, 0, fmt.Errorf("invalid account action rate limit result")
+		return false, 0, fmt.Errorf("invalid action rate limit result")
 	}
 	allowed, ok := values[0].(int64)
 	if !ok {
-		return false, 0, fmt.Errorf("invalid account action rate limit status")
+		return false, 0, fmt.Errorf("invalid action rate limit status")
 	}
 	millis, ok := values[1].(int64)
 	if !ok {
-		return false, 0, fmt.Errorf("invalid account action rate limit TTL")
+		return false, 0, fmt.Errorf("invalid action rate limit TTL")
 	}
 	if millis < 1000 {
 		millis = 1000

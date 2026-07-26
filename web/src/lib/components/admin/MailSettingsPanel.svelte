@@ -30,6 +30,8 @@
     onchanged?: () => void | Promise<void>;
   }
 
+  type MailMutationAction = Exclude<MailReauthenticationAction, 'load'>;
+
   let { registrationMode, onchanged }: Props = $props();
 
   const reauthenticationStorageKey = 'nyauth:reauth:mail-settings';
@@ -48,6 +50,8 @@
   let passwordless = $state(false);
   let preserveDraftOnNextLoad = $state(false);
   let disableConfirmationOpen = $state(false);
+  let retryDeadlines = $state<Partial<Record<MailMutationAction, number>>>({});
+  let retryClock = $state(Date.now());
   let draft = $state<MailCandidateDraft>(defaultDraft());
 
   function defaultDraft(): MailCandidateDraft {
@@ -149,8 +153,31 @@
     return '';
   }
 
+  function retrySeconds(action: MailMutationAction): number {
+    const deadline = retryDeadlines[action] ?? 0;
+    return Math.max(0, Math.ceil((deadline - retryClock) / 1000));
+  }
+
+  function blockDuringRetry(action: MailMutationAction): boolean {
+    const seconds = retrySeconds(action);
+    if (seconds <= 0) return false;
+    operationNotice = '';
+    operationError = `邮件设置操作过于频繁，请在 ${seconds} 秒后重试。`;
+    return true;
+  }
+
+  function mailOperationError(action: MailMutationAction, cause: unknown, fallback: string): string {
+    if (cause instanceof ApiError && cause.status === 429 && cause.retryAfter && cause.retryAfter > 0) {
+      const seconds = Math.max(1, Math.ceil(cause.retryAfter));
+      retryDeadlines = { ...retryDeadlines, [action]: Date.now() + seconds * 1000 };
+      retryClock = Date.now();
+    }
+    return errorMessage(cause, fallback);
+  }
+
   async function saveCandidate(event?: SubmitEvent, allowReauthentication = true, expectedRevision?: number) {
     event?.preventDefault();
+    if (blockDuringRetry('save')) return;
     operationError = '';
     operationNotice = '';
     const validationError = validateDraft();
@@ -179,7 +206,7 @@
       if (allowReauthentication && isRecentAuthenticationError(cause)) {
         openReauthentication(snapshot);
       } else {
-        operationError = errorMessage(cause, '候选配置保存失败');
+        operationError = mailOperationError('save', cause, '候选配置保存失败');
       }
     } finally {
       operation = '';
@@ -187,6 +214,7 @@
   }
 
   async function testCandidate(allowReauthentication = true, expectedRevision?: number, versionID?: string) {
+    if (blockDuringRetry('test')) return;
     operationError = '';
     operationNotice = '';
     const recipient = testEmail.trim();
@@ -216,7 +244,7 @@
       if (allowReauthentication && isRecentAuthenticationError(cause)) {
         openReauthentication(snapshot);
       } else {
-        operationError = errorMessage(cause, '测试邮件发送失败');
+        operationError = mailOperationError('test', cause, '测试邮件发送失败');
       }
     } finally {
       operation = '';
@@ -224,6 +252,7 @@
   }
 
   async function activateCandidate(allowReauthentication = true, expectedRevision?: number, versionID?: string) {
+    if (blockDuringRetry('activate')) return;
     operationError = '';
     operationNotice = '';
     const candidateID = versionID || settings?.candidate?.id;
@@ -240,13 +269,14 @@
       await onchanged?.();
     } catch (cause) {
       if (allowReauthentication && isRecentAuthenticationError(cause)) openReauthentication(snapshot);
-      else operationError = errorMessage(cause, '候选配置激活失败');
+      else operationError = mailOperationError('activate', cause, '候选配置激活失败');
     } finally {
       operation = '';
     }
   }
 
   async function rollbackSettings(allowReauthentication = true, expectedRevision?: number) {
+    if (blockDuringRetry('rollback')) return;
     operationError = '';
     operationNotice = '';
     if (!settings) return;
@@ -260,13 +290,14 @@
       await onchanged?.();
     } catch (cause) {
       if (allowReauthentication && isRecentAuthenticationError(cause)) openReauthentication(snapshot);
-      else operationError = errorMessage(cause, '邮件配置回滚失败');
+      else operationError = mailOperationError('rollback', cause, '邮件配置回滚失败');
     } finally {
       operation = '';
     }
   }
 
   async function disableMail(allowReauthentication = true, expectedRevision?: number) {
+    if (blockDuringRetry('disable')) return;
     operationError = '';
     operationNotice = '';
     if (!settings) return;
@@ -284,7 +315,7 @@
       await onchanged?.();
     } catch (cause) {
       if (allowReauthentication && isRecentAuthenticationError(cause)) openReauthentication(snapshot);
-      else operationError = errorMessage(cause, '邮件服务禁用失败');
+      else operationError = mailOperationError('disable', cause, '邮件服务禁用失败');
     } finally {
       operation = '';
     }
@@ -414,6 +445,13 @@
   onMount(async () => {
     if (!(await restoreProviderReauthentication())) await loadMailSettings();
   });
+
+  onMount(() => {
+    const interval = window.setInterval(() => {
+      retryClock = Date.now();
+    }, 1000);
+    return () => window.clearInterval(interval);
+  });
 </script>
 
 <section class="mb-4 rounded-nya-card border border-nya-border bg-nya-surface p-5 shadow-nya-card">
@@ -524,7 +562,9 @@
           <Input id="mail-send-timeout" label="发送超时" bind:value={draft.send_timeout} required placeholder="30s" />
         </div>
         <div class="flex flex-wrap gap-2">
-          <Button type="submit" variant="primary" loading={operation === 'save'}>保存候选配置</Button>
+          <Button type="submit" variant="primary" loading={operation === 'save'} disabled={operation !== '' || retrySeconds('save') > 0}>
+            保存候选配置{#if retrySeconds('save') > 0}（{retrySeconds('save')} 秒）{/if}
+          </Button>
           <Button variant="ghost" onclick={resetDraft} disabled={operation !== ''}>放弃表单修改</Button>
         </div>
       </form>
@@ -540,8 +580,12 @@
           </div>
           <div class="mt-4 grid gap-3 md:grid-cols-[minmax(0,1fr)_auto_auto] md:items-end">
             <Input id="mail-test-email" label="测试邮件收件地址" type="email" bind:value={testEmail} autocomplete="email" placeholder="operator@example.com" />
-            <Button variant="secondary" loading={operation === 'test'} disabled={operation !== '' && operation !== 'test'} onclick={() => testCandidate()}><Send size={16} /> 发送真实测试</Button>
-            <Button variant="primary" loading={operation === 'activate'} disabled={operation !== '' && operation !== 'activate'} onclick={() => activateCandidate()}><ShieldCheck size={16} /> 激活候选版本</Button>
+            <Button variant="secondary" loading={operation === 'test'} disabled={(operation !== '' && operation !== 'test') || retrySeconds('test') > 0} onclick={() => testCandidate()}>
+              <Send size={16} /> 发送真实测试{#if retrySeconds('test') > 0}（{retrySeconds('test')} 秒）{/if}
+            </Button>
+            <Button variant="primary" loading={operation === 'activate'} disabled={(operation !== '' && operation !== 'activate') || retrySeconds('activate') > 0} onclick={() => activateCandidate()}>
+              <ShieldCheck size={16} /> 激活候选版本{#if retrySeconds('activate') > 0}（{retrySeconds('activate')} 秒）{/if}
+            </Button>
           </div>
         </div>
       {/if}
@@ -551,7 +595,11 @@
           <h3 class="text-body-medium font-semibold text-nya-text-primary">上一有效版本</h3>
           {#if settings.previous}
             <p class="mt-2 text-small text-nya-text-secondary">版本 #{settings.previous.revision} · {settings.previous.host}:{settings.previous.port} · {tlsModeLabel(settings.previous.tls_mode)}</p>
-            <div class="mt-3"><Button variant="secondary" loading={operation === 'rollback'} disabled={operation !== '' && operation !== 'rollback'} onclick={() => rollbackSettings()}><RotateCcw size={16} /> 回滚到上一版本</Button></div>
+            <div class="mt-3">
+              <Button variant="secondary" loading={operation === 'rollback'} disabled={(operation !== '' && operation !== 'rollback') || retrySeconds('rollback') > 0} onclick={() => rollbackSettings()}>
+                <RotateCcw size={16} /> 回滚到上一版本{#if retrySeconds('rollback') > 0}（{retrySeconds('rollback')} 秒）{/if}
+              </Button>
+            </div>
           {:else}
             <p class="mt-2 text-small text-nya-text-tertiary">当前没有可回滚版本。</p>
           {/if}
@@ -560,7 +608,11 @@
           <h3 class="text-body-medium font-semibold text-nya-text-primary">禁用邮件发送</h3>
           <p class="mt-2 text-small text-nya-text-secondary">禁用后停止领取 outbox，但不会删除待发送邮件。必须先关闭自助注册。</p>
           {#if registrationMode === null}<p class="mt-2 text-small text-nya-warning">注册设置仍在加载，暂不能禁用邮件。</p>{:else if registrationMode !== 'closed'}<p class="mt-2 text-small text-nya-warning">当前注册模式未关闭，暂不能禁用邮件。</p>{/if}
-          <div class="mt-3"><Button variant="danger" loading={operation === 'disable'} disabled={settings.mode === 'disabled' || registrationMode !== 'closed' || operation !== ''} onclick={() => (disableConfirmationOpen = true)}><Power size={16} /> 禁用邮件服务</Button></div>
+          <div class="mt-3">
+            <Button variant="danger" loading={operation === 'disable'} disabled={settings.mode === 'disabled' || registrationMode !== 'closed' || operation !== '' || retrySeconds('disable') > 0} onclick={() => (disableConfirmationOpen = true)}>
+              <Power size={16} /> 禁用邮件服务{#if retrySeconds('disable') > 0}（{retrySeconds('disable')} 秒）{/if}
+            </Button>
+          </div>
         </div>
       </div>
 

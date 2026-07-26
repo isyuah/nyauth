@@ -40,6 +40,8 @@ SMTP 密码使用 `auth.master_key` 做 envelope encryption。管理 API 不返�
 
 读取配置和所有变更都要求管理员会话在最近十分钟内完成过认证。密码账户可调用 `POST /api/me/reauth/password`；无本地密码的账户可通过已绑定 Provider 的 `POST /api/me/reauth/{provider}` 浏览器流程完成。修改请求还必须携带会话的 `X-CSRF-Token`，并受操作限流保护。
 
+SMTP 管理使用独立于公开账户操作的宽松限流：同一管理员与来源 IP 组合在 15 分钟内可保存 60 次候选配置，发送 30 次测试邮件，并分别执行 30 次激活、回滚或禁用；同一来源 IP 的每类操作聚合上限为 200 次。各类操作的计数互不影响。超过限制时 API 返回 `429` 和 `Retry-After`，后台按钮会显示剩余等待时间；公开注册、密码恢复和邮箱验证仍使用更严格的账户操作限流。
+
 推荐顺序：
 
 1. 读取当前配置，取得 `state_revision`。
