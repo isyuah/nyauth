@@ -93,8 +93,8 @@ GET             /api/v1/stats               GET /api/v1/system/status
 
 每个阶段独立可发布；Phase 2 完成即可宣布 beta 契约征求反馈。
 
-## 8. 待决问题
+## 8. 已定决策（2026-07-26，按最优方案拍板）
 
-- [ ] Service Account 的凭据形态：沿用 client secret，还是支持 private_key_jwt（更安全，实现成本更高）？建议首版 secret，v1.1 加 private_key_jwt
-- [ ] `audit-events/export` 大结果集：同步流式 CSV（现状）还是异步任务 + 下载链接？首版沿用同步流式，加 `max_range` 限制
-- [ ] 是否暴露 JWK 管理（轮换触发）？倾向不暴露，保持 CLI/运维专属
+- **凭据形态：v1 起即支持 `private_key_jwt`（RFC 7523），并保留 `client_secret_basic` 作为低门槛选项**。管理后台创建 Service Account 时默认推荐上传/生成公钥（私钥永不落库），secret 模式仅在明确选择时启用；文档默认示例使用 private_key_jwt
+- **审计导出：异步任务 + 下载链接**。`POST /api/v1/audit-events/exports` 创建导出任务（幂等键适用），`GET .../exports/{id}` 查询状态并在完成后返回一次性下载 URL（有效期短、审计记录下载行为）；不再提供同步大结果集流式
+- **JWK 管理：不通过 /api/v1 暴露**。密钥轮换保持自动化 + CLI/运维专属，减少管理面攻击面
