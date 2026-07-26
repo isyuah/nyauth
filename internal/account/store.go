@@ -11,6 +11,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nyasharp/nyauth/internal/registration"
+	accountstats "github.com/nyasharp/nyauth/internal/stats"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
 
@@ -221,8 +222,9 @@ func (s *Store) ConsumePasswordReset(ctx context.Context, token *ActionToken, ex
 	})
 }
 
-func (s *Store) ConsumeEmailVerification(ctx context.Context, token *ActionToken, expectedEmail string, now time.Time) (*models.User, error) {
-	return s.consumeAction(ctx, token, now, nil, func(tx pgx.Tx) (*models.User, error) {
+func (s *Store) ConsumeEmailVerification(ctx context.Context, token *ActionToken, expectedEmail string, now time.Time) (*models.User, *time.Duration, error) {
+	var verificationDuration *time.Duration
+	updated, err := s.consumeAction(ctx, token, now, nil, func(tx pgx.Tx) (*models.User, error) {
 		var currentStatus models.UserStatus
 		var username string
 		if err := tx.QueryRow(ctx, `
@@ -246,6 +248,10 @@ func (s *Store) ConsumeEmailVerification(ctx context.Context, token *ActionToken
 			}
 			if !transition.Changed {
 				return nil, ErrInvalidActionToken
+			}
+			duration := now.Sub(transition.CreatedAt)
+			if duration >= 0 {
+				verificationDuration = &duration
 			}
 		}
 		accountUser, err := scanAccountUser(tx.QueryRow(ctx, `
@@ -274,6 +280,7 @@ func (s *Store) ConsumeEmailVerification(ctx context.Context, token *ActionToken
 		}
 		return accountUser, nil
 	})
+	return updated, verificationDuration, err
 }
 
 func (s *Store) ConsumeEmailChange(ctx context.Context, token *ActionToken, previousEmail, newEmail string, notices []*OutboxEmail, now time.Time) (*models.User, error) {
@@ -371,6 +378,9 @@ func insertOutboxEmail(ctx context.Context, tx pgx.Tx, email *OutboxEmail) error
 		email.AvailableAt, email.ExpiresAt, email.CreatedAt)
 	if err != nil {
 		return fmt.Errorf("inserting email outbox message: %w", err)
+	}
+	if err := accountstats.AddMailDailyTx(ctx, tx, email.CreatedAt, accountstats.MailDailyDelta{Enqueued: 1}); err != nil {
+		return fmt.Errorf("recording queued email statistics: %w", err)
 	}
 	return nil
 }

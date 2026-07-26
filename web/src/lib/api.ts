@@ -187,11 +187,51 @@ export interface DashboardStats {
   login_count_7d: number;
   active_sessions: number;
   failed_logins_7d: number;
+  pending_registrations: number;
+  completed_registrations_7d: number;
+  registration_completion_rate_30d: number | null;
+  mail_backlog: number;
+  mail_failures_24h: number;
+  smtp_circuit_state: 'closed' | 'open';
+  mail_stats_available_from: string;
+  refreshed_at: string;
 }
 
 export interface LoginTrend {
   labels: string[];
   values: number[];
+}
+
+export type StatsTrendDays = 7 | 30 | 90;
+
+export interface RegistrationTrendPoint {
+  day: string;
+  registrations_started: number;
+  registrations_completed: number;
+  registrations_expired: number;
+  invites_reserved: number;
+  invites_consumed: number;
+  invites_released: number;
+}
+
+export interface RegistrationTrend {
+  timezone: 'UTC';
+  points: RegistrationTrendPoint[];
+}
+
+export interface MailTrendPoint {
+  day: string;
+  enqueued: number;
+  sent: number;
+  other_failures: number;
+  rejected: number;
+  expired: number;
+}
+
+export interface MailTrend {
+  timezone: 'UTC';
+  available_from: string;
+  points: MailTrendPoint[];
 }
 
 export interface RecentLogin {
@@ -647,6 +687,10 @@ export const api = {
   admin: {
     getStats: () => req<DashboardStats>('/api/admin/stats'),
     getLoginTrend: (days = 7) => req<LoginTrend>(`/api/admin/stats/login-trend?days=${days}`),
+    getRegistrationTrend: (days: StatsTrendDays = 30) =>
+      req<RegistrationTrend>(`/api/admin/stats/registration-trend?days=${days}`),
+    getMailTrend: (days: StatsTrendDays = 30) =>
+      req<MailTrend>(`/api/admin/stats/mail-trend?days=${days}`),
     getRecentLogins: (limit = 5) => req<RecentLogin[]>(`/api/admin/stats/recent-logins?limit=${limit}`),
     getSystemStatus: () => req<SystemStatus>('/api/admin/system/status'),
     updateBranding: (branding: Branding) =>

@@ -554,7 +554,7 @@ func TestRuntimeMailDownMigrationSafelyMapsRejectedMessages(t *testing.T) {
 	t.Cleanup(func() {
 		_, _ = runner.Close()
 	})
-	if err := runner.Steps(-1); err != nil {
+	if err := runner.Steps(-2); err != nil {
 		t.Fatalf("migrate runtime mail down: %v", err)
 	}
 	var version int
@@ -587,7 +587,7 @@ func TestRuntimeMailDownMigrationSafelyMapsRejectedMessages(t *testing.T) {
 	`, userID); err != nil {
 		t.Fatalf("seed schema 4 SMTP error text: %v", err)
 	}
-	if err := runner.Steps(1); err != nil {
+	if err := runner.Steps(2); err != nil {
 		t.Fatalf("migrate runtime mail up again: %v", err)
 	}
 	if err := schema.pool.QueryRow(context.Background(), `SELECT to_regclass('idx_email_outbox_active_expiry')::text`).Scan(&expiryIndex); err != nil {

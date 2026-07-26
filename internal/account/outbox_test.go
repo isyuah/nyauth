@@ -21,6 +21,7 @@ type fakeOutboxStore struct {
 	failureText string
 	retryAt     time.Time
 	backlog     int64
+	oldestAge   time.Duration
 	claims      int
 	expirations int
 	expiryLimit int
@@ -28,8 +29,8 @@ type fakeOutboxStore struct {
 	claimGate   *runtimecoord.MailDeliveryGate
 }
 
-func (f *fakeOutboxStore) EmailOutboxBacklog(context.Context, time.Time) (int64, error) {
-	return f.backlog, nil
+func (f *fakeOutboxStore) EmailOutboxBacklog(context.Context, time.Time) (int64, time.Duration, error) {
+	return f.backlog, f.oldestAge, nil
 }
 
 func (f *fakeOutboxStore) ExpireEmailArtifacts(_ context.Context, _ time.Time, perTableLimit int) (int64, error) {
@@ -170,19 +171,24 @@ func TestDispatcherReportsDeliveryRetryAndBacklogMetrics(t *testing.T) {
 	var result string
 	var retryScheduled bool
 	var backlog int64
+	var oldestAge time.Duration
+	expectedOldestAge := 12 * time.Minute
+	store.oldestAge = expectedOldestAge
 	dispatcher, err := newDispatcher(store, sender, DispatcherOptions{
 		WorkerID: "worker-1", MasterKeys: map[string][]byte{"primary": testKey}, Clock: func() time.Time { return testNow },
 		OnDelivery: func(_ context.Context, currentResult string, retry bool) {
 			result, retryScheduled = currentResult, retry
 		},
-		OnBacklog: func(_ context.Context, currentBacklog int64) { backlog = currentBacklog },
+		OnBacklog: func(_ context.Context, currentBacklog int64, currentOldestAge time.Duration) {
+			backlog, oldestAge = currentBacklog, currentOldestAge
+		},
 	})
 	if err != nil {
 		t.Fatalf("newDispatcher: %v", err)
 	}
 	_, _ = dispatcher.DispatchOnce(context.Background())
-	if result != "failure" || !retryScheduled || backlog != 3 {
-		t.Fatalf("result=%q retry=%v backlog=%d", result, retryScheduled, backlog)
+	if result != "failure" || !retryScheduled || backlog != 3 || oldestAge != expectedOldestAge {
+		t.Fatalf("result=%q retry=%v backlog=%d oldest_age=%s", result, retryScheduled, backlog, oldestAge)
 	}
 }
 

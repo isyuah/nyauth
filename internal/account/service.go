@@ -36,7 +36,7 @@ type serviceStore interface {
 	ReplacePendingVerificationAndQueueEmail(ctx context.Context, expectedEmail string, action *ActionToken, email *OutboxEmail, now time.Time) error
 	GetUsableAction(ctx context.Context, tokenHash []byte, action Action, now time.Time) (*ActionToken, error)
 	ConsumePasswordReset(ctx context.Context, token *ActionToken, expectedEmail, passwordHash string, notices []*OutboxEmail, now time.Time) (*models.User, error)
-	ConsumeEmailVerification(ctx context.Context, token *ActionToken, expectedEmail string, now time.Time) (*models.User, error)
+	ConsumeEmailVerification(ctx context.Context, token *ActionToken, expectedEmail string, now time.Time) (*models.User, *time.Duration, error)
 	ConsumeEmailChange(ctx context.Context, token *ActionToken, previousEmail, newEmail string, notices []*OutboxEmail, now time.Time) (*models.User, error)
 }
 
@@ -50,6 +50,7 @@ type ServiceOptions struct {
 	ReauthenticationTTL time.Duration
 	Clock               func() time.Time
 	GenerateToken       func() (string, error)
+	OnEmailVerified     func(context.Context, time.Duration)
 }
 
 type Service struct {
@@ -63,6 +64,7 @@ type Service struct {
 	reauthenticationTTL time.Duration
 	clock               func() time.Time
 	generateToken       func() (string, error)
+	onEmailVerified     func(context.Context, time.Duration)
 }
 
 func NewService(store *Store, options ServiceOptions) (*Service, error) {
@@ -115,7 +117,7 @@ func newService(store serviceStore, options ServiceOptions) (*Service, error) {
 		store: store, activeKeyID: options.ActiveKeyID, masterKeys: keys,
 		passwordResetTTL: options.PasswordResetTTL, emailActionTTL: options.EmailActionTTL,
 		emailOutboxTTL: options.EmailOutboxTTL, reauthenticationTTL: options.ReauthenticationTTL,
-		clock: options.Clock, generateToken: options.GenerateToken,
+		clock: options.Clock, generateToken: options.GenerateToken, onEmailVerified: options.OnEmailVerified,
 	}
 	service.publicBaseURL.Store(baseURL)
 	return service, nil
@@ -270,9 +272,12 @@ func (s *Service) ConfirmEmailVerification(ctx context.Context, rawToken string)
 	if err != nil {
 		return nil, err
 	}
-	updated, err := s.store.ConsumeEmailVerification(ctx, token, claims.Email, now)
+	updated, verificationDuration, err := s.store.ConsumeEmailVerification(ctx, token, claims.Email, now)
 	if err != nil {
 		return nil, normalizeConsumeError(err)
+	}
+	if verificationDuration != nil && s.onEmailVerified != nil {
+		s.onEmailVerified(ctx, *verificationDuration)
 	}
 	return updated, nil
 }

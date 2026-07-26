@@ -84,22 +84,26 @@ func isUniqueViolationError(err error) bool {
 func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	setSessionNoStoreHeaders(w)
 	if !s.validSameOriginRequest(r) {
+		s.telemetry.RecordRegistrationOutcome(r.Context(), "rejected", "invalid_origin")
 		writeAPIError(w, http.StatusForbidden, "invalid request origin")
 		return
 	}
 	reg := s.settingsMgr.Registration()
 	switch reg.Mode {
 	case settings.RegistrationClosed:
+		s.telemetry.RecordRegistrationOutcome(r.Context(), "rejected", "closed")
 		writeAPIError(w, http.StatusForbidden, "registration is closed")
 		return
 	case settings.RegistrationInviteOnly, settings.RegistrationOpen:
 		// Continue below using the explicit supported mode.
 	default:
+		s.telemetry.RecordRegistrationOutcome(r.Context(), "failure", "dependency_unavailable")
 		writeAPIError(w, http.StatusServiceUnavailable, "registration is temporarily unavailable")
 		return
 	}
 	mailGate, mailStatus, mailAvailable := s.registrationMailState()
 	if !mailAvailable {
+		s.telemetry.RecordRegistrationOutcome(r.Context(), "failure", "mail_unavailable")
 		if mailStatus.CircuitState == mailruntime.CircuitOpen {
 			w.Header().Set("Retry-After", "60")
 		}
@@ -108,6 +112,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	}
 	var request models.RegisterRequest
 	if err := decodeJSON(w, r, &request); err != nil {
+		s.telemetry.RecordRegistrationOutcome(r.Context(), "rejected", "invalid_input")
 		writeAPIError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
@@ -118,11 +123,13 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	allowed, retry, err := s.accountLimiter.Reserve(r.Context(), "register", ip, strings.ToLower(request.Username))
 	if err != nil {
 		s.telemetry.RecordRateLimit(r.Context(), "account_action", "register", "error")
+		s.telemetry.RecordRegistrationOutcome(r.Context(), "failure", "dependency_unavailable")
 		writeAPIError(w, http.StatusServiceUnavailable, "registration temporarily unavailable")
 		return
 	}
 	if !allowed {
-		s.telemetry.RecordRateLimit(r.Context(), "account_action", "register", "blocked")
+		s.telemetry.RecordRateLimit(r.Context(), "account_action", "register", "rejected")
+		s.telemetry.RecordRegistrationOutcome(r.Context(), "rejected", "rate_limited")
 		w.Header().Set("Retry-After", retryAfterSeconds(retry))
 		writeAPIError(w, http.StatusTooManyRequests, "too many registration attempts")
 		return
@@ -131,14 +138,17 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 
 	verificationRequired := registrationVerificationRequired(reg)
 	if verificationRequired && s.accountService == nil {
+		s.telemetry.RecordRegistrationOutcome(r.Context(), "failure", "mail_unavailable")
 		writeAPIError(w, http.StatusServiceUnavailable, "registration requires email delivery, which is not configured")
 		return
 	}
 	if err := s.userService.ValidateRegistration(request); err != nil {
+		s.telemetry.RecordRegistrationOutcome(r.Context(), "rejected", "invalid_input")
 		writeAPIError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	if !emailDomainAllowed(request.Email, reg.AllowedEmailDomains) {
+		s.telemetry.RecordRegistrationOutcome(r.Context(), "rejected", "invalid_input")
 		writeAPIError(w, http.StatusBadRequest, "email domain is not allowed")
 		return
 	}
@@ -147,6 +157,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if reg.Mode == settings.RegistrationInviteOnly {
 		code := strings.TrimSpace(request.InviteCode)
 		if code == "" {
+			s.telemetry.RecordRegistrationOutcome(r.Context(), "rejected", "invalid_invite")
 			writeAPIError(w, http.StatusBadRequest, "invite code is required")
 			return
 		}
@@ -157,6 +168,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	pendingTTL, err := time.ParseDuration(strings.TrimSpace(reg.PendingRegistrationTTL))
 	if err != nil || pendingTTL < pendingRegistrationMinTTL || pendingTTL > pendingRegistrationMaxTTL {
 		slog.ErrorContext(r.Context(), "stored pending registration TTL is invalid", "value", reg.PendingRegistrationTTL)
+		s.telemetry.RecordRegistrationOutcome(r.Context(), "failure", "dependency_unavailable")
 		writeAPIError(w, http.StatusServiceUnavailable, "registration is temporarily unavailable")
 		return
 	}
@@ -181,18 +193,23 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		switch {
 		case user.IsInvalidInput(err):
+			s.telemetry.RecordRegistrationOutcome(r.Context(), "rejected", "invalid_input")
 			writeAPIError(w, http.StatusBadRequest, err.Error())
 		case errors.Is(err, user.ErrInviteInvalid):
 			s.telemetry.RecordAuthEvent(r.Context(), "register", "invalid_invite")
+			s.telemetry.RecordRegistrationOutcome(r.Context(), "rejected", "invalid_invite")
 			writeAPIError(w, http.StatusBadRequest, "invalid or expired invite code")
 		case isUniqueViolationError(err):
+			s.telemetry.RecordRegistrationOutcome(r.Context(), "rejected", "conflict")
 			writeAPIError(w, http.StatusConflict, "username or email is already taken")
 		case errors.Is(err, runtimecoord.ErrMailCircuitOpen):
 			w.Header().Set("Retry-After", "60")
 			slog.WarnContext(r.Context(), "mail circuit opened while committing self-registration")
+			s.telemetry.RecordRegistrationOutcome(r.Context(), "failure", "mail_unavailable")
 			writeAPIError(w, http.StatusServiceUnavailable, "registration temporarily unavailable")
 		default:
 			slog.ErrorContext(r.Context(), "self-registration failed", "error", err)
+			s.telemetry.RecordRegistrationOutcome(r.Context(), "failure", "dependency_unavailable")
 			writeAPIError(w, http.StatusServiceUnavailable, "registration temporarily unavailable")
 		}
 		return
@@ -201,11 +218,13 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	s.telemetry.RecordAuthEvent(r.Context(), "register", "success")
 
 	if verificationRequired {
+		s.telemetry.RecordRegistrationOutcome(r.Context(), "success", "pending_verification")
 		writeJSON(w, http.StatusCreated, models.RegisterResponse{
 			Status: "pending_verification", VerificationExpiresAt: &verificationExpiresAt,
 		})
 		return
 	}
+	s.telemetry.RecordRegistrationOutcome(r.Context(), "success", "registered")
 	writeJSON(w, http.StatusCreated, models.RegisterResponse{Status: "registered"})
 }
 

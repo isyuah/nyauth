@@ -10,8 +10,10 @@ import (
 	"unicode/utf8"
 
 	"github.com/google/uuid"
+	"github.com/jackc/pgx/v5"
 	"github.com/nyasharp/nyauth/internal/crypto"
 	"github.com/nyasharp/nyauth/internal/runtimecoord"
+	accountstats "github.com/nyasharp/nyauth/internal/stats"
 )
 
 const (
@@ -28,6 +30,7 @@ func (s *Store) ExpireEmailArtifacts(ctx context.Context, now time.Time, perTabl
 	if perTableLimit < 1 || perTableLimit > maxEmailArtifactExpiryBatchSize {
 		return 0, fmt.Errorf("invalid email artifact expiry batch size")
 	}
+	now = now.UTC()
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("starting email artifact expiry: %w", err)
@@ -49,7 +52,7 @@ func (s *Store) ExpireEmailArtifacts(ctx context.Context, now time.Time, perTabl
 	if err != nil {
 		return 0, fmt.Errorf("expiring account action tokens: %w", err)
 	}
-	outboxResult, err := tx.Exec(ctx, `
+	outboxRows, err := tx.Query(ctx, `
 		WITH candidates AS (
 			SELECT id FROM email_outbox
 			WHERE status IN ('pending','failed','sending') AND expires_at<=$1
@@ -62,14 +65,44 @@ func (s *Store) ExpireEmailArtifacts(ctx context.Context, now time.Time, perTabl
 		    locked_at=NULL,locked_by=NULL,updated_at=$1
 		FROM candidates
 		WHERE outbox.id=candidates.id
+		RETURNING outbox.expires_at
 	`, now, perTableLimit)
 	if err != nil {
 		return 0, fmt.Errorf("expiring email outbox messages: %w", err)
 	}
+	type expiryBucket struct {
+		expiresAt time.Time
+		count     int64
+	}
+	expiredByDay := make(map[string]expiryBucket)
+	var expiredOutbox int64
+	for outboxRows.Next() {
+		var expiresAt time.Time
+		if err := outboxRows.Scan(&expiresAt); err != nil {
+			outboxRows.Close()
+			return 0, fmt.Errorf("reading expired email outbox messages: %w", err)
+		}
+		day := expiresAt.UTC().Format("2006-01-02")
+		bucket := expiredByDay[day]
+		bucket.expiresAt = expiresAt
+		bucket.count++
+		expiredByDay[day] = bucket
+		expiredOutbox++
+	}
+	if err := outboxRows.Err(); err != nil {
+		outboxRows.Close()
+		return 0, fmt.Errorf("reading expired email outbox messages: %w", err)
+	}
+	outboxRows.Close()
+	for _, bucket := range expiredByDay {
+		if err := accountstats.AddMailDailyTx(ctx, tx, bucket.expiresAt, accountstats.MailDailyDelta{Expired: bucket.count}); err != nil {
+			return 0, fmt.Errorf("recording expired email statistics: %w", err)
+		}
+	}
 	if err := tx.Commit(ctx); err != nil {
 		return 0, fmt.Errorf("committing email artifact expiry: %w", err)
 	}
-	return tokenResult.RowsAffected() + outboxResult.RowsAffected(), nil
+	return tokenResult.RowsAffected() + expiredOutbox, nil
 }
 
 func (s *Store) ClaimEmailBatch(
@@ -143,16 +176,29 @@ func (s *Store) ClaimEmailBatch(
 }
 
 func (s *Store) MarkEmailSent(ctx context.Context, id uuid.UUID, workerID string, now time.Time) error {
-	result, err := s.db.Exec(ctx, `
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("starting sent email update: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	var updatedID uuid.UUID
+	err = tx.QueryRow(ctx, `
 		UPDATE email_outbox SET status='sent',sent_at=$3,encrypted_message='',last_error=NULL,
 		       locked_at=NULL,locked_by=NULL,updated_at=$3
 		WHERE id=$1 AND status='sending' AND locked_by=$2
-	`, id, workerID, now)
+		RETURNING id
+	`, id, workerID, now.UTC()).Scan(&updatedID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrOutboxLeaseLost
+	}
 	if err != nil {
 		return fmt.Errorf("marking email sent: %w", err)
 	}
-	if result.RowsAffected() == 0 {
-		return ErrOutboxLeaseLost
+	if err := accountstats.AddMailDailyTx(ctx, tx, now, accountstats.MailDailyDelta{Sent: 1}); err != nil {
+		return fmt.Errorf("recording sent email statistics: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("committing sent email update: %w", err)
 	}
 	return nil
 }
@@ -161,48 +207,94 @@ func (s *Store) MarkEmailFailed(ctx context.Context, id uuid.UUID, workerID, fai
 	if len(failure) > 512 {
 		failure = truncateUTF8(failure, 512)
 	}
-	result, err := s.db.Exec(ctx, `
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("starting failed email update: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	var status string
+	var expiresAt time.Time
+	err = tx.QueryRow(ctx, `
 		UPDATE email_outbox SET
 			status=CASE WHEN expires_at<=$4 THEN 'expired' ELSE 'failed' END,
 			encrypted_message=CASE WHEN expires_at<=$4 THEN '' ELSE encrypted_message END,
 			last_error=$3,available_at=CASE WHEN expires_at<=$4 THEN available_at ELSE $5 END,
 			locked_at=NULL,locked_by=NULL,updated_at=$4
 		WHERE id=$1 AND status='sending' AND locked_by=$2
-	`, id, workerID, failure, now, retryAt)
+		RETURNING status,expires_at
+	`, id, workerID, failure, now.UTC(), retryAt.UTC()).Scan(&status, &expiresAt)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrOutboxLeaseLost
+	}
 	if err != nil {
 		return fmt.Errorf("marking email failed: %w", err)
 	}
-	if result.RowsAffected() == 0 {
-		return ErrOutboxLeaseLost
+	if err := accountstats.AddMailDailyTx(ctx, tx, now, accountstats.MailDailyDelta{FailedAttempts: 1}); err != nil {
+		return fmt.Errorf("recording failed email statistics: %w", err)
+	}
+	if err := accountstats.AddMailFailureMinuteTx(ctx, tx, now, 1); err != nil {
+		return fmt.Errorf("recording rolling email failure statistics: %w", err)
+	}
+	if status == "expired" {
+		if err := accountstats.AddMailDailyTx(ctx, tx, expiresAt, accountstats.MailDailyDelta{Expired: 1}); err != nil {
+			return fmt.Errorf("recording expired failed email statistics: %w", err)
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("committing failed email update: %w", err)
 	}
 	return nil
 }
 
 func (s *Store) MarkEmailRejected(ctx context.Context, id uuid.UUID, workerID string, now time.Time) error {
-	result, err := s.db.Exec(ctx, `
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("starting rejected email update: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	var updatedID uuid.UUID
+	err = tx.QueryRow(ctx, `
 		UPDATE email_outbox SET status='rejected',encrypted_message='',last_error='permanent SMTP recipient failure',
 		       locked_at=NULL,locked_by=NULL,updated_at=$3
 		WHERE id=$1 AND status='sending' AND locked_by=$2
-	`, id, workerID, now)
+		RETURNING id
+	`, id, workerID, now.UTC()).Scan(&updatedID)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return ErrOutboxLeaseLost
+	}
 	if err != nil {
 		return fmt.Errorf("marking email rejected: %w", err)
 	}
-	if result.RowsAffected() == 0 {
-		return ErrOutboxLeaseLost
+	if err := accountstats.AddMailDailyTx(ctx, tx, now, accountstats.MailDailyDelta{
+		FailedAttempts: 1,
+		Rejected:       1,
+	}); err != nil {
+		return fmt.Errorf("recording rejected email statistics: %w", err)
+	}
+	if err := accountstats.AddMailFailureMinuteTx(ctx, tx, now, 1); err != nil {
+		return fmt.Errorf("recording rolling rejected email statistics: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("committing rejected email update: %w", err)
 	}
 	return nil
 }
 
-func (s *Store) EmailOutboxBacklog(ctx context.Context, now time.Time) (int64, error) {
+func (s *Store) EmailOutboxBacklog(ctx context.Context, now time.Time) (int64, time.Duration, error) {
 	var backlog int64
+	var oldestCreatedAt *time.Time
 	err := s.db.QueryRow(ctx, `
-		SELECT COUNT(*) FROM email_outbox
+		SELECT COUNT(*),MIN(created_at) FROM email_outbox
 		WHERE status IN ('pending','failed','sending') AND expires_at>$1
-	`, now).Scan(&backlog)
+	`, now.UTC()).Scan(&backlog, &oldestCreatedAt)
 	if err != nil {
-		return 0, fmt.Errorf("counting email outbox backlog: %w", err)
+		return 0, 0, fmt.Errorf("counting email outbox backlog: %w", err)
 	}
-	return backlog, nil
+	var oldestAge time.Duration
+	if oldestCreatedAt != nil && now.After(*oldestCreatedAt) {
+		oldestAge = now.Sub(*oldestCreatedAt)
+	}
+	return backlog, oldestAge, nil
 }
 
 type EmailSender interface {
@@ -232,7 +324,7 @@ type emailOutboxStore interface {
 }
 
 type emailBacklogStore interface {
-	EmailOutboxBacklog(ctx context.Context, now time.Time) (int64, error)
+	EmailOutboxBacklog(ctx context.Context, now time.Time) (int64, time.Duration, error)
 }
 
 type DispatcherOptions struct {
@@ -246,7 +338,7 @@ type DispatcherOptions struct {
 	OnError                 func(error)
 	OnDelivery              func(context.Context, string, bool)
 	OnSMTPError             func(context.Context, SMTPErrorCategory)
-	OnBacklog               func(context.Context, int64)
+	OnBacklog               func(context.Context, int64, time.Duration)
 }
 
 type Dispatcher struct {
@@ -262,7 +354,7 @@ type Dispatcher struct {
 	onError     func(error)
 	onDelivery  func(context.Context, string, bool)
 	onSMTPError func(context.Context, SMTPErrorCategory)
-	onBacklog   func(context.Context, int64)
+	onBacklog   func(context.Context, int64, time.Duration)
 }
 
 func NewDispatcher(store *Store, sender EmailSender, options DispatcherOptions) (*Dispatcher, error) {
@@ -467,14 +559,14 @@ func (d *Dispatcher) observeBacklog(ctx context.Context) {
 	if !ok {
 		return
 	}
-	backlog, err := store.EmailOutboxBacklog(ctx, d.clock().UTC())
+	backlog, oldestAge, err := store.EmailOutboxBacklog(ctx, d.clock().UTC())
 	if err != nil {
 		if d.onError != nil {
 			d.onError(err)
 		}
 		return
 	}
-	d.onBacklog(ctx, backlog)
+	d.onBacklog(ctx, backlog, oldestAge)
 }
 
 func retryDelay(attempt int) time.Duration {

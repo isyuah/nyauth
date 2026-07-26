@@ -128,7 +128,8 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 	}
 	accountService, err := account.NewService(accountStore, account.ServiceOptions{
 		PublicBaseURL: publicBaseURL, ActiveKeyID: "primary",
-		MasterKeys: map[string][]byte{"primary": cfg.Auth.MasterKey},
+		MasterKeys:      map[string][]byte{"primary": cfg.Auth.MasterKey},
+		OnEmailVerified: telemetryRuntime.RecordEmailVerificationDuration,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("configuring account recovery: %w", err)
@@ -155,6 +156,7 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 		Fallback: fallback, Production: cfg.IsProduction(),
 		OnError: func(err error) { slog.Error("runtime mail operation failed", "error", err) },
 		OnSnapshot: func(effective mailruntime.EffectiveConfig) {
+			telemetryRuntime.RecordSMTPCircuitState(context.Background(), effective.CircuitState)
 			if effective.Config != nil {
 				if err := accountService.SetPublicBaseURL(effective.Config.PublicBaseURL); err != nil {
 					slog.Error("runtime mail public URL update failed", "error", err)
@@ -176,7 +178,10 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 		MasterKeys: map[string][]byte{"primary": cfg.Auth.MasterKey},
 		OnError:    func(err error) { slog.Error("email outbox dispatch failed", "error", err) },
 		OnDelivery: telemetryRuntime.RecordSMTPDelivery,
-		OnBacklog:  telemetryRuntime.RecordSMTPBacklog,
+		OnSMTPError: func(ctx context.Context, category account.SMTPErrorCategory) {
+			telemetryRuntime.RecordSMTPError(ctx, string(category))
+		},
+		OnBacklog: telemetryRuntime.RecordSMTPBacklog,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("configuring email dispatcher: %w", err)
@@ -274,6 +279,8 @@ func (s *Server) buildRouter() *chi.Mux {
 			r.Delete("/admin/invites/{id}", s.handleRevokeInvite)
 			r.Get("/admin/stats", s.statsHandler.GetStats)
 			r.Get("/admin/stats/login-trend", s.statsHandler.GetLoginTrend)
+			r.Get("/admin/stats/registration-trend", s.statsHandler.GetRegistrationTrend)
+			r.Get("/admin/stats/mail-trend", s.statsHandler.GetMailTrend)
 			r.Get("/admin/stats/recent-logins", s.statsHandler.GetRecentLogins)
 			r.Get("/admin/audit-logs", s.handleListAuditLogs)
 			r.Get("/admin/audit-logs/export", s.handleExportAuditLogs)

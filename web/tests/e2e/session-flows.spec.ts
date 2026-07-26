@@ -1,5 +1,13 @@
-import { expect, test, type Page, type Route } from '@playwright/test';
-import type { MailConfig, MailSettings } from '../../src/lib/api';
+import { expect, test, type Locator, type Page, type Route } from '@playwright/test';
+import type {
+  DashboardStats,
+  LoginTrend,
+  MailConfig,
+  MailSettings,
+  MailTrend,
+  RegistrationTrend,
+  StatsTrendDays,
+} from '../../src/lib/api';
 
 type Role = 'admin' | 'user';
 
@@ -197,6 +205,97 @@ const mailSettings: MailSettings = {
   },
 };
 
+const dashboardStats = {
+  user_count: 12,
+  app_count: 3,
+  login_count_7d: 41,
+  active_sessions: 5,
+  failed_logins_7d: 4,
+  pending_registrations: 6,
+  completed_registrations_7d: 18,
+  registration_completion_rate_30d: 0.825,
+  mail_backlog: 7,
+  mail_failures_24h: 2,
+  smtp_circuit_state: 'closed',
+  mail_stats_available_from: '2026-07-27T00:00:00Z',
+  refreshed_at: '2026-07-27T00:05:00Z',
+} satisfies DashboardStats;
+
+const dashboardLoginTrend = {
+  labels: ['07-20', '07-21', '07-22', '07-23', '07-24', '07-25', '07-26'],
+  values: [3, 5, 2, 8, 6, 4, 7],
+} satisfies LoginTrend;
+
+function trendDaysEndingAtFixture(days: StatsTrendDays): string[] {
+  const end = Date.UTC(2026, 6, 26);
+  return Array.from({ length: days }, (_, index) =>
+    new Date(end - (days - 1 - index) * 24 * 60 * 60 * 1000).toISOString().slice(0, 10),
+  );
+}
+
+function registrationTrendFor(days: StatsTrendDays): RegistrationTrend {
+  return {
+    timezone: 'UTC',
+    points: trendDaysEndingAtFixture(days).map((day, index) => {
+      const daysFromEnd = days - 1 - index;
+      if (daysFromEnd === 1) return {
+        day,
+        registrations_started: Math.max(1, Math.floor(days / 7)),
+        registrations_completed: 2,
+        registrations_expired: 1,
+        invites_reserved: 0,
+        invites_consumed: 0,
+        invites_released: 0,
+      };
+      if (daysFromEnd === 0) return {
+        day,
+        registrations_started: 4,
+        registrations_completed: 3,
+        registrations_expired: 0,
+        invites_reserved: 0,
+        invites_consumed: 0,
+        invites_released: 0,
+      };
+      return {
+        day,
+        registrations_started: 0,
+        registrations_completed: 0,
+        registrations_expired: 0,
+        invites_reserved: 0,
+        invites_consumed: 0,
+        invites_released: 0,
+      };
+    }),
+  } satisfies RegistrationTrend;
+}
+
+function mailTrendFor(days: StatsTrendDays): MailTrend {
+  return {
+    timezone: 'UTC',
+    available_from: '2026-07-25T00:00:00Z',
+    points: trendDaysEndingAtFixture(days).map((day, index) => {
+      const daysFromEnd = days - 1 - index;
+      if (daysFromEnd === 1) return {
+        day,
+        enqueued: Math.max(2, Math.floor(days / 3)),
+        sent: 6,
+        other_failures: 2,
+        rejected: 1,
+        expired: 0,
+      };
+      if (daysFromEnd === 0) return {
+        day,
+        enqueued: 5,
+        sent: 4,
+        other_failures: 1,
+        rejected: 0,
+        expired: 1,
+      };
+      return { day, enqueued: 0, sent: 0, other_failures: 0, rejected: 0, expired: 0 };
+    }),
+  } satisfies MailTrend;
+}
+
 const githubIdentity = {
   id: '33333333-3333-3333-3333-333333333333',
   user_id: user.id,
@@ -226,6 +325,21 @@ async function fulfillJSON(route: Route, status: number, body: unknown, headers?
     body: JSON.stringify(body),
     headers,
   });
+}
+
+async function countPaintedPixels(canvas: Locator): Promise<number> {
+  return canvas.evaluate((element: HTMLCanvasElement) => {
+    const data = element.getContext('2d')!.getImageData(0, 0, element.width, element.height).data;
+    let painted = 0;
+    for (let index = 3; index < data.length; index += 4) if (data[index] > 0) painted += 1;
+    return painted;
+  });
+}
+
+async function installDashboardCoreMocks(page: Page) {
+  await page.route('**/api/admin/stats', (route) => fulfillJSON(route, 200, dashboardStats));
+  await page.route('**/api/admin/stats/login-trend**', (route) => fulfillJSON(route, 200, dashboardLoginTrend));
+  await page.route('**/api/admin/stats/recent-logins**', (route) => fulfillJSON(route, 200, []));
 }
 
 async function installAPIMocks(page: Page, state: MockState) {
@@ -1298,29 +1412,121 @@ test('the dashboard login-trend chart draws real data points', async ({ page }) 
     role: 'admin',
     csrfToken: 'csrf-admin',
   });
-  await page.route('**/api/admin/stats', (route) => fulfillJSON(route, 200, {
-    user_count: 12, app_count: 3, login_count_7d: 41, active_sessions: 5, failed_logins_7d: 4,
-  }));
-  await page.route('**/api/admin/stats/login-trend**', (route) => fulfillJSON(route, 200, {
-    labels: ['07-20', '07-21', '07-22', '07-23', '07-24', '07-25', '07-26'],
-    values: [3, 5, 2, 8, 6, 4, 7],
-  }));
-  await page.route('**/api/admin/stats/recent-logins**', (route) => fulfillJSON(route, 200, []));
+  await installDashboardCoreMocks(page);
+  await page.route('**/api/admin/stats/registration-trend**', (route) => fulfillJSON(route, 200, registrationTrendFor(30)));
+  await page.route('**/api/admin/stats/mail-trend**', (route) => fulfillJSON(route, 200, mailTrendFor(30)));
 
   await page.goto('/admin');
 
   // The canvas existing is not enough: a chart initialization failure leaves
   // a mounted but blank canvas. Assert that pixels were actually painted.
-  const canvas = page.locator('section', { hasText: '登录趋势' }).locator('canvas');
+  const canvas = page.locator('canvas[aria-label="过去 7 天登录趋势"]');
   await expect(canvas).toBeVisible();
-  await expect
-    .poll(async () => canvas.evaluate((el: HTMLCanvasElement) => {
-      const data = el.getContext('2d')!.getImageData(0, 0, el.width, el.height).data;
-      let painted = 0;
-      for (let i = 3; i < data.length; i += 4) if (data[i] > 0) painted += 1;
-      return painted;
-    }))
-    .toBeGreaterThan(100);
+  await expect.poll(() => countPaintedPixels(canvas)).toBeGreaterThan(100);
+  expect(pageErrors).toEqual([]);
+});
+
+test('the dashboard renders registration, invitation, and mail trends and switches time ranges', async ({ page }) => {
+  const pageErrors: string[] = [];
+  const registrationDays: number[] = [];
+  const mailDays: number[] = [];
+  page.on('pageerror', (error) => pageErrors.push(String(error)));
+
+  await installAPIMocks(page, {
+    authenticated: true,
+    mustChangePassword: false,
+    role: 'admin',
+    csrfToken: 'csrf-admin-stats',
+  });
+  await installDashboardCoreMocks(page);
+  await page.route('**/api/admin/stats/registration-trend**', async (route) => {
+    const requestedDays = Number(new URL(route.request().url()).searchParams.get('days')) as StatsTrendDays;
+    registrationDays.push(requestedDays);
+    await fulfillJSON(route, 200, registrationTrendFor(requestedDays));
+  });
+  await page.route('**/api/admin/stats/mail-trend**', async (route) => {
+    const requestedDays = Number(new URL(route.request().url()).searchParams.get('days')) as StatsTrendDays;
+    mailDays.push(requestedDays);
+    await fulfillJSON(route, 200, mailTrendFor(requestedDays));
+  });
+
+  await page.goto('/admin');
+
+  await expect(page.getByText('待验证注册')).toBeVisible();
+  await expect(page.getByText('82.5%')).toBeVisible();
+  await expect(page.getByText('SMTP 熔断')).toBeVisible();
+  const availableFrom = await page.evaluate((value) => new Intl.DateTimeFormat('zh-CN', {
+    dateStyle: 'medium',
+    timeStyle: 'short',
+  }).format(new Date(value)), mailTrendFor(30).available_from);
+  await expect(page.getByText(`邮件统计自 ${availableFrom} 起可用，早于该时间的数据可能不完整。`)).toBeVisible();
+
+  const registrationCanvas = page.locator('canvas[aria-label="注册趋势（30 天）"]');
+  const invitationCanvas = page.locator('canvas[aria-label="邀请趋势（30 天）"]');
+  const mailCanvas = page.locator('canvas[aria-label="邮件趋势（30 天）"]');
+  const registrationTable = page.getByRole('table', { name: '注册趋势（30 天）数据明细' });
+  await expect(registrationCanvas).toBeVisible();
+  await expect(invitationCanvas).toBeVisible();
+  await expect(mailCanvas).toBeVisible();
+  await expect(registrationTable.getByRole('row')).toHaveCount(31);
+  await expect.poll(() => countPaintedPixels(registrationCanvas)).toBeGreaterThan(100);
+  // Invitation values are deliberately all zero. The chart must still render
+  // its axes and zero baseline instead of reporting an empty dataset.
+  await expect.poll(() => countPaintedPixels(invitationCanvas)).toBeGreaterThan(100);
+  await expect.poll(() => countPaintedPixels(mailCanvas)).toBeGreaterThan(100);
+  expect(registrationDays).toEqual([30]);
+  expect(mailDays).toEqual([30]);
+
+  await page.getByRole('button', { name: '7 天', exact: true }).click();
+  await expect(page.locator('canvas[aria-label="注册趋势（7 天）"]')).toBeVisible();
+  await expect(page.getByRole('table', { name: '注册趋势（7 天）数据明细' }).getByRole('row')).toHaveCount(8);
+  await expect.poll(() => registrationDays).toEqual([30, 7]);
+  await expect.poll(() => mailDays).toEqual([30, 7]);
+
+  await page.getByRole('button', { name: '90 天', exact: true }).click();
+  await expect(page.locator('canvas[aria-label="邮件趋势（90 天）"]')).toBeVisible();
+  await expect(page.getByRole('table', { name: '邮件趋势（90 天）数据明细' }).getByRole('row')).toHaveCount(91);
+  await expect.poll(() => registrationDays).toEqual([30, 7, 90]);
+  await expect.poll(() => mailDays).toEqual([30, 7, 90]);
+  expect(pageErrors).toEqual([]);
+});
+
+test('a failed registration trend does not hide mail or existing dashboard data and can recover', async ({ page }) => {
+  const pageErrors: string[] = [];
+  let registrationRequests = 0;
+  page.on('pageerror', (error) => pageErrors.push(String(error)));
+
+  await installAPIMocks(page, {
+    authenticated: true,
+    mustChangePassword: false,
+    role: 'admin',
+    csrfToken: 'csrf-admin-stats-recovery',
+  });
+  await installDashboardCoreMocks(page);
+  await page.route('**/api/admin/stats/registration-trend**', async (route) => {
+    registrationRequests += 1;
+    if (registrationRequests === 1) {
+      await fulfillJSON(route, 503, { error: 'registration trend temporarily unavailable' });
+      return;
+    }
+    await fulfillJSON(route, 200, registrationTrendFor(30));
+  });
+  await page.route('**/api/admin/stats/mail-trend**', (route) => fulfillJSON(route, 200, mailTrendFor(30)));
+
+  await page.goto('/admin');
+
+  await expect(page.locator('canvas[aria-label="过去 7 天登录趋势"]')).toBeVisible();
+  await expect(page.getByText('用户总数')).toBeVisible();
+  await expect(page.locator('canvas[aria-label="邮件趋势（30 天）"]')).toBeVisible();
+  await expect(page.getByRole('alert')).toContainText('注册与邀请趋势加载失败');
+
+  await page.getByRole('button', { name: '重试注册与邀请趋势' }).click();
+  const recoveredRegistration = page.locator('canvas[aria-label="注册趋势（30 天）"]');
+  const recoveredInvitation = page.locator('canvas[aria-label="邀请趋势（30 天）"]');
+  await expect(recoveredRegistration).toBeVisible();
+  await expect(recoveredInvitation).toBeVisible();
+  await expect.poll(() => countPaintedPixels(recoveredRegistration)).toBeGreaterThan(100);
+  expect(registrationRequests).toBe(2);
   expect(pageErrors).toEqual([]);
 });
 
@@ -2089,6 +2295,7 @@ test('SMTP candidate is saved, tested, activated, rolled back and disabled with 
   await page.goto('/admin/system');
   await expect(page.getByRole('heading', { name: 'SMTP 动态配置' })).toBeVisible();
   await page.getByLabel('SMTP 主机').fill('smtp.dynamic.example.com');
+  await page.getByLabel('端口').fill('2525');
   await page.getByLabel('SMTP 密码（留空继承）').fill('smtp-runtime-secret');
   await page.getByRole('button', { name: '保存候选配置' }).click();
 
@@ -2102,7 +2309,7 @@ test('SMTP candidate is saved, tested, activated, rolled back and disabled with 
   await expect(page.getByText(/测试邮件已成功发送/)).toBeVisible();
   await page.getByRole('button', { name: '激活候选版本' }).click();
   await expect(page.getByText(/候选配置已激活/)).toBeVisible();
-  await expect(page.getByText('smtp.dynamic.example.com:587')).toBeVisible();
+  await expect(page.getByText('smtp.dynamic.example.com:2525')).toBeVisible();
 
   await page.getByRole('button', { name: '回滚到上一版本' }).click();
   await expect(page.getByText('邮件配置已回滚到上一版本。')).toBeVisible();
@@ -2114,8 +2321,8 @@ test('SMTP candidate is saved, tested, activated, rolled back and disabled with 
 
   expect(saveAttempts).toBe(2);
   expect(saveBodies).toEqual([
-    expect.objectContaining({ host: 'smtp.dynamic.example.com', password: 'smtp-runtime-secret', expected_revision: 10 }),
-    expect.objectContaining({ host: 'smtp.dynamic.example.com', password: 'smtp-runtime-secret', expected_revision: 10 }),
+    expect.objectContaining({ host: 'smtp.dynamic.example.com', port: 2525, password: 'smtp-runtime-secret', expected_revision: 10 }),
+    expect.objectContaining({ host: 'smtp.dynamic.example.com', port: 2525, password: 'smtp-runtime-secret', expected_revision: 10 }),
   ]);
   expect(saveCSRFs).toEqual(['csrf-mail', 'csrf-reauthenticated']);
   expect(testBody).toEqual({ expected_revision: 11, version_id: candidateID, email: 'operator@example.com' });

@@ -302,6 +302,12 @@ func TestRegistrationVerificationArtifactFailureRollsBackEverything(t *testing.T
 					t.Fatalf("%s rows after rollback = %d", name, count)
 				}
 			}
+			if count := countRegistrationRows(t, schema, `SELECT COALESCE(SUM(registrations_started),0) FROM registration_stats_daily`); count != 0 {
+				t.Fatalf("registration aggregate after rollback = %d", count)
+			}
+			if count := countRegistrationRows(t, schema, `SELECT COALESCE(SUM(enqueued),0) FROM mail_stats_daily`); count != 0 {
+				t.Fatalf("mail aggregate after rollback = %d", count)
+			}
 		})
 	}
 }

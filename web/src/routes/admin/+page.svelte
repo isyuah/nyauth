@@ -6,6 +6,7 @@
   import ResourceState from '$lib/components/ui/ResourceState.svelte';
   import StatusBadge from '$lib/components/data-display/StatusBadge.svelte';
   import TrendChart from '$lib/components/data-display/TrendChart.svelte';
+  import RegistrationMailStats from '$lib/components/admin/RegistrationMailStats.svelte';
   import { Activity, AlertTriangle, AppWindow, Database, KeyRound, LogIn, Server, Users } from 'lucide-svelte';
 
   let stats = $state<DashboardStats | null>(null);
@@ -19,6 +20,13 @@
   let systemError = $state('');
 
   let currentUser = $derived($sessionStore.session?.user);
+  let loginSeries = $derived([{
+    key: 'successful_logins',
+    label: '登录次数',
+    values: trendData,
+    color: 'primary' as const,
+    fill: true,
+  }]);
   let statCards = $derived(stats ? [
     { label: '用户总数', value: stats.user_count, icon: Users, bg: 'var(--nya-primary-soft)', fg: 'var(--nya-primary)' },
     { label: '应用总数', value: stats.app_count, icon: AppWindow, bg: 'var(--nya-blue-soft)', fg: 'var(--nya-blue)' },
@@ -84,7 +92,13 @@
       <div class="mt-4 grid gap-4 xl:grid-cols-2">
         <section class="min-h-[310px] rounded-nya-card border border-nya-border bg-nya-surface p-5 shadow-nya-card">
           <div class="mb-4 flex items-center justify-between"><h2 class="text-card-title text-nya-text-primary">登录趋势</h2><span class="rounded-nya-pill bg-nya-surface-muted px-2 py-0.5 text-small text-nya-text-tertiary">7 天</span></div>
-          <TrendChart labels={trendLabels} values={trendData} height="220px" />
+          <TrendChart
+            labels={trendLabels}
+            series={loginSeries}
+            height="220px"
+            ariaLabel="过去 7 天登录趋势"
+            emptyText="暂无登录趋势数据"
+          />
         </section>
 
         <section class="min-h-[310px] rounded-nya-card border border-nya-border bg-nya-surface p-5 shadow-nya-card">
@@ -104,6 +118,8 @@
           {/if}
         </section>
       </div>
+
+      <RegistrationMailStats {stats} />
 
       <div class="mt-4 grid gap-4 lg:grid-cols-2">
         <section class="rounded-nya-card border border-nya-border bg-nya-surface p-5 shadow-nya-card">

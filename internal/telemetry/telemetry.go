@@ -42,9 +42,14 @@ type Runtime struct {
 	providerEvents     metric.Int64Counter
 	jwkRotations       metric.Int64Counter
 	rateLimitEvents    metric.Int64Counter
+	registrationEvents metric.Int64Counter
+	verificationTime   metric.Float64Histogram
 	smtpDeliveries     metric.Int64Counter
 	smtpRetries        metric.Int64Counter
+	smtpFailures       metric.Int64Counter
 	smtpBacklog        metric.Int64Gauge
+	smtpOldestAge      metric.Float64Gauge
+	smtpCircuitOpen    metric.Int64Gauge
 	postgresPool       metric.Int64ObservableGauge
 	redisPool          metric.Int64ObservableGauge
 	registrationMu     sync.Mutex
@@ -142,6 +147,14 @@ func New(ctx context.Context, options Options) (*Runtime, error) {
 	if err != nil {
 		return nil, err
 	}
+	registrationEvents, err := meter.Int64Counter("nyauth.registration.outcomes", metric.WithDescription("Self-registration outcomes by bounded result and reason"))
+	if err != nil {
+		return nil, err
+	}
+	verificationTime, err := meter.Float64Histogram("nyauth.registration.verification.duration", metric.WithUnit("s"), metric.WithDescription("Time from pending self-registration creation to email verification"))
+	if err != nil {
+		return nil, err
+	}
 	smtpDeliveries, err := meter.Int64Counter("nyauth.smtp.outbox.deliveries", metric.WithDescription("Email outbox delivery outcomes"))
 	if err != nil {
 		return nil, err
@@ -150,7 +163,19 @@ func New(ctx context.Context, options Options) (*Runtime, error) {
 	if err != nil {
 		return nil, err
 	}
+	smtpFailures, err := meter.Int64Counter("nyauth.smtp.outbox.failures", metric.WithDescription("SMTP failures by bounded error category"))
+	if err != nil {
+		return nil, err
+	}
 	smtpBacklog, err := meter.Int64Gauge("nyauth.smtp.outbox.backlog", metric.WithDescription("Last observed number of deliverable or in-flight email outbox entries"))
+	if err != nil {
+		return nil, err
+	}
+	smtpOldestAge, err := meter.Float64Gauge("nyauth.smtp.outbox.oldest_pending_age", metric.WithUnit("s"), metric.WithDescription("Age of the oldest deliverable or in-flight email outbox entry"))
+	if err != nil {
+		return nil, err
+	}
+	smtpCircuitOpen, err := meter.Int64Gauge("nyauth.smtp.circuit.open", metric.WithDescription("SMTP circuit state, where closed is 0 and open is 1"))
 	if err != nil {
 		return nil, err
 	}
@@ -168,7 +193,9 @@ func New(ctx context.Context, options Options) (*Runtime, error) {
 		authEvents: authEvents, dependencyDuration: dependencyDuration, auditFailures: auditFailures,
 		csrfRejections: csrfRejections, oauthGrants: oauthGrants, refreshReuse: refreshReuse,
 		providerEvents: providerEvents, jwkRotations: jwkRotations, rateLimitEvents: rateLimitEvents,
-		smtpDeliveries: smtpDeliveries, smtpRetries: smtpRetries, smtpBacklog: smtpBacklog,
+		registrationEvents: registrationEvents, verificationTime: verificationTime,
+		smtpDeliveries: smtpDeliveries, smtpRetries: smtpRetries, smtpFailures: smtpFailures,
+		smtpBacklog: smtpBacklog, smtpOldestAge: smtpOldestAge, smtpCircuitOpen: smtpCircuitOpen,
 		postgresPool: postgresPool, redisPool: redisPool,
 	}, nil
 }
@@ -376,13 +403,35 @@ func (r *Runtime) RecordRateLimit(ctx context.Context, limiter, action, result s
 		return
 	}
 	limiter = boundedValue(limiter, "other", "login", "account_action")
-	action = boundedValue(action, "other", "login", "password_reset", "email_verification", "email_change")
+	action = boundedValue(action, "other", "login", "register", "password_reset", "email_verification", "pending_email_verification", "email_change")
 	result = boundedValue(result, "error", "allowed", "rejected", "error")
 	r.rateLimitEvents.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("rate_limit.limiter", limiter),
 		attribute.String("rate_limit.action", action),
 		attribute.String("rate_limit.result", result),
 	))
+}
+
+func (r *Runtime) RecordRegistrationOutcome(ctx context.Context, result, reason string) {
+	if r == nil {
+		return
+	}
+	result = boundedValue(result, "failure", "success", "rejected", "failure")
+	reason = boundedValue(reason, "dependency_unavailable",
+		"registered", "pending_verification", "closed", "invalid_origin", "invalid_input",
+		"invalid_invite", "conflict", "rate_limited", "mail_unavailable", "dependency_unavailable",
+	)
+	r.registrationEvents.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("registration.result", result),
+		attribute.String("registration.reason", reason),
+	))
+}
+
+func (r *Runtime) RecordEmailVerificationDuration(ctx context.Context, duration time.Duration) {
+	if r == nil || duration < 0 {
+		return
+	}
+	r.verificationTime.Record(ctx, duration.Seconds())
 }
 
 func (r *Runtime) RecordSMTPDelivery(ctx context.Context, result string, retryScheduled bool) {
@@ -396,14 +445,38 @@ func (r *Runtime) RecordSMTPDelivery(ctx context.Context, result string, retrySc
 	}
 }
 
-func (r *Runtime) RecordSMTPBacklog(ctx context.Context, backlog int64) {
+func (r *Runtime) RecordSMTPError(ctx context.Context, category string) {
+	if r == nil {
+		return
+	}
+	category = boundedValue(category, "unknown", "configuration", "authentication", "tls", "transport", "recipient", "unknown")
+	r.smtpFailures.Add(ctx, 1, metric.WithAttributes(attribute.String("smtp.error_category", category)))
+}
+
+func (r *Runtime) RecordSMTPCircuitState(ctx context.Context, state string) {
+	if r == nil {
+		return
+	}
+	switch state {
+	case "closed":
+		r.smtpCircuitOpen.Record(ctx, 0)
+	case "open":
+		r.smtpCircuitOpen.Record(ctx, 1)
+	}
+}
+
+func (r *Runtime) RecordSMTPBacklog(ctx context.Context, backlog int64, oldestAge time.Duration) {
 	if r == nil {
 		return
 	}
 	if backlog < 0 {
 		backlog = 0
 	}
+	if oldestAge < 0 {
+		oldestAge = 0
+	}
 	r.smtpBacklog.Record(ctx, backlog)
+	r.smtpOldestAge.Record(ctx, oldestAge.Seconds())
 }
 
 func boundedValue(value, fallback string, allowed ...string) string {

@@ -34,6 +34,7 @@ type fakeServiceStore struct {
 	consumeNewEmail      string
 	consumeNotices       []*OutboxEmail
 	consumeErr           error
+	verificationDuration *time.Duration
 	pendingExpiresAt     time.Time
 }
 
@@ -93,14 +94,14 @@ func (f *fakeServiceStore) ConsumePasswordReset(_ context.Context, _ *ActionToke
 	return &updated, nil
 }
 
-func (f *fakeServiceStore) ConsumeEmailVerification(_ context.Context, _ *ActionToken, expectedEmail string, _ time.Time) (*models.User, error) {
+func (f *fakeServiceStore) ConsumeEmailVerification(_ context.Context, _ *ActionToken, expectedEmail string, _ time.Time) (*models.User, *time.Duration, error) {
 	f.consumeExpectedEmail = expectedEmail
 	if f.consumeErr != nil {
-		return nil, f.consumeErr
+		return nil, nil, f.consumeErr
 	}
 	updated := *f.user
 	updated.EmailVerifiedAt = &testNow
-	return &updated, nil
+	return &updated, f.verificationDuration, nil
 }
 
 func (f *fakeServiceStore) ConsumeEmailChange(_ context.Context, _ *ActionToken, previousEmail, newEmail string, notices []*OutboxEmail, _ time.Time) (*models.User, error) {
@@ -308,6 +309,35 @@ func TestActionEnvelopeIsBoundToUserAndAction(t *testing.T) {
 	store.action.UserID = uuid.New()
 	if _, err := service.ConfirmEmailVerification(context.Background(), testRawToken); !errors.Is(err, ErrInvalidActionToken) {
 		t.Fatalf("tampered action binding error = %v, want ErrInvalidActionToken", err)
+	}
+}
+
+func TestPendingEmailVerificationReportsCommittedDuration(t *testing.T) {
+	duration := 3*time.Hour + 15*time.Minute
+	store := &fakeServiceStore{user: activeVerifiedUser(), verificationDuration: &duration}
+	store.user.EmailVerifiedAt = nil
+	var observed time.Duration
+	service, err := newService(store, ServiceOptions{
+		PublicBaseURL: "https://auth.example.test/base",
+		ActiveKeyID:   "primary",
+		MasterKeys:    map[string][]byte{"primary": testKey},
+		Clock:         func() time.Time { return testNow },
+		GenerateToken: func() (string, error) { return testRawToken, nil },
+		OnEmailVerified: func(_ context.Context, current time.Duration) {
+			observed = current
+		},
+	})
+	if err != nil {
+		t.Fatalf("newService: %v", err)
+	}
+	if err := service.RequestEmailVerification(context.Background(), store.user.ID, RequestMetadata{}); err != nil {
+		t.Fatalf("RequestEmailVerification: %v", err)
+	}
+	if _, err := service.ConfirmEmailVerification(context.Background(), testRawToken); err != nil {
+		t.Fatalf("ConfirmEmailVerification: %v", err)
+	}
+	if observed != duration {
+		t.Fatalf("verification duration = %s, want %s", observed, duration)
 	}
 }
 

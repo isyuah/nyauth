@@ -8,6 +8,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nyasharp/nyauth/internal/audit"
+	registrationstats "github.com/nyasharp/nyauth/internal/stats"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
 
@@ -28,6 +29,7 @@ type cleanupCandidate struct {
 	registrationID uuid.UUID
 	userID         *uuid.UUID
 	inviteID       *uuid.UUID
+	expiresAt      time.Time
 }
 
 // CleanupExpired releases and removes expired pending registrations in bounded
@@ -146,7 +148,7 @@ func cleanupBatch(ctx context.Context, conn *pgxpool.Conn, now time.Time, batchS
 		UPDATE self_registrations
 		SET status='released',released_at=$1,release_reason=$2,updated_at=$1
 		WHERE id=ANY($3::uuid[]) AND status='pending' AND expires_at<=$1
-		RETURNING id,user_id,invite_id
+		RETURNING id,user_id,invite_id,expires_at
 	`, now, ReleaseReasonExpired, candidateIDs)
 	if err != nil {
 		return nil, 0, fmt.Errorf("releasing expired registrations: %w", err)
@@ -155,7 +157,7 @@ func cleanupBatch(ctx context.Context, conn *pgxpool.Conn, now time.Time, batchS
 	userIDs = userIDs[:0]
 	for rows.Next() {
 		var candidate cleanupCandidate
-		if err := rows.Scan(&candidate.registrationID, &candidate.userID, &candidate.inviteID); err != nil {
+		if err := rows.Scan(&candidate.registrationID, &candidate.userID, &candidate.inviteID, &candidate.expiresAt); err != nil {
 			rows.Close()
 			return nil, 0, fmt.Errorf("scanning released registration: %w", err)
 		}
@@ -169,6 +171,27 @@ func cleanupBatch(ctx context.Context, conn *pgxpool.Conn, now time.Time, batchS
 		return nil, 0, fmt.Errorf("reading released registrations: %w", err)
 	}
 	rows.Close()
+
+	type expiryDelta struct {
+		eventAt time.Time
+		delta   registrationstats.RegistrationDailyDelta
+	}
+	expiryByDay := make(map[string]expiryDelta)
+	for _, candidate := range candidates {
+		day := candidate.expiresAt.UTC().Format("2006-01-02")
+		entry := expiryByDay[day]
+		entry.eventAt = candidate.expiresAt
+		entry.delta.RegistrationsExpired++
+		if candidate.inviteID != nil {
+			entry.delta.InvitesReleased++
+		}
+		expiryByDay[day] = entry
+	}
+	for _, entry := range expiryByDay {
+		if err := registrationstats.AddRegistrationDailyTx(ctx, tx, entry.eventAt, entry.delta); err != nil {
+			return nil, 0, fmt.Errorf("recording expired registration statistics: %w", err)
+		}
+	}
 
 	actor := AuditContext{ActorName: "system"}
 	for _, candidate := range candidates {

@@ -75,27 +75,3 @@ const (
 	AuditRefreshTokenReuse      = "token.refresh_reuse"
 	AuditTokenRevoked           = "token.revoked"
 )
-
-// DashboardStats holds system statistics.
-type DashboardStats struct {
-	UserCount      int64 `json:"user_count"`
-	AppCount       int64 `json:"app_count"`
-	LoginCount7d   int64 `json:"login_count_7d"`
-	ActiveSessions int64 `json:"active_sessions"`
-	FailedLogins7d int64 `json:"failed_logins_7d"`
-}
-
-// LoginTrend holds login trend data.
-type LoginTrend struct {
-	Labels []string `json:"labels"`
-	Values []int64  `json:"values"`
-}
-
-// RecentLogin holds a recent login entry for the dashboard.
-type RecentLogin struct {
-	Username string `json:"username"`
-	Role     string `json:"role"`
-	Result   string `json:"result"`
-	IP       string `json:"ip"`
-	Time     string `json:"time"`
-}

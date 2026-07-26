@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/nyasharp/nyauth/internal/audit"
+	registrationstats "github.com/nyasharp/nyauth/internal/stats"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
 
@@ -39,6 +40,7 @@ type AuditContext struct {
 type Transition struct {
 	RegistrationID uuid.UUID
 	InviteID       *uuid.UUID
+	CreatedAt      time.Time
 	Changed        bool
 }
 
@@ -96,6 +98,23 @@ func InsertTx(
 	if err != nil {
 		return fmt.Errorf("inserting self-registration: %w", err)
 	}
+	delta := registrationstats.RegistrationDailyDelta{
+		RegistrationsStarted: 1,
+		CohortStarted:        1,
+	}
+	if inviteID != nil && status == StatusPending {
+		delta.InvitesReserved = 1
+	}
+	if status == StatusCompleted {
+		delta.RegistrationsCompleted = 1
+		delta.CohortCompleted = 1
+		if inviteID != nil {
+			delta.InvitesConsumed = 1
+		}
+	}
+	if err := registrationstats.AddRegistrationDailyTx(ctx, tx, now, delta); err != nil {
+		return fmt.Errorf("recording self-registration statistics: %w", err)
+	}
 	return nil
 }
 
@@ -116,8 +135,8 @@ func CompleteForUserTx(
 		UPDATE self_registrations
 		SET status='completed',completed_at=$2,updated_at=$2
 		WHERE user_id=$1 AND status='pending' AND ($3 OR expires_at>$2)
-		RETURNING id,invite_id
-	`, userID, now.UTC(), allowExpired).Scan(&result.RegistrationID, &result.InviteID)
+		RETURNING id,invite_id,created_at
+	`, userID, now.UTC(), allowExpired).Scan(&result.RegistrationID, &result.InviteID, &result.CreatedAt)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return Transition{}, nil
 	}
@@ -125,6 +144,18 @@ func CompleteForUserTx(
 		return Transition{}, fmt.Errorf("completing self-registration: %w", err)
 	}
 	result.Changed = true
+	completionDelta := registrationstats.RegistrationDailyDelta{RegistrationsCompleted: 1}
+	if result.InviteID != nil {
+		completionDelta.InvitesConsumed = 1
+	}
+	if err := registrationstats.AddRegistrationDailyTx(ctx, tx, now, completionDelta); err != nil {
+		return Transition{}, fmt.Errorf("recording completed registration statistics: %w", err)
+	}
+	if err := registrationstats.AddRegistrationDailyTx(ctx, tx, result.CreatedAt, registrationstats.RegistrationDailyDelta{
+		CohortCompleted: 1,
+	}); err != nil {
+		return Transition{}, fmt.Errorf("recording registration cohort completion: %w", err)
+	}
 	if result.InviteID != nil {
 		if err := enqueueInviteEventTx(ctx, tx, models.AuditInviteConsumed, *result.InviteID, result.RegistrationID, userID, source, "", actor, now); err != nil {
 			return Transition{}, err
@@ -161,6 +192,13 @@ func ReleaseForUserTx(
 		return Transition{}, fmt.Errorf("releasing self-registration: %w", err)
 	}
 	result.Changed = true
+	if result.InviteID != nil {
+		if err := registrationstats.AddRegistrationDailyTx(ctx, tx, now, registrationstats.RegistrationDailyDelta{
+			InvitesReleased: 1,
+		}); err != nil {
+			return Transition{}, fmt.Errorf("recording released invite statistics: %w", err)
+		}
+	}
 	if result.InviteID != nil {
 		if err := enqueueInviteEventTx(ctx, tx, models.AuditInviteReleased, *result.InviteID, result.RegistrationID, userID, source, reason, actor, now); err != nil {
 			return Transition{}, err
