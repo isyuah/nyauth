@@ -237,6 +237,11 @@ export interface BrowserSession {
   authenticated_at: string;
 }
 
+export interface Branding {
+  title: string;
+  logo_url: string;
+}
+
 export type ComponentStatus = 'ok' | 'degraded' | 'unavailable' | string;
 
 export interface SystemStatus {
@@ -392,6 +397,7 @@ export const api = {
       method: 'POST',
       body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
     }, false),
+  getBranding: () => req<Branding>('/api/branding', {}, false),
   getProviders: () => req<ProviderSummary[]>('/api/providers'),
   getMyIdentities: () => req<ExternalIdentity[]>('/api/me/identities'),
   bindIdentity: (provider: string, returnTo = '/profile') =>
@@ -461,6 +467,8 @@ export const api = {
     getLoginTrend: (days = 7) => req<LoginTrend>(`/api/admin/stats/login-trend?days=${days}`),
     getRecentLogins: (limit = 5) => req<RecentLogin[]>(`/api/admin/stats/recent-logins?limit=${limit}`),
     getSystemStatus: () => req<SystemStatus>('/api/admin/system/status'),
+    updateBranding: (branding: Branding) =>
+      req<Branding>('/api/admin/branding', { method: 'PUT', body: JSON.stringify(branding) }),
     getUsers: (page = 1, pageSize = 20, search = '', status?: UserStatus) => {
       const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
       if (search) params.set('q', search);

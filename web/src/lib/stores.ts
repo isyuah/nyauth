@@ -1,5 +1,5 @@
 import { writable } from 'svelte/store';
-import { api, ApiError, setCsrfToken, type SessionInfo } from './api';
+import { api, ApiError, setCsrfToken, type Branding, type SessionInfo } from './api';
 import { cleanProviderAuthError, safeReturnPath, type ProviderAuthErrorResult } from './navigation';
 
 export { safeReturnPath } from './navigation';
@@ -110,6 +110,24 @@ export function createSessionStore() {
 }
 
 export const sessionStore = createSessionStore();
+
+export const DEFAULT_BRANDING: Branding = { title: 'Nya', logo_url: '' };
+
+// Server-configured branding with a static fallback: pages render the default
+// immediately and update if the deployment has customized it.
+export const brandingStore = writable<Branding>(DEFAULT_BRANDING);
+
+let brandingLoaded = false;
+export async function initializeBranding(force = false): Promise<void> {
+  if (brandingLoaded && !force) return;
+  brandingLoaded = true;
+  try {
+    const branding = await api.getBranding();
+    if (branding?.title) brandingStore.set(branding);
+  } catch {
+    // Keep the default branding when the endpoint is unavailable.
+  }
+}
 
 export function consumeProviderAuthError(): ProviderAuthErrorResult | null {
   if (typeof window === 'undefined') return null;

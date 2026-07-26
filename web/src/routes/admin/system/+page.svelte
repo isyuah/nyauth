@@ -1,14 +1,52 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { api, type SystemStatus } from '$lib/api';
+  import { brandingStore } from '$lib/stores';
   import PageHeader from '$lib/components/layout/PageHeader.svelte';
   import ResourceState from '$lib/components/ui/ResourceState.svelte';
   import StatusBadge from '$lib/components/data-display/StatusBadge.svelte';
-  import { Database, KeyRound, Network, Server } from 'lucide-svelte';
+  import Button from '$lib/components/ui/Button.svelte';
+  import Input from '$lib/components/ui/Input.svelte';
+  import { Database, KeyRound, Network, Palette, Server } from 'lucide-svelte';
 
   let systemStatus = $state<SystemStatus | null>(null);
   let loading = $state(true);
   let error = $state('');
+
+  let brandingTitle = $state('');
+  let brandingLogoURL = $state('');
+  let brandingSaving = $state(false);
+  let brandingError = $state('');
+  let brandingSaved = $state(false);
+  let brandingSynced = false;
+
+  $effect(() => {
+    // Seed the form once from the loaded branding without clobbering edits.
+    const branding = $brandingStore;
+    if (!brandingSynced && branding.title) {
+      brandingTitle = branding.title;
+      brandingLogoURL = branding.logo_url;
+      brandingSynced = true;
+    }
+  });
+
+  async function saveBranding(event: SubmitEvent) {
+    event.preventDefault();
+    brandingSaving = true;
+    brandingError = '';
+    brandingSaved = false;
+    try {
+      const updated = await api.admin.updateBranding({ title: brandingTitle.trim(), logo_url: brandingLogoURL.trim() });
+      brandingStore.set(updated);
+      brandingTitle = updated.title;
+      brandingLogoURL = updated.logo_url;
+      brandingSaved = true;
+    } catch (cause) {
+      brandingError = cause instanceof Error ? cause.message : '保存失败';
+    } finally {
+      brandingSaving = false;
+    }
+  }
 
   async function loadSystemStatus() {
     loading = true;
@@ -38,6 +76,23 @@
 <svelte:head><title>系统状态 - Nya</title></svelte:head>
 
 <PageHeader title="系统状态" description="查看当前版本、数据库基线与认证服务依赖的只读运行状态" />
+
+<section class="mb-4 rounded-nya-card border border-nya-border bg-nya-surface p-5 shadow-nya-card">
+  <div class="mb-4 flex items-center gap-2">
+    <Palette size={18} class="text-nya-primary" />
+    <h2 class="text-card-title text-nya-text-primary">品牌设置</h2>
+  </div>
+  <p class="mb-4 text-body text-nya-text-secondary">修改后无需重启，立即同步到所有实例的侧栏与登录页。Logo 留空时使用内置图标。</p>
+  <form onsubmit={saveBranding} class="space-y-4">
+    {#if brandingError}<p class="rounded-nya-sm bg-nya-danger-soft px-3 py-2 text-small text-nya-danger" role="alert">{brandingError}</p>{/if}
+    {#if brandingSaved}<p class="rounded-nya-sm bg-nya-success-soft px-3 py-2 text-small text-nya-success" role="status">品牌设置已保存，立即对所有实例生效。</p>{/if}
+    <div class="grid gap-4 md:grid-cols-2">
+      <Input id="branding-title" label="站点名称" bind:value={brandingTitle} required placeholder="Nya" />
+      <Input id="branding-logo-url" label="Logo URL（可选）" bind:value={brandingLogoURL} placeholder="https://example.com/logo.png" />
+    </div>
+    <Button type="submit" variant="primary" loading={brandingSaving}>保存品牌设置</Button>
+  </form>
+</section>
 
 <ResourceState
   {loading}

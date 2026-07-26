@@ -1464,6 +1464,37 @@ test('disabled provider creation is a single request with an explicit enabled st
   });
 });
 
+test('runtime branding propagates to the sidebar and saves with CSRF', async ({ page }) => {
+  let updateCSRF: string | null = null;
+  let updateBody: unknown;
+  await installAPIMocks(page, {
+    authenticated: true,
+    mustChangePassword: false,
+    role: 'admin',
+    csrfToken: 'csrf-brand',
+    systemStatus,
+  });
+  await page.route('**/api/branding', (route) => fulfillJSON(route, 200, { title: 'Acme ID', logo_url: '' }));
+  await page.route('**/api/admin/branding', async (route) => {
+    updateCSRF = route.request().headers()['x-csrf-token'] ?? null;
+    updateBody = route.request().postDataJSON();
+    await fulfillJSON(route, 200, { title: 'Acme SSO', logo_url: 'https://cdn.example.com/logo.png' });
+  });
+
+  await page.goto('/admin/system');
+  const sidebar = page.getByRole('complementary', { name: '管理后台导航' });
+  await expect(sidebar.getByText('Acme ID')).toBeVisible();
+
+  await page.getByLabel('站点名称').fill('Acme SSO');
+  await page.getByLabel(/Logo URL/).fill('https://cdn.example.com/logo.png');
+  await page.getByRole('button', { name: '保存品牌设置' }).click();
+
+  await expect(page.getByText('品牌设置已保存，立即对所有实例生效。')).toBeVisible();
+  expect(updateBody).toEqual({ title: 'Acme SSO', logo_url: 'https://cdn.example.com/logo.png' });
+  expect(updateCSRF).toBe('csrf-brand');
+  await expect(sidebar.getByText('Acme SSO')).toBeVisible();
+});
+
 test('the system status page renders the backend status DTO and admin navigation entry', async ({ page }) => {
   const state: MockState = {
     authenticated: true,

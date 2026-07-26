@@ -15,6 +15,7 @@
 - 审计：月分区表、审计 outbox、审计导出接口
 - 数据库双角色：迁移账号执行 DDL，运行时账号最小权限；`serve` 不再执行任何 DDL
 - 品牌：接入 nyauth 猫猫 logo（favicon 与 Web UI 品牌区）
+- 运行时设置：`runtime_settings` 表与跨实例同步（LISTEN/NOTIFY + 定时对账）；首个消费者为品牌设置（站点名称 / Logo URL），管理后台"系统状态"页可编辑，免重启即时生效
 - 高可用与备份恢复文档、OAuth/OIDC 集成指南（`docs/`）
 
 ### 变更（破坏性）

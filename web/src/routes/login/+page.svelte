@@ -1,7 +1,7 @@
 <script lang="ts">
   import { page } from '$app/stores';
   import { api, ApiError } from '$lib/api';
-  import { consumeProviderAuthError, safeReturnPath, sessionStore } from '$lib/stores';
+  import { brandingStore, consumeProviderAuthError, safeReturnPath, sessionStore } from '$lib/stores';
   import { goto } from '$app/navigation';
   import { onMount } from 'svelte';
   import Button from '$lib/components/ui/Button.svelte';
@@ -87,8 +87,8 @@
   <div class="w-full max-w-[400px]">
     <!-- 品牌区 -->
     <div class="text-center mb-8">
-      <img src="/logo.png" alt="" class="mx-auto mb-3 h-16 w-16 select-none" draggable="false" />
-      <h1 class="text-[38px] font-bold leading-none text-nya-primary">Nya</h1>
+      <img src={$brandingStore.logo_url || '/logo.png'} alt="" class="mx-auto mb-3 h-16 w-16 select-none" draggable="false" />
+      <h1 class="text-[38px] font-bold leading-none text-nya-primary">{$brandingStore.title}</h1>
       <p class="text-body text-nya-text-secondary mt-2">欢迎回来，今天也要元气满满喵～</p>
     </div>
 
