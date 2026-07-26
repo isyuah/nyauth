@@ -1059,6 +1059,42 @@ test('forgot-password surfaces rate limiting and allows a later retry', async ({
   expect(requests).toBe(2);
 });
 
+test('the dashboard login-trend chart draws real data points', async ({ page }) => {
+  const pageErrors: string[] = [];
+  page.on('pageerror', (error) => pageErrors.push(String(error)));
+
+  await installAPIMocks(page, {
+    authenticated: true,
+    mustChangePassword: false,
+    role: 'admin',
+    csrfToken: 'csrf-admin',
+  });
+  await page.route('**/api/admin/stats', (route) => fulfillJSON(route, 200, {
+    user_count: 12, app_count: 3, login_count_7d: 41, active_sessions: 5, failed_logins_7d: 4,
+  }));
+  await page.route('**/api/admin/stats/login-trend**', (route) => fulfillJSON(route, 200, {
+    labels: ['07-20', '07-21', '07-22', '07-23', '07-24', '07-25', '07-26'],
+    values: [3, 5, 2, 8, 6, 4, 7],
+  }));
+  await page.route('**/api/admin/stats/recent-logins**', (route) => fulfillJSON(route, 200, []));
+
+  await page.goto('/admin');
+
+  // The canvas existing is not enough: a chart initialization failure leaves
+  // a mounted but blank canvas. Assert that pixels were actually painted.
+  const canvas = page.locator('section', { hasText: '登录趋势' }).locator('canvas');
+  await expect(canvas).toBeVisible();
+  await expect
+    .poll(async () => canvas.evaluate((el: HTMLCanvasElement) => {
+      const data = el.getContext('2d')!.getImageData(0, 0, el.width, el.height).data;
+      let painted = 0;
+      for (let i = 3; i < data.length; i += 4) if (data[i] > 0) painted += 1;
+      return painted;
+    }))
+    .toBeGreaterThan(100);
+  expect(pageErrors).toEqual([]);
+});
+
 test('administrators can edit OAuth clients without mutating immutable ownership fields', async ({ page }) => {
   const state: MockState = {
     authenticated: true,

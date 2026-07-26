@@ -26,10 +26,12 @@
     chart = new Chart(canvas, {
       type: 'line',
       data: {
-        labels,
+        // Chart.js defines non-enumerable bookkeeping properties on these
+        // arrays, which Svelte 5 $state proxies forbid — pass plain copies.
+        labels: [...labels],
         datasets: [{
           label: '登录次数',
-          data: values,
+          data: [...values],
           borderColor: primaryColor,
           backgroundColor: primaryColor + '20',
           borderWidth: 2.5,
