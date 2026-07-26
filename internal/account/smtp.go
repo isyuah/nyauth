@@ -4,6 +4,8 @@ import (
 	"bytes"
 	"context"
 	"crypto/tls"
+	"crypto/x509"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -25,6 +27,52 @@ const (
 	SMTPTLSImplicit = "implicit"
 	SMTPTLSPlain    = "plain"
 )
+
+type SMTPErrorCategory string
+
+const (
+	SMTPErrorConfiguration  SMTPErrorCategory = "configuration"
+	SMTPErrorAuthentication SMTPErrorCategory = "authentication"
+	SMTPErrorTLS            SMTPErrorCategory = "tls"
+	SMTPErrorTransport      SMTPErrorCategory = "transport"
+	SMTPErrorRecipient      SMTPErrorCategory = "recipient"
+	SMTPErrorUnknown        SMTPErrorCategory = "unknown"
+)
+
+// SMTPError classifies delivery failures without exposing SMTP credentials or
+// message contents. Permanent configuration, authentication, and TLS failures
+// are used by the runtime mail circuit breaker.
+type SMTPError struct {
+	Category  SMTPErrorCategory
+	Operation string
+	Permanent bool
+	Err       error
+}
+
+func (e *SMTPError) Error() string {
+	if e == nil {
+		return "SMTP error"
+	}
+	if e.Err == nil {
+		return e.Operation
+	}
+	return e.Operation + ": " + e.Err.Error()
+}
+
+func (e *SMTPError) Unwrap() error {
+	if e == nil {
+		return nil
+	}
+	return e.Err
+}
+
+func SMTPErrorDetails(err error) (SMTPErrorCategory, bool) {
+	var smtpErr *SMTPError
+	if errors.As(err, &smtpErr) {
+		return smtpErr.Category, smtpErr.Permanent
+	}
+	return SMTPErrorUnknown, false
+}
 
 type SMTPOptions struct {
 	Host           string
@@ -95,11 +143,11 @@ func NewSMTPSender(options SMTPOptions) (*SMTPSender, error) {
 
 func (s *SMTPSender) Send(ctx context.Context, message EmailMessage) error {
 	if err := validateEmailMessage(message); err != nil {
-		return err
+		return smtpFailure(SMTPErrorRecipient, "validating SMTP message", true, err)
 	}
 	recipient, err := mail.ParseAddress(message.To)
 	if err != nil {
-		return fmt.Errorf("parsing SMTP recipient: %w", err)
+		return smtpFailure(SMTPErrorRecipient, "parsing SMTP recipient", true, err)
 	}
 	payload, err := buildMIMEMessage(s.from, recipient, message)
 	if err != nil {
@@ -109,48 +157,104 @@ func (s *SMTPSender) Send(ctx context.Context, message EmailMessage) error {
 	if err != nil {
 		return err
 	}
-	defer conn.Close()
-	defer client.Close()
 	stopCancel := context.AfterFunc(ctx, func() { _ = conn.Close() })
-	defer stopCancel()
+	clientOpen := true
+	defer func() {
+		stopCancel()
+		if clientOpen {
+			_ = client.Close()
+		}
+	}()
 
 	deadline := time.Now().Add(s.sendTimeout)
 	if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
 		deadline = contextDeadline
 	}
 	if err := conn.SetDeadline(deadline); err != nil {
-		return fmt.Errorf("setting SMTP deadline: %w", err)
+		return smtpFailure(SMTPErrorTransport, "setting SMTP deadline", false, err)
 	}
 	if err := ctx.Err(); err != nil {
 		return err
 	}
-	if s.username != "" {
-		if ok, _ := client.Extension("AUTH"); !ok {
-			return fmt.Errorf("SMTP server does not advertise authentication")
-		}
-		if err := client.Auth(smtp.PlainAuth("", s.username, s.password, s.host)); err != nil {
-			return fmt.Errorf("authenticating to SMTP server: %w", err)
-		}
+	if err := s.authenticate(client); err != nil {
+		return err
 	}
 	if err := client.Mail(s.from.Address); err != nil {
-		return fmt.Errorf("sending SMTP MAIL FROM: %w", err)
+		return smtpProtocolFailure(SMTPErrorConfiguration, "sending SMTP MAIL FROM", err)
 	}
 	if err := client.Rcpt(recipient.Address); err != nil {
-		return fmt.Errorf("sending SMTP RCPT TO: %w", err)
+		return smtpProtocolFailure(SMTPErrorRecipient, "sending SMTP RCPT TO", err)
 	}
 	writer, err := client.Data()
 	if err != nil {
-		return fmt.Errorf("starting SMTP DATA: %w", err)
+		return smtpProtocolFailure(SMTPErrorTransport, "starting SMTP DATA", err)
 	}
 	if _, err := writer.Write(payload); err != nil {
 		_ = writer.Close()
-		return fmt.Errorf("writing SMTP DATA: %w", err)
+		return smtpFailure(SMTPErrorTransport, "writing SMTP DATA", false, err)
 	}
 	if err := writer.Close(); err != nil {
-		return fmt.Errorf("finishing SMTP DATA: %w", err)
+		return smtpDataFailure("finishing SMTP DATA", err)
 	}
-	if err := client.Quit(); err != nil {
-		return fmt.Errorf("closing SMTP transaction: %w", err)
+
+	// A successful DATA close means the server accepted the message. QUIT is
+	// only a best-effort session shutdown from this point; surfacing its error
+	// would cause the outbox to retry an already accepted message.
+	stopCancel()
+	if err := client.Quit(); err == nil {
+		clientOpen = false
+	}
+	return nil
+}
+
+// Probe verifies the connection, TLS policy, authentication, and envelope
+// sender without sending a message. It is used only for circuit recovery;
+// candidate tests still send a real email.
+func (s *SMTPSender) Probe(ctx context.Context) error {
+	client, conn, err := s.connect(ctx)
+	if err != nil {
+		return err
+	}
+	stopCancel := context.AfterFunc(ctx, func() { _ = conn.Close() })
+	clientOpen := true
+	defer func() {
+		stopCancel()
+		if clientOpen {
+			_ = client.Close()
+		}
+	}()
+	if err := s.authenticate(client); err != nil {
+		return err
+	}
+	if err := client.Mail(s.from.Address); err != nil {
+		return smtpProtocolFailure(SMTPErrorConfiguration, "probing SMTP MAIL FROM", err)
+	}
+	if err := client.Reset(); err != nil {
+		return smtpProtocolFailure(SMTPErrorTransport, "resetting SMTP probe transaction", err)
+	}
+	if err := client.Noop(); err != nil {
+		return smtpProtocolFailure(SMTPErrorTransport, "probing SMTP connection", err)
+	}
+
+	// The probe has already established server health. A failed QUIT must not
+	// reverse that result, but a successful QUIT owns and closes the client so
+	// the deferred cleanup does not close it twice.
+	stopCancel()
+	if err := client.Quit(); err == nil {
+		clientOpen = false
+	}
+	return nil
+}
+
+func (s *SMTPSender) authenticate(client *smtp.Client) error {
+	if s.username == "" {
+		return nil
+	}
+	if ok, _ := client.Extension("AUTH"); !ok {
+		return smtpFailure(SMTPErrorAuthentication, "authenticating to SMTP server", true, errors.New("server does not advertise AUTH"))
+	}
+	if err := client.Auth(smtp.PlainAuth("", s.username, s.password, s.host)); err != nil {
+		return smtpProtocolFailure(SMTPErrorAuthentication, "authenticating to SMTP server", err)
 	}
 	return nil
 }
@@ -159,7 +263,7 @@ func (s *SMTPSender) connect(ctx context.Context) (*smtp.Client, net.Conn, error
 	dialer := &net.Dialer{Timeout: s.connectTimeout}
 	conn, err := dialer.DialContext(ctx, "tcp", s.address)
 	if err != nil {
-		return nil, nil, fmt.Errorf("connecting to SMTP server: %w", err)
+		return nil, nil, smtpFailure(SMTPErrorTransport, "connecting to SMTP server", false, err)
 	}
 	deadline := time.Now().Add(s.connectTimeout)
 	if contextDeadline, ok := ctx.Deadline(); ok && contextDeadline.Before(deadline) {
@@ -167,35 +271,73 @@ func (s *SMTPSender) connect(ctx context.Context) (*smtp.Client, net.Conn, error
 	}
 	if err := conn.SetDeadline(deadline); err != nil {
 		conn.Close()
-		return nil, nil, fmt.Errorf("setting SMTP connection deadline: %w", err)
+		return nil, nil, smtpFailure(SMTPErrorTransport, "setting SMTP connection deadline", false, err)
 	}
 	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12, ServerName: s.host}
 	if s.tlsMode == SMTPTLSImplicit {
 		tlsConn := tls.Client(conn, tlsConfig)
 		if err := tlsConn.HandshakeContext(ctx); err != nil {
 			conn.Close()
-			return nil, nil, fmt.Errorf("performing implicit SMTP TLS handshake: %w", err)
+			return nil, nil, smtpTLSFailure("performing implicit SMTP TLS handshake", err)
 		}
 		conn = tlsConn
 	}
 	client, err := smtp.NewClient(conn, s.host)
 	if err != nil {
 		conn.Close()
-		return nil, nil, fmt.Errorf("creating SMTP client: %w", err)
+		return nil, nil, smtpFailure(SMTPErrorTransport, "creating SMTP client", false, err)
 	}
 	if s.tlsMode == SMTPTLSStartTLS {
 		if ok, _ := client.Extension("STARTTLS"); !ok {
 			client.Close()
 			conn.Close()
-			return nil, nil, fmt.Errorf("SMTP server does not advertise STARTTLS")
+			return nil, nil, smtpFailure(SMTPErrorTLS, "starting SMTP TLS", true, errors.New("server does not advertise STARTTLS"))
 		}
 		if err := client.StartTLS(tlsConfig); err != nil {
 			client.Close()
 			conn.Close()
-			return nil, nil, fmt.Errorf("starting SMTP TLS: %w", err)
+			return nil, nil, smtpTLSFailure("starting SMTP TLS", err)
 		}
 	}
 	return client, conn, nil
+}
+
+func smtpFailure(category SMTPErrorCategory, operation string, permanent bool, err error) error {
+	return &SMTPError{Category: category, Operation: operation, Permanent: permanent, Err: err}
+}
+
+func smtpProtocolFailure(category SMTPErrorCategory, operation string, err error) error {
+	permanent := false
+	var protocolErr *textproto.Error
+	if errors.As(err, &protocolErr) {
+		permanent = protocolErr.Code >= 500
+	}
+	return smtpFailure(category, operation, permanent, err)
+}
+
+// A permanent final DATA rejection means the server rejected this specific
+// message or recipient after reading it; retrying it or opening the global
+// SMTP circuit would not help. Temporary DATA replies remain transport errors.
+func smtpDataFailure(operation string, err error) error {
+	var protocolErr *textproto.Error
+	if errors.As(err, &protocolErr) && protocolErr.Code >= 500 {
+		return smtpFailure(SMTPErrorRecipient, operation, true, err)
+	}
+	return smtpFailure(SMTPErrorTransport, operation, false, err)
+}
+
+func smtpTLSFailure(operation string, err error) error {
+	var protocolErr *textproto.Error
+	if errors.As(err, &protocolErr) {
+		return smtpFailure(SMTPErrorTLS, operation, protocolErr.Code >= 500, err)
+	}
+	var unknownAuthority x509.UnknownAuthorityError
+	var hostnameError x509.HostnameError
+	var certificateInvalid x509.CertificateInvalidError
+	var recordHeader tls.RecordHeaderError
+	permanent := errors.As(err, &unknownAuthority) || errors.As(err, &hostnameError) ||
+		errors.As(err, &certificateInvalid) || errors.As(err, &recordHeader)
+	return smtpFailure(SMTPErrorTLS, operation, permanent, err)
 }
 
 func buildMIMEMessage(from, recipient *mail.Address, message EmailMessage) ([]byte, error) {

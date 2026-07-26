@@ -5,7 +5,7 @@
 ## 恢复目标
 
 - PostgreSQL：使用全量备份与 WAL 归档实现时间点恢复（PITR）。
-- Master key：独立于数据库备份并加密保存；丢失后无法解密 Provider secret、邮件 outbox 或 JWK 私钥。
+- Master key：独立于数据库备份并加密保存；丢失后无法解密 Provider secret、动态 SMTP 密码、邮件 outbox 或 JWK 私钥。
 - Redis：不恢复旧快照。Redis 丢失后启动空实例，使全部会话和 Token 失效。
 
 ## PostgreSQL
@@ -24,11 +24,12 @@ Nyauth 不负责拉取 WAL、操作托管数据库快照或选择生产恢复点
 
 1. 恢复到隔离 PostgreSQL。
 2. 使用一次性迁移账号运行 schema 检查，不运行应用流量。
-3. 将恢复后的用户、客户端、Provider、JWK、审计和邮件 outbox 数量与备份 manifest 比较。
+3. 将恢复后的用户、客户端、Provider、JWK、审计和邮件 outbox 数量与备份 manifest 比较；另外记录 `mail_config_versions` 数量与 `mail_runtime_state` singleton 状态。当前自动化 manifest 尚未包含这两项动态邮件证据。
 4. 运行只读的 `nyauth verify-recovery`，验证活动 JWK、全部 Provider Secret，以及最多 100 条仍保留密文的邮件 outbox envelope。
 5. 使用正确 master key 启动单个隔离应用实例并检查 `/readyz`。
-6. 验证新的登录和 OAuth code 流程；不得使用备份中的旧 Redis。
-7. 验证完成后才允许切换流量。
+6. 读取 `/api/admin/settings/mail`，确认活动版本、mode 和 `password_configured` 符合恢复点。当前 `verify-recovery` 不验证动态 SMTP 密码 envelope；应在隔离环境创建继承密码的候选并向受控测试地址实际测试，或使用等价的受控 SMTP 验证流程。
+7. 验证新的登录和 OAuth code 流程；不得使用备份中的旧 Redis。
+8. 验证完成后才允许切换流量。
 
 ## Master key
 
@@ -37,7 +38,7 @@ Nyauth 不负责拉取 WAL、操作托管数据库快照或选择生产恢复点
 - 使用秘密管理器、离线密钥库或双人控制的加密介质。
 - 不与数据库备份放在同一存储位置。
 - 不写入 Compose 文件、日志、工单或代码仓库。
-- 每次恢复演练必须验证密钥可以解密恢复数据库中的活动 JWK。
+- 每次恢复演练必须验证密钥可以解密恢复数据库中的活动 JWK、Provider secret 和当前动态 SMTP 密码。动态 SMTP 的候选测试、激活与恢复流程见 [动态 SMTP 配置与故障处理](runtime-mail.md)。
 
 所有 Provider envelope 都必须通过认证；邮件 outbox 中仍保留密文的记录会抽样验证并报告符合条件的总数与实际抽样数。邮件发送成功或过期后会按设计清除密文，因此邮件抽样数可以为零，报告不得把零样本描述为已验证历史邮件内容。
 

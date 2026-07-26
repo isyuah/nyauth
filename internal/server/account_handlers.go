@@ -52,7 +52,7 @@ func (s *Server) handleRequestPasswordReset(w http.ResponseWriter, r *http.Reque
 		writeAPIError(w, http.StatusForbidden, "invalid request origin")
 		return
 	}
-	if s.accountService == nil || s.accountLimiter == nil {
+	if s.accountService == nil || s.accountLimiter == nil || !s.mailRuntimeStatus().Configured {
 		writeAPIError(w, http.StatusServiceUnavailable, "account recovery is unavailable")
 		return
 	}
@@ -115,7 +115,7 @@ func (s *Server) handleConfirmPasswordReset(w http.ResponseWriter, r *http.Reque
 
 func (s *Server) handleRequestEmailVerification(w http.ResponseWriter, r *http.Request) {
 	setSessionNoStoreHeaders(w)
-	if s.accountService == nil || s.accountLimiter == nil {
+	if s.accountService == nil || s.accountLimiter == nil || !s.mailRuntimeStatus().Configured {
 		writeAPIError(w, http.StatusServiceUnavailable, "email verification is unavailable")
 		return
 	}
@@ -146,7 +146,7 @@ func (s *Server) handleResendPendingEmailVerification(w http.ResponseWriter, r *
 		writeAPIError(w, http.StatusForbidden, "invalid request origin")
 		return
 	}
-	if s.accountService == nil || s.accountLimiter == nil {
+	if s.accountService == nil || s.accountLimiter == nil || !s.mailRuntimeStatus().Configured {
 		writeAPIError(w, http.StatusServiceUnavailable, "email verification is unavailable")
 		return
 	}
@@ -206,7 +206,7 @@ func (s *Server) handleConfirmEmailVerification(w http.ResponseWriter, r *http.R
 
 func (s *Server) handleRequestEmailChange(w http.ResponseWriter, r *http.Request) {
 	setSessionNoStoreHeaders(w)
-	if s.accountService == nil || s.accountLimiter == nil {
+	if s.accountService == nil || s.accountLimiter == nil || !s.mailRuntimeStatus().Configured {
 		writeAPIError(w, http.StatusServiceUnavailable, "email change is unavailable")
 		return
 	}

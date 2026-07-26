@@ -29,6 +29,7 @@ import (
 	"github.com/nyasharp/nyauth/internal/crypto"
 	"github.com/nyasharp/nyauth/internal/identity"
 	"github.com/nyasharp/nyauth/internal/invite"
+	"github.com/nyasharp/nyauth/internal/mailruntime"
 	"github.com/nyasharp/nyauth/internal/provider"
 	"github.com/nyasharp/nyauth/internal/registration"
 	"github.com/nyasharp/nyauth/internal/session"
@@ -67,6 +68,7 @@ type Server struct {
 	telemetry          *telemetry.Runtime
 	accountService     accountActionService
 	accountLimiter     *AccountActionLimiter
+	mailManager        *mailruntime.Manager
 	emailDispatcher    *account.Dispatcher
 	readiness          readinessState
 }
@@ -119,39 +121,69 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 		return nil, fmt.Errorf("configuring audit dispatcher: %w", err)
 	}
 	s.auditDispatcher = auditDispatcher
-	if cfg.Mail.Enabled {
-		accountStore := account.NewStore(db)
-		accountService, err := account.NewService(accountStore, account.ServiceOptions{
-			PublicBaseURL: cfg.Mail.PublicBaseURL, ActiveKeyID: "primary",
-			MasterKeys: map[string][]byte{"primary": cfg.Auth.MasterKey},
-		})
-		if err != nil {
-			return nil, fmt.Errorf("configuring account recovery: %w", err)
-		}
-		userStore.SetSecurityNotificationBuilder(accountService)
-		identityStore.SetSecurityNotificationBuilder(accountService)
-		sender, err := account.NewSMTPSender(account.SMTPOptions{
-			Host: cfg.Mail.SMTP.Host, Port: cfg.Mail.SMTP.Port,
-			Username: cfg.Mail.SMTP.Username, Password: cfg.Mail.SMTP.Password,
-			TLSMode: cfg.Mail.SMTP.TLSMode, FromAddress: cfg.Mail.FromAddress, FromName: cfg.Mail.FromName,
-			ConnectTimeout: cfg.Mail.SMTP.ConnectTimeout, SendTimeout: cfg.Mail.SMTP.SendTimeout,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("configuring SMTP: %w", err)
-		}
-		dispatcher, err := account.NewDispatcher(accountStore, sender, account.DispatcherOptions{
-			WorkerID:   workerPrefix + "-email",
-			MasterKeys: map[string][]byte{"primary": cfg.Auth.MasterKey},
-			OnError:    func(err error) { slog.Error("email outbox dispatch failed", "error", err) },
-			OnDelivery: telemetryRuntime.RecordSMTPDelivery,
-			OnBacklog:  telemetryRuntime.RecordSMTPBacklog,
-		})
-		if err != nil {
-			return nil, fmt.Errorf("configuring email dispatcher: %w", err)
-		}
-		s.accountService = accountService
-		s.emailDispatcher = dispatcher
+	accountStore := account.NewStore(db)
+	publicBaseURL := cfg.Mail.PublicBaseURL
+	if strings.TrimSpace(publicBaseURL) == "" {
+		publicBaseURL = cfg.Auth.Issuer
 	}
+	accountService, err := account.NewService(accountStore, account.ServiceOptions{
+		PublicBaseURL: publicBaseURL, ActiveKeyID: "primary",
+		MasterKeys: map[string][]byte{"primary": cfg.Auth.MasterKey},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("configuring account recovery: %w", err)
+	}
+	mailStore, err := mailruntime.NewStore(db, mailruntime.StoreOptions{
+		ActiveKeyID: "primary", MasterKeys: map[string][]byte{"primary": cfg.Auth.MasterKey},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("configuring runtime mail storage: %w", err)
+	}
+	var fallback *mailruntime.SMTPConfig
+	if cfg.Mail.Enabled {
+		fallback = &mailruntime.SMTPConfig{
+			Settings: mailruntime.Settings{
+				Host: cfg.Mail.SMTP.Host, Port: cfg.Mail.SMTP.Port, Username: cfg.Mail.SMTP.Username,
+				TLSMode: cfg.Mail.SMTP.TLSMode, FromAddress: cfg.Mail.FromAddress, FromName: cfg.Mail.FromName,
+				PublicBaseURL: cfg.Mail.PublicBaseURL, ConnectTimeout: cfg.Mail.SMTP.ConnectTimeout,
+				SendTimeout: cfg.Mail.SMTP.SendTimeout,
+			},
+			Password: cfg.Mail.SMTP.Password,
+		}
+	}
+	mailManager, err := mailruntime.NewManager(mailStore, mailruntime.ManagerOptions{
+		Fallback: fallback, Production: cfg.IsProduction(),
+		OnError: func(err error) { slog.Error("runtime mail operation failed", "error", err) },
+		OnSnapshot: func(effective mailruntime.EffectiveConfig) {
+			if effective.Config != nil {
+				if err := accountService.SetPublicBaseURL(effective.Config.PublicBaseURL); err != nil {
+					slog.Error("runtime mail public URL update failed", "error", err)
+				}
+			}
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("configuring runtime mail manager: %w", err)
+	}
+	if err := mailManager.Load(context.Background()); err != nil {
+		slog.Error("initial runtime mail load failed", "error", err)
+	}
+	notificationBuilder := runtimeSecurityNotificationBuilder{manager: mailManager, service: accountService}
+	userStore.SetSecurityNotificationBuilder(notificationBuilder)
+	identityStore.SetSecurityNotificationBuilder(notificationBuilder)
+	dispatcher, err := account.NewDynamicDispatcher(accountStore, mailManager, account.DispatcherOptions{
+		WorkerID:   workerPrefix + "-email",
+		MasterKeys: map[string][]byte{"primary": cfg.Auth.MasterKey},
+		OnError:    func(err error) { slog.Error("email outbox dispatch failed", "error", err) },
+		OnDelivery: telemetryRuntime.RecordSMTPDelivery,
+		OnBacklog:  telemetryRuntime.RecordSMTPBacklog,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("configuring email dispatcher: %w", err)
+	}
+	s.accountService = accountService
+	s.mailManager = mailManager
+	s.emailDispatcher = dispatcher
 	s.readiness.checks = s.runtimeReadinessChecks()
 	s.router = s.buildRouter()
 	return s, nil
@@ -231,6 +263,12 @@ func (s *Server) buildRouter() *chi.Mux {
 			r.Put("/admin/branding", s.handleUpdateBranding)
 			r.Get("/admin/settings/registration", s.handleGetRegistrationSettings)
 			r.Put("/admin/settings/registration", s.handleUpdateRegistrationSettings)
+			r.Get("/admin/settings/mail", s.handleGetMailSettings)
+			r.Put("/admin/settings/mail/candidate", s.handleSaveMailCandidate)
+			r.Post("/admin/settings/mail/candidate/test", s.handleTestMailCandidate)
+			r.Post("/admin/settings/mail/activate", s.handleActivateMailCandidate)
+			r.Post("/admin/settings/mail/rollback", s.handleRollbackMailSettings)
+			r.Post("/admin/settings/mail/disable", s.handleDisableMail)
 			r.Get("/admin/invites", s.handleListInvites)
 			r.Post("/admin/invites", s.handleCreateInvite)
 			r.Delete("/admin/invites/{id}", s.handleRevokeInvite)
@@ -334,6 +372,9 @@ func (s *Server) Run(ctx context.Context) error {
 		slog.WarnContext(runCtx, "initial runtime settings load failed", "error", err)
 	}
 	s.settingsMgr.StartSynchronization(runCtx)
+	if s.mailManager != nil {
+		s.mailManager.StartSynchronization(runCtx)
+	}
 	if s.auditDispatcher != nil {
 		go func() {
 			if dispatchErr := s.auditDispatcher.Run(runCtx); dispatchErr != nil && !errors.Is(dispatchErr, context.Canceled) {

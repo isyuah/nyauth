@@ -1,6 +1,9 @@
 package settings
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestBrandingFallsBackToDefaults(t *testing.T) {
 	manager := NewManager(nil, Branding{Title: "Nya", LogoURL: "https://cdn.example.com/logo.png"})
@@ -61,5 +64,37 @@ func TestLoadWithoutDatabaseKeepsDefaults(t *testing.T) {
 	}
 	if registration := manager.Registration(); registration.Mode != RegistrationClosed {
 		t.Fatalf("registration = %#v", registration)
+	}
+}
+
+func TestSettingsLoadsAndWritesShareOnePublicationLock(t *testing.T) {
+	manager := NewManager(nil, Branding{Title: "Nya"})
+	manager.loadMu.Lock()
+	loadDone := make(chan error, 1)
+	writeDone := make(chan error, 1)
+	go func() { loadDone <- manager.Load(t.Context()) }()
+	go func() {
+		writeDone <- manager.SetRegistration(t.Context(), DefaultRegistration(), "test", false)
+	}()
+	for _, operation := range []struct {
+		name   string
+		result <-chan error
+	}{
+		{name: "load", result: loadDone},
+		{name: "write", result: writeDone},
+	} {
+		select {
+		case <-operation.result:
+			manager.loadMu.Unlock()
+			t.Fatalf("%s bypassed the settings publication lock", operation.name)
+		case <-time.After(25 * time.Millisecond):
+		}
+	}
+	manager.loadMu.Unlock()
+	if err := <-loadDone; err != nil {
+		t.Fatalf("Load without database: %v", err)
+	}
+	if err := <-writeDone; err == nil {
+		t.Fatal("SetRegistration without database unexpectedly succeeded")
 	}
 }

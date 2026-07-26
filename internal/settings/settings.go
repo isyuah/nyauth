@@ -9,10 +9,14 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"slices"
+	"sync"
 	"sync/atomic"
 	"time"
 
+	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/nyasharp/nyauth/internal/runtimecoord"
 )
 
 const (
@@ -20,6 +24,11 @@ const (
 	registrationKey        = "registration"
 	notificationChannel    = "nyauth_settings_changed"
 	reconciliationInterval = 60 * time.Second
+)
+
+var (
+	ErrRegistrationChanged     = errors.New("registration settings changed")
+	ErrMailConfigurationNeeded = errors.New("mail configuration is required for self-registration")
 )
 
 // Branding holds the values the web UI uses to present the deployment
@@ -76,6 +85,7 @@ type Manager struct {
 	brandingDefaults Branding
 	branding         atomic.Pointer[Branding]
 	registration     atomic.Pointer[Registration]
+	loadMu           sync.Mutex
 }
 
 func NewManager(db *pgxpool.Pool, brandingDefaults Branding) *Manager {
@@ -102,6 +112,8 @@ func (m *Manager) Registration() Registration {
 // Load refreshes every settings group from the database. Missing rows reset
 // the corresponding group to its defaults so deletes propagate too.
 func (m *Manager) Load(ctx context.Context) error {
+	m.loadMu.Lock()
+	defer m.loadMu.Unlock()
 	if m.db == nil {
 		return nil
 	}
@@ -149,6 +161,8 @@ func (m *Manager) Load(ctx context.Context) error {
 // SetBranding persists the branding, refreshes the local snapshot, and
 // notifies other instances. Validation is the caller's responsibility.
 func (m *Manager) SetBranding(ctx context.Context, branding Branding, updatedBy string) error {
+	m.loadMu.Lock()
+	defer m.loadMu.Unlock()
 	if err := m.store(ctx, brandingKey, branding, updatedBy); err != nil {
 		return err
 	}
@@ -160,13 +174,99 @@ func (m *Manager) SetBranding(ctx context.Context, branding Branding, updatedBy 
 // SetRegistration persists the registration settings, refreshes the local
 // snapshot, and notifies other instances. Validation is the caller's
 // responsibility.
-func (m *Manager) SetRegistration(ctx context.Context, registration Registration, updatedBy string) error {
-	if err := m.store(ctx, registrationKey, registration, updatedBy); err != nil {
+func (m *Manager) SetRegistration(
+	ctx context.Context,
+	registration Registration,
+	updatedBy string,
+	fallbackMailConfigured bool,
+) error {
+	m.loadMu.Lock()
+	defer m.loadMu.Unlock()
+	if m.db == nil {
+		return errors.New("runtime settings storage is unavailable")
+	}
+	encoded, err := json.Marshal(registration)
+	if err != nil {
+		return fmt.Errorf("encoding %s settings: %w", registrationKey, err)
+	}
+	tx, err := m.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("starting registration settings transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	if err := runtimecoord.LockRegistrationExclusive(ctx, tx); err != nil {
 		return err
 	}
+	if registration.Mode != RegistrationClosed {
+		configured, configuredErr := runtimecoord.MailConfigured(ctx, tx, fallbackMailConfigured)
+		if configuredErr != nil {
+			return configuredErr
+		}
+		if !configured {
+			return ErrMailConfigurationNeeded
+		}
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO runtime_settings (key, value, updated_by, updated_at)
+		VALUES ($1, $2, $3, now())
+		ON CONFLICT (key) DO UPDATE SET
+			value = EXCLUDED.value, updated_by = EXCLUDED.updated_by, updated_at = EXCLUDED.updated_at
+	`, registrationKey, encoded, updatedBy); err != nil {
+		return fmt.Errorf("storing %s settings: %w", registrationKey, err)
+	}
+	if _, err := tx.Exec(ctx, `SELECT pg_notify($1, $2)`, notificationChannel, registrationKey); err != nil {
+		return fmt.Errorf("notifying registration settings change: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("committing registration settings: %w", err)
+	}
 	m.registration.Store(&registration)
-	m.notify(ctx, registrationKey)
 	return nil
+}
+
+// LoadRegistrationTx reads and locks the authoritative registration policy.
+// A missing row represents the safe defaults, and the coordination advisory
+// lock prevents a concurrent first insert from bypassing this observation.
+func LoadRegistrationTx(ctx context.Context, tx pgx.Tx) (Registration, error) {
+	registration := DefaultRegistration()
+	var raw []byte
+	err := tx.QueryRow(ctx, `
+		SELECT value FROM runtime_settings
+		WHERE key=$1
+		FOR SHARE
+	`, registrationKey).Scan(&raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return registration, nil
+	}
+	if err != nil {
+		return Registration{}, fmt.Errorf("locking registration settings: %w", err)
+	}
+	if err := json.Unmarshal(raw, &registration); err != nil {
+		return Registration{}, fmt.Errorf("decoding stored registration settings: %w", err)
+	}
+	return registration, nil
+}
+
+// RequireRegistrationTx verifies that a request still uses the complete
+// authoritative policy that was validated by the HTTP layer.
+func RequireRegistrationTx(ctx context.Context, tx pgx.Tx, expected Registration) error {
+	current, err := LoadRegistrationTx(ctx, tx)
+	if err != nil {
+		return err
+	}
+	if !sameRegistration(current, expected) {
+		return ErrRegistrationChanged
+	}
+	return nil
+}
+
+func sameRegistration(left, right Registration) bool {
+	return left.Mode == right.Mode &&
+		left.RequireEmailVerification == right.RequireEmailVerification &&
+		slices.Equal(left.AllowedEmailDomains, right.AllowedEmailDomains) &&
+		left.PendingRegistrationTTL == right.PendingRegistrationTTL &&
+		left.InviteDefaultTTL == right.InviteDefaultTTL &&
+		left.InviteDefaultMaxUses == right.InviteDefaultMaxUses
 }
 
 func (m *Manager) store(ctx context.Context, key string, value any, updatedBy string) error {

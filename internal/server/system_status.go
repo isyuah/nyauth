@@ -7,6 +7,7 @@ import (
 
 	"github.com/nyasharp/nyauth/internal/buildinfo"
 	"github.com/nyasharp/nyauth/internal/database"
+	"github.com/nyasharp/nyauth/internal/mailruntime"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
 
@@ -19,6 +20,14 @@ type systemProviderStatus struct {
 	Status           string `json:"status"`
 	LatencyMS        int64  `json:"latency_ms"`
 	SnapshotRevision uint64 `json:"snapshot_revision"`
+}
+
+type systemMailStatus struct {
+	Status       string `json:"status"`
+	Mode         string `json:"mode"`
+	Configured   bool   `json:"configured"`
+	Available    bool   `json:"available"`
+	CircuitState string `json:"circuit_state"`
 }
 
 type systemSchemaStatus struct {
@@ -43,6 +52,7 @@ type systemStatusResponse struct {
 		Redis      systemDependencyStatus `json:"redis"`
 		Providers  systemProviderStatus   `json:"providers"`
 		JWK        systemDependencyStatus `json:"jwk"`
+		Mail       systemMailStatus       `json:"mail"`
 	} `json:"services"`
 	ActiveSigningKey *systemSigningKeyStatus `json:"active_signing_key,omitempty"`
 }
@@ -59,6 +69,7 @@ type systemStatusSources struct {
 	readSchema     func(context.Context) (systemSchemaSnapshot, error)
 	readSigningKey func(context.Context) (*models.JWK, error)
 	providerState  func() (bool, uint64)
+	mailState      func() mailruntime.RuntimeStatus
 }
 
 func (s *Server) handleSystemStatus(w http.ResponseWriter, r *http.Request) {
@@ -82,6 +93,7 @@ func (s *Server) handleSystemStatus(w http.ResponseWriter, r *http.Request) {
 		providerState: func() (bool, uint64) {
 			return s.providerMgr.Ready(), s.providerMgr.SnapshotRevision()
 		},
+		mailState: s.mailRuntimeStatus,
 	})
 	writeJSON(w, http.StatusOK, response)
 }
@@ -141,6 +153,28 @@ func collectSystemStatus(ctx context.Context, rotationInterval time.Duration, so
 		response.Status = "degraded"
 	}
 	response.Services.Providers = systemProviderStatus{Status: providerStatus, LatencyMS: elapsedMilliseconds(started), SnapshotRevision: revision}
+
+	mailStatus := mailruntime.RuntimeStatus{Mode: mailruntime.ModeFallback, CircuitState: mailruntime.CircuitClosed}
+	if sources.mailState != nil {
+		mailStatus = sources.mailState()
+	}
+	componentStatus := "not_configured"
+	switch {
+	case mailStatus.Mode == mailruntime.ModeDisabled:
+		componentStatus = "disabled"
+	case mailStatus.Available:
+		componentStatus = "ok"
+	case mailStatus.Configured && mailStatus.CircuitState == mailruntime.CircuitOpen:
+		componentStatus = "unavailable"
+		response.Status = "degraded"
+	case mailStatus.Configured:
+		componentStatus = "degraded"
+		response.Status = "degraded"
+	}
+	response.Services.Mail = systemMailStatus{
+		Status: componentStatus, Mode: mailStatus.Mode, Configured: mailStatus.Configured,
+		Available: mailStatus.Available, CircuitState: mailStatus.CircuitState,
+	}
 	return response
 }
 

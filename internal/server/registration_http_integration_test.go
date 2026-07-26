@@ -22,6 +22,7 @@ import (
 	"github.com/nyasharp/nyauth/internal/config"
 	"github.com/nyasharp/nyauth/internal/database"
 	"github.com/nyasharp/nyauth/internal/invite"
+	"github.com/nyasharp/nyauth/internal/mailruntime"
 	"github.com/nyasharp/nyauth/internal/session"
 	"github.com/nyasharp/nyauth/internal/settings"
 	"github.com/nyasharp/nyauth/internal/telemetry"
@@ -150,7 +151,7 @@ func registrationHTTPDSNWithSearchPath(t *testing.T, dsn, schemaName string) str
 
 func (testApp *registrationHTTPTestApp) setRegistration(t *testing.T, value settings.Registration) {
 	t.Helper()
-	if err := testApp.app.settingsMgr.SetRegistration(context.Background(), value, "integration-admin"); err != nil {
+	if err := testApp.app.settingsMgr.SetRegistration(context.Background(), value, "integration-admin", true); err != nil {
 		t.Fatalf("set registration settings: %v", err)
 	}
 }
@@ -338,6 +339,157 @@ func TestRegistrationHTTPInfrastructureFailureRollsBackAndReturnsUnavailable(t *
 		if count != 0 {
 			t.Fatalf("%s rows after infrastructure rollback = %d", name, count)
 		}
+	}
+}
+
+func TestRegistrationAvailabilityTracksSharedMailCircuit(t *testing.T) {
+	testApp := newRegistrationHTTPTestApp(t)
+	registrationSettings := settings.DefaultRegistration()
+	registrationSettings.Mode = settings.RegistrationOpen
+	registrationSettings.RequireEmailVerification = true
+	testApp.setRegistration(t, registrationSettings)
+
+	availableResponse := registrationHTTPRequest(testApp.app, http.MethodGet, "/api/registration", "", "", "192.0.2.40:41000")
+	if availableResponse.Code != http.StatusOK {
+		t.Fatalf("available options status=%d body=%s", availableResponse.Code, availableResponse.Body.String())
+	}
+	var available registrationOptionsResponse
+	if err := json.Unmarshal(availableResponse.Body.Bytes(), &available); err != nil {
+		t.Fatalf("decode available registration options: %v", err)
+	}
+	if !available.Available || available.Mode != settings.RegistrationOpen {
+		t.Fatalf("available registration options=%#v", available)
+	}
+
+	source := mailruntime.EffectiveSource{Mode: mailruntime.ModeFallback}
+	for attempt := 0; attempt < mailruntime.TransportFailureLimit; attempt++ {
+		if _, err := testApp.app.mailManager.Store().RecordDeliveryOutcome(context.Background(), mailruntime.DeliveryOutcome{
+			Source: source, Category: mailruntime.ErrorCategoryTransport, Reason: "registration_test_transport_failure",
+		}); err != nil {
+			t.Fatalf("open shared mail circuit attempt %d: %v", attempt+1, err)
+		}
+	}
+	if err := testApp.app.mailManager.Load(context.Background()); err != nil {
+		t.Fatalf("reload open mail circuit: %v", err)
+	}
+
+	unavailableResponse := registrationHTTPRequest(testApp.app, http.MethodGet, "/api/registration", "", "", "192.0.2.40:41001")
+	if unavailableResponse.Code != http.StatusOK {
+		t.Fatalf("unavailable options status=%d body=%s", unavailableResponse.Code, unavailableResponse.Body.String())
+	}
+	var unavailable registrationOptionsResponse
+	if err := json.Unmarshal(unavailableResponse.Body.Bytes(), &unavailable); err != nil {
+		t.Fatalf("decode unavailable registration options: %v", err)
+	}
+	if unavailable.Available {
+		t.Fatalf("registration remained available with open mail circuit: %#v", unavailable)
+	}
+
+	registerResponse := registrationHTTPRequest(
+		testApp.app, http.MethodPost, "/api/register",
+		`{"username":"mail-circuit-user","email":"mail-circuit@example.test","password":"a-valid-password-123"}`,
+		"https://auth.example.test", "192.0.2.40:41002",
+	)
+	if registerResponse.Code != http.StatusServiceUnavailable || registerResponse.Header().Get("Retry-After") != "60" {
+		t.Fatalf("open circuit registration status=%d retry=%q body=%s", registerResponse.Code, registerResponse.Header().Get("Retry-After"), registerResponse.Body.String())
+	}
+	var created int
+	if err := testApp.pool.QueryRow(context.Background(), `SELECT COUNT(*) FROM users WHERE username='mail-circuit-user'`).Scan(&created); err != nil {
+		t.Fatalf("count user after unavailable registration: %v", err)
+	}
+	if created != 0 {
+		t.Fatalf("unavailable registration created %d users", created)
+	}
+}
+
+func TestRegistrationHTTPRejectsStaleLocalPolicyAndMailSnapshots(t *testing.T) {
+	for _, test := range []struct {
+		name       string
+		mutate     func(*testing.T, *registrationHTTPTestApp)
+		body       string
+		retryAfter string
+	}{
+		{
+			name: "registration policy changed on another instance",
+			mutate: func(t *testing.T, testApp *registrationHTTPTestApp) {
+				t.Helper()
+				closed, err := json.Marshal(settings.DefaultRegistration())
+				if err != nil {
+					t.Fatalf("encode closed registration policy: %v", err)
+				}
+				if _, err := testApp.pool.Exec(context.Background(), `
+					UPDATE runtime_settings SET value=$1,updated_at=NOW() WHERE key='registration'
+				`, closed); err != nil {
+					t.Fatalf("change authoritative registration policy: %v", err)
+				}
+			},
+			body: `{"username":"stale-policy","email":"stale-policy@example.test","password":"a-valid-password-123"}`,
+		},
+		{
+			name: "mail state changed on another instance",
+			mutate: func(t *testing.T, testApp *registrationHTTPTestApp) {
+				t.Helper()
+				if _, err := testApp.pool.Exec(context.Background(), `
+					UPDATE mail_runtime_state
+					SET mode='disabled',active_version_id=NULL,previous_version_id=NULL,
+					    revision=revision+1,updated_at=NOW()
+					WHERE singleton=TRUE
+				`); err != nil {
+					t.Fatalf("change authoritative mail state: %v", err)
+				}
+			},
+			body: `{"username":"stale-mail","email":"stale-mail@example.test","password":"a-valid-password-123"}`,
+		},
+		{
+			name: "mail circuit opened on another instance",
+			mutate: func(t *testing.T, testApp *registrationHTTPTestApp) {
+				t.Helper()
+				if local := testApp.app.mailManager.Status(); local.CircuitState != mailruntime.CircuitClosed {
+					t.Fatalf("mail snapshot was not closed before stale-circuit test: %#v", local)
+				}
+				source := mailruntime.EffectiveSource{Mode: mailruntime.ModeFallback}
+				for attempt := 0; attempt < mailruntime.TransportFailureLimit; attempt++ {
+					if _, err := testApp.app.mailManager.Store().RecordDeliveryOutcome(context.Background(), mailruntime.DeliveryOutcome{
+						Source: source, Category: mailruntime.ErrorCategoryTransport, Reason: "stale_registration_test_transport_failure",
+					}); err != nil {
+						t.Fatalf("open authoritative mail circuit attempt %d: %v", attempt+1, err)
+					}
+				}
+				if local := testApp.app.mailManager.Status(); local.CircuitState != mailruntime.CircuitClosed {
+					t.Fatalf("database circuit mutation unexpectedly refreshed local snapshot: %#v", local)
+				}
+			},
+			body:       `{"username":"stale-circuit","email":"stale-circuit@example.test","password":"a-valid-password-123"}`,
+			retryAfter: "60",
+		},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			testApp := newRegistrationHTTPTestApp(t)
+			open := settings.DefaultRegistration()
+			open.Mode = settings.RegistrationOpen
+			testApp.setRegistration(t, open)
+			test.mutate(t, testApp)
+
+			response := registrationHTTPRequest(
+				testApp.app, http.MethodPost, "/api/register", test.body,
+				"https://auth.example.test", "192.0.2.70:42000",
+			)
+			if response.Code != http.StatusServiceUnavailable {
+				t.Fatalf("stale snapshot registration status=%d body=%s", response.Code, response.Body.String())
+			}
+			if retryAfter := response.Header().Get("Retry-After"); retryAfter != test.retryAfter {
+				t.Fatalf("stale snapshot registration retry-after=%q want=%q", retryAfter, test.retryAfter)
+			}
+			var created int
+			if err := testApp.pool.QueryRow(context.Background(), `
+				SELECT COUNT(*) FROM users WHERE username IN ('stale-policy','stale-mail','stale-circuit')
+			`).Scan(&created); err != nil {
+				t.Fatalf("count users after stale snapshot registration: %v", err)
+			}
+			if created != 0 {
+				t.Fatalf("stale snapshot registration created %d users", created)
+			}
+		})
 	}
 }
 

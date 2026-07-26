@@ -16,6 +16,8 @@ import (
 	"github.com/nyasharp/nyauth/internal/database"
 	"github.com/nyasharp/nyauth/internal/invite"
 	"github.com/nyasharp/nyauth/internal/registration"
+	"github.com/nyasharp/nyauth/internal/runtimecoord"
+	"github.com/nyasharp/nyauth/internal/settings"
 	"github.com/nyasharp/nyauth/internal/user"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
@@ -124,17 +126,31 @@ func createPendingRegistration(
 	}
 	if _, err := user.NewStore(schema.pool).CreateRegistration(context.Background(), u, user.RegistrationCommitOptions{
 		InviteCodeHash: inviteHash, ExpiresAt: expiresAt, Now: createdAt,
-		Mode: settingsModeForInvite(inviteHash), Verification: prepared,
+		Registration: configureRegistrationPolicy(t, schema, inviteHash),
+		MailGate:     runtimecoord.MailDeliveryGate{Mode: runtimecoord.MailModeFallback}, Verification: prepared,
 	}); err != nil {
 		t.Fatalf("create pending registration: %v", err)
 	}
 }
 
-func settingsModeForInvite(inviteHash *string) string {
+func registrationPolicyForInvite(inviteHash *string) settings.Registration {
+	policy := settings.DefaultRegistration()
 	if inviteHash != nil {
-		return "invite_only"
+		policy.Mode = settings.RegistrationInviteOnly
+		return policy
 	}
-	return "open"
+	policy.Mode = settings.RegistrationOpen
+	return policy
+}
+
+func configureRegistrationPolicy(t *testing.T, schema *postgresTestSchema, inviteHash *string) settings.Registration {
+	t.Helper()
+	policy := registrationPolicyForInvite(inviteHash)
+	manager := settings.NewManager(schema.pool, settings.Branding{})
+	if err := manager.SetRegistration(context.Background(), policy, "registration-integration", true); err != nil {
+		t.Fatalf("configure registration policy: %v", err)
+	}
+	return policy
 }
 
 func registrationInviteByID(t *testing.T, schema *postgresTestSchema, id uuid.UUID, now time.Time) models.Invite {
@@ -174,6 +190,7 @@ func TestRegistrationInviteFinalCapacityIsSerialized(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	inviteID, codeHash := createRegistrationTestInvite(t, schema, nil, 1, now.Add(-time.Minute), now.Add(time.Hour))
 	store := user.NewStore(schema.pool)
+	policy := configureRegistrationPolicy(t, schema, &codeHash)
 
 	start := make(chan struct{})
 	errorsByWorker := make(chan error, 2)
@@ -187,7 +204,7 @@ func TestRegistrationInviteFinalCapacityIsSerialized(t *testing.T) {
 			u := registrationTestUser(fmt.Sprintf("final-slot-%d-%s", worker, uuid.NewString()[:8]), models.UserStatusActive)
 			_, err := store.CreateRegistration(context.Background(), u, user.RegistrationCommitOptions{
 				InviteCodeHash: &codeHash, ExpiresAt: now.Add(72 * time.Hour), Now: now,
-				Mode: "invite_only",
+				Registration: policy, MailGate: runtimecoord.MailDeliveryGate{Mode: runtimecoord.MailModeFallback},
 			})
 			errorsByWorker <- err
 		}()
@@ -223,10 +240,12 @@ func TestRegistrationDuplicateUsernameRollsBackInviteReservation(t *testing.T) {
 	insertRegistrationTestUser(t, schema, existing)
 	inviteID, codeHash := createRegistrationTestInvite(t, schema, nil, 1, now.Add(-time.Minute), now.Add(time.Hour))
 	store := user.NewStore(schema.pool)
+	policy := configureRegistrationPolicy(t, schema, &codeHash)
 
 	duplicate := registrationTestUser(existing.Username, models.UserStatusActive)
 	if _, err := store.CreateRegistration(context.Background(), duplicate, user.RegistrationCommitOptions{
-		InviteCodeHash: &codeHash, ExpiresAt: now.Add(72 * time.Hour), Now: now, Mode: "invite_only",
+		InviteCodeHash: &codeHash, ExpiresAt: now.Add(72 * time.Hour), Now: now,
+		Registration: policy, MailGate: runtimecoord.MailDeliveryGate{Mode: runtimecoord.MailModeFallback},
 	}); err == nil {
 		t.Fatal("duplicate username registration unexpectedly succeeded")
 	}
@@ -237,7 +256,8 @@ func TestRegistrationDuplicateUsernameRollsBackInviteReservation(t *testing.T) {
 
 	retry := registrationTestUser("duplicate-retry", models.UserStatusActive)
 	if _, err := store.CreateRegistration(context.Background(), retry, user.RegistrationCommitOptions{
-		InviteCodeHash: &codeHash, ExpiresAt: now.Add(72 * time.Hour), Now: now, Mode: "invite_only",
+		InviteCodeHash: &codeHash, ExpiresAt: now.Add(72 * time.Hour), Now: now,
+		Registration: policy, MailGate: runtimecoord.MailDeliveryGate{Mode: runtimecoord.MailModeFallback},
 	}); err != nil {
 		t.Fatalf("retry after duplicate rollback: %v", err)
 	}
@@ -263,9 +283,11 @@ func TestRegistrationVerificationArtifactFailureRollsBackEverything(t *testing.T
 			if test.breakEmail {
 				prepared.Email.RecipientHash = []byte{1}
 			}
+			policy := configureRegistrationPolicy(t, schema, nil)
 
 			if _, err := user.NewStore(schema.pool).CreateRegistration(context.Background(), u, user.RegistrationCommitOptions{
-				ExpiresAt: now.Add(72 * time.Hour), Now: now, Mode: "open", Verification: prepared,
+				ExpiresAt: now.Add(72 * time.Hour), Now: now, Registration: policy,
+				MailGate: runtimecoord.MailDeliveryGate{Mode: runtimecoord.MailModeFallback}, Verification: prepared,
 			}); err == nil {
 				t.Fatal("invalid verification artifacts unexpectedly committed")
 			}
@@ -371,11 +393,13 @@ func TestRegistrationAdministrativeLifecycleAndCleanup(t *testing.T) {
 	inviteID, codeHash := createRegistrationTestInvite(t, schema, &creator.ID, 3, now.Add(-3*time.Hour), now.Add(24*time.Hour))
 	store := user.NewStore(schema.pool)
 	service := user.NewService(store)
+	policy := configureRegistrationPolicy(t, schema, &codeHash)
 
 	deletedPending := registrationTestUser("pending-admin-delete", models.UserStatusPending)
 	if _, err := store.CreateRegistration(context.Background(), deletedPending, user.RegistrationCommitOptions{
 		InviteCodeHash: &codeHash, ExpiresAt: now.Add(4 * time.Hour), Now: now,
-		Mode: "invite_only", Verification: validPreparedVerification(deletedPending, now, now.Add(4*time.Hour)),
+		Registration: policy, MailGate: runtimecoord.MailDeliveryGate{Mode: runtimecoord.MailModeFallback},
+		Verification: validPreparedVerification(deletedPending, now, now.Add(4*time.Hour)),
 	}); err != nil {
 		t.Fatalf("create pending deletion registration: %v", err)
 	}
@@ -397,7 +421,8 @@ func TestRegistrationAdministrativeLifecycleAndCleanup(t *testing.T) {
 	createdAt := now.Add(-2 * time.Hour)
 	if _, err := store.CreateRegistration(context.Background(), activated, user.RegistrationCommitOptions{
 		InviteCodeHash: &codeHash, ExpiresAt: now.Add(-time.Hour), Now: createdAt,
-		Mode: "invite_only", Verification: validPreparedVerification(activated, createdAt, now.Add(-time.Hour)),
+		Registration: policy, MailGate: runtimecoord.MailDeliveryGate{Mode: runtimecoord.MailModeFallback},
+		Verification: validPreparedVerification(activated, createdAt, now.Add(-time.Hour)),
 	}); err != nil {
 		t.Fatalf("create expired pending activation registration: %v", err)
 	}
@@ -426,7 +451,8 @@ func TestRegistrationAdministrativeLifecycleAndCleanup(t *testing.T) {
 	expired := registrationTestUser("pending-cleanup", models.UserStatusPending)
 	if _, err := store.CreateRegistration(context.Background(), expired, user.RegistrationCommitOptions{
 		InviteCodeHash: &codeHash, ExpiresAt: now.Add(-30 * time.Minute), Now: createdAt,
-		Mode: "invite_only", Verification: validPreparedVerification(expired, createdAt, now.Add(-30*time.Minute)),
+		Registration: policy, MailGate: runtimecoord.MailDeliveryGate{Mode: runtimecoord.MailModeFallback},
+		Verification: validPreparedVerification(expired, createdAt, now.Add(-30*time.Minute)),
 	}); err != nil {
 		t.Fatalf("create cleanup registration: %v", err)
 	}

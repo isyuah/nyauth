@@ -14,6 +14,8 @@ import (
 	"github.com/nyasharp/nyauth/internal/crypto"
 	"github.com/nyasharp/nyauth/internal/passwordpolicy"
 	"github.com/nyasharp/nyauth/internal/registration"
+	"github.com/nyasharp/nyauth/internal/runtimecoord"
+	"github.com/nyasharp/nyauth/internal/settings"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
 
@@ -53,7 +55,8 @@ type RegistrationCommitOptions struct {
 	InviteCodeHash *string
 	ExpiresAt      time.Time
 	Now            time.Time
-	Mode           string
+	Registration   settings.Registration
+	MailGate       runtimecoord.MailDeliveryGate
 	Audit          registration.AuditContext
 	Verification   *account.PreparedActionEmail
 }
@@ -63,7 +66,8 @@ type RegisterOptions struct {
 	InviteCodeHash      *string
 	ExpiresAt           time.Time
 	Now                 time.Time
-	Mode                string
+	Registration        settings.Registration
+	MailGate            runtimecoord.MailDeliveryGate
 	Audit               registration.AuditContext
 	PrepareVerification func(*models.User) (*account.PreparedActionEmail, error)
 }
@@ -201,7 +205,8 @@ func (s *Service) Register(ctx context.Context, req models.RegisterRequest, opti
 		InviteCodeHash: options.InviteCodeHash,
 		ExpiresAt:      options.ExpiresAt,
 		Now:            options.Now,
-		Mode:           options.Mode,
+		Registration:   options.Registration,
+		MailGate:       options.MailGate,
 		Audit:          options.Audit,
 		Verification:   verification,
 	})

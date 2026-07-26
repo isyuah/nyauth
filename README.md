@@ -27,6 +27,7 @@
 - 管理后台：用户、客户端、Provider、审计与统计
 - 账户安全中心：设备会话、OAuth 授权、近期重新认证、邮箱验证与密码恢复
 - 自助注册：关闭 / 邀请制 / 开放三种模式，域名白名单与邀请码均为运行时设置
+- 动态邮件：数据库版本化 SMTP 配置、真实测试邮件、免重启激活/回滚、共享熔断
 - 运维：严格 readiness、JSON 日志、内部 Prometheus、可选 OTLP 与审计 outbox
 - 集成方式：标准 OAuth/OIDC Discovery、成熟语言库与 BFF 会话模式
 
@@ -105,6 +106,8 @@ go run ./cmd/nyauth serve -config config.yaml
 
 配置文件采用严格解码，未知字段（包括已删除的旧 `providers` 配置）会直接导致启动失败。环境变量统一使用 `NYAUTH_` 前缀和下划线层级，例如 `server.trusted_proxy_cidrs` 对应 `NYAUTH_SERVER_TRUSTED_PROXY_CIDRS`。数据库 DSN、Redis 密码、master key、bootstrap 管理员密码、SMTP 密码和 OTLP Authorization 均支持 `*_FILE`；同一项不能同时设置直接值与文件值。
 
+SMTP 的运行主配置保存在 PostgreSQL，可在服务运行期间按“候选 → 真实测试邮件 → 激活”流程修改，无需重启。`NYAUTH_MAIL_*` 与 SMTP password file 仅作为数据库尚未明确激活或禁用配置时的首次 fallback/bootstrap；完整的本地 PowerShell 操作、远程 `curl` 操作、回滚与熔断语义见 [动态 SMTP 配置与故障处理](docs/operations/runtime-mail.md)。Nyauth 只发信，不读取邮箱，因此无需 IMAP。
+
 ## 生产部署
 
 生产环境由外部反向代理终止 TLS。只有配置的可信代理 CIDR 可以提供转发头。
@@ -144,7 +147,7 @@ docker compose --env-file .env.production -f docker-compose.prod.yml up -d
 
 Prometheus 指标默认由仅限内部网络访问的 `/metrics` 提供。可选 OTLP HTTP 导出使用 `NYAUTH_TELEMETRY_OTLP_ENABLED`、`NYAUTH_TELEMETRY_OTLP_ENDPOINT`、`NYAUTH_TELEMETRY_OTLP_EXPORT_INTERVAL` 和 `NYAUTH_TELEMETRY_OTLP_TIMEOUT`；collector Authorization 建议通过 `NYAUTH_TELEMETRY_OTLP_AUTHORIZATION_FILE` 注入，生产 endpoint 必须使用 HTTPS。
 
-Nyauth 只发送邮件，不读取邮箱，因此不使用 IMAP。在 Phase S 动态 SMTP 配置上线前，SMTP 使用启动期 `NYAUTH_MAIL_*` 环境变量，修改后需要重启对应 `serve` 实例。单机 Compose 使用 `docker/compose.prod.smtp-password-file.yml`，HA Compose 使用 `docker/compose.ha.smtp-password-file.yml`，把 `NYAUTH_MAIL_SMTP_PASSWORD_FILE` 指向宿主机 secret 文件后与基础 Compose 一起加载。常用变量包括 `NYAUTH_MAIL_ENABLED`、`NYAUTH_MAIL_FROM_ADDRESS`、`NYAUTH_MAIL_PUBLIC_BASE_URL`、`NYAUTH_MAIL_SMTP_HOST`、`NYAUTH_MAIL_SMTP_PORT`、`NYAUTH_MAIL_SMTP_USERNAME` 和 `NYAUTH_MAIL_SMTP_TLS_MODE`；生产环境禁止明文 SMTP，并要求公开邮件链接使用 HTTPS。
+Nyauth 只通过 SMTP 发送邮件，不读取邮箱，也不需要 IMAP。生产 SMTP 应在服务启动后写入数据库：管理员先保存不可变候选，向指定地址实际发送测试邮件，再在测试成功后的十分钟内激活；后续可免重启切换候选、回滚上一数据库版本或在关闭注册后禁用。所有配置操作要求管理员最近十分钟内重新认证，密码使用 master key envelope encryption，API 只返回 `password_configured`。`NYAUTH_MAIL_*`、单机 `docker/compose.prod.smtp-password-file.yml` 和 HA `docker/compose.ha.smtp-password-file.yml` 仅保留为首次 fallback/bootstrap。详见 [动态 SMTP 配置与故障处理](docs/operations/runtime-mail.md)。
 
 ## 第一方会话 API
 
@@ -220,10 +223,10 @@ OAuth 客户端支持 `post_logout_redirect_uris`。`/end_session` 仅允许跳�
 | POST | `/api/email/verify` | 原子确认邮箱验证 |
 | POST | `/api/email/verification/resend` | 不可枚举地重发仍有效的待验证注册邮件，不延长截止时间 |
 | POST | `/api/email/change/confirm` | 原子确认邮箱变更 |
-| GET | `/api/registration` | 公开注册配置（模式、是否需验证、域名限制） |
+| GET | `/api/registration` | 公开注册配置（模式、是否需验证、域名限制与当前 `available`） |
 | POST | `/api/register` | 自助注册（closed/invite_only/open 由运行时设置控制） |
 
-自助注册默认关闭。开启需先启用邮件子系统；邀请制模式下用户、注册生命周期、邀请码预占、验证 Token、邮件 outbox 和审计事件在同一事务内提交，失败会整体回滚。邀请码在邮箱验证后才计为已使用；删除或清理待验证用户会释放预占，删除已完成用户不会返还次数。
+自助注册默认关闭。开启前必须存在已配置的邮件能力；邀请制模式下用户、注册生命周期、邀请码预占、验证 Token、邮件 outbox 和审计事件在同一事务内提交，失败会整体回滚。邀请码在邮箱验证后才计为已使用；删除或清理待验证用户会释放预占，删除已完成用户不会返还次数。SMTP 未配置、被禁用或熔断打开时，公开配置返回 `available=false`，注册请求在创建用户前返回 `503`；熔断状态同时返回 `Retry-After: 60`。
 
 `pending_registration_ttl` 是可热更新的注册设置，默认 `72h`、允许 `1h` 至 `720h`。创建注册时会保存绝对截止时间，后续修改设置或重发验证邮件都不会改变既有截止时间。注册、邮箱验证、邀请码预占/消耗/释放及注册过期均写入审计 outbox。
 
@@ -235,7 +238,7 @@ OAuth 客户端支持 `post_logout_redirect_uris`。`/end_session` 仅允许跳�
 | GET | `/readyz` | 检查 schema、PostgreSQL、Redis、活动 JWK 与 Provider 快照 |
 | GET | `/metrics` | 仅允许内部或可信来源访问的 Prometheus 指标 |
 
-旧 `/health` 已删除。`/readyz` 失败返回 503，响应不会包含数据库地址、原始依赖错误或 secret。
+旧 `/health` 已删除。`/readyz` 失败返回 503，响应不会包含数据库地址、原始依赖错误或 secret。SMTP 故障不进入 `/readyz`，避免邮件降级让登录与 OAuth/OIDC 整体下线；管理员通过 `/api/admin/system/status` 的 `services.mail` 和邮件设置状态查看 `degraded/unavailable` 与熔断信息。
 
 ## 外部身份
 
@@ -260,6 +263,7 @@ Provider 不再从 YAML 或环境变量静态加载，只能由管理员写入�
 - `GET /api/admin/users/{id}/sessions`、`DELETE /api/admin/users/{id}/sessions`：查看或撤销用户会话。
 - `GET/PUT /api/admin/settings/registration`：注册模式、邮箱验证要求、域名白名单、待验证期限与邀请默认值（运行时设置，免重启生效；修改要求近期重新认证）。
 - `GET/POST /api/admin/invites`、`DELETE /api/admin/invites/{id}`：邀请码管理；明文 code 仅创建响应返回一次，库中只存哈希；列表分别返回已使用与待验证预占数。创建要求近期重新认证，紧急吊销不要求。
+- `GET /api/admin/settings/mail`、`PUT /api/admin/settings/mail/candidate`，以及邮件设置下的 `candidate/test`、`activate`、`rollback`、`disable` POST：数据库动态 SMTP；候选必须实际测试成功并在十分钟内激活，所有读取和变更均要求近期重新认证，写操作还受 CSRF、限流和审计保护。
 
 未来只有版本化 `/api/v1` 会作为自动化管理契约；在 Service Account、细粒度 scope、audience、幂等键和 OpenAPI 稳定前不发布专有 Management SDK。
 

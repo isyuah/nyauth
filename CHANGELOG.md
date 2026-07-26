@@ -10,7 +10,7 @@
 ### 新增
 
 - 账户安全中心：设备会话管理、OAuth 授权管理、近期重新认证（密码 / 外部 Provider）、邮箱验证与变更、密码找回；全部邮件操作使用一次性 token，且只在用户主动确认后消费
-- 邮件子系统：SMTP 发送、email outbox、安全通知；仅通过 `NYAUTH_MAIL_*` 环境变量配置（配置文件中的 `mail.*` 会被拒绝）
+- 邮件子系统：SMTP 发送、email outbox 与安全通知；新增 PostgreSQL 不可变候选版本、真实测试邮件、十分钟激活门槛、免重启切换/回滚/禁用、密码 envelope encryption、跨实例同步和 HA 共享熔断；outbox 领取会在同一事务校验活动 sender，永久收件人/消息拒绝进入不重试的 `rejected` 终态并清除密文；`NYAUTH_MAIL_*` 与 password file 仅作为首次 fallback/bootstrap
 - 运维能力：`maintenance` 子命令（审计月分区预建、保留策略、outbox 清理）、`verify-recovery` 只读恢复校验、严格 readiness、内部 Prometheus `/metrics`、可选 OTLP 指标导出
 - 审计：月分区表、审计 outbox、审计导出接口
 - 数据库双角色：迁移账号执行 DDL，运行时账号最小权限；`serve` 不再执行任何 DDL
@@ -18,6 +18,7 @@
 - 运行时设置：`runtime_settings` 表与跨实例同步（LISTEN/NOTIFY + 定时对账）；首个消费者为品牌设置（站点名称 / Logo URL），管理后台"系统状态"页可编辑，免重启即时生效
 - 每客户端访问策略：`open`（默认）/ `admins_only` / `allowlist`（用户白名单）；授权端点拒绝名单外用户（`access_denied` + 审计），refresh 与 access token 校验时复查策略——被移出名单的用户令牌在下次使用时即失效；机器流程（client_credentials）不受限；管理后台可编辑策略与访问名单
 - 自助注册与邀请制：注册模式（`closed` 默认 / `invite_only` / `open`）、邮箱验证要求、域名白名单、`pending_registration_ttl` 与邀请默认值均为跨实例运行时设置；用户、注册记录、邀请码预占、验证 Token、邮件 outbox 和审计事件同事务提交；邀请码在验证后消耗，删除或自动清理 pending 用户会释放预占；公开重发接口不可枚举且不延长截止时间；服务启动后及每小时执行 HA 安全的有界清理，`maintenance` 复用同一逻辑兜底；创建邀请和修改注册策略要求近期重新认证，吊销不要求；新增 `invite.reserved`、`invite.consumed`、`invite.reservation_released` 与 `registration.expired` 审计事件
+- 邮件运行状态与注册联动：`GET /api/registration` 返回 `available`；SMTP 未配置、禁用或熔断时注册在创建用户前返回 `503`，熔断附带 `Retry-After: 60`；注册事务、注册策略变更与 SMTP 禁用通过 PostgreSQL 共享/独占协调锁线性化，防止多实例旧快照越过安全约束；SMTP 降级显示在管理员系统状态中但不影响 `/readyz`、登录或 OAuth/OIDC
 - 高可用与备份恢复文档、OAuth/OIDC 集成指南（`docs/`）
 
 ### 变更（破坏性）

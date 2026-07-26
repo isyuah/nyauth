@@ -13,6 +13,8 @@ import (
 	"github.com/nyasharp/nyauth/internal/account"
 	"github.com/nyasharp/nyauth/internal/audit"
 	"github.com/nyasharp/nyauth/internal/registration"
+	"github.com/nyasharp/nyauth/internal/runtimecoord"
+	"github.com/nyasharp/nyauth/internal/settings"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
 
@@ -100,6 +102,15 @@ func (s *Store) CreateRegistration(ctx context.Context, u *models.User, options 
 		return nil, fmt.Errorf("starting registration: %w", err)
 	}
 	defer tx.Rollback(ctx)
+	if err := runtimecoord.LockRegistrationShared(ctx, tx); err != nil {
+		return nil, err
+	}
+	if err := settings.RequireRegistrationTx(ctx, tx, options.Registration); err != nil {
+		return nil, err
+	}
+	if err := runtimecoord.RequireMailDeliveryGate(ctx, tx, options.MailGate); err != nil {
+		return nil, err
+	}
 
 	var inviteID *uuid.UUID
 	if options.InviteCodeHash != nil {
@@ -129,7 +140,7 @@ func (s *Store) CreateRegistration(ctx context.Context, u *models.User, options 
 
 	actorID := u.ID
 	details := map[string]any{
-		"mode":                  options.Mode,
+		"mode":                  options.Registration.Mode,
 		"registration_id":       registrationID.String(),
 		"verification_required": u.Status == models.UserStatusPending,
 	}

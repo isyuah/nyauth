@@ -160,3 +160,31 @@ func TestDescribeRegistrationAdministrationMutations(t *testing.T) {
 		})
 	}
 }
+
+func TestDescribeMailAdministrationMutations(t *testing.T) {
+	actor := &models.User{ID: uuid.New(), Username: "admin"}
+	tests := []struct {
+		method, path, event, targetType, targetID string
+	}{
+		{http.MethodPut, "/api/admin/settings/mail/candidate", models.AuditMailSettingsSaved, "mail_config", ""},
+		{http.MethodPost, "/api/admin/settings/mail/candidate/test", models.AuditMailSettingsTested, "mail_config", ""},
+		{http.MethodPost, "/api/admin/settings/mail/activate", models.AuditMailSettingsActivated, "mail_config", ""},
+		{http.MethodPost, "/api/admin/settings/mail/rollback", models.AuditMailSettingsRolledBack, "mail_runtime", "singleton"},
+		{http.MethodPost, "/api/admin/settings/mail/disable", models.AuditMailSettingsDisabled, "mail_runtime", "singleton"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.method+" "+test.path, func(t *testing.T) {
+			request := httptest.NewRequest(test.method, test.path, nil)
+			descriptor, ok := describeMutation(request, actor)
+			if !ok {
+				t.Fatal("mail administration mutation was not described")
+			}
+			if descriptor.event != test.event || descriptor.targetType != test.targetType ||
+				descriptor.targetID != test.targetID || descriptor.riskLevel != "high" ||
+				!descriptor.successAlreadyAudited {
+				t.Fatalf("unexpected descriptor: %#v", descriptor)
+			}
+		})
+	}
+}

@@ -10,7 +10,9 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/nyasharp/nyauth/internal/account"
 	"github.com/nyasharp/nyauth/internal/invite"
+	"github.com/nyasharp/nyauth/internal/mailruntime"
 	"github.com/nyasharp/nyauth/internal/registration"
+	"github.com/nyasharp/nyauth/internal/runtimecoord"
 	"github.com/nyasharp/nyauth/internal/settings"
 	"github.com/nyasharp/nyauth/internal/user"
 	"github.com/nyasharp/nyauth/pkg/models"
@@ -27,6 +29,7 @@ const (
 )
 
 type registrationOptionsResponse struct {
+	Available                bool     `json:"available"`
 	Mode                     string   `json:"mode"`
 	RequireEmailVerification bool     `json:"require_email_verification"`
 	AllowedEmailDomains      []string `json:"allowed_email_domains"`
@@ -49,6 +52,7 @@ func (s *Server) handleRegistrationOptions(w http.ResponseWriter, r *http.Reques
 		domains = []string{}
 	}
 	writeJSON(w, http.StatusOK, registrationOptionsResponse{
+		Available:                reg.Mode != settings.RegistrationClosed && s.mailRuntimeStatus().Available,
 		Mode:                     reg.Mode,
 		RequireEmailVerification: registrationVerificationRequired(reg),
 		AllowedEmailDomains:      domains,
@@ -91,6 +95,14 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	case settings.RegistrationInviteOnly, settings.RegistrationOpen:
 		// Continue below using the explicit supported mode.
 	default:
+		writeAPIError(w, http.StatusServiceUnavailable, "registration is temporarily unavailable")
+		return
+	}
+	mailGate, mailStatus, mailAvailable := s.registrationMailState()
+	if !mailAvailable {
+		if mailStatus.CircuitState == mailruntime.CircuitOpen {
+			w.Header().Set("Retry-After", "60")
+		}
 		writeAPIError(w, http.StatusServiceUnavailable, "registration is temporarily unavailable")
 		return
 	}
@@ -155,7 +167,8 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		InviteCodeHash:      inviteCodeHash,
 		ExpiresAt:           verificationExpiresAt,
 		Now:                 now,
-		Mode:                reg.Mode,
+		Registration:        reg,
+		MailGate:            mailGate,
 		Audit:               registrationAuditContext(r),
 	}
 	if verificationRequired {
@@ -174,6 +187,10 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 			writeAPIError(w, http.StatusBadRequest, "invalid or expired invite code")
 		case isUniqueViolationError(err):
 			writeAPIError(w, http.StatusConflict, "username or email is already taken")
+		case errors.Is(err, runtimecoord.ErrMailCircuitOpen):
+			w.Header().Set("Retry-After", "60")
+			slog.WarnContext(r.Context(), "mail circuit opened while committing self-registration")
+			writeAPIError(w, http.StatusServiceUnavailable, "registration temporarily unavailable")
 		default:
 			slog.ErrorContext(r.Context(), "self-registration failed", "error", err)
 			writeAPIError(w, http.StatusServiceUnavailable, "registration temporarily unavailable")
@@ -215,11 +232,28 @@ func (s *Server) handleUpdateRegistrationSettings(w http.ResponseWriter, r *http
 		writeAPIError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := s.settingsMgr.SetRegistration(r.Context(), validated, current.Username); err != nil {
+	fallbackConfigured := s.mailManager != nil && s.mailManager.FallbackConfigured()
+	if err := s.settingsMgr.SetRegistration(r.Context(), validated, current.Username, fallbackConfigured); err != nil {
+		if errors.Is(err, settings.ErrMailConfigurationNeeded) {
+			writeAPIError(w, http.StatusConflict, "mail configuration changed; reload and try again")
+			return
+		}
 		writeAPIError(w, http.StatusInternalServerError, "failed to store registration settings")
 		return
 	}
 	writeJSON(w, http.StatusOK, validated)
+}
+
+func (s *Server) registrationMailState() (runtimecoord.MailDeliveryGate, mailruntime.RuntimeStatus, bool) {
+	if s.mailManager != nil {
+		return s.mailManager.RegistrationDeliveryState()
+	}
+	configured := s.accountService != nil
+	status := mailruntime.RuntimeStatus{
+		Mode: mailruntime.ModeFallback, Configured: configured, Available: configured,
+		CircuitState: mailruntime.CircuitClosed,
+	}
+	return runtimecoord.MailDeliveryGate{Mode: runtimecoord.MailModeFallback}, status, configured
 }
 
 func (s *Server) validateRegistrationSettings(request settings.Registration) (settings.Registration, error) {
@@ -230,8 +264,8 @@ func (s *Server) validateRegistrationSettings(request settings.Registration) (se
 		// Open registration without verified emails invites abuse.
 		request.RequireEmailVerification = true
 	}
-	if request.Mode != settings.RegistrationClosed && (!s.cfg.Mail.Enabled || s.accountService == nil) {
-		return settings.Registration{}, errors.New("self-registration requires the mail subsystem (NYAUTH_MAIL_*)")
+	if request.Mode != settings.RegistrationClosed && !s.mailRuntimeStatus().Configured {
+		return settings.Registration{}, errors.New("self-registration requires an active mail configuration")
 	}
 	if len(request.AllowedEmailDomains) > maxAllowedDomains {
 		return settings.Registration{}, errors.New("too many allowed email domains")

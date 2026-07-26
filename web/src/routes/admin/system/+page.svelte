@@ -2,13 +2,14 @@
   import { onMount } from 'svelte';
   import { api, isRecentAuthenticationError, type RegistrationMode, type RegistrationSettings, type SystemStatus } from '$lib/api';
   import { brandingStore, consumeProviderAuthError } from '$lib/stores';
+  import MailSettingsPanel from '$lib/components/admin/MailSettingsPanel.svelte';
   import ReauthenticationDialog from '$lib/components/account/ReauthenticationDialog.svelte';
   import PageHeader from '$lib/components/layout/PageHeader.svelte';
   import ResourceState from '$lib/components/ui/ResourceState.svelte';
   import StatusBadge from '$lib/components/data-display/StatusBadge.svelte';
   import Button from '$lib/components/ui/Button.svelte';
   import Input from '$lib/components/ui/Input.svelte';
-  import { Database, KeyRound, Network, Palette, Server, UserPlus } from 'lucide-svelte';
+  import { Database, KeyRound, Mail, Network, Palette, Server, UserPlus } from 'lucide-svelte';
 
   let systemStatus = $state<SystemStatus | null>(null);
   let loading = $state(true);
@@ -192,7 +193,7 @@
 
 <svelte:head><title>系统状态 - Nya</title></svelte:head>
 
-<PageHeader title="系统状态" description="查看当前版本、数据库基线与认证服务依赖的只读运行状态" />
+<PageHeader title="系统状态" description="查看运行状态，并管理无需重启即可生效的受保护配置" />
 
 <section class="mb-4 rounded-nya-card border border-nya-border bg-nya-surface p-5 shadow-nya-card">
   <div class="mb-4 flex items-center gap-2">
@@ -211,12 +212,14 @@
   </form>
 </section>
 
+<MailSettingsPanel registrationMode={regLoaded ? regMode : null} onchanged={loadSystemStatus} />
+
 <section class="mb-4 rounded-nya-card border border-nya-border bg-nya-surface p-5 shadow-nya-card">
   <div class="mb-4 flex items-center gap-2">
     <UserPlus size={18} class="text-nya-primary" />
     <h2 class="text-card-title text-nya-text-primary">注册设置</h2>
   </div>
-  <p class="mb-4 text-body text-nya-text-secondary">控制自助注册的开关与邀请默认值，保存后免重启即时生效。开启注册要求邮件子系统（NYAUTH_MAIL_*）已启用。</p>
+  <p class="mb-4 text-body text-nya-text-secondary">控制自助注册的开关与邀请默认值，保存后免重启即时生效。开启注册要求上方 SMTP 子系统已配置。</p>
   {#if regLoadError}
     <p class="rounded-nya-sm bg-nya-danger-soft px-3 py-2 text-small text-nya-danger" role="alert">{regLoadError}</p>
   {:else if !regLoaded}
@@ -354,6 +357,26 @@
                 <div>
                   <dt class="text-nya-text-tertiary">快照修订</dt>
                   <dd class="mt-1 font-mono text-nya-text-primary">{systemStatus.services.providers.snapshot_revision}</dd>
+                </div>
+              </dl>
+            </article>
+
+            <article class="rounded-nya-md border border-nya-border p-4">
+              <div class="flex items-center justify-between gap-3">
+                <div class="flex items-center gap-2">
+                  <Mail size={16} class="text-nya-primary" />
+                  <h3 class="text-body-medium font-semibold text-nya-text-primary">SMTP 邮件</h3>
+                </div>
+                <StatusBadge status={systemStatus.services.mail.status} />
+              </div>
+              <dl class="mt-3 grid grid-cols-2 gap-3 text-small">
+                <div>
+                  <dt class="text-nya-text-tertiary">运行模式</dt>
+                  <dd class="mt-1 text-nya-text-primary">{systemStatus.services.mail.mode === 'fallback' ? '环境回退' : systemStatus.services.mail.mode === 'active' ? '动态配置' : '已禁用'}</dd>
+                </div>
+                <div>
+                  <dt class="text-nya-text-tertiary">熔断状态</dt>
+                  <dd class="mt-1 text-nya-text-primary">{systemStatus.services.mail.circuit_state === 'open' ? '已打开' : '正常'}</dd>
                 </div>
               </dl>
             </article>

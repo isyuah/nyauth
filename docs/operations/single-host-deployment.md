@@ -137,9 +137,11 @@ curl --fail --silent --show-error https://auth.example.com/.well-known/openid-co
 - 日志中的客户端 IP 来自受信转发链，公网伪造 `X-Forwarded-For` 不会覆盖真实地址。
 - `/metrics` 无法从公网访问，PostgreSQL、Redis 和 `8080` 未出现在宿主机监听端口中。
 
-## SMTP password-file override
+## 动态 SMTP 与可选 bootstrap fallback
 
-在 Phase S 动态 SMTP 配置上线前，SMTP 是启动期配置，修改后必须重建 `serve` 容器。Nyauth 只发送邮件，不使用 IMAP。先创建 SMTP 密码文件并在 `.env.production` 中补充宿主机路径和非 secret 设置：
+Nyauth 只通过 SMTP 发信，不读取邮箱，因此无需 IMAP。生产环境的主配置入口是 PostgreSQL 中的动态 SMTP：首次登录并修改管理员密码后，按 [动态 SMTP 配置与故障处理](runtime-mail.md) 从受控工作站保存候选、向指定地址实际发送测试邮件，并在成功后的十分钟内激活。激活、后续切换、回滚和禁用都不需要重建容器；所有操作要求最近十分钟内重新认证，并走 CSRF、限流和审计。
+
+环境变量与 password file 仅作为可选的首次 fallback/bootstrap。例如希望应用第一次启动后、管理员尚未写入数据库配置前就具备邮件能力，可以创建 SMTP 密码文件并在 `.env.production` 中补充宿主机路径和非 secret 设置：
 
 ```bash
 umask 077
@@ -159,7 +161,7 @@ NYAUTH_MAIL_SMTP_TLS_MODE=starttls
 NYAUTH_MAIL_SMTP_PASSWORD_FILE=/opt/nyauth/secrets/smtp-password
 ```
 
-加载单机 override；此后所有该部署的 `config`、`up` 和重建命令都必须使用同一组 `-f` 参数：
+加载单机 override；只要部署仍保留该 fallback，所有 `config`、`up` 和重建命令都应使用同一组 `-f` 参数，避免不同运维命令展开出不一致的容器定义：
 
 ```bash
 docker compose --env-file .env.production \
@@ -173,7 +175,9 @@ docker compose --env-file .env.production \
   up -d --force-recreate nyauth
 ```
 
-生产环境只能使用 `starttls` 或 `implicit`，且邮件链接基址必须是 HTTPS。HA 部署使用 `docker/compose.ha.smtp-password-file.yml`，它把同一只读 secret 挂入 `nyauth-a` 和 `nyauth-b`；修改静态 SMTP 配置时两个实例都必须重建。
+生产环境只能使用 `starttls` 或 `implicit`，且邮件链接基址必须是 HTTPS。数据库运行状态初始为 `fallback`；一旦管理员激活数据库候选或明确禁用邮件，环境配置即不再参与选择，重启也不会自动回退。只有仍处于 `fallback` 时修改静态 SMTP 配置才需要重建 `serve` 容器。HA bootstrap 使用 `docker/compose.ha.smtp-password-file.yml`，两个实例必须读取同一只读 secret。
+
+不配置 SMTP fallback 也可以正常启动、登录和完成 OAuth/OIDC 服务；管理员可在启动后直接通过动态配置流程建立第一版 SMTP。数据库中没有已激活配置且候选请求省略 `password` 时没有可继承秘密，会返回 `400`，因此第一版需要显式输入密码，或显式使用 passwordless SMTP。
 
 ## 日常运维
 
@@ -190,7 +194,7 @@ docker compose --env-file .env.production -f docker-compose.prod.yml logs --tail
 docker compose --env-file .env.production -f docker-compose.prod.yml run --rm migrate maintenance
 ```
 
-持续监控 `/readyz`、登录失败率、PostgreSQL/Redis 容量、最老审计 outbox、磁盘空间和证书到期时间。SMTP 故障不应通过公开日志泄露地址、凭据或邮件内容。
+持续监控 `/readyz`、登录失败率、PostgreSQL/Redis 容量、最老审计 outbox、磁盘空间和证书到期时间。SMTP 不属于 `/readyz`；邮件故障通过 `/api/admin/system/status` 的 `services.mail`、邮件设置中的熔断状态和受控指标观察。熔断期间注册会返回 `503`，但登录与 OAuth/OIDC 保持在线。日志不得泄露地址、凭据、验证 Token 或邮件内容。
 
 正常停止而保留 PostgreSQL 数据：
 
@@ -217,7 +221,7 @@ docker compose --env-file .env.production -f docker-compose.prod.yml run --rm mi
 docker compose --env-file .env.production -f docker-compose.prod.yml up -d --no-deps --force-recreate nyauth
 ```
 
-启用 SMTP override 的部署必须在上述每条 Compose 命令中追加相同的 override 文件。
+保留 SMTP bootstrap override 的部署必须在上述每条 Compose 命令中追加相同的 override 文件。数据库模式已经是 `active` 或 `disabled` 时，该环境 fallback 不会覆盖数据库状态；是否移除 override 应作为一次独立、经 `config --quiet` 验证的部署配置变更处理。
 
 ## 回滚
 

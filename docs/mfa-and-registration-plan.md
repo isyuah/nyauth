@@ -1,6 +1,6 @@
 # Passkey/TOTP 与自助注册/邀请制 实施计划（草案）
 
-> 状态：**待用户确认**（2026-07-26）。原则：所有行为开关都是**运行时设置**（`runtime_settings`，管理后台编辑、免重启、跨实例同步），配置文件不新增字段。
+> 状态：Phase R 已完成；Phase T 与 Phase P 仍是待实施草案（2026-07-26）。下文 Phase R 的早期数据模型草图仅保留设计背景，当前注册/邀请契约以 README 和实现为准。所有行为开关继续使用运行时设置，配置文件不新增业务开关。
 
 ## 0. 顺序建议
 
@@ -23,7 +23,7 @@
 | `invite_default_ttl` | `168h` | 新建邀请的默认有效期 |
 | `invite_default_max_uses` | `1` | 新建邀请的默认可用次数 |
 
-约束校验：`mode != closed` 时要求 `mail.enabled`（否则拒绝保存该设置并提示）；注册端点始终挂账号动作限流器（复用 `AccountActionLimiter`）。
+约束校验：`mode != closed` 时要求动态邮件状态 `configured=true`（否则拒绝保存该设置并提示）；真正注册时还要求 `available=true`。SMTP 熔断打开时在创建用户前返回 `503` 和 `Retry-After: 60`。邮件配置来源与状态语义见 [动态 SMTP 配置与故障处理](operations/runtime-mail.md)。注册端点始终挂账号动作限流器（复用 `AccountActionLimiter`）。
 
 ### 数据模型（迁移 000004）
 
@@ -61,7 +61,7 @@ CREATE TABLE invites (
 
 ### 设计
 
-- 迁移 000005：`user_mfa`（TOTP secret 用 master key envelope 加密）+ `recovery_codes`（argon2id 哈希，一次性）
+- 新迁移（编号在实施时分配）：`user_mfa`（TOTP secret 用 master key envelope 加密）+ `recovery_codes`（argon2id 哈希，一次性）
 - 标准 TOTP（RFC 6238，30s/6 位，±1 窗口），防重放：记录最近成功的 time-step
 - 登录流：密码/外部身份验证成功 → 若用户有 MFA → 会话进入 `mfa_pending` 半状态（不发全量会话）→ `POST /api/login/mfa` 校验 TOTP 或恢复码 → 升级为完整会话；`mfa_pending` 状态只能访问 MFA 校验端点
 - 启用/停用 TOTP 要求近期重新认证（复用 reauth 框架）；启用时生成 10 个恢复码（一次性显示）
@@ -72,7 +72,7 @@ CREATE TABLE invites (
 
 - 库：`github.com/go-webauthn/webauthn`（Go 生态事实标准）
 - RP ID/origin 取自 `auth.issuer`（又一个 issuer 必须等于公开域名的理由）
-- 迁移 000006：`webauthn_credentials`（credential_id、公钥、sign_count、transports、aaguid、自定义名称、created/last_used_at）
+- 新迁移（编号在实施时分配）：`webauthn_credentials`（credential_id、公钥、sign_count、transports、aaguid、自定义名称、created/last_used_at）
 - 能力：① 独立登录方式（discoverable credential + 浏览器 conditional UI，登录页"使用通行密钥登录"）② 已登录用户的 step-up 重新认证手段（并入 reauth 框架，与密码/Provider reauth 并列）③ 作为 MFA 第二因素
 - 运行时设置：`security.passkeys_enabled`（默认 true）
 - 注册/删除通行密钥要求近期重新认证；删除最后一个凭据时校验用户还有其他登录方式（复用 identity 的"最后认证方式"检查思路）
@@ -80,6 +80,6 @@ CREATE TABLE invites (
 
 ## 4. 统一原则
 
-- 所有开关经由 runtime_settings（管理后台编辑 + LISTEN/NOTIFY 同步 + 配置默认值兜底），保存时做跨依赖校验（如 mail 未启用不能开注册）
+- 所有开关经由 runtime_settings（管理后台编辑 + LISTEN/NOTIFY 同步 + 配置默认值兜底），保存时做跨依赖校验（如动态邮件未配置不能开放注册）
 - 所有敏感操作（启停 MFA、生成邀请、注册凭据）走 CSRF + mutation audit + 近期重新认证
 - 每阶段交付含：迁移（发布时并入基线）、Go 单测/集成测试、Playwright e2e、CHANGELOG、README API 表更新

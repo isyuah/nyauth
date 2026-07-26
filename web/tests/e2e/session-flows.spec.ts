@@ -1,4 +1,5 @@
 import { expect, test, type Page, type Route } from '@playwright/test';
+import type { MailConfig, MailSettings } from '../../src/lib/api';
 
 type Role = 'admin' | 'user';
 
@@ -162,12 +163,37 @@ const systemStatus = {
     redis: { status: 'ok', latency_ms: 2 },
     providers: { status: 'degraded', latency_ms: 8, snapshot_revision: 12 },
     jwk: { status: 'ok', latency_ms: 1 },
+    mail: { status: 'ok', mode: 'fallback', configured: true, available: true, circuit_state: 'closed' },
   },
   active_signing_key: {
     kid: 'signing-key-2026-07',
     status: 'ok',
     signing_started_at: '2026-07-01T00:00:00Z',
     next_rotation_at: '2026-08-01T00:00:00Z',
+  },
+};
+
+const mailSettings: MailSettings = {
+  mode: 'fallback',
+  configured: true,
+  available: true,
+  state_revision: 0,
+  circuit: {
+    state: 'closed',
+    transport_failure_count: 0,
+  },
+  active: {
+    source: 'environment',
+    host: 'smtp.bootstrap.example.com',
+    port: 587,
+    username: 'bootstrap-user',
+    tls_mode: 'starttls',
+    from_address: 'noreply@example.com',
+    from_name: 'Nyauth',
+    public_base_url: 'https://auth.example.com',
+    connect_timeout: '10s',
+    send_timeout: '30s',
+    password_configured: true,
   },
 };
 
@@ -543,6 +569,11 @@ async function installAPIMocks(page: Page, state: MockState) {
 
     if (path === '/api/admin/system/status' && request.method() === 'GET' && state.systemStatus) {
       await fulfillJSON(route, 200, state.systemStatus);
+      return;
+    }
+
+    if (path === '/api/admin/settings/mail' && request.method() === 'GET') {
+      await fulfillJSON(route, 200, mailSettings);
       return;
     }
 
@@ -1076,7 +1107,8 @@ test('invalid email action tokens surface the failure without a false success st
   await expect(page.getByText('新邮箱已生效。为保护账户安全，请重新登录。')).not.toBeVisible();
 });
 
-const registrationOptions = (mode: string, domains: string[] = []) => ({
+const registrationOptions = (mode: string, domains: string[] = [], available = mode !== 'closed') => ({
+  available,
   mode,
   require_email_verification: true,
   allowed_email_domains: domains,
@@ -1101,6 +1133,16 @@ test('closed registration shows guidance instead of a form', async ({ page }) =>
   await page.route('**/api/registration', (route) => fulfillJSON(route, 200, registrationOptions('closed')));
   await page.goto('/register');
   await expect(page.getByText('当前未开放注册，请联系管理员创建账号。')).toBeVisible();
+  await expect(page.getByLabel('用户名')).not.toBeVisible();
+});
+
+test('registration explains when SMTP is unavailable before showing a form', async ({ page }) => {
+  await page.route('**/api/registration', (route) => fulfillJSON(route, 200, registrationOptions('open', [], false)));
+
+  await page.goto('/register');
+
+  await expect(page.getByRole('alert')).toContainText('邮件服务当前不可用');
+  await expect(page.getByText('系统不会创建无法接收验证邮件的待验证账号')).toBeVisible();
   await expect(page.getByLabel('用户名')).not.toBeVisible();
 });
 
@@ -1157,6 +1199,28 @@ test('open registration hides the invite field and surfaces conflicts', async ({
 
   await expect(page.getByRole('alert')).toHaveText('用户名或邮箱已被使用');
   expect(requests).toBe(1);
+  await expect(page.getByRole('button', { name: '注册' })).toBeEnabled();
+});
+
+test('registration preserves the form and explains SMTP recovery after a 503', async ({ page }) => {
+  await page.route('**/api/registration', (route) => fulfillJSON(route, 200, registrationOptions('open')));
+  await page.route('**/api/register', (route) => fulfillJSON(
+    route,
+    503,
+    { error: 'registration is temporarily unavailable' },
+    { 'Retry-After': '60' },
+  ));
+
+  await page.goto('/register');
+  await page.getByLabel('用户名').fill('waiting-user');
+  await page.getByLabel('邮箱地址').fill('waiting@example.com');
+  await page.locator('#register-password').fill('a-new-password-123');
+  await page.locator('#register-confirm').fill('a-new-password-123');
+  await page.getByRole('button', { name: '注册' }).click();
+
+  await expect(page.getByRole('alert')).toHaveText('注册邮件服务正在恢复，请在 60 秒后重试。你填写的内容尚未提交。');
+  await expect(page.getByLabel('用户名')).toHaveValue('waiting-user');
+  await expect(page.getByLabel('邮箱地址')).toHaveValue('waiting@example.com');
   await expect(page.getByRole('button', { name: '注册' })).toBeEnabled();
 });
 
@@ -1915,6 +1979,218 @@ test('provider reauthentication denial restores the unsaved registration form', 
   expect(await page.evaluate(() => sessionStorage.getItem('nyauth:reauth:registration-settings'))).toBeNull();
 });
 
+test('SMTP candidate is saved, tested, activated, rolled back and disabled with CSRF', async ({ page }) => {
+  const state: MockState = {
+    authenticated: true,
+    mustChangePassword: false,
+    role: 'admin',
+    csrfToken: 'csrf-mail',
+    systemStatus,
+  };
+  await installAPIMocks(page, state);
+  await page.route('**/api/admin/settings/registration', (route) => fulfillJSON(route, 200, {
+    mode: 'closed', require_email_verification: true, allowed_email_domains: [],
+    pending_registration_ttl: '72h', invite_default_ttl: '168h', invite_default_max_uses: 1,
+  }));
+
+  const active: MailConfig = {
+    ...mailSettings.active!,
+    source: 'database',
+    id: '10000000-0000-0000-0000-000000000001',
+    revision: 4,
+    created_at: '2026-07-25T10:00:00Z',
+  };
+  const candidateID = '10000000-0000-0000-0000-000000000002';
+  let runtimeSettings: MailSettings = {
+    ...mailSettings,
+    mode: 'active',
+    state_revision: 10,
+    active,
+  };
+  let saveAttempts = 0;
+  const saveBodies: unknown[] = [];
+  const saveCSRFs: Array<string | null> = [];
+  let testBody: unknown;
+  let activateBody: unknown;
+  let rollbackBody: unknown;
+  let disableBody: unknown;
+
+  await page.route('**/api/admin/settings/mail**', async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    if (path === '/api/admin/settings/mail' && request.method() === 'GET') {
+      await fulfillJSON(route, 200, runtimeSettings);
+      return;
+    }
+    if (path === '/api/admin/settings/mail/candidate' && request.method() === 'PUT') {
+      saveAttempts += 1;
+      saveBodies.push(request.postDataJSON());
+      saveCSRFs.push(await request.headerValue('x-csrf-token'));
+      if (saveAttempts === 1) {
+        await fulfillJSON(route, 403, { error: 'recent authentication is required' });
+        return;
+      }
+      const body = request.postDataJSON() as Record<string, unknown>;
+      const candidate: MailConfig = {
+        source: 'database', id: candidateID, revision: 5,
+        host: String(body.host), port: Number(body.port), username: String(body.username),
+        tls_mode: String(body.tls_mode) as MailConfig['tls_mode'],
+        from_address: String(body.from_address), from_name: String(body.from_name),
+        public_base_url: String(body.public_base_url), connect_timeout: String(body.connect_timeout),
+        send_timeout: String(body.send_timeout), password_configured: body.password !== '',
+        created_at: '2026-07-26T12:00:00Z',
+      };
+      runtimeSettings = { ...runtimeSettings, state_revision: 11, candidate };
+      await fulfillJSON(route, 201, { candidate, state_revision: 11 });
+      return;
+    }
+    if (path === '/api/admin/settings/mail/candidate/test' && request.method() === 'POST') {
+      testBody = request.postDataJSON();
+      runtimeSettings = { ...runtimeSettings, state_revision: 12 };
+      await fulfillJSON(route, 200, {
+        result: 'success', tested_at: '2026-07-26T12:01:00Z', state_revision: 12,
+      });
+      return;
+    }
+    if (path === '/api/admin/settings/mail/activate' && request.method() === 'POST') {
+      activateBody = request.postDataJSON();
+      runtimeSettings = {
+        ...runtimeSettings,
+        mode: 'active', configured: true, available: true, state_revision: 13,
+        active: runtimeSettings.candidate, previous: runtimeSettings.active, candidate: undefined,
+      };
+      await fulfillJSON(route, 200, { status: 'activated', state_revision: 13 });
+      return;
+    }
+    if (path === '/api/admin/settings/mail/rollback' && request.method() === 'POST') {
+      rollbackBody = request.postDataJSON();
+      const previous = runtimeSettings.previous;
+      runtimeSettings = {
+        ...runtimeSettings,
+        state_revision: 14,
+        active: previous,
+        previous: runtimeSettings.active,
+      };
+      await fulfillJSON(route, 200, { status: 'rolled_back', state_revision: 14 });
+      return;
+    }
+    if (path === '/api/admin/settings/mail/disable' && request.method() === 'POST') {
+      disableBody = request.postDataJSON();
+      runtimeSettings = {
+        ...runtimeSettings,
+        mode: 'disabled', configured: false, available: false, state_revision: 15, active: undefined,
+      };
+      await fulfillJSON(route, 200, { status: 'disabled', state_revision: 15 });
+      return;
+    }
+    await fulfillJSON(route, 404, { error: `unmocked mail endpoint: ${path}` });
+  });
+
+  await page.goto('/admin/system');
+  await expect(page.getByRole('heading', { name: 'SMTP 动态配置' })).toBeVisible();
+  await page.getByLabel('SMTP 主机').fill('smtp.dynamic.example.com');
+  await page.getByLabel('SMTP 密码（留空继承）').fill('smtp-runtime-secret');
+  await page.getByRole('button', { name: '保存候选配置' }).click();
+
+  await expect(page.getByRole('dialog', { name: '重新验证身份' })).toBeVisible();
+  await page.getByLabel('当前密码').fill('current-password');
+  await page.getByRole('button', { name: '使用密码验证' }).click();
+  await expect(page.getByText(/候选配置已保存/)).toBeVisible();
+
+  await page.getByLabel('测试邮件收件地址').fill('operator@example.com');
+  await page.getByRole('button', { name: '发送真实测试' }).click();
+  await expect(page.getByText(/测试邮件已成功发送/)).toBeVisible();
+  await page.getByRole('button', { name: '激活候选版本' }).click();
+  await expect(page.getByText(/候选配置已激活/)).toBeVisible();
+  await expect(page.getByText('smtp.dynamic.example.com:587')).toBeVisible();
+
+  await page.getByRole('button', { name: '回滚到上一版本' }).click();
+  await expect(page.getByText('邮件配置已回滚到上一版本。')).toBeVisible();
+  await page.getByRole('button', { name: '禁用邮件服务' }).click();
+  await page.getByLabel('输入“禁用邮件”以确认').fill('禁用邮件');
+  await page.getByRole('button', { name: '确认禁用' }).click();
+  await expect(page.getByText(/邮件服务已禁用/)).toBeVisible();
+  await expect(page.getByText('已禁用', { exact: true }).first()).toBeVisible();
+
+  expect(saveAttempts).toBe(2);
+  expect(saveBodies).toEqual([
+    expect.objectContaining({ host: 'smtp.dynamic.example.com', password: 'smtp-runtime-secret', expected_revision: 10 }),
+    expect.objectContaining({ host: 'smtp.dynamic.example.com', password: 'smtp-runtime-secret', expected_revision: 10 }),
+  ]);
+  expect(saveCSRFs).toEqual(['csrf-mail', 'csrf-reauthenticated']);
+  expect(testBody).toEqual({ expected_revision: 11, version_id: candidateID, email: 'operator@example.com' });
+  expect(activateBody).toEqual({ expected_revision: 12, version_id: candidateID });
+  expect(rollbackBody).toEqual({ expected_revision: 13 });
+  expect(disableBody).toEqual({ expected_revision: 14 });
+});
+
+test('provider reauthentication restores SMTP fields once without retaining or replaying the password', async ({ page }) => {
+  const state: MockState = {
+    authenticated: true,
+    mustChangePassword: false,
+    role: 'admin',
+    csrfToken: 'csrf-mail-provider',
+    hasPassword: false,
+    identities: [githubIdentity],
+    systemStatus,
+  };
+  await installAPIMocks(page, state);
+  await page.route('**/api/admin/settings/registration', (route) => fulfillJSON(route, 200, {
+    mode: 'closed', require_email_verification: true, allowed_email_domains: [],
+    pending_registration_ttl: '72h', invite_default_ttl: '168h', invite_default_max_uses: 1,
+  }));
+
+  let runtimeSettings: MailSettings = { ...mailSettings, state_revision: 20 };
+  let saveAttempts = 0;
+  const saveBodies: Array<Record<string, unknown>> = [];
+  await page.route('**/api/admin/settings/mail**', async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    if (path === '/api/admin/settings/mail' && request.method() === 'GET') {
+      await fulfillJSON(route, 200, runtimeSettings);
+      return;
+    }
+    if (path === '/api/admin/settings/mail/candidate' && request.method() === 'PUT') {
+      saveAttempts += 1;
+      const body = request.postDataJSON() as Record<string, unknown>;
+      saveBodies.push(body);
+      if (saveAttempts === 1) {
+        await fulfillJSON(route, 403, { error: 'recent authentication is required' });
+        return;
+      }
+      const candidate: MailConfig = {
+        ...mailSettings.active!, source: 'database', id: '20000000-0000-0000-0000-000000000001', revision: 1,
+        host: String(body.host), password_configured: true, created_at: '2026-07-26T13:00:00Z',
+      };
+      runtimeSettings = { ...runtimeSettings, state_revision: 21, candidate };
+      await fulfillJSON(route, 201, { candidate, state_revision: 21 });
+      return;
+    }
+    await fulfillJSON(route, 404, { error: `unmocked mail endpoint: ${path}` });
+  });
+
+  await page.goto('/admin/system');
+  await page.getByLabel('SMTP 主机').fill('smtp.provider.example.com');
+  await page.getByLabel('SMTP 密码（留空继承）').fill('must-not-enter-session-storage');
+  await page.getByRole('button', { name: '保存候选配置' }).click();
+  await page.getByRole('button', { name: '使用 github 验证' }).click();
+
+  await expect(page.getByText(/出于安全原因密码未保存/)).toBeVisible();
+  await expect(page.getByLabel('SMTP 主机')).toHaveValue('smtp.provider.example.com');
+  await expect(page.getByLabel('SMTP 密码（留空继承）')).toHaveValue('');
+  expect(saveAttempts).toBe(1);
+  expect(await page.evaluate(() => sessionStorage.getItem('nyauth:reauth:mail-settings'))).toBeNull();
+
+  await page.getByLabel('SMTP 密码（留空继承）').fill('reentered-after-provider');
+  await page.getByRole('button', { name: '保存候选配置' }).click();
+  await expect(page.getByText(/候选配置已保存/)).toBeVisible();
+  expect(saveAttempts).toBe(2);
+  expect(saveBodies[0].password).toBe('must-not-enter-session-storage');
+  expect(saveBodies[1].password).toBe('reentered-after-provider');
+  expect(state.providerReauthBody).toEqual({ return_to: '/admin/system' });
+  expect(state.providerReauthCSRF).toBe('csrf-mail-provider');
+});
+
 test('the system status page renders the backend status DTO and admin navigation entry', async ({ page }) => {
   const state: MockState = {
     authenticated: true,
@@ -1934,6 +2210,7 @@ test('the system status page renders the backend status DTO and admin navigation
   await expect(page.getByRole('heading', { name: 'Redis' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'JWK' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Provider 快照' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'SMTP 邮件' })).toBeVisible();
   await expect(page.getByText('signing-key-2026-07')).toBeVisible();
   await expect(page.getByText('12', { exact: true })).toBeVisible();
 });

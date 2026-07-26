@@ -16,6 +16,8 @@
     ok: { variant: 'success', label: '正常' },
     degraded: { variant: 'warning', label: '降级' },
     unavailable: { variant: 'danger', label: '不可用' },
+    not_configured: { variant: 'default', label: '未配置' },
+    not_ready: { variant: 'warning', label: '未就绪' },
   };
 
   let config = $derived(map[status] || { variant: 'default' as const, label: status });

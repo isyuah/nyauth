@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { api, type RegistrationOptions } from '$lib/api';
+  import { ApiError, api, type RegistrationOptions } from '$lib/api';
   import AccountActionCard from '$lib/components/account/AccountActionCard.svelte';
   import Button from '$lib/components/ui/Button.svelte';
   import Input from '$lib/components/ui/Input.svelte';
@@ -48,7 +48,13 @@
       result = response.status;
       verificationExpiresAt = response.verification_expires_at || '';
     } catch (cause) {
-      error = cause instanceof Error ? cause.message : '注册失败，请稍后重试';
+      if (cause instanceof ApiError && cause.status === 503) {
+        error = cause.retryAfter
+          ? `注册邮件服务正在恢复，请在 ${cause.retryAfter} 秒后重试。你填写的内容尚未提交。`
+          : '注册暂时不可用，邮件服务可能尚未配置或正在恢复，请稍后重试。';
+      } else {
+        error = cause instanceof Error ? cause.message : '注册失败，请稍后重试';
+      }
     } finally {
       loading = false;
     }
@@ -68,6 +74,8 @@
     <p class="text-center text-body text-nya-text-tertiary">加载中…</p>
   {:else if options.mode === 'closed'}
     <div class="text-center"><p class="rounded-nya-sm bg-nya-warning-soft px-3 py-3 text-body text-nya-warning" role="alert">当前未开放注册，请联系管理员创建账号。</p><a href="/login" class="mt-5 inline-block text-body-medium text-nya-primary hover:underline">返回登录</a></div>
+  {:else if !options.available}
+    <div class="text-center"><p class="rounded-nya-sm bg-nya-warning-soft px-3 py-3 text-body text-nya-warning" role="alert">注册入口已开启，但邮件服务当前不可用。系统不会创建无法接收验证邮件的待验证账号，请稍后再试或联系管理员。</p><a href="/login" class="mt-5 inline-block text-body-medium text-nya-primary hover:underline">返回登录</a></div>
   {:else}
     <form onsubmit={submit} class="space-y-4">
       {#if error}<p class="rounded-nya-sm bg-nya-danger-soft px-3 py-2 text-small text-nya-danger" role="alert">{error}</p>{/if}

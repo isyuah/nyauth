@@ -30,7 +30,7 @@ Nyauth 的高可用形态是多个无状态应用实例共享外部 PostgreSQL �
 
 Redis TLS 默认启用。使用公共 CA 时无需额外文件；使用私有 CA 时，通过部署环境的 Compose override 将只读 CA 文件挂入两个应用和迁移容器，并设置 `NYAUTH_REDIS_TLS_ROOT_CA_FILE`。只有依赖网络已经提供等效的加密隔离时，才应显式设置 `NYAUTH_REDIS_TLS_ENABLED=false`。
 
-在 Phase S 动态 SMTP 配置上线前，静态 SMTP 密码使用仓库提供的 HA override。宿主机的 `NYAUTH_MAIL_SMTP_PASSWORD_FILE` 指向密码文件，容器内会固定挂载为 `/run/secrets/mail_smtp_password`；两个应用实例读取同一 secret：
+SMTP 的主配置保存在共享 PostgreSQL，并按 [动态 SMTP 配置与故障处理](runtime-mail.md) 通过候选、真实测试邮件和激活流程免重启切换。Nyauth 只发信，不读取邮箱，因此无需 IMAP。环境变量和 password file 仅作为数据库状态仍为 `fallback` 时的首次 bootstrap；若使用它，仓库提供的 HA override 会把同一只读 secret 挂入两个实例：
 
 ```bash
 docker compose \
@@ -39,7 +39,7 @@ docker compose \
   config --quiet
 ```
 
-SMTP 其余 `NYAUTH_MAIL_*` 参数由部署环境提供。修改静态邮件配置后必须重建两个 `serve` 实例；Nyauth 不使用 IMAP。
+SMTP 其余 `NYAUTH_MAIL_*` 参数由部署环境提供。两个实例的 fallback 必须完全一致；仍处于 `fallback` 时修改静态配置需要重建两个 `serve` 实例。管理员一旦激活数据库候选或明确禁用邮件，环境 fallback 不再参与选择，重启也不会重新启用它。
 
 外部 PostgreSQL 不会由 Compose 创建登录角色。DBA 至少要在目标数据库中先执行等价操作，并将密码只写入运行 DSN secret：
 
@@ -70,6 +70,7 @@ docker compose -f docker-compose.ha.yml ps
 - Session、授权码和 Token 安全状态由共享 Redis 保证。
 - JWK 轮换由 PostgreSQL advisory lock 保证单写者。
 - Provider 变更通过 PostgreSQL `LISTEN/NOTIFY` 通知，并使用周期 reconciliation 修复丢失通知。
+- 动态 SMTP 的活动版本、上一版本和熔断状态由 PostgreSQL 共享；变更通过 `LISTEN/NOTIFY` 同步，并每分钟 reconciliation。每 30 秒最多一个实例取得熔断探测权。
 - 管理员高风险变更与审计记录必须在同一数据库事务中完成。
 - 审计日志按 UTC 月分区；分区预创建和保留清理由独立迁移账号运行 `nyauth maintenance`，应用实例不执行 DDL。
 
@@ -85,6 +86,8 @@ docker compose -f docker-compose.ha.yml ps
 - 同一授权码并发交换只有一个成功。
 - 同一 refresh token 并发轮换只有一个成功，重复使用撤销整个 family。
 - Provider 启停、删除和 JWK 轮换在所有实例收敛。
+- SMTP 候选激活、回滚和禁用在所有实例收敛；模拟丢失通知后也能在 reconciliation 周期内一致。
+- SMTP 配置/认证/TLS 故障或传输故障达到阈值后共享熔断只打开一次，注册返回 `503`，探测成功后所有实例恢复投递。
 - 用户暂停、密码重置和会话撤销在所有实例立即生效。
 
 CI 的真实 PostgreSQL/Redis 集成测试使用两个独立 HTTP Server、连接池和 Redis client，覆盖 Cookie 跨实例使用、用户暂停后的跨实例失效，以及通过 `/token` 并发交换同一授权码时只有一个请求成功。组件级测试继续覆盖 Provider 通知与 reconciliation、JWK advisory lock 和 Refresh family 并发轮换。完整部署仍应在目标反向代理和托管依赖上重复上述故障验证。

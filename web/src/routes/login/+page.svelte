@@ -36,7 +36,7 @@
   async function loadRegistrationOptions() {
     try {
       const options = await api.getRegistrationOptions();
-      registrationOpen = options.mode !== 'closed';
+      registrationOpen = options.mode !== 'closed' && options.available;
     } catch {
       registrationOpen = false;
     }

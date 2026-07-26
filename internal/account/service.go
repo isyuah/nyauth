@@ -11,6 +11,7 @@ import (
 	"net/mail"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -53,7 +54,7 @@ type ServiceOptions struct {
 
 type Service struct {
 	store               serviceStore
-	publicBaseURL       *url.URL
+	publicBaseURL       atomic.Pointer[url.URL]
 	activeKeyID         string
 	masterKeys          map[string][]byte
 	passwordResetTTL    time.Duration
@@ -110,12 +111,33 @@ func newService(store serviceStore, options ServiceOptions) (*Service, error) {
 	if options.GenerateToken == nil {
 		options.GenerateToken = func() (string, error) { return crypto.GenerateRandomString(32) }
 	}
-	return &Service{
-		store: store, publicBaseURL: baseURL, activeKeyID: options.ActiveKeyID, masterKeys: keys,
+	service := &Service{
+		store: store, activeKeyID: options.ActiveKeyID, masterKeys: keys,
 		passwordResetTTL: options.PasswordResetTTL, emailActionTTL: options.EmailActionTTL,
 		emailOutboxTTL: options.EmailOutboxTTL, reauthenticationTTL: options.ReauthenticationTTL,
 		clock: options.Clock, generateToken: options.GenerateToken,
-	}, nil
+	}
+	service.publicBaseURL.Store(baseURL)
+	return service, nil
+}
+
+// SetPublicBaseURL atomically changes links rendered into subsequently queued
+// account emails. Messages already in the outbox remain unchanged.
+func (s *Service) SetPublicBaseURL(value string) error {
+	baseURL, err := parsePublicBaseURL(value)
+	if err != nil {
+		return err
+	}
+	s.publicBaseURL.Store(baseURL)
+	return nil
+}
+
+func parsePublicBaseURL(value string) (*url.URL, error) {
+	baseURL, err := url.Parse(strings.TrimSpace(value))
+	if err != nil || baseURL.Scheme == "" || baseURL.Host == "" || (baseURL.Scheme != "http" && baseURL.Scheme != "https") || baseURL.User != nil || baseURL.RawQuery != "" || baseURL.Fragment != "" {
+		return nil, fmt.Errorf("public base URL must be an absolute HTTP(S) URL without credentials, query, or fragment")
+	}
+	return baseURL, nil
 }
 
 // RequestPasswordReset deliberately returns nil for unknown, unverified, or
@@ -524,7 +546,11 @@ func (s *Service) actionMessage(action Action, recipient, rawToken string, ttl t
 	default:
 		return EmailMessage{}, fmt.Errorf("unsupported account action %q", action)
 	}
-	actionURL := *s.publicBaseURL
+	baseURL := s.publicBaseURL.Load()
+	if baseURL == nil {
+		return EmailMessage{}, fmt.Errorf("public base URL is unavailable")
+	}
+	actionURL := *baseURL
 	actionURL.Path = strings.TrimSuffix(actionURL.Path, "/") + path
 	query := actionURL.Query()
 	query.Set("token", rawToken)

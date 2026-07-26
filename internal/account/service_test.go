@@ -132,6 +132,28 @@ func newTestService(t *testing.T, store *fakeServiceStore) *Service {
 	return service
 }
 
+func TestServicePublicBaseURLCanBeUpdatedForNewMessages(t *testing.T) {
+	service := newTestService(t, &fakeServiceStore{})
+	before, err := service.actionMessage(ActionEmailVerification, "alice@example.test", testRawToken, time.Hour)
+	if err != nil {
+		t.Fatalf("actionMessage(before): %v", err)
+	}
+	if err := service.SetPublicBaseURL("https://new-auth.example.test/prefix"); err != nil {
+		t.Fatalf("SetPublicBaseURL: %v", err)
+	}
+	after, err := service.actionMessage(ActionEmailVerification, "alice@example.test", testRawToken, time.Hour)
+	if err != nil {
+		t.Fatalf("actionMessage(after): %v", err)
+	}
+	if !strings.Contains(before.TextBody, "https://auth.example.test/base/verify-email") ||
+		!strings.Contains(after.TextBody, "https://new-auth.example.test/prefix/verify-email") {
+		t.Fatalf("unexpected links before=%q after=%q", before.TextBody, after.TextBody)
+	}
+	if err := service.SetPublicBaseURL("https://user:secret@example.test"); err == nil {
+		t.Fatal("SetPublicBaseURL accepted credentials")
+	}
+}
+
 func activeVerifiedUser() *models.User {
 	email := "alice@example.test"
 	verifiedAt := testNow.Add(-24 * time.Hour)

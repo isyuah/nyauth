@@ -10,6 +10,7 @@ import (
 
 	"github.com/nyasharp/nyauth/internal/buildinfo"
 	"github.com/nyasharp/nyauth/internal/database"
+	"github.com/nyasharp/nyauth/internal/mailruntime"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
 
@@ -86,5 +87,80 @@ func TestCollectSystemStatusMarksDirtySchemaIncompatible(t *testing.T) {
 	})
 	if response.Status != "degraded" || response.Schema.Status != "incompatible" {
 		t.Fatalf("status = %#v", response)
+	}
+}
+
+func TestCollectSystemStatusReportsMailRuntimeWithoutAffectingReadinessDependencies(t *testing.T) {
+	baseSources := func(mailState mailruntime.RuntimeStatus) systemStatusSources {
+		return systemStatusSources{
+			pingPostgreSQL: func(context.Context) error { return nil },
+			pingRedis:      func(context.Context) error { return nil },
+			readSchema: func(context.Context) (systemSchemaSnapshot, error) {
+				return systemSchemaSnapshot{version: database.SchemaVersion, rows: 1}, nil
+			},
+			readSigningKey: func(context.Context) (*models.JWK, error) {
+				return &models.JWK{Kid: "kid", Status: models.JWKStatusSigning, SigningStartedAt: time.Now()}, nil
+			},
+			providerState: func() (bool, uint64) { return true, 1 },
+			mailState:     func() mailruntime.RuntimeStatus { return mailState },
+		}
+	}
+
+	tests := []struct {
+		name          string
+		mail          mailruntime.RuntimeStatus
+		wantOverall   string
+		wantComponent string
+	}{
+		{
+			name: "available",
+			mail: mailruntime.RuntimeStatus{
+				Mode: mailruntime.ModeActive, Configured: true, Available: true,
+				CircuitState: mailruntime.CircuitClosed,
+			},
+			wantOverall: "ok", wantComponent: "ok",
+		},
+		{
+			name: "open circuit",
+			mail: mailruntime.RuntimeStatus{
+				Mode: mailruntime.ModeActive, Configured: true, Available: false,
+				CircuitState: mailruntime.CircuitOpen,
+			},
+			wantOverall: "degraded", wantComponent: "unavailable",
+		},
+		{
+			name: "disabled by operator",
+			mail: mailruntime.RuntimeStatus{
+				Mode: mailruntime.ModeDisabled, Configured: false, Available: false,
+				CircuitState: mailruntime.CircuitClosed,
+			},
+			wantOverall: "ok", wantComponent: "disabled",
+		},
+		{
+			name: "not configured",
+			mail: mailruntime.RuntimeStatus{
+				Mode: mailruntime.ModeFallback, Configured: false, Available: false,
+				CircuitState: mailruntime.CircuitClosed,
+			},
+			wantOverall: "ok", wantComponent: "not_configured",
+		},
+	}
+
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			response := collectSystemStatus(context.Background(), time.Hour, baseSources(test.mail))
+			if response.Status != test.wantOverall || response.Services.Mail.Status != test.wantComponent {
+				t.Fatalf("status=%q mail=%#v", response.Status, response.Services.Mail)
+			}
+			if response.Services.Mail.Mode != test.mail.Mode ||
+				response.Services.Mail.Configured != test.mail.Configured ||
+				response.Services.Mail.Available != test.mail.Available ||
+				response.Services.Mail.CircuitState != test.mail.CircuitState {
+				t.Fatalf("mail response=%#v, runtime=%#v", response.Services.Mail, test.mail)
+			}
+			if response.Services.PostgreSQL.Status != "ok" || response.Services.Redis.Status != "ok" {
+				t.Fatalf("mail state altered readiness dependencies: %#v", response.Services)
+			}
+		})
 	}
 }

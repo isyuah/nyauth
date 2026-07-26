@@ -11,9 +11,75 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/nyasharp/nyauth/internal/crypto"
+	"github.com/nyasharp/nyauth/internal/runtimecoord"
 )
 
-func (s *Store) ClaimEmailBatch(ctx context.Context, workerID string, limit int, now time.Time, lease time.Duration) ([]OutboxEmail, error) {
+const (
+	defaultEmailArtifactExpiryBatchSize = 500
+	maxEmailArtifactExpiryBatchSize     = 5000
+)
+
+// ExpireEmailArtifacts removes sensitive payloads as soon as their persisted
+// deadline passes. It runs independently of sender availability so disabling
+// SMTP or opening the circuit cannot retain expired plaintext envelopes. The
+// per-table limit bounds lock and write amplification while allowing tokens and
+// queued messages to make progress independently.
+func (s *Store) ExpireEmailArtifacts(ctx context.Context, now time.Time, perTableLimit int) (int64, error) {
+	if perTableLimit < 1 || perTableLimit > maxEmailArtifactExpiryBatchSize {
+		return 0, fmt.Errorf("invalid email artifact expiry batch size")
+	}
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("starting email artifact expiry: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	tokenResult, err := tx.Exec(ctx, `
+		WITH candidates AS (
+			SELECT id FROM account_action_tokens
+			WHERE consumed_at IS NULL AND revoked_at IS NULL AND expires_at<=$1
+			ORDER BY expires_at,id
+			FOR UPDATE SKIP LOCKED
+			LIMIT $2
+		)
+		UPDATE account_action_tokens AS token
+		SET revoked_at=$1,revoked_reason='expired',payload_ciphertext=''
+		FROM candidates
+		WHERE token.id=candidates.id
+	`, now, perTableLimit)
+	if err != nil {
+		return 0, fmt.Errorf("expiring account action tokens: %w", err)
+	}
+	outboxResult, err := tx.Exec(ctx, `
+		WITH candidates AS (
+			SELECT id FROM email_outbox
+			WHERE status IN ('pending','failed','sending') AND expires_at<=$1
+			ORDER BY expires_at,id
+			FOR UPDATE SKIP LOCKED
+			LIMIT $2
+		)
+		UPDATE email_outbox AS outbox
+		SET status='expired',encrypted_message='',last_error=NULL,
+		    locked_at=NULL,locked_by=NULL,updated_at=$1
+		FROM candidates
+		WHERE outbox.id=candidates.id
+	`, now, perTableLimit)
+	if err != nil {
+		return 0, fmt.Errorf("expiring email outbox messages: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("committing email artifact expiry: %w", err)
+	}
+	return tokenResult.RowsAffected() + outboxResult.RowsAffected(), nil
+}
+
+func (s *Store) ClaimEmailBatch(
+	ctx context.Context,
+	workerID string,
+	limit int,
+	now time.Time,
+	lease time.Duration,
+	gate *runtimecoord.MailDeliveryGate,
+) ([]OutboxEmail, error) {
 	workerID = strings.TrimSpace(workerID)
 	if workerID == "" || len(workerID) > 128 {
 		return nil, fmt.Errorf("valid email worker ID is required")
@@ -26,17 +92,10 @@ func (s *Store) ClaimEmailBatch(ctx context.Context, workerID string, limit int,
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `
-		UPDATE account_action_tokens SET revoked_at=$1,revoked_reason='expired',payload_ciphertext=''
-		WHERE consumed_at IS NULL AND revoked_at IS NULL AND expires_at<=$1
-	`, now); err != nil {
-		return nil, fmt.Errorf("expiring account action tokens: %w", err)
-	}
-	if _, err := tx.Exec(ctx, `
-		UPDATE email_outbox SET status='expired',encrypted_message='',locked_at=NULL,locked_by=NULL,updated_at=$1
-		WHERE status IN ('pending','failed','sending') AND expires_at<=$1
-	`, now); err != nil {
-		return nil, fmt.Errorf("expiring email outbox messages: %w", err)
+	if gate != nil {
+		if err := runtimecoord.RequireMailDeliveryGate(ctx, tx, *gate); err != nil {
+			return nil, err
+		}
 	}
 	rows, err := tx.Query(ctx, `
 		WITH candidates AS (
@@ -119,6 +178,21 @@ func (s *Store) MarkEmailFailed(ctx context.Context, id uuid.UUID, workerID, fai
 	return nil
 }
 
+func (s *Store) MarkEmailRejected(ctx context.Context, id uuid.UUID, workerID string, now time.Time) error {
+	result, err := s.db.Exec(ctx, `
+		UPDATE email_outbox SET status='rejected',encrypted_message='',last_error='permanent SMTP recipient failure',
+		       locked_at=NULL,locked_by=NULL,updated_at=$3
+		WHERE id=$1 AND status='sending' AND locked_by=$2
+	`, id, workerID, now)
+	if err != nil {
+		return fmt.Errorf("marking email rejected: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return ErrOutboxLeaseLost
+	}
+	return nil
+}
+
 func (s *Store) EmailOutboxBacklog(ctx context.Context, now time.Time) (int64, error) {
 	var backlog int64
 	err := s.db.QueryRow(ctx, `
@@ -135,10 +209,26 @@ type EmailSender interface {
 	Send(ctx context.Context, message EmailMessage) error
 }
 
+type EmailSenderProvider interface {
+	CurrentSender() (EmailSender, runtimecoord.MailDeliveryGate, bool)
+}
+
+type staticEmailSenderProvider struct{ sender EmailSender }
+
+func (p staticEmailSenderProvider) CurrentSender() (EmailSender, runtimecoord.MailDeliveryGate, bool) {
+	return p.sender, runtimecoord.MailDeliveryGate{}, p.sender != nil
+}
+
+type emailSenderRefresher interface {
+	RefreshEmailSender(context.Context) error
+}
+
 type emailOutboxStore interface {
-	ClaimEmailBatch(ctx context.Context, workerID string, limit int, now time.Time, lease time.Duration) ([]OutboxEmail, error)
+	ExpireEmailArtifacts(ctx context.Context, now time.Time, perTableLimit int) (int64, error)
+	ClaimEmailBatch(ctx context.Context, workerID string, limit int, now time.Time, lease time.Duration, gate *runtimecoord.MailDeliveryGate) ([]OutboxEmail, error)
 	MarkEmailSent(ctx context.Context, id uuid.UUID, workerID string, now time.Time) error
 	MarkEmailFailed(ctx context.Context, id uuid.UUID, workerID, failure string, retryAt, now time.Time) error
+	MarkEmailRejected(ctx context.Context, id uuid.UUID, workerID string, now time.Time) error
 }
 
 type emailBacklogStore interface {
@@ -146,29 +236,33 @@ type emailBacklogStore interface {
 }
 
 type DispatcherOptions struct {
-	WorkerID   string
-	MasterKeys map[string][]byte
-	BatchSize  int
-	Lease      time.Duration
-	Interval   time.Duration
-	Clock      func() time.Time
-	OnError    func(error)
-	OnDelivery func(context.Context, string, bool)
-	OnBacklog  func(context.Context, int64)
+	WorkerID                string
+	MasterKeys              map[string][]byte
+	BatchSize               int
+	ArtifactExpiryBatchSize int
+	Lease                   time.Duration
+	Interval                time.Duration
+	Clock                   func() time.Time
+	OnError                 func(error)
+	OnDelivery              func(context.Context, string, bool)
+	OnSMTPError             func(context.Context, SMTPErrorCategory)
+	OnBacklog               func(context.Context, int64)
 }
 
 type Dispatcher struct {
-	store      emailOutboxStore
-	sender     EmailSender
-	workerID   string
-	masterKeys map[string][]byte
-	batchSize  int
-	lease      time.Duration
-	interval   time.Duration
-	clock      func() time.Time
-	onError    func(error)
-	onDelivery func(context.Context, string, bool)
-	onBacklog  func(context.Context, int64)
+	store       emailOutboxStore
+	senders     EmailSenderProvider
+	workerID    string
+	masterKeys  map[string][]byte
+	batchSize   int
+	expiryBatch int
+	lease       time.Duration
+	interval    time.Duration
+	clock       func() time.Time
+	onError     func(error)
+	onDelivery  func(context.Context, string, bool)
+	onSMTPError func(context.Context, SMTPErrorCategory)
+	onBacklog   func(context.Context, int64)
 }
 
 func NewDispatcher(store *Store, sender EmailSender, options DispatcherOptions) (*Dispatcher, error) {
@@ -176,7 +270,18 @@ func NewDispatcher(store *Store, sender EmailSender, options DispatcherOptions) 
 }
 
 func newDispatcher(store emailOutboxStore, sender EmailSender, options DispatcherOptions) (*Dispatcher, error) {
-	if store == nil || sender == nil {
+	return newDispatcherWithProvider(store, staticEmailSenderProvider{sender: sender}, options)
+}
+
+func NewDynamicDispatcher(store *Store, senders EmailSenderProvider, options DispatcherOptions) (*Dispatcher, error) {
+	return newDispatcherWithProvider(store, senders, options)
+}
+
+func newDispatcherWithProvider(store emailOutboxStore, senders EmailSenderProvider, options DispatcherOptions) (*Dispatcher, error) {
+	if store == nil || senders == nil {
+		return nil, fmt.Errorf("email outbox store and sender provider are required")
+	}
+	if static, ok := senders.(staticEmailSenderProvider); ok && static.sender == nil {
 		return nil, fmt.Errorf("email outbox store and sender are required")
 	}
 	options.WorkerID = strings.TrimSpace(options.WorkerID)
@@ -196,30 +301,55 @@ func newDispatcher(store emailOutboxStore, sender EmailSender, options Dispatche
 	if options.BatchSize == 0 {
 		options.BatchSize = 20
 	}
+	if options.ArtifactExpiryBatchSize == 0 {
+		options.ArtifactExpiryBatchSize = defaultEmailArtifactExpiryBatchSize
+	}
 	if options.Lease == 0 {
 		options.Lease = 2 * time.Minute
 	}
 	if options.Interval == 0 {
 		options.Interval = 5 * time.Second
 	}
-	if options.BatchSize < 1 || options.BatchSize > 100 || options.Lease <= 0 || options.Interval <= 0 {
+	if options.BatchSize < 1 || options.BatchSize > 100 ||
+		options.ArtifactExpiryBatchSize < 1 || options.ArtifactExpiryBatchSize > maxEmailArtifactExpiryBatchSize ||
+		options.Lease <= 0 || options.Interval <= 0 {
 		return nil, fmt.Errorf("invalid email dispatcher settings")
 	}
 	if options.Clock == nil {
 		options.Clock = time.Now
 	}
 	return &Dispatcher{
-		store: store, sender: sender, workerID: options.WorkerID, masterKeys: keys,
-		batchSize: options.BatchSize, lease: options.Lease, interval: options.Interval, clock: options.Clock,
-		onError: options.OnError, onDelivery: options.OnDelivery, onBacklog: options.OnBacklog,
+		store: store, senders: senders, workerID: options.WorkerID, masterKeys: keys,
+		batchSize: options.BatchSize, expiryBatch: options.ArtifactExpiryBatchSize,
+		lease: options.Lease, interval: options.Interval, clock: options.Clock,
+		onError: options.OnError, onDelivery: options.OnDelivery, onSMTPError: options.OnSMTPError, onBacklog: options.OnBacklog,
 	}, nil
 }
 
 func (d *Dispatcher) DispatchOnce(ctx context.Context) (int, error) {
 	defer d.observeBacklog(ctx)
 	now := d.clock().UTC()
-	items, err := d.store.ClaimEmailBatch(ctx, d.workerID, d.batchSize, now, d.lease)
+	if _, err := d.store.ExpireEmailArtifacts(ctx, now, d.expiryBatch); err != nil {
+		return 0, err
+	}
+	sender, gate, available := d.senders.CurrentSender()
+	if !available {
+		return 0, nil
+	}
+	var expectedGate *runtimecoord.MailDeliveryGate
+	if gate.Mode != "" {
+		expectedGate = &gate
+	}
+	items, err := d.store.ClaimEmailBatch(ctx, d.workerID, d.batchSize, now, d.lease, expectedGate)
 	if err != nil {
+		if errors.Is(err, runtimecoord.ErrMailDeliveryGateChanged) || errors.Is(err, runtimecoord.ErrMailCircuitOpen) {
+			if refresher, ok := d.senders.(emailSenderRefresher); ok {
+				if refreshErr := refresher.RefreshEmailSender(ctx); refreshErr != nil {
+					return 0, fmt.Errorf("refreshing email sender after delivery state changed: %w", refreshErr)
+				}
+			}
+			return 0, nil
+		}
 		return 0, err
 	}
 	processed := 0
@@ -231,7 +361,7 @@ func (d *Dispatcher) DispatchOnce(ctx context.Context) (int, error) {
 			dispatchErrors = append(dispatchErrors, d.fail(ctx, item, err, now))
 			continue
 		}
-		if err := d.sender.Send(ctx, message); err != nil {
+		if err := sender.Send(ctx, message); err != nil {
 			dispatchErrors = append(dispatchErrors, d.fail(ctx, item, fmt.Errorf("sending email: %w", err), now))
 			continue
 		}
@@ -294,14 +424,33 @@ func (d *Dispatcher) Run(ctx context.Context) error {
 }
 
 func (d *Dispatcher) fail(ctx context.Context, item *OutboxEmail, cause error, now time.Time) error {
+	category, permanent := SMTPErrorDetails(cause)
+	failure := sanitizeDispatchError(cause)
+	safeCause := errors.New(failure)
+	if category == SMTPErrorRecipient && permanent {
+		markErr := d.store.MarkEmailRejected(
+			ctx, item.ID, d.workerID, d.clock().UTC(),
+		)
+		d.recordDelivery(ctx, "failure", false)
+		if d.onSMTPError != nil {
+			d.onSMTPError(ctx, category)
+		}
+		if markErr != nil {
+			return errors.Join(safeCause, markErr)
+		}
+		return safeCause
+	}
 	retryAt := now.Add(retryDelay(item.AttemptCount))
-	markErr := d.store.MarkEmailFailed(ctx, item.ID, d.workerID, sanitizeDispatchError(cause), retryAt, d.clock().UTC())
+	markErr := d.store.MarkEmailFailed(ctx, item.ID, d.workerID, failure, retryAt, d.clock().UTC())
 	retryScheduled := markErr == nil && item.ExpiresAt.After(now)
 	d.recordDelivery(ctx, "failure", retryScheduled)
-	if markErr != nil {
-		return errors.Join(cause, markErr)
+	if d.onSMTPError != nil {
+		d.onSMTPError(ctx, category)
 	}
-	return cause
+	if markErr != nil {
+		return errors.Join(safeCause, markErr)
+	}
+	return safeCause
 }
 
 func (d *Dispatcher) recordDelivery(ctx context.Context, result string, retryScheduled bool) {
@@ -341,6 +490,26 @@ func retryDelay(attempt int) time.Duration {
 func sanitizeDispatchError(err error) string {
 	if err == nil {
 		return "unknown email delivery error"
+	}
+	var smtpErr *SMTPError
+	if errors.As(err, &smtpErr) {
+		switch smtpErr.Category {
+		case SMTPErrorConfiguration:
+			return "SMTP configuration failure"
+		case SMTPErrorAuthentication:
+			return "SMTP authentication failure"
+		case SMTPErrorTLS:
+			return "SMTP TLS failure"
+		case SMTPErrorTransport:
+			return "SMTP transport failure"
+		case SMTPErrorRecipient:
+			if smtpErr.Permanent {
+				return "permanent SMTP recipient failure"
+			}
+			return "temporary SMTP recipient failure"
+		default:
+			return "SMTP delivery failure"
+		}
 	}
 	message := strings.ReplaceAll(err.Error(), "\r", " ")
 	message = strings.ReplaceAll(message, "\n", " ")

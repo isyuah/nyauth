@@ -4,28 +4,44 @@ import (
 	"context"
 	"errors"
 	"net/mail"
+	"net/textproto"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/nyasharp/nyauth/internal/runtimecoord"
 )
 
 type fakeOutboxStore struct {
 	items       []OutboxEmail
 	sent        []uuid.UUID
 	failed      []uuid.UUID
+	rejected    []uuid.UUID
 	failureText string
 	retryAt     time.Time
 	backlog     int64
+	claims      int
+	expirations int
+	expiryLimit int
+	claimErr    error
+	claimGate   *runtimecoord.MailDeliveryGate
 }
 
 func (f *fakeOutboxStore) EmailOutboxBacklog(context.Context, time.Time) (int64, error) {
 	return f.backlog, nil
 }
 
-func (f *fakeOutboxStore) ClaimEmailBatch(context.Context, string, int, time.Time, time.Duration) ([]OutboxEmail, error) {
-	return f.items, nil
+func (f *fakeOutboxStore) ExpireEmailArtifacts(_ context.Context, _ time.Time, perTableLimit int) (int64, error) {
+	f.expirations++
+	f.expiryLimit = perTableLimit
+	return 0, nil
+}
+
+func (f *fakeOutboxStore) ClaimEmailBatch(_ context.Context, _ string, _ int, _ time.Time, _ time.Duration, gate *runtimecoord.MailDeliveryGate) ([]OutboxEmail, error) {
+	f.claims++
+	f.claimGate = gate
+	return f.items, f.claimErr
 }
 
 func (f *fakeOutboxStore) MarkEmailSent(_ context.Context, id uuid.UUID, _ string, _ time.Time) error {
@@ -40,9 +56,36 @@ func (f *fakeOutboxStore) MarkEmailFailed(_ context.Context, id uuid.UUID, _ str
 	return nil
 }
 
+func (f *fakeOutboxStore) MarkEmailRejected(_ context.Context, id uuid.UUID, _ string, _ time.Time) error {
+	f.rejected = append(f.rejected, id)
+	f.failureText = "permanent SMTP recipient failure"
+	return nil
+}
+
 type fakeSender struct {
 	messages []EmailMessage
 	err      error
+}
+
+type sequenceSenderProvider struct {
+	senders   []EmailSender
+	gate      runtimecoord.MailDeliveryGate
+	calls     int
+	refreshes int
+}
+
+func (p *sequenceSenderProvider) CurrentSender() (EmailSender, runtimecoord.MailDeliveryGate, bool) {
+	if p.calls >= len(p.senders) {
+		return nil, p.gate, false
+	}
+	sender := p.senders[p.calls]
+	p.calls++
+	return sender, p.gate, sender != nil
+}
+
+func (p *sequenceSenderProvider) RefreshEmailSender(context.Context) error {
+	p.refreshes++
+	return nil
 }
 
 func (f *fakeSender) Send(_ context.Context, message EmailMessage) error {
@@ -140,6 +183,134 @@ func TestDispatcherReportsDeliveryRetryAndBacklogMetrics(t *testing.T) {
 	_, _ = dispatcher.DispatchOnce(context.Background())
 	if result != "failure" || !retryScheduled || backlog != 3 {
 		t.Fatalf("result=%q retry=%v backlog=%d", result, retryScheduled, backlog)
+	}
+}
+
+func TestDynamicDispatcherPinsClaimedBatchToValidatedSenderSnapshot(t *testing.T) {
+	firstItem := encryptedTestEmail(t)
+	secondItem := encryptedTestEmail(t)
+	store := &fakeOutboxStore{items: []OutboxEmail{firstItem, secondItem}}
+	firstSender := &fakeSender{}
+	secondSender := &fakeSender{}
+	versionID := uuid.New()
+	provider := &sequenceSenderProvider{
+		senders: []EmailSender{firstSender, secondSender},
+		gate:    runtimecoord.MailDeliveryGate{Mode: runtimecoord.MailModeActive, VersionID: &versionID},
+	}
+	dispatcher, err := newDispatcherWithProvider(store, provider, DispatcherOptions{
+		WorkerID: "worker-1", MasterKeys: map[string][]byte{"primary": testKey}, Clock: func() time.Time { return testNow },
+	})
+	if err != nil {
+		t.Fatalf("newDispatcherWithProvider: %v", err)
+	}
+	processed, err := dispatcher.DispatchOnce(context.Background())
+	if err != nil {
+		t.Fatalf("DispatchOnce: %v", err)
+	}
+	if processed != 2 || provider.calls != 1 || len(firstSender.messages) != 2 || len(secondSender.messages) != 0 {
+		t.Fatalf("processed=%d snapshots=%d first=%d second=%d", processed, provider.calls, len(firstSender.messages), len(secondSender.messages))
+	}
+	if store.claimGate == nil || store.claimGate.Mode != runtimecoord.MailModeActive || store.claimGate.VersionID == nil || *store.claimGate.VersionID != versionID {
+		t.Fatalf("claim gate = %#v", store.claimGate)
+	}
+}
+
+func TestDynamicDispatcherDoesNotClaimWhileUnavailable(t *testing.T) {
+	store := &fakeOutboxStore{items: []OutboxEmail{encryptedTestEmail(t)}}
+	provider := &sequenceSenderProvider{senders: []EmailSender{nil}}
+	dispatcher, err := newDispatcherWithProvider(store, provider, DispatcherOptions{
+		WorkerID: "worker-1", MasterKeys: map[string][]byte{"primary": testKey}, Clock: func() time.Time { return testNow },
+	})
+	if err != nil {
+		t.Fatalf("newDispatcherWithProvider: %v", err)
+	}
+	processed, err := dispatcher.DispatchOnce(context.Background())
+	if err != nil || processed != 0 || store.claims != 0 || store.expirations != 1 || store.expiryLimit != defaultEmailArtifactExpiryBatchSize {
+		t.Fatalf("processed=%d claims=%d expirations=%d expiry_limit=%d err=%v", processed, store.claims, store.expirations, store.expiryLimit, err)
+	}
+}
+
+func TestDynamicDispatcherRefreshesAfterAuthoritativeCircuitOpen(t *testing.T) {
+	item := encryptedTestEmail(t)
+	store := &fakeOutboxStore{items: []OutboxEmail{item}, claimErr: runtimecoord.ErrMailCircuitOpen}
+	provider := &sequenceSenderProvider{
+		senders: []EmailSender{&fakeSender{}},
+		gate:    runtimecoord.MailDeliveryGate{Mode: runtimecoord.MailModeFallback},
+	}
+	dispatcher, err := newDispatcherWithProvider(store, provider, DispatcherOptions{
+		WorkerID: "worker-1", MasterKeys: map[string][]byte{"primary": testKey}, Clock: func() time.Time { return testNow },
+	})
+	if err != nil {
+		t.Fatalf("newDispatcherWithProvider: %v", err)
+	}
+	processed, err := dispatcher.DispatchOnce(context.Background())
+	if err != nil || processed != 0 || store.claims != 1 || provider.refreshes != 1 {
+		t.Fatalf("processed=%d claims=%d refreshes=%d err=%v", processed, store.claims, provider.refreshes, err)
+	}
+}
+
+func TestDispatcherPermanentlyRejectsRecipientWithoutRetry(t *testing.T) {
+	item := encryptedTestEmail(t)
+	store := &fakeOutboxStore{items: []OutboxEmail{item}}
+	const leakedRecipient = "rejected@example.test"
+	sender := &fakeSender{err: &SMTPError{
+		Category: SMTPErrorRecipient, Operation: "sending SMTP RCPT TO", Permanent: true,
+		Err: &textproto.Error{Code: 550, Msg: "mailbox unavailable for " + leakedRecipient},
+	}}
+	dispatcher, err := newDispatcher(store, sender, DispatcherOptions{
+		WorkerID: "worker-1", MasterKeys: map[string][]byte{"primary": testKey}, Clock: func() time.Time { return testNow },
+	})
+	if err != nil {
+		t.Fatalf("newDispatcher: %v", err)
+	}
+	processed, err := dispatcher.DispatchOnce(context.Background())
+	if processed != 0 || err == nil || len(store.rejected) != 1 || len(store.failed) != 0 {
+		t.Fatalf("processed=%d err=%v rejected=%d failed=%d", processed, err, len(store.rejected), len(store.failed))
+	}
+	if !store.retryAt.IsZero() || store.failureText != "permanent SMTP recipient failure" {
+		t.Fatalf("retryAt=%s failure=%q", store.retryAt, store.failureText)
+	}
+	if strings.Contains(err.Error(), leakedRecipient) || strings.Contains(err.Error(), "550") || strings.Contains(err.Error(), "mailbox unavailable") {
+		t.Fatalf("dispatcher returned raw SMTP response: %q", err)
+	}
+}
+
+func TestDispatcherRedactsRetryableSMTPFailure(t *testing.T) {
+	item := encryptedTestEmail(t)
+	store := &fakeOutboxStore{items: []OutboxEmail{item}}
+	const leakedRecipient = "alice@example.test"
+	sender := &fakeSender{err: &SMTPError{
+		Category: SMTPErrorTransport, Operation: "closing SMTP DATA", Permanent: false,
+		Err: &textproto.Error{Code: 451, Msg: "temporary failure for " + leakedRecipient},
+	}}
+	dispatcher, err := newDispatcher(store, sender, DispatcherOptions{
+		WorkerID: "worker-1", MasterKeys: map[string][]byte{"primary": testKey}, Clock: func() time.Time { return testNow },
+	})
+	if err != nil {
+		t.Fatalf("newDispatcher: %v", err)
+	}
+	processed, err := dispatcher.DispatchOnce(context.Background())
+	if processed != 0 || err == nil || len(store.failed) != 1 || len(store.rejected) != 0 {
+		t.Fatalf("processed=%d err=%v failed=%d rejected=%d", processed, err, len(store.failed), len(store.rejected))
+	}
+	if store.failureText != "SMTP transport failure" {
+		t.Fatalf("failure=%q", store.failureText)
+	}
+	if strings.Contains(err.Error(), leakedRecipient) || strings.Contains(err.Error(), "451") || strings.Contains(err.Error(), "temporary failure") {
+		t.Fatalf("dispatcher returned raw SMTP response: %q", err)
+	}
+}
+
+func TestSMTPProtocolFailureClassification(t *testing.T) {
+	err := smtpProtocolFailure(SMTPErrorRecipient, "sending recipient", &textproto.Error{Code: 550, Msg: "rejected"})
+	category, permanent := SMTPErrorDetails(err)
+	if category != SMTPErrorRecipient || !permanent {
+		t.Fatalf("category=%q permanent=%v", category, permanent)
+	}
+	err = smtpProtocolFailure(SMTPErrorTransport, "sending data", &textproto.Error{Code: 451, Msg: "try later"})
+	category, permanent = SMTPErrorDetails(err)
+	if category != SMTPErrorTransport || permanent {
+		t.Fatalf("category=%q permanent=%v", category, permanent)
 	}
 }
 

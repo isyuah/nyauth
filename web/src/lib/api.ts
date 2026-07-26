@@ -258,6 +258,7 @@ export interface Branding {
 export type RegistrationMode = 'closed' | 'invite_only' | 'open';
 
 export interface RegistrationOptions {
+  available: boolean;
   mode: RegistrationMode;
   require_email_verification: boolean;
   allowed_email_domains: string[];
@@ -302,6 +303,80 @@ export interface RegisterResult {
   verification_expires_at?: string;
 }
 
+export type MailTLSMode = 'starttls' | 'implicit' | 'plain';
+export type MailRuntimeMode = 'fallback' | 'active' | 'disabled' | string;
+export type MailCircuitState = 'closed' | 'open' | string;
+export type MailErrorCategory = 'configuration' | 'authentication' | 'tls' | 'transport' | 'recipient' | 'unknown' | string;
+
+export interface MailConfig {
+  source: 'environment' | 'database' | string;
+  id?: string;
+  revision?: number;
+  host: string;
+  port: number;
+  username: string;
+  tls_mode: MailTLSMode;
+  from_address: string;
+  from_name: string;
+  public_base_url: string;
+  connect_timeout: string;
+  send_timeout: string;
+  password_configured: boolean;
+  created_by?: string;
+  created_at?: string;
+}
+
+export interface MailCircuit {
+  state: MailCircuitState;
+  open_category?: MailErrorCategory;
+  open_reason?: string;
+  opened_at?: string;
+  next_probe_at?: string;
+  transport_failure_count: number;
+}
+
+export interface MailSettings {
+  mode: MailRuntimeMode;
+  configured: boolean;
+  available: boolean;
+  state_revision: number;
+  circuit: MailCircuit;
+  active?: MailConfig;
+  candidate?: MailConfig;
+  previous?: MailConfig;
+}
+
+export interface SaveMailCandidateInput {
+  expected_revision: number;
+  host: string;
+  port: number;
+  username: string;
+  password?: string;
+  tls_mode: MailTLSMode;
+  from_address: string;
+  from_name: string;
+  public_base_url: string;
+  connect_timeout: string;
+  send_timeout: string;
+}
+
+export interface SaveMailCandidateResult {
+  candidate: MailConfig;
+  state_revision: number;
+}
+
+export interface MailTestResult {
+  result: 'success' | 'failure';
+  error_category?: MailErrorCategory;
+  tested_at: string;
+  state_revision: number;
+}
+
+export interface MailMutationResult {
+  status: 'activated' | 'rolled_back' | 'disabled' | string;
+  state_revision: number;
+}
+
 export type ComponentStatus = 'ok' | 'degraded' | 'unavailable' | string;
 
 export interface SystemStatus {
@@ -317,6 +392,13 @@ export interface SystemStatus {
     redis: { status: ComponentStatus; latency_ms: number };
     providers: { status: ComponentStatus; latency_ms: number; snapshot_revision: number };
     jwk: { status: ComponentStatus; latency_ms: number };
+    mail: {
+      status: ComponentStatus;
+      mode: MailRuntimeMode;
+      configured: boolean;
+      available: boolean;
+      circuit_state: MailCircuitState;
+    };
   };
   active_signing_key?: {
     kid: string;
@@ -381,7 +463,24 @@ const API_ERROR_TRANSLATIONS: Record<string, string> = {
   'username or email is already taken': '用户名或邮箱已被使用',
   'email domain is not allowed': '该邮箱域名不允许注册',
   'too many registration attempts': '注册尝试过于频繁，请稍后再试',
+  'registration is temporarily unavailable': '注册功能暂时不可用，请稍后重试',
+  'registration temporarily unavailable': '注册功能暂时不可用，请稍后重试',
   'registration requires email delivery, which is not configured': '注册功能暂不可用：邮件服务未配置',
+  'mail settings are temporarily unavailable': '邮件设置暂时不可用，请稍后重试',
+  'mail configuration is invalid': 'SMTP 配置无效，请检查各字段和密码设置',
+  'mail configuration version was not found': '邮件配置版本不存在，请重新加载',
+  'mail settings changed; reload and try again': '邮件设置已被其他管理员修改，请重新加载后再试',
+  'a successful candidate test is required': '激活前必须先成功发送候选配置的测试邮件',
+  'the successful candidate test has expired': '候选配置的成功测试已过期，请重新发送测试邮件',
+  'no previous mail configuration is available': '没有可回滚的上一版邮件配置',
+  'mail is already disabled': '邮件服务已经处于禁用状态',
+  'close self-registration before disabling mail': '禁用邮件服务前必须先关闭自助注册',
+  'too many mail settings operations': '邮件设置操作过于频繁，请稍后重试',
+  'connect_timeout must be a valid duration': '连接超时必须是有效时长，例如 10s',
+  'send_timeout must be a valid duration': '发送超时必须是有效时长，例如 30s',
+  'plain smtp is forbidden in production': '生产环境禁止使用明文 SMTP',
+  'public_base_url must use https in production': '生产环境的公开地址必须使用 HTTPS',
+  'email is invalid': '邮箱地址格式无效',
 };
 
 export function localizeAPIErrorMessage(message: string): string {
@@ -555,6 +654,25 @@ export const api = {
     getRegistrationSettings: () => req<RegistrationSettings>('/api/admin/settings/registration'),
     updateRegistrationSettings: (settings: RegistrationSettings) =>
       req<RegistrationSettings>('/api/admin/settings/registration', { method: 'PUT', body: JSON.stringify(settings) }),
+    getMailSettings: () => req<MailSettings>('/api/admin/settings/mail'),
+    saveMailCandidate: (settings: SaveMailCandidateInput) =>
+      req<SaveMailCandidateResult>('/api/admin/settings/mail/candidate', { method: 'PUT', body: JSON.stringify(settings) }),
+    testMailCandidate: (expectedRevision: number, versionID: string, email: string) =>
+      req<MailTestResult>('/api/admin/settings/mail/candidate/test', {
+        method: 'POST', body: JSON.stringify({ expected_revision: expectedRevision, version_id: versionID, email }),
+      }),
+    activateMailCandidate: (expectedRevision: number, versionID: string) =>
+      req<MailMutationResult>('/api/admin/settings/mail/activate', {
+        method: 'POST', body: JSON.stringify({ expected_revision: expectedRevision, version_id: versionID }),
+      }),
+    rollbackMailSettings: (expectedRevision: number) =>
+      req<MailMutationResult>('/api/admin/settings/mail/rollback', {
+        method: 'POST', body: JSON.stringify({ expected_revision: expectedRevision }),
+      }),
+    disableMail: (expectedRevision: number) =>
+      req<MailMutationResult>('/api/admin/settings/mail/disable', {
+        method: 'POST', body: JSON.stringify({ expected_revision: expectedRevision }),
+      }),
     getInvites: () => req<Invite[]>('/api/admin/invites'),
     createInvite: (data: { note?: string; max_uses?: number; ttl?: string }) =>
       req<CreateInviteResult>('/api/admin/invites', { method: 'POST', body: JSON.stringify(data) }),
