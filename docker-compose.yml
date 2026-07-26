@@ -2,7 +2,7 @@ name: nyauth-dev
 
 x-nyauth-environment: &nyauth-environment
   NYAUTH_ENVIRONMENT: development
-  NYAUTH_DATABASE_DSN: "postgres://nyauth_runtime:${NYAUTH_DEV_RUNTIME_POSTGRES_PASSWORD:-local-dev-only-runtime-postgres}@postgres:5432/nyauth?sslmode=disable"
+  NYAUTH_DATABASE_DSN: "postgres://${NYAUTH_DATABASE_RUNTIME_ROLE:-nyauth_runtime}:${NYAUTH_DEV_RUNTIME_POSTGRES_PASSWORD:-local-dev-only-runtime-postgres}@postgres:5432/nyauth?sslmode=disable"
   NYAUTH_DATABASE_RUNTIME_ROLE: "${NYAUTH_DATABASE_RUNTIME_ROLE:-nyauth_runtime}"
   NYAUTH_REDIS_ADDR: "redis:6379"
   NYAUTH_REDIS_PASSWORD: "${NYAUTH_DEV_REDIS_PASSWORD:-local-dev-only-redis}"
@@ -29,6 +29,7 @@ services:
       POSTGRES_DB: nyauth
       POSTGRES_USER: nyauth_migrator
       POSTGRES_PASSWORD: "${NYAUTH_DEV_MIGRATION_POSTGRES_PASSWORD:-local-dev-only-migration-postgres}"
+      NYAUTH_DATABASE_RUNTIME_ROLE: "${NYAUTH_DATABASE_RUNTIME_ROLE:-nyauth_runtime}"
       NYAUTH_RUNTIME_DB_PASSWORD: "${NYAUTH_DEV_RUNTIME_POSTGRES_PASSWORD:-local-dev-only-runtime-postgres}"
     volumes:
       - pgdata:/var/lib/postgresql/data
@@ -87,6 +88,7 @@ services:
     environment:
       NYAUTH_ENVIRONMENT: development
       NYAUTH_DATABASE_DSN: "postgres://nyauth_migrator:${NYAUTH_DEV_MIGRATION_POSTGRES_PASSWORD:-local-dev-only-migration-postgres}@postgres:5432/nyauth?sslmode=disable"
+      NYAUTH_DATABASE_RUNTIME_ROLE: "${NYAUTH_DATABASE_RUNTIME_ROLE:-nyauth_runtime}"
       NYAUTH_AUDIT_RETENTION: "${NYAUTH_AUDIT_RETENTION:-8760h}"
     depends_on:
       postgres:

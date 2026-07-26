@@ -39,30 +39,71 @@
 - Redis 7+
 - Node.js 20+
 
+### 使用开发 Compose（推荐）
+
+在仓库根目录后台构建并启动完整开发栈：
+
+```powershell
+docker compose up -d --build
+docker compose ps
+docker compose logs --tail 100 migrate nyauth
+```
+
+访问 `http://localhost:8080`。空数据库的首次登录账号为 `admin`，密码为 `local-dev-only-admin`；登录后必须立即修改密码。这些值只用于本地开发，不得用于可被其他设备访问的环境。
+
+检查 readiness，或持续查看应用日志：
+
+```powershell
+curl.exe --fail http://localhost:8080/readyz
+docker compose logs --follow nyauth
+```
+
+开发 Compose 将应用、PostgreSQL 和 Redis 分别绑定到 `127.0.0.1:8080`、`127.0.0.1:5432` 和 `127.0.0.1:6379`，并通过一次性 `migrate` service 初始化空数据库。正常停止使用 `docker compose down`，数据会保留在命名 volume 中。不要使用 `docker compose down -v`；`-v` 会删除本地 PostgreSQL 数据。
+
 ### 使用本机服务
 
-```bash
-cp config.example.yaml config.yaml
-# 编辑 config.yaml 中的数据库、Redis 和开发配置
+本机运行 Go 进程前必须先生成会被嵌入二进制的 `web/build`：
 
-go run ./cmd/nyauth migrate -config config.yaml
-go run ./cmd/nyauth serve -config config.yaml
-
-# 建议由迁移账号按月执行；migrate 也会执行同一维护步骤
-go run ./cmd/nyauth maintenance -config config.yaml
+```powershell
+Set-Location web
+npm ci
+npm run check
+npm run build
+Set-Location ..
+Copy-Item config.example.yaml config.yaml
 ```
 
-迁移命令使用数据库锁；多个实例同时执行时只有一个实例应用迁移。`migrate` 和 `maintenance` 使用迁移账号预创建审计月分区、应用 `audit.retention`、清理已投递的旧 outbox，并复用注册过期清理逻辑作为运维兜底。常驻 `serve` 实例会在启动后立即、此后每小时尝试清理超过各自持久化截止时间的待验证注册；PostgreSQL advisory lock 保证多实例每轮只有一个执行者。`serve` 不执行 DDL，数据库未迁移或版本不匹配时会拒绝启动。
+PostgreSQL 必须使用相互独立的 migrator 与 runtime 登录角色。以下是全新本地实例的开发示例；如果同名角色或数据库已经存在，应核对其权限，而不是重复执行创建命令：
+
+```powershell
+psql -U postgres -d postgres -c "CREATE ROLE nyauth_migrator LOGIN PASSWORD 'local-dev-only-migration-postgres' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS"
+psql -U postgres -d postgres -c "CREATE ROLE nyauth_runtime LOGIN PASSWORD 'local-dev-only-runtime-postgres' NOSUPERUSER NOCREATEDB NOCREATEROLE NOINHERIT NOREPLICATION NOBYPASSRLS"
+psql -U postgres -d postgres -c "CREATE DATABASE nyauth OWNER nyauth_migrator"
+```
+
+启动 Redis 7，并配置密码与 `noeviction`。例如在另一个终端运行：
+
+```powershell
+redis-server --requirepass local-dev-only-redis --maxmemory-policy noeviction
+```
+
+先让迁移命令使用 migrator DSN，再让常驻服务使用 runtime DSN。bootstrap 密码只从环境变量或 secret 文件读取，不应写入 YAML：
+
+```powershell
+$env:NYAUTH_REDIS_PASSWORD = 'local-dev-only-redis'
+$env:NYAUTH_DATABASE_RUNTIME_ROLE = 'nyauth_runtime'
+$env:NYAUTH_BOOTSTRAP_ADMIN_PASSWORD = 'local-dev-only-admin'
+
+$env:NYAUTH_DATABASE_DSN = 'postgres://nyauth_migrator:local-dev-only-migration-postgres@localhost:5432/nyauth?sslmode=disable'
+go run ./cmd/nyauth migrate -config config.yaml
+
+$env:NYAUTH_DATABASE_DSN = 'postgres://nyauth_runtime:local-dev-only-runtime-postgres@localhost:5432/nyauth?sslmode=disable'
+go run ./cmd/nyauth serve -config config.yaml
+```
+
+建议由迁移账号按月执行 `go run ./cmd/nyauth maintenance -config config.yaml`，并在执行前把 `NYAUTH_DATABASE_DSN` 切回 migrator DSN。迁移命令使用数据库锁；多个实例同时执行时只有一个实例应用迁移。`migrate` 和 `maintenance` 使用迁移账号预创建审计月分区、应用 `audit.retention`、清理已投递的旧 outbox，并复用注册过期清理逻辑作为运维兜底。常驻 `serve` 实例会在启动后立即、此后每小时尝试清理超过各自持久化截止时间的待验证注册；PostgreSQL advisory lock 保证多实例每轮只有一个执行者。`serve` 不执行 DDL，数据库未迁移或版本不匹配时会拒绝启动。
 
 配置文件采用严格解码，未知字段（包括已删除的旧 `providers` 配置）会直接导致启动失败。环境变量统一使用 `NYAUTH_` 前缀和下划线层级，例如 `server.trusted_proxy_cidrs` 对应 `NYAUTH_SERVER_TRUSTED_PROXY_CIDRS`。数据库 DSN、Redis 密码、master key、bootstrap 管理员密码、SMTP 密码和 OTLP Authorization 均支持 `*_FILE`；同一项不能同时设置直接值与文件值。
-
-### 使用开发 Compose
-
-```bash
-docker compose up --build
-```
-
-开发 Compose 将应用、PostgreSQL 和 Redis 分别绑定到 `127.0.0.1:8080`、`127.0.0.1:5432` 和 `127.0.0.1:6379`，并通过一次性 `migrate` service 初始化空数据库。
 
 ## 生产部署
 
@@ -71,33 +112,29 @@ docker compose up --build
 > [!IMPORTANT]
 > `auth.issuer` 必须与浏览器实际访问的公开地址完全一致（协议 + 域名）。第一方登录和账户操作接口会把请求的 `Origin` 与 issuer 比对，不一致会返回 `403 invalid request origin`。通过 Cloudflare Tunnel、frp 或任何反向代理暴露服务时，把 issuer 设为公开 HTTPS 域名，并只通过该域名访问后台。
 
-1. 复制生产配置模板并替换全部部署值：
+完整的单机远程部署、secret 生成、反向代理、升级和回滚步骤见 [单机远程部署手册](docs/operations/single-host-deployment.md)。`docker-compose.prod.yml` 完全由环境变量和 Compose secret 配置，不读取 `config.production.yaml`，因此 Compose 部署不需要复制配置模板。`config.production.example.yaml` 只用于直接运行原生二进制的部署。
 
-   ```bash
-   cp config.production.example.yaml config.production.yaml
-   ```
+Compose 部署至少设置：
 
-2. 设置 `docker-compose.prod.yml` 要求的环境变量：
+- `NYAUTH_IMAGE`：建议使用不可变镜像 digest
+- `NYAUTH_DATABASE_DSN_FILE`：运行账号 DSN secret 文件
+- `NYAUTH_DATABASE_MIGRATION_DSN_FILE`：迁移账号 DSN secret 文件
+- 可选 `NYAUTH_DATABASE_RUNTIME_ROLE`：独立且不属于其他 PostgreSQL 角色的运行账号，默认 `nyauth_runtime`
+- `NYAUTH_DATABASE_RUNTIME_PASSWORD_FILE`：初始化运行账号所需的密码 secret 文件
+- `POSTGRES_PASSWORD_FILE`：PostgreSQL 迁移账号密码 secret 文件
+- `NYAUTH_REDIS_PASSWORD_FILE`：至少 16 字符的 Redis 密码 secret 文件
+- `NYAUTH_AUTH_MASTER_KEY_FILE`：标准 Base64 编码的随机 32 字节 master key secret 文件
+- `NYAUTH_AUTH_ISSUER`：生产 HTTPS issuer
+- `NYAUTH_TRUSTED_PROXY_CIDRS`：准确的反向代理 CIDR
+- `NYAUTH_PROXY_NETWORK`：已由反向代理平台创建并加入的外部 Docker network
+- 可选 `NYAUTH_BOOTSTRAP_ADMIN_USERNAME`、`NYAUTH_BOOTSTRAP_ADMIN_EMAIL`、`NYAUTH_BOOTSTRAP_ADMIN_PASSWORD`
 
-   - `NYAUTH_IMAGE`：建议使用不可变镜像 digest
-   - `NYAUTH_DATABASE_DSN_FILE`：运行账号 DSN secret 文件
-   - `NYAUTH_DATABASE_MIGRATION_DSN_FILE`：迁移账号 DSN secret 文件
-   - 可选 `NYAUTH_DATABASE_RUNTIME_ROLE`：独立且不属于其他 PostgreSQL 角色的运行账号，默认 `nyauth_runtime`
-   - `NYAUTH_DATABASE_RUNTIME_PASSWORD_FILE`：初始化运行账号所需的密码 secret 文件
-   - `POSTGRES_PASSWORD_FILE`：PostgreSQL 迁移账号密码 secret 文件
-   - `NYAUTH_REDIS_PASSWORD_FILE`：至少 16 字符的 Redis 密码 secret 文件
-   - `NYAUTH_AUTH_MASTER_KEY_FILE`：标准 Base64 编码的随机 32 字节 master key secret 文件
-   - `NYAUTH_AUTH_ISSUER`：生产 HTTPS issuer
-   - `NYAUTH_TRUSTED_PROXY_CIDRS`：准确的反向代理 CIDR
-   - `NYAUTH_PROXY_NETWORK`：已由反向代理平台创建并加入的外部 Docker network
-   - 可选 `NYAUTH_BOOTSTRAP_ADMIN_USERNAME`、`NYAUTH_BOOTSTRAP_ADMIN_EMAIL`、`NYAUTH_BOOTSTRAP_ADMIN_PASSWORD`
+先检查 Compose 展开结果，再启动：
 
-3. 先检查 Compose 展开结果，再启动：
-
-   ```bash
-   docker compose -f docker-compose.prod.yml config --quiet
-   docker compose -f docker-compose.prod.yml up -d
-   ```
+```bash
+docker compose --env-file .env.production -f docker-compose.prod.yml config --quiet
+docker compose --env-file .env.production -f docker-compose.prod.yml up -d
+```
 
 生产 Compose 不发布 PostgreSQL/Redis 端口，应用仅通过预先创建的 external proxy network 暴露 `8080`；Compose 不创建或删除该网络。应用与迁移容器使用非 root 用户、只读根文件系统、临时 `/tmp`、cap drop 和 `no-new-privileges`。
 
@@ -107,7 +144,7 @@ docker compose up --build
 
 Prometheus 指标默认由仅限内部网络访问的 `/metrics` 提供。可选 OTLP HTTP 导出使用 `NYAUTH_TELEMETRY_OTLP_ENABLED`、`NYAUTH_TELEMETRY_OTLP_ENDPOINT`、`NYAUTH_TELEMETRY_OTLP_EXPORT_INTERVAL` 和 `NYAUTH_TELEMETRY_OTLP_TIMEOUT`；collector Authorization 建议通过 `NYAUTH_TELEMETRY_OTLP_AUTHORIZATION_FILE` 注入，生产 endpoint 必须使用 HTTPS。
 
-Nyauth 只发送邮件，不读取邮箱，因此不使用 IMAP。SMTP 使用启动期 `NYAUTH_MAIL_*` 环境变量配置，修改后需要重启对应 `serve` 实例；密码优先通过 `NYAUTH_MAIL_SMTP_PASSWORD_FILE` 注入。常用变量包括 `NYAUTH_MAIL_ENABLED`、`NYAUTH_MAIL_FROM_ADDRESS`、`NYAUTH_MAIL_PUBLIC_BASE_URL`、`NYAUTH_MAIL_SMTP_HOST`、`NYAUTH_MAIL_SMTP_PORT`、`NYAUTH_MAIL_SMTP_USERNAME` 和 `NYAUTH_MAIL_SMTP_TLS_MODE`；生产环境禁止明文 SMTP，并要求公开邮件链接使用 HTTPS。
+Nyauth 只发送邮件，不读取邮箱，因此不使用 IMAP。在 Phase S 动态 SMTP 配置上线前，SMTP 使用启动期 `NYAUTH_MAIL_*` 环境变量，修改后需要重启对应 `serve` 实例。单机 Compose 使用 `docker/compose.prod.smtp-password-file.yml`，HA Compose 使用 `docker/compose.ha.smtp-password-file.yml`，把 `NYAUTH_MAIL_SMTP_PASSWORD_FILE` 指向宿主机 secret 文件后与基础 Compose 一起加载。常用变量包括 `NYAUTH_MAIL_ENABLED`、`NYAUTH_MAIL_FROM_ADDRESS`、`NYAUTH_MAIL_PUBLIC_BASE_URL`、`NYAUTH_MAIL_SMTP_HOST`、`NYAUTH_MAIL_SMTP_PORT`、`NYAUTH_MAIL_SMTP_USERNAME` 和 `NYAUTH_MAIL_SMTP_TLS_MODE`；生产环境禁止明文 SMTP，并要求公开邮件链接使用 HTTPS。
 
 ## 第一方会话 API
 

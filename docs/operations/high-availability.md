@@ -30,6 +30,17 @@ Nyauth 的高可用形态是多个无状态应用实例共享外部 PostgreSQL �
 
 Redis TLS 默认启用。使用公共 CA 时无需额外文件；使用私有 CA 时，通过部署环境的 Compose override 将只读 CA 文件挂入两个应用和迁移容器，并设置 `NYAUTH_REDIS_TLS_ROOT_CA_FILE`。只有依赖网络已经提供等效的加密隔离时，才应显式设置 `NYAUTH_REDIS_TLS_ENABLED=false`。
 
+在 Phase S 动态 SMTP 配置上线前，静态 SMTP 密码使用仓库提供的 HA override。宿主机的 `NYAUTH_MAIL_SMTP_PASSWORD_FILE` 指向密码文件，容器内会固定挂载为 `/run/secrets/mail_smtp_password`；两个应用实例读取同一 secret：
+
+```bash
+docker compose \
+  -f docker-compose.ha.yml \
+  -f docker/compose.ha.smtp-password-file.yml \
+  config --quiet
+```
+
+SMTP 其余 `NYAUTH_MAIL_*` 参数由部署环境提供。修改静态邮件配置后必须重建两个 `serve` 实例；Nyauth 不使用 IMAP。
+
 外部 PostgreSQL 不会由 Compose 创建登录角色。DBA 至少要在目标数据库中先执行等价操作，并将密码只写入运行 DSN secret：
 
 ```sql

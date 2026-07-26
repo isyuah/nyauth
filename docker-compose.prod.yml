@@ -79,6 +79,7 @@ services:
       POSTGRES_DB: "${POSTGRES_DB:-nyauth}"
       POSTGRES_USER: "nyauth_migrator"
       POSTGRES_PASSWORD_FILE: "/run/secrets/postgres_password"
+      NYAUTH_DATABASE_RUNTIME_ROLE: "${NYAUTH_DATABASE_RUNTIME_ROLE:-nyauth_runtime}"
       NYAUTH_RUNTIME_DB_PASSWORD_FILE: "/run/secrets/database_runtime_password"
     secrets:
       - postgres_password
@@ -201,7 +202,7 @@ secrets:
   database_migration_dsn:
     file: "${NYAUTH_DATABASE_MIGRATION_DSN_FILE:?set NYAUTH_DATABASE_MIGRATION_DSN_FILE to the migration DSN secret file}"
   database_runtime_password:
-    file: "${NYAUTH_DATABASE_RUNTIME_PASSWORD_FILE:?set NYAUTH_DATABASE_RUNTIME_PASSWORD_FILE to the nyauth_runtime password secret file}"
+    file: "${NYAUTH_DATABASE_RUNTIME_PASSWORD_FILE:?set NYAUTH_DATABASE_RUNTIME_PASSWORD_FILE to the runtime-role password secret file}"
   redis_password:
     file: "${NYAUTH_REDIS_PASSWORD_FILE:?set NYAUTH_REDIS_PASSWORD_FILE to the Redis password secret file}"
   auth_master_key:
