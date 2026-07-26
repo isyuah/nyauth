@@ -8,6 +8,14 @@ x-nyauth-environment: &nyauth-environment
   NYAUTH_REDIS_PASSWORD: "${NYAUTH_DEV_REDIS_PASSWORD:-local-dev-only-redis}"
   NYAUTH_AUTH_MASTER_KEY: "${NYAUTH_DEV_MASTER_KEY:-MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=}"
   NYAUTH_BOOTSTRAP_ADMIN_PASSWORD: "${NYAUTH_DEV_ADMIN_PASSWORD:-local-dev-only-admin}"
+  # 启用账户安全中心邮件（密码重置、邮箱验证/变更）时取消注释，
+  # 并配合本地 SMTP 捕获工具（如 Mailpit：docker run -p 1025:1025 -p 8025:8025 axllent/mailpit）：
+  # NYAUTH_MAIL_ENABLED: "true"
+  # NYAUTH_MAIL_FROM_ADDRESS: "noreply@localhost"
+  # NYAUTH_MAIL_PUBLIC_BASE_URL: "http://localhost:8080"
+  # NYAUTH_MAIL_SMTP_HOST: "host.docker.internal"
+  # NYAUTH_MAIL_SMTP_PORT: "1025"
+  # NYAUTH_MAIL_SMTP_TLS_MODE: "plain"
 
 services:
   postgres:

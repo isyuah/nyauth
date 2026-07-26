@@ -65,6 +65,12 @@ admin:
 web:
   enabled: true
   title: "Nya"
+# mail: account security center email (password reset, email verify/change,
+# security notifications). mail.* keys are rejected in config files; configure
+# exclusively via NYAUTH_MAIL_* environment variables (see docker-compose.prod.yml
+# for the full set). Production requires HTTPS NYAUTH_MAIL_PUBLIC_BASE_URL and
+# forbids NYAUTH_MAIL_SMTP_TLS_MODE=plain; inject the SMTP password with
+# NYAUTH_MAIL_SMTP_PASSWORD_FILE.
 audit:
   retention: 8760h
 telemetry:

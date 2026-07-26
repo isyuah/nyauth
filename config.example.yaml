@@ -67,6 +67,19 @@ web:
   enabled: true
   title: "nyauth"
   logo_url: ""
+# mail: 账户安全中心（密码重置、邮箱验证/变更、安全通知）依赖邮件发送。
+# mail.* 不允许写在配置文件里，只能通过 NYAUTH_MAIL_* 环境变量配置：
+#   NYAUTH_MAIL_ENABLED=true
+#   NYAUTH_MAIL_FROM_ADDRESS=noreply@example.com
+#   NYAUTH_MAIL_FROM_NAME=nyauth
+#   NYAUTH_MAIL_PUBLIC_BASE_URL=http://localhost:8080   # 邮件里链接的基址；生产必须 HTTPS
+#   NYAUTH_MAIL_SMTP_HOST=localhost
+#   NYAUTH_MAIL_SMTP_PORT=1025                          # 默认 587
+#   NYAUTH_MAIL_SMTP_USERNAME=
+#   NYAUTH_MAIL_SMTP_PASSWORD=                          # 优先用 NYAUTH_MAIL_SMTP_PASSWORD_FILE
+#   NYAUTH_MAIL_SMTP_TLS_MODE=plain                     # starttls（默认）/implicit/plain；生产禁止 plain
+# 本地开发可配合 Mailpit（docker run -p 1025:1025 -p 8025:8025 axllent/mailpit）。
+# 未启用 mail 时相关 API 返回明确错误，其余功能不受影响。
 audit:
   retention: 8760h
 telemetry:
