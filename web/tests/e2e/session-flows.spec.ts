@@ -953,6 +953,112 @@ test('email action links are never consumed during page load', async ({ page }) 
   expect(changeBody).toEqual({ token: 'email-change-token-from-email' });
 });
 
+test('account action pages without a token show recovery guidance instead of a form', async ({ page }) => {
+  let confirmRequests = 0;
+  for (const path of ['**/api/password/reset', '**/api/email/verify', '**/api/email/change/confirm']) {
+    await page.route(path, async (route) => {
+      confirmRequests += 1;
+      await fulfillJSON(route, 200, {});
+    });
+  }
+  await page.route('**/api/session', (route) => fulfillJSON(route, 401, { error: 'authentication_required' }));
+
+  await page.goto('/reset-password');
+  await expect(page.getByText('重置链接不完整，请重新发起密码找回。')).toBeVisible();
+  await expect(page.getByRole('link', { name: '重新发送邮件' })).toHaveAttribute('href', '/forgot-password');
+
+  await page.goto('/verify-email');
+  await expect(page.getByText('验证链接不完整，请从个人资料页重新发送。')).toBeVisible();
+
+  await page.goto('/change-email');
+  await expect(page.getByText('确认链接不完整，请从个人资料页重新发起邮箱变更。')).toBeVisible();
+
+  expect(confirmRequests).toBe(0);
+});
+
+test('client-side password validation blocks the reset request before the token is spent', async ({ page }) => {
+  let requests = 0;
+  await page.route('**/api/password/reset', async (route) => {
+    requests += 1;
+    await fulfillJSON(route, 200, { status: 'password_reset' });
+  });
+
+  await page.goto('/reset-password?token=reset-token-from-email');
+  await page.getByLabel(/^新密码/).fill('short');
+  await page.getByLabel('确认新密码').fill('short');
+  await page.getByRole('button', { name: '确认重置' }).click();
+  await expect(page.getByRole('alert')).toHaveText('密码长度需为 12–1024 字节（按 UTF-8 编码）。');
+
+  await page.getByLabel(/^新密码/).fill('a-new-password-123');
+  await page.getByLabel('确认新密码').fill('a-different-password-456');
+  await page.getByRole('button', { name: '确认重置' }).click();
+  await expect(page.getByRole('alert')).toHaveText('两次输入的新密码不一致。');
+
+  expect(requests).toBe(0);
+});
+
+test('an expired reset token shows the server error and keeps the form usable for retry', async ({ page }) => {
+  let requests = 0;
+  await page.route('**/api/password/reset', async (route) => {
+    requests += 1;
+    await fulfillJSON(route, 400, { error: 'invalid or expired account action token' });
+  });
+
+  await page.goto('/reset-password?token=expired-token');
+  await page.getByLabel(/^新密码/).fill('a-new-password-123');
+  await page.getByLabel('确认新密码').fill('a-new-password-123');
+  await page.getByRole('button', { name: '确认重置' }).click();
+
+  await expect(page.getByRole('alert')).toHaveText('invalid or expired account action token');
+  await expect(page.getByText('密码已更新，所有旧会话和令牌均已失效。')).not.toBeVisible();
+  expect(requests).toBe(1);
+
+  await page.getByRole('button', { name: '确认重置' }).click();
+  await expect(page.getByRole('alert')).toHaveText('invalid or expired account action token');
+  expect(requests).toBe(2);
+});
+
+test('invalid email action tokens surface the failure without a false success state', async ({ page }) => {
+  await page.route('**/api/email/verify', (route) =>
+    fulfillJSON(route, 400, { error: 'invalid or expired account action token' }));
+  await page.route('**/api/email/change/confirm', (route) =>
+    fulfillJSON(route, 400, { error: 'invalid or expired account action token' }));
+  await page.route('**/api/session', (route) => fulfillJSON(route, 401, { error: 'authentication_required' }));
+
+  await page.goto('/verify-email?token=stale-token');
+  await page.getByRole('button', { name: '确认验证邮箱' }).click();
+  await expect(page.getByRole('alert')).toHaveText('invalid or expired account action token');
+  await expect(page.getByText('邮箱验证完成，现在可以用于账户恢复。')).not.toBeVisible();
+  await expect(page.getByRole('button', { name: '确认验证邮箱' })).toBeVisible();
+
+  await page.goto('/change-email?token=stale-token');
+  await page.getByRole('button', { name: '确认更换邮箱' }).click();
+  await expect(page.getByRole('alert')).toHaveText('invalid or expired account action token');
+  await expect(page.getByText('新邮箱已生效。为保护账户安全，请重新登录。')).not.toBeVisible();
+});
+
+test('forgot-password surfaces rate limiting and allows a later retry', async ({ page }) => {
+  let requests = 0;
+  await page.route('**/api/password/forgot', async (route) => {
+    requests += 1;
+    if (requests === 1) {
+      await fulfillJSON(route, 429, { error: 'too many account recovery requests' });
+    } else {
+      await fulfillJSON(route, 202, { status: 'accepted' });
+    }
+  });
+
+  await page.goto('/forgot-password');
+  await page.getByLabel('邮箱地址').fill('alice@example.com');
+  await page.getByRole('button', { name: '发送重置邮件' }).click();
+  await expect(page.getByRole('alert')).toHaveText('too many account recovery requests');
+  await expect(page.getByLabel('邮箱地址')).toHaveValue('alice@example.com');
+
+  await page.getByRole('button', { name: '发送重置邮件' }).click();
+  await expect(page.getByText('如果该邮箱已绑定到可恢复的账户，重置邮件会很快送达。')).toBeVisible();
+  expect(requests).toBe(2);
+});
+
 test('administrators can edit OAuth clients without mutating immutable ownership fields', async ({ page }) => {
   const state: MockState = {
     authenticated: true,
