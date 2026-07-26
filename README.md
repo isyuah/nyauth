@@ -67,6 +67,9 @@ docker compose up --build
 
 生产环境由外部反向代理终止 TLS。只有配置的可信代理 CIDR 可以提供转发头。
 
+> [!IMPORTANT]
+> `auth.issuer` 必须与浏览器实际访问的公开地址完全一致（协议 + 域名）。第一方登录和账户操作接口会把请求的 `Origin` 与 issuer 比对，不一致会返回 `403 invalid request origin`。通过 Cloudflare Tunnel、frp 或任何反向代理暴露服务时，把 issuer 设为公开 HTTPS 域名，并只通过该域名访问后台。
+
 1. 复制生产配置模板并替换全部部署值：
 
    ```bash
