@@ -95,6 +95,11 @@ func (s *Service) Create(ctx context.Context, req models.CreateUserRequest) (*mo
 		Status: models.UserStatusActive, Role: "user", AuthVersion: 1, SessionVersion: 1,
 		Metadata: req.Metadata,
 	}
+	if u.Metadata == nil {
+		// users.metadata is NOT NULL; an omitted metadata field must not
+		// become a SQL NULL.
+		u.Metadata = map[string]string{}
+	}
 	if req.Email != "" {
 		u.Email = &req.Email
 	}

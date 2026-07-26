@@ -188,3 +188,33 @@ func TestSetPasswordOnlyAddsMissingCapability(t *testing.T) {
 		t.Fatalf("configured password error = %v", err)
 	}
 }
+
+type createRecordingStore struct {
+	bootstrapStore
+	created *models.User
+}
+
+func (s *createRecordingStore) Create(_ context.Context, u *models.User) error {
+	s.created = u
+	return nil
+}
+
+func TestCreateDefaultsOmittedMetadataToEmptyObject(t *testing.T) {
+	store := &createRecordingStore{}
+	service := &Service{store: store}
+	created, err := service.Create(context.Background(), models.CreateUserRequest{
+		Username: "newuser",
+		Password: "a-valid-password-123",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	// users.metadata is NOT NULL in the schema; a nil map would be inserted
+	// as SQL NULL and fail the whole request with a 500.
+	if store.created == nil || store.created.Metadata == nil {
+		t.Fatalf("created user metadata must not be nil: %#v", store.created)
+	}
+	if created.DisplayName != nil || created.Email != nil {
+		t.Fatalf("blank optional fields must stay null: %#v", created)
+	}
+}
