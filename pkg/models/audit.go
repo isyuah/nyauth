@@ -49,6 +49,8 @@ const (
 	AuditClientDeleted        = "client.deleted"
 	AuditClientSecretRotated  = "client.secret_rotated"
 	AuditAuthorizationRevoked = "authorization.revoked"
+	AuditAuthorizeDenied      = "authorize.access_denied"
+	AuditClientAccessChanged  = "client.access_users_changed"
 	AuditProviderCreated      = "provider.created"
 	AuditProviderUpdated      = "provider.updated"
 	AuditProviderTested       = "provider.tested"

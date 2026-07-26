@@ -32,10 +32,17 @@ type TokenService struct {
 	jwkManager      *JWKManager
 	session         *session.Store
 	users           *user.Service
+	accessPolicy    AccessPolicyChecker
 	issuer          string
 	accessTTL       time.Duration
 	refreshTTL      time.Duration
 	publicKeyLoader func(context.Context, string) (*rsa.PublicKey, error)
+}
+
+// AccessPolicyChecker evaluates whether a user may use a client under its
+// access policy. Implemented by the client store.
+type AccessPolicyChecker interface {
+	UserMayAccess(ctx context.Context, clientID string, userID string) (bool, error)
 }
 
 func NewTokenService(jwkManager *JWKManager, sessionStore *session.Store, issuer string, accessTTL, refreshTTL time.Duration) *TokenService {
@@ -44,6 +51,12 @@ func NewTokenService(jwkManager *JWKManager, sessionStore *session.Store, issuer
 
 // SetUserService enables active-state and auth_version checks for user tokens.
 func (ts *TokenService) SetUserService(users *user.Service) { ts.users = users }
+
+// SetAccessPolicyChecker enables per-client access policy enforcement on
+// refresh and access-token validation.
+func (ts *TokenService) SetAccessPolicyChecker(checker AccessPolicyChecker) {
+	ts.accessPolicy = checker
+}
 
 type TokenPair struct {
 	AccessToken  string `json:"access_token"`
@@ -193,6 +206,9 @@ func (ts *TokenService) ValidateAccessToken(ctx context.Context, tokenString str
 	if err := ts.validateAuthorization(ctx, metadata); err != nil {
 		return nil, err
 	}
+	if err := ts.validateAccessPolicy(ctx, metadata); err != nil {
+		return nil, err
+	}
 	return claims, nil
 }
 
@@ -264,6 +280,10 @@ func (ts *TokenService) RefreshToken(ctx context.Context, refreshToken, clientID
 		_ = ts.session.RevokeRefreshTokenForClient(ctx, refreshToken, clientID, ts.refreshTTL)
 		return nil, err
 	}
+	if err := ts.validateAccessPolicy(ctx, data); err != nil {
+		_ = ts.session.RevokeRefreshTokenForClient(ctx, refreshToken, clientID, ts.refreshTTL)
+		return nil, err
+	}
 	newRefresh, err := internalcrypto.GenerateRandomString(32)
 	if err != nil {
 		return nil, fmt.Errorf("generating refresh token: %w", err)
@@ -328,6 +348,9 @@ func (ts *TokenService) IntrospectTokenForClient(ctx context.Context, tokenStrin
 	if err := ts.validateAuthorization(ctx, data); err != nil {
 		return map[string]interface{}{"active": false}, nil
 	}
+	if err := ts.validateAccessPolicy(ctx, data); err != nil {
+		return map[string]interface{}{"active": false}, nil
+	}
 	return map[string]interface{}{
 		"active": true, "sub": data.UserID, "client_id": data.ClientID,
 		"scope": joinScopes(data.Scopes), "token_type": "refresh_token",
@@ -369,6 +392,23 @@ func (ts *TokenService) validateUser(ctx context.Context, subject string, authVe
 		return fmt.Errorf("%w: loading token subject: %v", ErrTokenValidationUnavailable, err)
 	}
 	if u.Status != models.UserStatusActive || u.AuthVersion != authVersion {
+		return ErrInvalidToken
+	}
+	return nil
+}
+
+// validateAccessPolicy re-evaluates the client's access policy for user-bound
+// tokens so allowlist removals take effect on the next token use. Machine
+// tokens (AuthVersion 0) are not user-bound and are never restricted.
+func (ts *TokenService) validateAccessPolicy(ctx context.Context, data *session.TokenData) error {
+	if data.AuthVersion == 0 || ts.accessPolicy == nil {
+		return nil
+	}
+	allowed, err := ts.accessPolicy.UserMayAccess(ctx, data.ClientID, data.UserID)
+	if err != nil {
+		return fmt.Errorf("%w: evaluating access policy: %v", ErrTokenValidationUnavailable, err)
+	}
+	if !allowed {
 		return ErrInvalidToken
 	}
 	return nil

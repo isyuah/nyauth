@@ -579,3 +579,39 @@ func TestRevokedAuthorizationCodeCannotIssueTokens(t *testing.T) {
 		t.Fatalf("revoked authorization code issuance error = %v", err)
 	}
 }
+
+type fakeAccessPolicy struct {
+	allowed bool
+	err     error
+}
+
+func (f fakeAccessPolicy) UserMayAccess(context.Context, string, string) (bool, error) {
+	return f.allowed, f.err
+}
+
+func TestValidateAccessPolicyEnforcesClientPolicy(t *testing.T) {
+	ctx := context.Background()
+	service := &TokenService{}
+	data := &session.TokenData{ClientID: "client", UserID: "11111111-1111-1111-1111-111111111111", AuthVersion: 1}
+
+	if err := service.validateAccessPolicy(ctx, data); err != nil {
+		t.Fatalf("nil checker must allow: %v", err)
+	}
+	service.accessPolicy = fakeAccessPolicy{allowed: true}
+	if err := service.validateAccessPolicy(ctx, data); err != nil {
+		t.Fatalf("allowed user was rejected: %v", err)
+	}
+	service.accessPolicy = fakeAccessPolicy{allowed: false}
+	if err := service.validateAccessPolicy(ctx, data); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("denied user error = %v", err)
+	}
+	service.accessPolicy = fakeAccessPolicy{err: errors.New("db down")}
+	if err := service.validateAccessPolicy(ctx, data); !errors.Is(err, ErrTokenValidationUnavailable) {
+		t.Fatalf("checker failure must be unavailable, got %v", err)
+	}
+	machine := &session.TokenData{ClientID: "client", UserID: "", AuthVersion: 0}
+	service.accessPolicy = fakeAccessPolicy{allowed: false}
+	if err := service.validateAccessPolicy(ctx, machine); err != nil {
+		t.Fatalf("machine tokens must not be policy-restricted: %v", err)
+	}
+}

@@ -76,3 +76,32 @@ func TestUnauditedCreateRejectsOwnerAssignment(t *testing.T) {
 		t.Fatalf("Create owner assignment error = %v", err)
 	}
 }
+
+func TestBuildClientValidatesAccessPolicy(t *testing.T) {
+	service := NewService(nil)
+	base := models.CreateClientRequest{Name: "App", RedirectURIs: []string{"https://app.example/cb"}, Grants: []string{models.GrantAuthorizationCode}}
+
+	valid := base
+	valid.AccessPolicy = models.ClientAccessAllowlist
+	client, _, err := service.buildClient(valid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if client.AccessPolicy != models.ClientAccessAllowlist {
+		t.Fatalf("access policy = %q", client.AccessPolicy)
+	}
+
+	defaulted, _, err := service.buildClient(base)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if defaulted.AccessPolicy != models.ClientAccessOpen {
+		t.Fatalf("default access policy = %q", defaulted.AccessPolicy)
+	}
+
+	invalid := base
+	invalid.AccessPolicy = "vip_only"
+	if _, _, err := service.buildClient(invalid); err == nil {
+		t.Fatal("invalid access policy was accepted")
+	}
+}

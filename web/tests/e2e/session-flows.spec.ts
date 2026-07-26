@@ -1149,9 +1149,49 @@ test('administrators can edit OAuth clients without mutating immutable ownership
     grants: ['authorization_code', 'refresh_token'],
     scopes: ['openid', 'email', 'custom'],
     metadata: { environment: 'production', team: 'identity' },
+    access_policy: 'open',
   });
   expect(state.adminClientUpdateBody).not.toHaveProperty('is_public');
   expect(state.adminClientUpdateBody).not.toHaveProperty('owner_id');
+});
+
+test('an allowlist client exposes its access list and saves changes with CSRF', async ({ page }) => {
+  const state: MockState = {
+    authenticated: true,
+    mustChangePassword: false,
+    role: 'admin',
+    csrfToken: 'csrf-access',
+    adminClients: [{ ...oauthClient, access_policy: 'allowlist' } as typeof oauthClient],
+  };
+  await installAPIMocks(page, state);
+
+  let putBody: unknown;
+  let putCSRF: string | null = null;
+  await page.route('**/api/admin/clients/example-client/access-users', async (route) => {
+    if (route.request().method() === 'GET') {
+      await fulfillJSON(route, 200, [{
+        user_id: user.id, username: user.username, display_name: user.display_name,
+        status: 'active', created_at: '2026-01-01T00:00:00Z',
+      }]);
+      return;
+    }
+    putBody = route.request().postDataJSON();
+    putCSRF = route.request().headers()['x-csrf-token'] ?? null;
+    await fulfillJSON(route, 200, []);
+  });
+
+  await page.goto('/admin/clients');
+  await expect(page.getByText('访问：白名单')).toBeVisible();
+  await page.getByRole('button', { name: `管理 ${oauthClient.name} 访问名单` }).click();
+
+  await expect(page.getByText('@alice')).toBeVisible();
+  await page.getByRole('button', { name: '移除 alice' }).click();
+  await page.getByRole('button', { name: '保存名单' }).click();
+
+  await expect(page.getByText('访问名单已保存，名单外用户的现有令牌将在下次使用时失效。')).toBeVisible();
+  expect(putBody).toEqual({ user_ids: [] });
+  expect(putCSRF).toBe('csrf-access');
+  await expect(page.getByText('名单为空：当前没有任何用户可以授权此应用。')).toBeVisible();
 });
 
 test('administrator client pagination is server-backed and preserved in the URL', async ({ page }) => {

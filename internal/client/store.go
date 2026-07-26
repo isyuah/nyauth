@@ -18,13 +18,14 @@ import (
 var (
 	ErrClientQuotaExceeded    = errors.New("OAuth client quota exceeded")
 	ErrClientOwnerUnavailable = errors.New("OAuth client owner is unavailable")
+	ErrAccessUserUnknown      = errors.New("access list contains unknown users")
 )
 
 type Store struct{ db *pgxpool.Pool }
 
 func NewStore(db *pgxpool.Pool) *Store { return &Store{db: db} }
 
-const clientSelectCols = `id, secret_hash, secret_hint, secret_version, secret_rotated_at, secret_last_used_at, name, redirect_uris, post_logout_redirect_uris, grants, scopes, is_public, owner_id, metadata, created_at, updated_at`
+const clientSelectCols = `id, secret_hash, secret_hint, secret_version, secret_rotated_at, secret_last_used_at, name, redirect_uris, post_logout_redirect_uris, grants, scopes, is_public, access_policy, owner_id, metadata, created_at, updated_at`
 
 type rowScanner interface{ Scan(dest ...any) error }
 
@@ -37,7 +38,7 @@ func scanClient(row rowScanner) (*models.OAuthClient, error) {
 	if err := row.Scan(
 		&c.ID, &c.SecretHash, &c.SecretHint, &c.SecretVersion, &c.SecretRotatedAt,
 		&c.SecretLastUsedAt, &c.Name, &c.RedirectURIs, &c.PostLogoutRedirectURIs,
-		&c.Grants, &c.Scopes, &c.IsPublic, &c.OwnerID, &c.Metadata, &c.CreatedAt, &c.UpdatedAt,
+		&c.Grants, &c.Scopes, &c.IsPublic, &c.AccessPolicy, &c.OwnerID, &c.Metadata, &c.CreatedAt, &c.UpdatedAt,
 	); err != nil {
 		return nil, err
 	}
@@ -50,13 +51,16 @@ func (s *Store) Create(ctx context.Context, c *models.OAuthClient) error {
 }
 
 func insertClient(ctx context.Context, execer clientExecer, c *models.OAuthClient) error {
+	if c.AccessPolicy == "" {
+		c.AccessPolicy = models.ClientAccessOpen
+	}
 	_, err := execer.Exec(ctx, `
 		INSERT INTO oauth_clients (
 			id,secret_hash,secret_hint,secret_version,secret_rotated_at,name,redirect_uris,
-			post_logout_redirect_uris,grants,scopes,is_public,owner_id,metadata
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13)
+			post_logout_redirect_uris,grants,scopes,is_public,access_policy,owner_id,metadata
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
 	`, c.ID, c.SecretHash, c.SecretHint, c.SecretVersion, c.SecretRotatedAt, c.Name,
-		c.RedirectURIs, c.PostLogoutRedirectURIs, c.Grants, c.Scopes, c.IsPublic, c.OwnerID, c.Metadata)
+		c.RedirectURIs, c.PostLogoutRedirectURIs, c.Grants, c.Scopes, c.IsPublic, c.AccessPolicy, c.OwnerID, c.Metadata)
 	if err != nil {
 		return fmt.Errorf("creating OAuth client: %w", err)
 	}
@@ -140,7 +144,7 @@ func (s *Store) Update(ctx context.Context, c *models.OAuthClient, mutation audi
 		return fmt.Errorf("starting client update: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	result, err := tx.Exec(ctx, `UPDATE oauth_clients SET name=$2,redirect_uris=$3,post_logout_redirect_uris=$4,grants=$5,scopes=$6,metadata=$7,updated_at=NOW() WHERE id=$1`, c.ID, c.Name, c.RedirectURIs, c.PostLogoutRedirectURIs, c.Grants, c.Scopes, c.Metadata)
+	result, err := tx.Exec(ctx, `UPDATE oauth_clients SET name=$2,redirect_uris=$3,post_logout_redirect_uris=$4,grants=$5,scopes=$6,metadata=$7,access_policy=$8,updated_at=NOW() WHERE id=$1`, c.ID, c.Name, c.RedirectURIs, c.PostLogoutRedirectURIs, c.Grants, c.Scopes, c.Metadata, c.AccessPolicy)
 	if err != nil {
 		return fmt.Errorf("updating client: %w", err)
 	}
@@ -425,4 +429,96 @@ func (s *Store) CountByOwner(ctx context.Context, ownerID string) (int64, error)
 	var count int64
 	err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM oauth_clients WHERE owner_id=$1`, ownerID).Scan(&count)
 	return count, err
+}
+
+// UserMayAccess evaluates the client's access policy for a user. Unknown
+// clients deny access; the caller distinguishes that case earlier if needed.
+func (s *Store) UserMayAccess(ctx context.Context, clientID string, userID string) (bool, error) {
+	var policy string
+	var allowlisted bool
+	var role *string
+	err := s.db.QueryRow(ctx, `
+		SELECT c.access_policy,
+		       EXISTS(SELECT 1 FROM client_access_users a WHERE a.client_id = c.id AND a.user_id = $2::uuid),
+		       (SELECT u.role FROM users u WHERE u.id = $2::uuid)
+		FROM oauth_clients c WHERE c.id = $1
+	`, clientID, userID).Scan(&policy, &allowlisted, &role)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return false, nil
+	}
+	if err != nil {
+		return false, fmt.Errorf("evaluating client access policy: %w", err)
+	}
+	switch policy {
+	case models.ClientAccessAdminsOnly:
+		return role != nil && *role == "admin", nil
+	case models.ClientAccessAllowlist:
+		return allowlisted, nil
+	default:
+		return true, nil
+	}
+}
+
+// ListAccessUsers returns the allowlisted users for a client.
+func (s *Store) ListAccessUsers(ctx context.Context, clientID string) ([]models.ClientAccessUser, error) {
+	rows, err := s.db.Query(ctx, `
+		SELECT a.user_id, u.username, COALESCE(u.display_name, ''), u.status, a.created_at
+		FROM client_access_users a
+		JOIN users u ON u.id = a.user_id
+		WHERE a.client_id = $1
+		ORDER BY u.username
+	`, clientID)
+	if err != nil {
+		return nil, fmt.Errorf("listing client access users: %w", err)
+	}
+	defer rows.Close()
+	users := make([]models.ClientAccessUser, 0)
+	for rows.Next() {
+		var entry models.ClientAccessUser
+		if err := rows.Scan(&entry.UserID, &entry.Username, &entry.DisplayName, &entry.Status, &entry.CreatedAt); err != nil {
+			return nil, fmt.Errorf("scanning client access user: %w", err)
+		}
+		users = append(users, entry)
+	}
+	return users, rows.Err()
+}
+
+// ReplaceAccessUsers replaces the client's allowlist atomically. Unknown user
+// IDs fail the whole request so the admin sees an explicit error instead of a
+// silently shorter list.
+func (s *Store) ReplaceAccessUsers(ctx context.Context, clientID string, userIDs []string, mutation audit.MutationAudit) error {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("starting access user update: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	var exists bool
+	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM oauth_clients WHERE id=$1)`, clientID).Scan(&exists); err != nil {
+		return fmt.Errorf("checking client: %w", err)
+	}
+	if !exists {
+		return pgx.ErrNoRows
+	}
+	if _, err := tx.Exec(ctx, `DELETE FROM client_access_users WHERE client_id=$1`, clientID); err != nil {
+		return fmt.Errorf("clearing client access users: %w", err)
+	}
+	if len(userIDs) > 0 {
+		result, err := tx.Exec(ctx, `
+			INSERT INTO client_access_users (client_id, user_id)
+			SELECT $1, u.id FROM users u WHERE u.id = ANY($2::uuid[])
+		`, clientID, userIDs)
+		if err != nil {
+			return fmt.Errorf("storing client access users: %w", err)
+		}
+		if result.RowsAffected() != int64(len(userIDs)) {
+			return ErrAccessUserUnknown
+		}
+	}
+	if err := audit.EnqueueMutationTx(ctx, tx, mutation.WithTarget("client", clientID)); err != nil {
+		return fmt.Errorf("auditing client access update: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("committing client access update: %w", err)
+	}
+	return nil
 }

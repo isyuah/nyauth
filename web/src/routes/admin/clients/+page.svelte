@@ -2,7 +2,7 @@
   import { goto } from '$app/navigation';
   import { page as pageStore } from '$app/stores';
   import { onDestroy, onMount } from 'svelte';
-  import { api, type CreateClientInput, type OAuthClient, type UpdateClientInput, type User } from '$lib/api';
+  import { api, type ClientAccessPolicy, type ClientAccessUser, type CreateClientInput, type OAuthClient, type UpdateClientInput, type User } from '$lib/api';
   import { formatStringMetadata, parseLineList, parseStringMetadata, parseTokenList } from '$lib/admin-form-utils';
   import PageHeader from '$lib/components/layout/PageHeader.svelte';
   import CopyField from '$lib/components/data-display/CopyField.svelte';
@@ -31,7 +31,18 @@
     post_logout_redirect_uris: string;
     scopes: string;
     metadata: string;
+    access_policy: ClientAccessPolicy;
   };
+
+  const accessPolicyOptions: Array<{ value: ClientAccessPolicy; label: string; description: string }> = [
+    { value: 'open', label: '开放', description: '所有活跃用户都可以授权此应用' },
+    { value: 'admins_only', label: '仅管理员', description: '只有管理员角色可以授权' },
+    { value: 'allowlist', label: '白名单', description: '只有被加入访问名单的用户可以授权' },
+  ];
+
+  function accessPolicyLabel(policy: string | undefined): string {
+    return accessPolicyOptions.find((option) => option.value === policy)?.label ?? '开放';
+  }
 
   const grantOptions = [
     { value: 'authorization_code', label: 'Authorization Code' },
@@ -65,7 +76,19 @@
   let editing = $state(false);
   let editError = $state('');
   let editGrants = $state<string[]>([]);
-  let editForm = $state<ClientEditForm>({ name: '', redirect_uris: '', post_logout_redirect_uris: '', scopes: '', metadata: '{}' });
+  let editForm = $state<ClientEditForm>({ name: '', redirect_uris: '', post_logout_redirect_uris: '', scopes: '', metadata: '{}', access_policy: 'open' });
+  let accessTarget = $state<OAuthClient | null>(null);
+  let accessModalOpen = $state(false);
+  let accessUsers = $state<ClientAccessUser[]>([]);
+  let accessLoading = $state(false);
+  let accessSaving = $state(false);
+  let accessError = $state('');
+  let accessNotice = $state('');
+  let accessSearch = $state('');
+  let accessSearchResults = $state<User[]>([]);
+  let accessSearchLoading = $state(false);
+  let accessSearchError = $state('');
+  let accessSearchVersion = 0;
   let ownerCandidates = $state<User[]>([]);
   let ownerLabels = $state<Record<string, string>>({});
   let ownerSearch = $state('');
@@ -318,6 +341,7 @@
       post_logout_redirect_uris: client.post_logout_redirect_uris.join('\n'),
       scopes: client.scopes.join('\n'),
       metadata: formatStringMetadata(client.metadata),
+      access_policy: (client.access_policy as ClientAccessPolicy) || 'open',
     };
     editError = '';
     showEdit = true;
@@ -360,6 +384,7 @@
       grants,
       scopes: parseTokenList(editForm.scopes),
       metadata,
+      access_policy: editForm.access_policy,
     };
     editing = true;
     try {
@@ -370,6 +395,75 @@
       editError = cause instanceof Error ? cause.message : '应用更新失败';
     } finally {
       editing = false;
+    }
+  }
+
+  async function openAccessUsers(client: OAuthClient) {
+    accessTarget = client;
+    accessModalOpen = true;
+    accessUsers = [];
+    accessError = '';
+    accessNotice = '';
+    accessSearch = '';
+    accessSearchResults = [];
+    accessSearchError = '';
+    accessLoading = true;
+    try {
+      accessUsers = await api.admin.getClientAccessUsers(client.id);
+    } catch (cause) {
+      accessError = cause instanceof Error ? cause.message : '访问名单加载失败';
+    } finally {
+      accessLoading = false;
+    }
+  }
+
+  async function searchAccessCandidates() {
+    const term = accessSearch.trim();
+    const version = ++accessSearchVersion;
+    accessSearchLoading = true;
+    accessSearchError = '';
+    try {
+      const response = await api.admin.getUsers(1, 8, term, 'active');
+      if (version !== accessSearchVersion) return;
+      accessSearchResults = response.items;
+    } catch (cause) {
+      if (version !== accessSearchVersion) return;
+      accessSearchError = cause instanceof Error ? cause.message : '用户搜索失败';
+    } finally {
+      if (version === accessSearchVersion) accessSearchLoading = false;
+    }
+  }
+
+  function addAccessUser(user: User) {
+    if (accessUsers.some((entry) => entry.user_id === user.id)) return;
+    accessUsers = [...accessUsers, {
+      user_id: user.id,
+      username: user.username,
+      display_name: user.display_name || '',
+      status: user.status,
+      created_at: new Date().toISOString(),
+    }];
+    accessNotice = '';
+  }
+
+  function removeAccessUser(userID: string) {
+    accessUsers = accessUsers.filter((entry) => entry.user_id !== userID);
+    accessNotice = '';
+  }
+
+  async function saveAccessUsers() {
+    const target = accessTarget;
+    if (!target) return;
+    accessSaving = true;
+    accessError = '';
+    accessNotice = '';
+    try {
+      accessUsers = await api.admin.updateClientAccessUsers(target.id, accessUsers.map((entry) => entry.user_id));
+      accessNotice = '访问名单已保存，名单外用户的现有令牌将在下次使用时失效。';
+    } catch (cause) {
+      accessError = cause instanceof Error ? cause.message : '访问名单保存失败';
+    } finally {
+      accessSaving = false;
     }
   }
 
@@ -453,7 +547,7 @@
         <Card>
           <div class="flex flex-col justify-between gap-4 md:flex-row md:items-start">
             <div class="flex min-w-0 items-center gap-3"><span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-nya-md bg-nya-blue-soft"><AppWindow size={20} class="text-nya-blue" /></span><div class="min-w-0"><h2 class="truncate text-card-title text-nya-text-primary">{client.name}</h2><CopyField value={client.id} /></div></div>
-            <div class="flex flex-wrap items-center gap-2">{#if client.is_public}<Badge variant="warning">Public</Badge>{:else}<Badge variant="default">Confidential</Badge><Button variant="secondary" size="sm" onclick={() => requestRotation(client)}><RefreshCw size={14} /> 轮换 Secret</Button>{/if}<Badge variant="primary">{client.grants.join(', ')}</Badge><Button variant="ghost" size="sm" onclick={() => openEdit(client)}><Pencil size={14} /> 编辑</Button><Button variant="ghost" size="sm" onclick={() => requestDelete(client)}>删除</Button></div>
+            <div class="flex flex-wrap items-center gap-2">{#if client.is_public}<Badge variant="warning">Public</Badge>{:else}<Badge variant="default">Confidential</Badge><Button variant="secondary" size="sm" onclick={() => requestRotation(client)}><RefreshCw size={14} /> 轮换 Secret</Button>{/if}{#if client.access_policy && client.access_policy !== 'open'}<Badge variant="warning">访问：{accessPolicyLabel(client.access_policy)}</Badge>{/if}<Badge variant="primary">{client.grants.join(', ')}</Badge>{#if client.access_policy === 'allowlist'}<Button variant="secondary" size="sm" ariaLabel={`管理 ${client.name} 访问名单`} onclick={() => openAccessUsers(client)}><Users size={14} /> 访问名单</Button>{/if}<Button variant="ghost" size="sm" onclick={() => openEdit(client)}><Pencil size={14} /> 编辑</Button><Button variant="ghost" size="sm" onclick={() => requestDelete(client)}>删除</Button></div>
           </div>
           <div class="mt-3 flex flex-wrap items-center justify-between gap-2"><p class="min-w-0 text-small text-nya-text-tertiary">Owner：<code class="break-all font-mono">{client.owner_id || '未分配'}</code> · Client 类型为只读，创建后不可更改。</p><Button variant="secondary" size="sm" ariaLabel={`管理 ${client.name} Owner`} onclick={() => openOwnerManager(client)}><Users size={14} /> 管理 Owner</Button></div>
           {#if !client.is_public}<p class="mt-3 text-small text-nya-text-tertiary">Secret 版本 {client.secret_version}{#if client.secret_hint} · 尾号 {client.secret_hint}{/if}{#if client.secret_rotated_at} · 最近轮换 {new Date(client.secret_rotated_at).toLocaleString()}{/if}{#if client.secret_last_used_at} · 最近使用 {new Date(client.secret_last_used_at).toLocaleString()}{/if}</p>{/if}
@@ -487,10 +581,54 @@
     <div><label for="edit-client-redirects" class="mb-1.5 block text-body-medium text-nya-text-primary">Redirect URI（每行一个）</label><textarea id="edit-client-redirects" bind:value={editForm.redirect_uris} required rows="3" class="w-full rounded-nya-sm border border-nya-border bg-nya-surface px-3 py-2 font-mono text-small focus:border-nya-primary focus:outline-none focus:ring-2 focus:ring-nya-primary/24"></textarea></div>
     <div><label for="edit-client-logouts" class="mb-1.5 block text-body-medium text-nya-text-primary">Post-logout Redirect URI（每行一个）</label><textarea id="edit-client-logouts" bind:value={editForm.post_logout_redirect_uris} rows="2" class="w-full rounded-nya-sm border border-nya-border bg-nya-surface px-3 py-2 font-mono text-small focus:border-nya-primary focus:outline-none focus:ring-2 focus:ring-nya-primary/24"></textarea></div>
     <fieldset><legend class="mb-2 text-body-medium text-nya-text-primary">Grants</legend><div class="grid gap-2 sm:grid-cols-3">{#each grantOptions as option}<label class="flex items-center gap-2 rounded-nya-sm border border-nya-border px-3 py-2 text-small text-nya-text-secondary"><input type="checkbox" value={option.value} bind:group={editGrants} disabled={editTarget?.is_public && option.value === 'client_credentials'} /> {option.label}</label>{/each}</div></fieldset>
+    <fieldset><legend class="mb-2 text-body-medium text-nya-text-primary">访问策略</legend><div class="grid gap-2 sm:grid-cols-3">{#each accessPolicyOptions as option}<label class="flex cursor-pointer items-start gap-2 rounded-nya-sm border border-nya-border px-3 py-2 {editForm.access_policy === option.value ? 'border-nya-primary bg-nya-primary-soft' : ''}"><input type="radio" name="edit-access-policy" value={option.value} bind:group={editForm.access_policy} class="mt-0.5" /><span><span class="block text-small font-semibold text-nya-text-primary">{option.label}</span><span class="block text-micro text-nya-text-tertiary">{option.description}</span></span></label>{/each}</div><p class="mt-1.5 text-micro text-nya-text-tertiary">策略只作用于用户授权流程；client_credentials 机器流程不受限制。切换为白名单后请在应用卡片上维护访问名单。</p></fieldset>
     <div><label for="edit-client-scopes" class="mb-1.5 block text-body-medium text-nya-text-primary">Scopes（空格、逗号或换行分隔）</label><textarea id="edit-client-scopes" bind:value={editForm.scopes} rows="2" class="w-full rounded-nya-sm border border-nya-border bg-nya-surface px-3 py-2 font-mono text-small focus:border-nya-primary focus:outline-none focus:ring-2 focus:ring-nya-primary/24"></textarea></div>
     <div><label for="edit-client-metadata" class="mb-1.5 block text-body-medium text-nya-text-primary">Metadata（JSON 字符串键值）</label><textarea id="edit-client-metadata" bind:value={editForm.metadata} rows="5" spellcheck="false" class="w-full rounded-nya-sm border border-nya-border bg-nya-surface px-3 py-2 font-mono text-small focus:border-nya-primary focus:outline-none focus:ring-2 focus:ring-nya-primary/24"></textarea></div>
     <div class="flex justify-end gap-2"><Button variant="secondary" onclick={() => (showEdit = false)} disabled={editing}>取消</Button><Button type="submit" variant="primary" loading={editing}>保存更改</Button></div>
   </form>
+</Modal>
+
+<Modal bind:open={accessModalOpen} title={`访问名单 · ${accessTarget?.name || ''}`} description="只有名单内的用户可以完成此应用的授权；保存后立刻生效" size="md">
+  <div class="space-y-4">
+    {#if accessError}<p class="rounded-nya-sm bg-nya-danger-soft px-3 py-2 text-small text-nya-danger" role="alert">{accessError}</p>{/if}
+    {#if accessNotice}<p class="rounded-nya-sm bg-nya-success-soft px-3 py-2 text-small text-nya-success" role="status">{accessNotice}</p>{/if}
+    <div>
+      <p class="mb-2 text-body-medium font-semibold text-nya-text-primary">当前名单（{accessUsers.length}）</p>
+      {#if accessLoading}
+        <p class="text-small text-nya-text-tertiary">加载中…</p>
+      {:else if accessUsers.length === 0}
+        <p class="rounded-nya-sm bg-nya-warning-soft px-3 py-2 text-small text-nya-warning">名单为空：当前没有任何用户可以授权此应用。</p>
+      {:else}
+        <ul class="space-y-1.5">
+          {#each accessUsers as entry (entry.user_id)}
+            <li class="flex items-center justify-between gap-2 rounded-nya-sm border border-nya-border px-3 py-2">
+              <span class="min-w-0 truncate text-small text-nya-text-primary">{entry.display_name || entry.username} <span class="text-nya-text-tertiary">@{entry.username}</span></span>
+              <Button variant="ghost" size="sm" ariaLabel={`移除 ${entry.username}`} onclick={() => removeAccessUser(entry.user_id)}>移除</Button>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+    </div>
+    <div>
+      <p class="mb-2 text-body-medium font-semibold text-nya-text-primary">添加用户</p>
+      <div class="flex items-end gap-2">
+        <div class="min-w-0 flex-1"><Input id="access-user-search" label="搜索用户" bind:value={accessSearch} placeholder="用户名或邮箱" autocomplete="off" /></div>
+        <Button variant="secondary" onclick={searchAccessCandidates} loading={accessSearchLoading}>搜索</Button>
+      </div>
+      {#if accessSearchError}<p class="mt-2 text-small text-nya-danger" role="alert">{accessSearchError}</p>{/if}
+      {#if accessSearchResults.length > 0}
+        <ul class="mt-2 space-y-1.5">
+          {#each accessSearchResults as candidate (candidate.id)}
+            <li class="flex items-center justify-between gap-2 rounded-nya-sm border border-nya-border px-3 py-2">
+              <span class="min-w-0 truncate text-small text-nya-text-primary">{candidate.display_name || candidate.username} <span class="text-nya-text-tertiary">@{candidate.username}</span></span>
+              <Button variant="secondary" size="sm" disabled={accessUsers.some((entry) => entry.user_id === candidate.id)} onclick={() => addAccessUser(candidate)}>添加</Button>
+            </li>
+          {/each}
+        </ul>
+      {/if}
+    </div>
+    <div class="flex justify-end gap-2"><Button variant="secondary" onclick={() => (accessModalOpen = false)} disabled={accessSaving}>关闭</Button><Button variant="primary" onclick={saveAccessUsers} loading={accessSaving}>保存名单</Button></div>
+  </div>
 </Modal>
 
 <Modal bind:open={ownerModalOpen} title={`管理 Client Owner · ${ownerTarget?.name || ''}`} description="转移或解除 Owner 会改变用户对该客户端的管理权限" size="md">

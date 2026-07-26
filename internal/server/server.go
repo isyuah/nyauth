@@ -247,6 +247,8 @@ func (s *Server) buildRouter() *chi.Mux {
 			r.Get("/admin/clients/{id}", clientHandler.Get)
 			r.Put("/admin/clients/{id}", clientHandler.Update)
 			r.Put("/admin/clients/{id}/owner", clientHandler.UpdateOwner)
+			r.Get("/admin/clients/{id}/access-users", clientHandler.ListAccessUsers)
+			r.Put("/admin/clients/{id}/access-users", clientHandler.ReplaceAccessUsers)
 			r.Post("/admin/clients/{id}/rotate-secret", clientHandler.RotateSecret)
 			r.Delete("/admin/clients/{id}", clientHandler.Delete)
 			r.Get("/admin/providers", s.handleAdminListProviders)

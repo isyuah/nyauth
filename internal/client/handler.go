@@ -25,6 +25,8 @@ type handlerService interface {
 	UpdateOwner(ctx context.Context, id string, req models.UpdateClientOwnerRequest, mutation audit.MutationAudit) (*models.OAuthClient, error)
 	Delete(ctx context.Context, id string, mutation audit.MutationAudit) error
 	RotateSecret(ctx context.Context, id string, mutation audit.MutationAudit) (*models.RotateClientSecretResponse, error)
+	ListAccessUsers(ctx context.Context, id string) ([]models.ClientAccessUser, error)
+	ReplaceAccessUsers(ctx context.Context, id string, req models.ReplaceClientAccessUsersRequest, mutation audit.MutationAudit) ([]models.ClientAccessUser, error)
 }
 
 // Handler handles HTTP requests for client operations.
@@ -229,4 +231,43 @@ func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
+}
+
+// ListAccessUsers returns the allowlisted users for a client.
+func (h *Handler) ListAccessUsers(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	users, err := h.service.ListAccessUsers(r.Context(), id)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to list access users")
+		return
+	}
+	writeJSON(w, http.StatusOK, users)
+}
+
+// ReplaceAccessUsers replaces the client's allowlist.
+func (h *Handler) ReplaceAccessUsers(w http.ResponseWriter, r *http.Request) {
+	id := chi.URLParam(r, "id")
+	var req models.ReplaceClientAccessUsersRequest
+	if err := decodeHandlerJSON(w, r, &req); err != nil {
+		writeError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	mutation, ok := audit.MutationAuditFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "audit context unavailable")
+		return
+	}
+	users, err := h.service.ReplaceAccessUsers(r.Context(), id, req, mutation)
+	if err != nil {
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			writeError(w, http.StatusNotFound, "client not found")
+		case errors.Is(err, ErrAccessUserUnknown), errors.Is(err, ErrInvalidClient):
+			writeError(w, http.StatusBadRequest, err.Error())
+		default:
+			writeError(w, http.StatusInternalServerError, "failed to update access users")
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, users)
 }

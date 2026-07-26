@@ -56,6 +56,7 @@ export interface OAuthClient {
   grants: string[];
   scopes: string[];
   is_public: boolean;
+  access_policy?: ClientAccessPolicy;
   secret_hint?: string | null;
   secret_version: number;
   secret_rotated_at?: string | null;
@@ -66,6 +67,16 @@ export interface OAuthClient {
   updated_at: string;
 }
 
+export type ClientAccessPolicy = 'open' | 'admins_only' | 'allowlist';
+
+export interface ClientAccessUser {
+  user_id: string;
+  username: string;
+  display_name: string;
+  status: string;
+  created_at: string;
+}
+
 export interface CreateClientInput {
   name: string;
   redirect_uris: string[];
@@ -73,6 +84,7 @@ export interface CreateClientInput {
   grants: string[];
   scopes: string[];
   is_public: boolean;
+  access_policy?: ClientAccessPolicy;
   owner_id?: string | null;
   metadata?: Record<string, string>;
 }
@@ -83,6 +95,7 @@ export interface UpdateClientInput {
   post_logout_redirect_uris?: string[];
   grants?: string[];
   scopes?: string[];
+  access_policy?: ClientAccessPolicy;
   metadata?: Record<string, string>;
 }
 
@@ -494,6 +507,9 @@ export const api = {
     updateClient: (id: string, data: UpdateClientInput) => req<OAuthClient>(`/api/admin/clients/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
     updateClientOwner: (id: string, data: { owner_id: string | null }) =>
       req<OAuthClient>(`/api/admin/clients/${encodeURIComponent(id)}/owner`, { method: 'PUT', body: JSON.stringify(data) }),
+    getClientAccessUsers: (id: string) => req<ClientAccessUser[]>(`/api/admin/clients/${encodeURIComponent(id)}/access-users`),
+    updateClientAccessUsers: (id: string, userIDs: string[]) =>
+      req<ClientAccessUser[]>(`/api/admin/clients/${encodeURIComponent(id)}/access-users`, { method: 'PUT', body: JSON.stringify({ user_ids: userIDs }) }),
     deleteClient: (id: string) => req<void>(`/api/admin/clients/${id}`, { method: 'DELETE' }),
     rotateClientSecret: (id: string) => req<RotateClientSecretResult>(`/api/admin/clients/${encodeURIComponent(id)}/rotate-secret`, { method: 'POST' }),
     getProviders: () => req<ExternalProvider[]>('/api/admin/providers'),

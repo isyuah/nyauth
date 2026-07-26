@@ -83,6 +83,9 @@ func validateRequest(req models.CreateClientRequest) error {
 	if seen[models.GrantRefreshToken] && !seen[models.GrantAuthorizationCode] {
 		return fmt.Errorf("%w: refresh_token requires authorization_code", ErrInvalidClient)
 	}
+	if req.AccessPolicy != "" && !models.ValidClientAccessPolicy(req.AccessPolicy) {
+		return fmt.Errorf("%w: unsupported access policy %q", ErrInvalidClient, req.AccessPolicy)
+	}
 	return nil
 }
 func (s *Service) buildClient(req models.CreateClientRequest) (*models.OAuthClient, string, error) {
@@ -112,7 +115,10 @@ func (s *Service) buildClient(req models.CreateClientRequest) (*models.OAuthClie
 		hash := crypto.HashClientSecret(secret)
 		secretHash = &hash
 	}
-	c := &models.OAuthClient{ID: id, SecretHash: secretHash, Name: strings.TrimSpace(req.Name), RedirectURIs: req.RedirectURIs, PostLogoutRedirectURIs: req.PostLogoutRedirectURIs, Grants: req.Grants, Scopes: req.Scopes, IsPublic: req.IsPublic, Metadata: req.Metadata}
+	if req.AccessPolicy == "" {
+		req.AccessPolicy = models.ClientAccessOpen
+	}
+	c := &models.OAuthClient{ID: id, SecretHash: secretHash, Name: strings.TrimSpace(req.Name), RedirectURIs: req.RedirectURIs, PostLogoutRedirectURIs: req.PostLogoutRedirectURIs, Grants: req.Grants, Scopes: req.Scopes, IsPublic: req.IsPublic, AccessPolicy: req.AccessPolicy, Metadata: req.Metadata}
 	if !req.IsPublic {
 		hint := clientSecretHint(secret)
 		rotatedAt := s.clock().UTC()
@@ -207,7 +213,13 @@ func (s *Service) Update(ctx context.Context, id string, req models.UpdateClient
 	if req.Metadata != nil {
 		c.Metadata = req.Metadata
 	}
-	check := models.CreateClientRequest{Name: c.Name, RedirectURIs: c.RedirectURIs, PostLogoutRedirectURIs: c.PostLogoutRedirectURIs, Grants: c.Grants, Scopes: c.Scopes, IsPublic: c.IsPublic, Metadata: c.Metadata}
+	if req.AccessPolicy != nil {
+		c.AccessPolicy = *req.AccessPolicy
+	}
+	if c.AccessPolicy == "" {
+		c.AccessPolicy = models.ClientAccessOpen
+	}
+	check := models.CreateClientRequest{Name: c.Name, RedirectURIs: c.RedirectURIs, PostLogoutRedirectURIs: c.PostLogoutRedirectURIs, Grants: c.Grants, Scopes: c.Scopes, IsPublic: c.IsPublic, AccessPolicy: c.AccessPolicy, Metadata: c.Metadata}
 	if err := validateRequest(check); err != nil {
 		return nil, err
 	}
@@ -320,4 +332,39 @@ func normalizeOwnerID(ownerID *string) (*string, error) {
 	}
 	canonical := parsed.String()
 	return &canonical, nil
+}
+
+// ListAccessUsers returns the allowlisted users for a client.
+func (s *Service) ListAccessUsers(ctx context.Context, id string) ([]models.ClientAccessUser, error) {
+	return s.store.ListAccessUsers(ctx, id)
+}
+
+const maxAccessUsers = 500
+
+// ReplaceAccessUsers validates and replaces a client's allowlist, returning
+// the stored list.
+func (s *Service) ReplaceAccessUsers(ctx context.Context, id string, req models.ReplaceClientAccessUsersRequest, mutation audit.MutationAudit) ([]models.ClientAccessUser, error) {
+	if err := mutation.ValidateEvent(models.AuditClientAccessChanged); err != nil {
+		return nil, fmt.Errorf("invalid client access audit context: %w", err)
+	}
+	if len(req.UserIDs) > maxAccessUsers {
+		return nil, fmt.Errorf("%w: at most %d users may be allowlisted", ErrInvalidClient, maxAccessUsers)
+	}
+	seen := make(map[string]bool, len(req.UserIDs))
+	userIDs := make([]string, 0, len(req.UserIDs))
+	for _, raw := range req.UserIDs {
+		parsed, err := uuid.Parse(strings.TrimSpace(raw))
+		if err != nil {
+			return nil, fmt.Errorf("%w: invalid user ID %q", ErrInvalidClient, raw)
+		}
+		value := parsed.String()
+		if !seen[value] {
+			seen[value] = true
+			userIDs = append(userIDs, value)
+		}
+	}
+	if err := s.store.ReplaceAccessUsers(ctx, id, userIDs, mutation); err != nil {
+		return nil, err
+	}
+	return s.store.ListAccessUsers(ctx, id)
 }

@@ -22,10 +22,29 @@ type OAuthClient struct {
 	Grants                 []string          `json:"grants" db:"grants"`
 	Scopes                 []string          `json:"scopes" db:"scopes"`
 	IsPublic               bool              `json:"is_public" db:"is_public"`
+	AccessPolicy           string            `json:"access_policy" db:"access_policy"`
 	OwnerID                *string           `json:"owner_id,omitempty" db:"owner_id"`
 	Metadata               map[string]string `json:"metadata,omitempty" db:"metadata"`
 	CreatedAt              time.Time         `json:"created_at" db:"created_at"`
 	UpdatedAt              time.Time         `json:"updated_at" db:"updated_at"`
+}
+
+// Access policies restricting which users may complete an OAuth flow against a
+// client. Machine flows (client_credentials) are not user-bound and are never
+// restricted by these policies.
+const (
+	ClientAccessOpen       = "open"
+	ClientAccessAdminsOnly = "admins_only"
+	ClientAccessAllowlist  = "allowlist"
+)
+
+// ValidClientAccessPolicy reports whether the value is a known access policy.
+func ValidClientAccessPolicy(policy string) bool {
+	switch policy {
+	case ClientAccessOpen, ClientAccessAdminsOnly, ClientAccessAllowlist:
+		return true
+	}
+	return false
 }
 
 // CreateClientRequest is the payload to create a client.
@@ -36,6 +55,7 @@ type CreateClientRequest struct {
 	Grants                 []string          `json:"grants" validate:"required,min=1"`
 	Scopes                 []string          `json:"scopes"`
 	IsPublic               bool              `json:"is_public"`
+	AccessPolicy           string            `json:"access_policy,omitempty"`
 	OwnerID                *string           `json:"owner_id,omitempty"`
 	Metadata               map[string]string `json:"metadata,omitempty"`
 }
@@ -48,7 +68,22 @@ type UpdateClientRequest struct {
 	Grants                 []string          `json:"grants,omitempty"`
 	Scopes                 []string          `json:"scopes,omitempty"`
 	IsPublic               *bool             `json:"is_public,omitempty"`
+	AccessPolicy           *string           `json:"access_policy,omitempty"`
 	Metadata               map[string]string `json:"metadata,omitempty"`
+}
+
+// ReplaceClientAccessUsersRequest replaces the allowlist for a client.
+type ReplaceClientAccessUsersRequest struct {
+	UserIDs []string `json:"user_ids"`
+}
+
+// ClientAccessUser is one allowlisted user shown in the admin UI.
+type ClientAccessUser struct {
+	UserID      string    `json:"user_id"`
+	Username    string    `json:"username"`
+	DisplayName string    `json:"display_name"`
+	Status      string    `json:"status"`
+	CreatedAt   time.Time `json:"created_at"`
 }
 
 // UpdateClientOwnerRequest assigns a client to an active user. A null owner

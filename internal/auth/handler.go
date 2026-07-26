@@ -66,6 +66,7 @@ type Handler struct {
 
 func NewHandler(tokenService *TokenService, jwkManager *JWKManager, userService *user.Service, clientStore *client.Store, sessionStore *session.Store, cfg *config.Config) *Handler {
 	tokenService.SetUserService(userService)
+	tokenService.SetAccessPolicyChecker(clientStore)
 	if err := jwkManager.Configure(cfg.Auth.MasterKey, cfg.Auth.AccessTokenTTL); err != nil {
 		panic("invalid validated JWK configuration: " + err.Error())
 	}
@@ -308,6 +309,20 @@ func (h *Handler) Authorize(w http.ResponseWriter, r *http.Request) {
 	}
 	if currentUser.MustChangePassword {
 		http.Redirect(w, r, "/change-password", http.StatusFound)
+		return
+	}
+	allowed, err := h.clientStore.UserMayAccess(r.Context(), cl.ID, currentUser.ID.String())
+	if err != nil {
+		writeOAuthError(w, http.StatusInternalServerError, "server_error", "failed to evaluate client access policy")
+		return
+	}
+	if !allowed {
+		h.recordSecurityAudit(r.Context(), SecurityAuditEvent{
+			Event: models.AuditAuthorizeDenied, ActorID: &currentUser.ID, ActorName: currentUser.Username,
+			AggregateType: "client", AggregateID: cl.ID, Result: "failure", RiskLevel: "medium",
+			Details: map[string]any{"access_policy": cl.AccessPolicy},
+		})
+		h.redirectAuthorizeError(w, r, redirectURI, state, "access_denied")
 		return
 	}
 	consentChallenge, err := internalcrypto.GenerateRandomString(32)

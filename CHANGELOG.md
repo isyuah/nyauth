@@ -16,6 +16,7 @@
 - 数据库双角色：迁移账号执行 DDL，运行时账号最小权限；`serve` 不再执行任何 DDL
 - 品牌：接入 nyauth 猫猫 logo（favicon 与 Web UI 品牌区）
 - 运行时设置：`runtime_settings` 表与跨实例同步（LISTEN/NOTIFY + 定时对账）；首个消费者为品牌设置（站点名称 / Logo URL），管理后台"系统状态"页可编辑，免重启即时生效
+- 每客户端访问策略：`open`（默认）/ `admins_only` / `allowlist`（用户白名单）；授权端点拒绝名单外用户（`access_denied` + 审计），refresh 与 access token 校验时复查策略——被移出名单的用户令牌在下次使用时即失效；机器流程（client_credentials）不受限；管理后台可编辑策略与访问名单
 - 高可用与备份恢复文档、OAuth/OIDC 集成指南（`docs/`）
 
 ### 变更（破坏性）

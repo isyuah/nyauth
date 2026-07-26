@@ -28,6 +28,9 @@ type fakeHandlerService struct {
 	deleteErr         error
 	rotateErr         error
 	rotateResult      *models.RotateClientSecretResponse
+	accessUsers       []models.ClientAccessUser
+	accessUsersErr    error
+	replaceAccessReq  models.ReplaceClientAccessUsersRequest
 }
 
 func (f *fakeHandlerService) List(context.Context, int, int) (*models.PaginatedResponse[models.OAuthClient], error) {
@@ -51,6 +54,13 @@ func (f *fakeHandlerService) Delete(context.Context, string, audit.MutationAudit
 }
 func (f *fakeHandlerService) RotateSecret(context.Context, string, audit.MutationAudit) (*models.RotateClientSecretResponse, error) {
 	return f.rotateResult, f.rotateErr
+}
+func (f *fakeHandlerService) ListAccessUsers(context.Context, string) ([]models.ClientAccessUser, error) {
+	return f.accessUsers, f.accessUsersErr
+}
+func (f *fakeHandlerService) ReplaceAccessUsers(_ context.Context, _ string, req models.ReplaceClientAccessUsersRequest, _ audit.MutationAudit) ([]models.ClientAccessUser, error) {
+	f.replaceAccessReq = req
+	return f.accessUsers, f.accessUsersErr
 }
 
 func withTestMutationAudit(request *http.Request) *http.Request {
