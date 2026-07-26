@@ -18,11 +18,9 @@
 
   function checkViewport() {
     isMobile = window.innerWidth < 768;
-    if (isMobile) {
-      sidebarCollapsed = true;
-    } else {
-      mobileMenuOpen = false;
-    }
+    // sidebarCollapsed is the user's desktop preference; the mobile layout
+    // uses the drawer instead, so viewport changes must not overwrite it.
+    if (!isMobile) mobileMenuOpen = false;
   }
 
   $effect(() => {

@@ -670,6 +670,25 @@ test('logout sends CSRF and returns to login', async ({ page }) => {
   expect(state.logoutCSRF).toBe('csrf-user');
 });
 
+test('the desktop sidebar recovers after the window shrinks below the mobile breakpoint', async ({ page }) => {
+  await installAPIMocks(page, {
+    authenticated: true,
+    mustChangePassword: false,
+    role: 'user',
+    csrfToken: 'csrf-resize',
+  });
+
+  await page.goto('/dashboard');
+  const sidebar = page.getByRole('complementary', { name: '用户中心导航' });
+  await expect(sidebar).toHaveCSS('width', '248px');
+
+  await page.setViewportSize({ width: 700, height: 900 });
+  await expect(sidebar).not.toBeVisible();
+
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await expect(sidebar).toHaveCSS('width', '248px');
+});
+
 test('mobile navigation traps focus, closes with Escape, and restores the menu trigger', async ({ page }) => {
   const state: MockState = {
     authenticated: true,
