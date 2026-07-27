@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/nyasharp/nyauth/internal/buildinfo"
+	"github.com/nyasharp/nyauth/internal/avatar"
 	"github.com/nyasharp/nyauth/internal/database"
 	"github.com/nyasharp/nyauth/internal/mailruntime"
 	"github.com/nyasharp/nyauth/pkg/models"
@@ -162,5 +163,29 @@ func TestCollectSystemStatusReportsMailRuntimeWithoutAffectingReadinessDependenc
 				t.Fatalf("mail state altered readiness dependencies: %#v", response.Services)
 			}
 		})
+	}
+}
+
+func TestCollectSystemStatusReportsMediaDegradationWithoutChangingCoreDependencies(t *testing.T) {
+	now := time.Now().UTC()
+	response := collectSystemStatus(context.Background(), time.Hour, systemStatusSources{
+		pingPostgreSQL: func(context.Context) error { return nil },
+		pingRedis:      func(context.Context) error { return nil },
+		readSchema: func(context.Context) (systemSchemaSnapshot, error) {
+			return systemSchemaSnapshot{version: database.SchemaVersion, rows: 1}, nil
+		},
+		readSigningKey: func(context.Context) (*models.JWK, error) {
+			return &models.JWK{Kid: "kid", Status: models.JWKStatusSigning, SigningStartedAt: now}, nil
+		},
+		providerState: func() (bool, uint64) { return true, 1 },
+		mediaState: func() avatar.RuntimeStatus {
+			return avatar.RuntimeStatus{Backend: avatar.StorageS3, Status: "degraded", Configured: true, LastErrorAt: &now}
+		},
+	})
+	if response.Status != "degraded" || response.Services.Media.Status != "degraded" || response.Services.Media.Backend != "s3" {
+		t.Fatalf("media status = %#v overall=%q", response.Services.Media, response.Status)
+	}
+	if response.Services.PostgreSQL.Status != "ok" || response.Services.Redis.Status != "ok" {
+		t.Fatalf("media state altered core dependencies: %#v", response.Services)
 	}
 }

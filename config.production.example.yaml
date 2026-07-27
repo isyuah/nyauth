@@ -71,6 +71,18 @@ web:
 # for the full set). Production requires HTTPS NYAUTH_MAIL_PUBLIC_BASE_URL and
 # forbids NYAUTH_MAIL_SMTP_TLS_MODE=plain; inject the SMTP password with
 # NYAUTH_MAIL_SMTP_PASSWORD_FILE.
+media:
+  backend: local
+  local:
+    directory: "/var/lib/nyauth/media"
+  s3:
+    endpoint: ""
+    region: ""
+    bucket: ""
+    prefix: "nyauth"
+    path_style: false
+# HA 必须切换为 s3。对象存储凭据只能通过 NYAUTH_MEDIA_S3_* 环境变量
+# 或对应 *_FILE secret 注入，不能写入本文件。
 audit:
   retention: 8760h
 telemetry:

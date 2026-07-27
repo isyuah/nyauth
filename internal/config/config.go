@@ -28,6 +28,7 @@ type Config struct {
 	Admin       AdminConfig     `mapstructure:"admin"`
 	Web         WebConfig       `mapstructure:"web"`
 	Mail        MailConfig      `mapstructure:"mail"`
+	Media       MediaConfig     `mapstructure:"media"`
 	Audit       AuditConfig     `mapstructure:"audit"`
 	Telemetry   TelemetryConfig `mapstructure:"telemetry"`
 }
@@ -159,6 +160,27 @@ type SMTPConfig struct {
 	SendTimeout       time.Duration `mapstructure:"-"`
 }
 
+type MediaConfig struct {
+	Backend string           `mapstructure:"backend"`
+	Local   LocalMediaConfig `mapstructure:"local"`
+	S3      S3MediaConfig    `mapstructure:"s3"`
+}
+
+type LocalMediaConfig struct {
+	Directory string `mapstructure:"directory"`
+}
+
+type S3MediaConfig struct {
+	Endpoint        string `mapstructure:"endpoint"`
+	Region          string `mapstructure:"region"`
+	Bucket          string `mapstructure:"bucket"`
+	Prefix          string `mapstructure:"prefix"`
+	PathStyle       bool   `mapstructure:"path_style"`
+	AccessKeyID     string `mapstructure:"access_key_id"`
+	SecretAccessKey string `mapstructure:"secret_access_key"`
+	SessionToken    string `mapstructure:"session_token"`
+}
+
 type AuditConfig struct {
 	RetentionRaw string        `mapstructure:"retention"`
 	Retention    time.Duration `mapstructure:"-"`
@@ -246,6 +268,16 @@ func (cfg *Config) Resolve() error {
 	if cfg.Audit.Retention, err = parsePositiveDuration("audit.retention", cfg.Audit.RetentionRaw, 365*24*time.Hour); err != nil {
 		return err
 	}
+	media := &cfg.Media
+	media.Backend = strings.ToLower(strings.TrimSpace(media.Backend))
+	if media.Backend == "" {
+		media.Backend = "local"
+	}
+	media.Local.Directory = strings.TrimSpace(media.Local.Directory)
+	media.S3.Endpoint = strings.TrimSpace(media.S3.Endpoint)
+	media.S3.Region = strings.TrimSpace(media.S3.Region)
+	media.S3.Bucket = strings.TrimSpace(media.S3.Bucket)
+	media.S3.Prefix = strings.Trim(strings.TrimSpace(media.S3.Prefix), "/")
 	otlp := &cfg.Telemetry.OTLP
 	otlp.Endpoint = strings.TrimSpace(otlp.Endpoint)
 	if otlp.ExportInterval, err = parsePositiveDuration("telemetry.otlp.export_interval", otlp.ExportIntervalRaw, 30*time.Second); err != nil {
@@ -421,6 +453,41 @@ func (cfg *Config) Validate() error {
 			errs = append(errs, fmt.Errorf("mail.smtp.tls_mode must be starttls, implicit, or plain"))
 		}
 	}
+	switch cfg.Media.Backend {
+	case "local":
+		if cfg.Media.Local.Directory == "" {
+			errs = append(errs, fmt.Errorf("media.local.directory is required when media.backend is local"))
+		}
+	case "s3":
+		if cfg.Media.S3.Bucket == "" {
+			errs = append(errs, fmt.Errorf("media.s3.bucket is required when media.backend is s3"))
+		}
+		if cfg.Media.S3.Region == "" {
+			errs = append(errs, fmt.Errorf("media.s3.region is required when media.backend is s3"))
+		}
+		if cfg.Media.S3.AccessKeyID == "" {
+			errs = append(errs, fmt.Errorf("media.s3.access_key_id is required when media.backend is s3"))
+		}
+		if cfg.Media.S3.SecretAccessKey == "" {
+			errs = append(errs, fmt.Errorf("media.s3.secret_access_key is required when media.backend is s3"))
+		}
+		if strings.ContainsAny(cfg.Media.S3.AccessKeyID+cfg.Media.S3.SecretAccessKey+cfg.Media.S3.SessionToken, "\r\n") {
+			errs = append(errs, fmt.Errorf("media.s3 credentials must be single-line values"))
+		}
+		if strings.Contains(cfg.Media.S3.Bucket, "/") || strings.Contains(cfg.Media.S3.Prefix, "\\") {
+			errs = append(errs, fmt.Errorf("media.s3.bucket and media.s3.prefix must be object storage names, not filesystem paths"))
+		}
+		if cfg.Media.S3.Endpoint != "" {
+			endpoint, err := url.Parse(cfg.Media.S3.Endpoint)
+			if err != nil || endpoint.Host == "" || (endpoint.Scheme != "http" && endpoint.Scheme != "https") || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" {
+				errs = append(errs, fmt.Errorf("media.s3.endpoint must be an absolute HTTP(S) URL without credentials, query, or fragment"))
+			} else if cfg.IsProduction() && endpoint.Scheme != "https" {
+				errs = append(errs, fmt.Errorf("media.s3.endpoint must use HTTPS in production"))
+			}
+		}
+	default:
+		errs = append(errs, fmt.Errorf("media.backend must be local or s3"))
+	}
 	if strings.ContainsAny(cfg.Telemetry.OTLP.Authorization, "\r\n") {
 		errs = append(errs, fmt.Errorf("telemetry.otlp.authorization must be a single-line value"))
 	}
@@ -509,6 +576,7 @@ var envKeys = []string{
 	"redis.tls.enabled", "redis.tls.root_ca_file", "redis.tls.client_cert_file", "redis.tls.client_key_file", "redis.tls.server_name", "redis.tls.insecure_skip_verify",
 	"auth.issuer", "auth.access_token_ttl", "auth.refresh_token_ttl", "auth.authorization_code_ttl", "auth.master_key", "auth.argon2_concurrency", "auth.jwk.algorithm", "auth.jwk.key_size", "auth.jwk.rotation_interval",
 	"web.enabled", "web.title", "web.logo_url", "mail.enabled", "mail.from_address", "mail.from_name", "mail.public_base_url", "mail.smtp.host", "mail.smtp.port", "mail.smtp.username", "mail.smtp.password", "mail.smtp.tls_mode", "mail.smtp.connect_timeout", "mail.smtp.send_timeout",
+	"media.backend", "media.local.directory", "media.s3.endpoint", "media.s3.region", "media.s3.bucket", "media.s3.prefix", "media.s3.path_style", "media.s3.access_key_id", "media.s3.secret_access_key", "media.s3.session_token",
 	"audit.retention",
 	"telemetry.otlp.enabled", "telemetry.otlp.endpoint", "telemetry.otlp.authorization", "telemetry.otlp.export_interval", "telemetry.otlp.timeout",
 }
@@ -523,6 +591,10 @@ var databaseMaintenanceEnvKeys = []string{
 	"audit.retention",
 }
 
+var mediaMaintenanceEnvKeys = append(append([]string(nil), databaseMaintenanceEnvKeys...),
+	"media.backend", "media.local.directory", "media.s3.endpoint", "media.s3.region", "media.s3.bucket", "media.s3.prefix", "media.s3.path_style", "media.s3.access_key_id", "media.s3.secret_access_key", "media.s3.session_token",
+)
+
 type secretFileBinding struct {
 	key      string
 	valueEnv string
@@ -535,11 +607,21 @@ var secretFileBindings = []secretFileBinding{
 	{key: "auth.master_key", valueEnv: "NYAUTH_AUTH_MASTER_KEY", fileEnv: "NYAUTH_AUTH_MASTER_KEY_FILE"},
 	{key: "admin.password", valueEnv: "NYAUTH_BOOTSTRAP_ADMIN_PASSWORD", fileEnv: "NYAUTH_BOOTSTRAP_ADMIN_PASSWORD_FILE"},
 	{key: "mail.smtp.password", valueEnv: "NYAUTH_MAIL_SMTP_PASSWORD", fileEnv: "NYAUTH_MAIL_SMTP_PASSWORD_FILE"},
+	{key: "media.s3.access_key_id", valueEnv: "NYAUTH_MEDIA_S3_ACCESS_KEY_ID", fileEnv: "NYAUTH_MEDIA_S3_ACCESS_KEY_ID_FILE"},
+	{key: "media.s3.secret_access_key", valueEnv: "NYAUTH_MEDIA_S3_SECRET_ACCESS_KEY", fileEnv: "NYAUTH_MEDIA_S3_SECRET_ACCESS_KEY_FILE"},
+	{key: "media.s3.session_token", valueEnv: "NYAUTH_MEDIA_S3_SESSION_TOKEN", fileEnv: "NYAUTH_MEDIA_S3_SESSION_TOKEN_FILE"},
 	{key: "telemetry.otlp.authorization", valueEnv: "NYAUTH_TELEMETRY_OTLP_AUTHORIZATION", fileEnv: "NYAUTH_TELEMETRY_OTLP_AUTHORIZATION_FILE"},
 }
 
 var databaseMaintenanceSecretFileBindings = []secretFileBinding{
 	{key: "database.dsn", valueEnv: "NYAUTH_DATABASE_DSN", fileEnv: "NYAUTH_DATABASE_DSN_FILE"},
+}
+
+var mediaMaintenanceSecretFileBindings = []secretFileBinding{
+	{key: "database.dsn", valueEnv: "NYAUTH_DATABASE_DSN", fileEnv: "NYAUTH_DATABASE_DSN_FILE"},
+	{key: "media.s3.access_key_id", valueEnv: "NYAUTH_MEDIA_S3_ACCESS_KEY_ID", fileEnv: "NYAUTH_MEDIA_S3_ACCESS_KEY_ID_FILE"},
+	{key: "media.s3.secret_access_key", valueEnv: "NYAUTH_MEDIA_S3_SECRET_ACCESS_KEY", fileEnv: "NYAUTH_MEDIA_S3_SECRET_ACCESS_KEY_FILE"},
+	{key: "media.s3.session_token", valueEnv: "NYAUTH_MEDIA_S3_SESSION_TOKEN", fileEnv: "NYAUTH_MEDIA_S3_SESSION_TOKEN_FILE"},
 }
 
 func Load(path string) (*Config, error) {
@@ -579,6 +661,9 @@ func Load(path string) (*Config, error) {
 	v.SetDefault("mail.smtp.tls_mode", "starttls")
 	v.SetDefault("mail.smtp.connect_timeout", "10s")
 	v.SetDefault("mail.smtp.send_timeout", "30s")
+	v.SetDefault("media.backend", "local")
+	v.SetDefault("media.local.directory", "data/media")
+	v.SetDefault("media.s3.path_style", false)
 	v.SetDefault("audit.retention", "8760h")
 	v.SetDefault("telemetry.otlp.enabled", false)
 	v.SetDefault("telemetry.otlp.export_interval", "30s")
@@ -636,8 +721,24 @@ func Load(path string) (*Config, error) {
 // needed by the migrate and maintenance commands. It applies only the database
 // DSN file secret and ignores runtime-only configuration.
 func LoadDatabaseMaintenance(path string) (*Config, error) {
+	return loadDatabaseMaintenance(path, false)
+}
+
+// LoadMaintenance adds media storage configuration to the database-only
+// maintenance scope so orphaned avatar objects can be reclaimed without
+// requiring Redis, issuer, mail, or bootstrap credentials.
+func LoadMaintenance(path string) (*Config, error) {
+	return loadDatabaseMaintenance(path, true)
+}
+
+func loadDatabaseMaintenance(path string, includeMedia bool) (*Config, error) {
 	v := viper.New()
 	setDatabaseMaintenanceDefaults(v)
+	if includeMedia {
+		v.SetDefault("media.backend", "local")
+		v.SetDefault("media.local.directory", "data/media")
+		v.SetDefault("media.s3.path_style", false)
+	}
 	if path != "" {
 		v.SetConfigFile(path)
 	} else {
@@ -648,7 +749,11 @@ func LoadDatabaseMaintenance(path string) (*Config, error) {
 	}
 	v.SetEnvPrefix("NYAUTH")
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
-	for _, key := range databaseMaintenanceEnvKeys {
+	keys := databaseMaintenanceEnvKeys
+	if includeMedia {
+		keys = mediaMaintenanceEnvKeys
+	}
+	for _, key := range keys {
 		if err := v.BindEnv(key); err != nil {
 			return nil, fmt.Errorf("binding environment variable for %s: %w", key, err)
 		}
@@ -659,13 +764,25 @@ func LoadDatabaseMaintenance(path string) (*Config, error) {
 			return nil, fmt.Errorf("reading config: %w", err)
 		}
 	}
-	if err := applyFileSecretBindings(v, databaseMaintenanceSecretFileBindings); err != nil {
+	bindings := databaseMaintenanceSecretFileBindings
+	if includeMedia {
+		bindings = mediaMaintenanceSecretFileBindings
+	}
+	if err := applyFileSecretBindings(v, bindings); err != nil {
 		return nil, err
+	}
+	if includeMedia {
+		for _, key := range []string{"media.s3.access_key_id", "media.s3.secret_access_key", "media.s3.session_token"} {
+			if v.InConfig(key) {
+				return nil, fmt.Errorf("%s must be configured through NYAUTH_MEDIA_S3_* environment variables or *_FILE secrets", key)
+			}
+		}
 	}
 	var scoped struct {
 		Environment string         `mapstructure:"environment"`
 		Database    DatabaseConfig `mapstructure:"database"`
 		Audit       AuditConfig    `mapstructure:"audit"`
+		Media       MediaConfig    `mapstructure:"media"`
 	}
 	if err := v.Unmarshal(&scoped, viper.DecodeHook(mapstructure.StringToSliceHookFunc(","))); err != nil {
 		return nil, fmt.Errorf("unmarshaling database maintenance config: %w", err)
@@ -674,6 +791,7 @@ func LoadDatabaseMaintenance(path string) (*Config, error) {
 		Environment: strings.ToLower(strings.TrimSpace(scoped.Environment)),
 		Database:    scoped.Database,
 		Audit:       scoped.Audit,
+		Media:       scoped.Media,
 	}
 	if cfg.Environment == "" {
 		cfg.Environment = "development"
@@ -684,7 +802,50 @@ func LoadDatabaseMaintenance(path string) (*Config, error) {
 	if err := validateDatabaseMaintenance(cfg); err != nil {
 		return nil, fmt.Errorf("validating database maintenance config: %w", err)
 	}
+	if includeMedia {
+		media := &cfg.Media
+		media.Backend = strings.ToLower(strings.TrimSpace(media.Backend))
+		media.Local.Directory = strings.TrimSpace(media.Local.Directory)
+		media.S3.Endpoint = strings.TrimSpace(media.S3.Endpoint)
+		media.S3.Region = strings.TrimSpace(media.S3.Region)
+		media.S3.Bucket = strings.TrimSpace(media.S3.Bucket)
+		media.S3.Prefix = strings.Trim(strings.TrimSpace(media.S3.Prefix), "/")
+		if err := validateMaintenanceMedia(*media, cfg.IsProduction()); err != nil {
+			return nil, fmt.Errorf("validating maintenance media config: %w", err)
+		}
+	}
 	return cfg, nil
+}
+
+func validateMaintenanceMedia(media MediaConfig, production bool) error {
+	switch media.Backend {
+	case "local":
+		if media.Local.Directory == "" {
+			return fmt.Errorf("media.local.directory is required when media.backend is local")
+		}
+	case "s3":
+		if media.S3.Region == "" || media.S3.Bucket == "" || media.S3.AccessKeyID == "" || media.S3.SecretAccessKey == "" {
+			return fmt.Errorf("media S3 region, bucket, access key ID, and secret access key are required")
+		}
+		if strings.ContainsAny(media.S3.AccessKeyID+media.S3.SecretAccessKey+media.S3.SessionToken, "\r\n") {
+			return fmt.Errorf("media.s3 credentials must be single-line values")
+		}
+		if strings.Contains(media.S3.Bucket, "/") || strings.Contains(media.S3.Prefix, "\\") {
+			return fmt.Errorf("media.s3.bucket and media.s3.prefix must be object storage names, not filesystem paths")
+		}
+		if media.S3.Endpoint != "" {
+			endpoint, err := url.Parse(media.S3.Endpoint)
+			if err != nil || endpoint.Host == "" || (endpoint.Scheme != "http" && endpoint.Scheme != "https") || endpoint.User != nil || endpoint.RawQuery != "" || endpoint.Fragment != "" {
+				return fmt.Errorf("media.s3.endpoint must be an absolute HTTP(S) URL without credentials, query, or fragment")
+			}
+			if production && endpoint.Scheme != "https" {
+				return fmt.Errorf("media.s3.endpoint must use HTTPS in production")
+			}
+		}
+	default:
+		return fmt.Errorf("media.backend must be local or s3")
+	}
+	return nil
 }
 
 func setDatabaseMaintenanceDefaults(v *viper.Viper) {
@@ -770,6 +931,11 @@ func rejectRestrictedConfigFileValues(v *viper.Viper) error {
 	for _, key := range envKeys {
 		if strings.HasPrefix(key, "mail.") && v.InConfig(key) {
 			return fmt.Errorf("%s must be configured through NYAUTH_MAIL_* environment variables", key)
+		}
+	}
+	for _, key := range []string{"media.s3.access_key_id", "media.s3.secret_access_key", "media.s3.session_token"} {
+		if v.InConfig(key) {
+			return fmt.Errorf("%s must be configured through NYAUTH_MEDIA_S3_* environment variables or *_FILE secrets", key)
 		}
 	}
 	return nil

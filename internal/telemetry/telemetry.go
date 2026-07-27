@@ -29,31 +29,35 @@ const instrumentationName = "github.com/nyasharp/nyauth/internal/telemetry"
 // instruments. It intentionally does not attach user, client, token, IP, or
 // other unbounded identifiers to metrics.
 type Runtime struct {
-	provider           *sdkmetric.MeterProvider
-	meter              metric.Meter
-	httpRequests       metric.Int64Counter
-	httpDuration       metric.Float64Histogram
-	authEvents         metric.Int64Counter
-	dependencyDuration metric.Float64Histogram
-	auditFailures      metric.Int64Counter
-	csrfRejections     metric.Int64Counter
-	oauthGrants        metric.Int64Counter
-	refreshReuse       metric.Int64Counter
-	providerEvents     metric.Int64Counter
-	jwkRotations       metric.Int64Counter
-	rateLimitEvents    metric.Int64Counter
-	registrationEvents metric.Int64Counter
-	verificationTime   metric.Float64Histogram
-	smtpDeliveries     metric.Int64Counter
-	smtpRetries        metric.Int64Counter
-	smtpFailures       metric.Int64Counter
-	smtpBacklog        metric.Int64Gauge
-	smtpOldestAge      metric.Float64Gauge
-	smtpCircuitOpen    metric.Int64Gauge
-	postgresPool       metric.Int64ObservableGauge
-	redisPool          metric.Int64ObservableGauge
-	registrationMu     sync.Mutex
-	registrations      []metric.Registration
+	provider             *sdkmetric.MeterProvider
+	meter                metric.Meter
+	httpRequests         metric.Int64Counter
+	httpDuration         metric.Float64Histogram
+	authEvents           metric.Int64Counter
+	dependencyDuration   metric.Float64Histogram
+	auditFailures        metric.Int64Counter
+	csrfRejections       metric.Int64Counter
+	oauthGrants          metric.Int64Counter
+	refreshReuse         metric.Int64Counter
+	providerEvents       metric.Int64Counter
+	jwkRotations         metric.Int64Counter
+	rateLimitEvents      metric.Int64Counter
+	registrationEvents   metric.Int64Counter
+	verificationTime     metric.Float64Histogram
+	smtpDeliveries       metric.Int64Counter
+	smtpRetries          metric.Int64Counter
+	smtpFailures         metric.Int64Counter
+	smtpBacklog          metric.Int64Gauge
+	smtpOldestAge        metric.Float64Gauge
+	smtpCircuitOpen      metric.Int64Gauge
+	avatarOperations     metric.Int64Counter
+	avatarDuration       metric.Float64Histogram
+	avatarStorageErrors  metric.Int64Counter
+	avatarCleanupPending metric.Int64Gauge
+	postgresPool         metric.Int64ObservableGauge
+	redisPool            metric.Int64ObservableGauge
+	registrationMu       sync.Mutex
+	registrations        []metric.Registration
 }
 
 type Options struct {
@@ -179,6 +183,22 @@ func New(ctx context.Context, options Options) (*Runtime, error) {
 	if err != nil {
 		return nil, err
 	}
+	avatarOperations, err := meter.Int64Counter("nyauth.avatar.operations", metric.WithDescription("Avatar media operations by bounded outcome and reason"))
+	if err != nil {
+		return nil, err
+	}
+	avatarDuration, err := meter.Float64Histogram("nyauth.avatar.processing.duration", metric.WithUnit("s"), metric.WithDescription("Avatar upload and provider-import processing duration"))
+	if err != nil {
+		return nil, err
+	}
+	avatarStorageErrors, err := meter.Int64Counter("nyauth.avatar.storage.errors", metric.WithDescription("Avatar storage failures by backend and operation"))
+	if err != nil {
+		return nil, err
+	}
+	avatarCleanupPending, err := meter.Int64Gauge("nyauth.avatar.cleanup.pending", metric.WithDescription("Avatar records awaiting object cleanup for the configured backend"))
+	if err != nil {
+		return nil, err
+	}
 	postgresPool, err := meter.Int64ObservableGauge("nyauth.postgresql.pool.connections", metric.WithDescription("PostgreSQL pool connections by bounded state"))
 	if err != nil {
 		return nil, err
@@ -196,7 +216,9 @@ func New(ctx context.Context, options Options) (*Runtime, error) {
 		registrationEvents: registrationEvents, verificationTime: verificationTime,
 		smtpDeliveries: smtpDeliveries, smtpRetries: smtpRetries, smtpFailures: smtpFailures,
 		smtpBacklog: smtpBacklog, smtpOldestAge: smtpOldestAge, smtpCircuitOpen: smtpCircuitOpen,
-		postgresPool: postgresPool, redisPool: redisPool,
+		avatarOperations: avatarOperations, avatarDuration: avatarDuration, avatarStorageErrors: avatarStorageErrors,
+		avatarCleanupPending: avatarCleanupPending,
+		postgresPool:         postgresPool, redisPool: redisPool,
 	}, nil
 }
 
@@ -402,8 +424,8 @@ func (r *Runtime) RecordRateLimit(ctx context.Context, limiter, action, result s
 	if r == nil {
 		return
 	}
-	limiter = boundedValue(limiter, "other", "login", "account_action")
-	action = boundedValue(action, "other", "login", "register", "password_reset", "email_verification", "pending_email_verification", "email_change")
+	limiter = boundedValue(limiter, "other", "login", "account_action", "avatar")
+	action = boundedValue(action, "other", "login", "register", "password_reset", "email_verification", "pending_email_verification", "email_change", "upload", "delete")
 	result = boundedValue(result, "error", "allowed", "rejected", "error")
 	r.rateLimitEvents.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("rate_limit.limiter", limiter),
@@ -477,6 +499,53 @@ func (r *Runtime) RecordSMTPBacklog(ctx context.Context, backlog int64, oldestAg
 	}
 	r.smtpBacklog.Record(ctx, backlog)
 	r.smtpOldestAge.Record(ctx, oldestAge.Seconds())
+}
+
+func (r *Runtime) RecordAvatarOperation(ctx context.Context, operation, result, reason string, duration time.Duration) {
+	if r == nil {
+		return
+	}
+	operation = boundedValue(operation, "other", "upload", "delete", "read", "provider_import", "cleanup")
+	result = boundedValue(result, "failure", "success", "failure", "rejected", "discarded", "retry")
+	reason = boundedValue(reason, "other",
+		"none", "too_large", "unsupported_media", "animated", "invalid_dimensions", "not_square",
+		"rate_limited", "dependency_unavailable", "not_found", "avatar_already_set", "policy_disabled",
+		"decryption_failed", "invalid_url", "invalid_port", "host_not_allowed", "unsafe_address",
+		"too_many_redirects", "invalid_redirect", "remote_rejected", "remote_too_large", "invalid_image",
+		"remote_or_storage_unavailable", "storage_unavailable", "canceled",
+		"cleanup_deferred", "processor_busy",
+	)
+	attributes := []attribute.KeyValue{
+		attribute.String("avatar.operation", operation),
+		attribute.String("avatar.result", result),
+		attribute.String("avatar.reason", reason),
+	}
+	r.avatarOperations.Add(ctx, 1, metric.WithAttributes(attributes...))
+	if duration >= 0 && (operation == "upload" || operation == "provider_import") {
+		r.avatarDuration.Record(ctx, duration.Seconds(), metric.WithAttributes(attributes...))
+	}
+}
+
+func (r *Runtime) RecordAvatarStorageError(ctx context.Context, backend, operation string) {
+	if r == nil {
+		return
+	}
+	backend = boundedValue(backend, "other", "local", "s3")
+	operation = boundedValue(operation, "other", "put", "get", "delete")
+	r.avatarStorageErrors.Add(ctx, 1, metric.WithAttributes(
+		attribute.String("avatar.storage_backend", backend),
+		attribute.String("avatar.storage_operation", operation),
+	))
+}
+
+func (r *Runtime) RecordAvatarCleanupPending(ctx context.Context, pending int64) {
+	if r == nil {
+		return
+	}
+	if pending < 0 {
+		pending = 0
+	}
+	r.avatarCleanupPending.Record(ctx, pending)
 }
 
 func boundedValue(value, fallback string, allowed ...string) string {

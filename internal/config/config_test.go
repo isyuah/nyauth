@@ -245,6 +245,97 @@ auth:
 	if cfg.Server.ReadinessTimeout != 3*time.Second || cfg.Server.ShutdownTimeout != 30*time.Second {
 		t.Fatalf("server timeouts = %s, %s", cfg.Server.ReadinessTimeout, cfg.Server.ShutdownTimeout)
 	}
+	if cfg.Media.Backend != "local" || cfg.Media.Local.Directory != "data/media" {
+		t.Fatalf("media defaults = %#v", cfg.Media)
+	}
+}
+
+func TestLoadResolvesS3MediaSecretsFromFiles(t *testing.T) {
+	unsetEnvironment(t, "NYAUTH_MEDIA_S3_ACCESS_KEY_ID")
+	unsetEnvironment(t, "NYAUTH_MEDIA_S3_SECRET_ACCESS_KEY")
+	accessKeyFile := filepath.Join(t.TempDir(), "s3-access-key")
+	secretKeyFile := filepath.Join(t.TempDir(), "s3-secret-key")
+	if err := os.WriteFile(accessKeyFile, []byte("access-key\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(secretKeyFile, []byte("secret-key\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("NYAUTH_MEDIA_BACKEND", "s3")
+	t.Setenv("NYAUTH_MEDIA_S3_REGION", "auto")
+	t.Setenv("NYAUTH_MEDIA_S3_BUCKET", "nyauth-media")
+	t.Setenv("NYAUTH_MEDIA_S3_PREFIX", "/avatars/")
+	t.Setenv("NYAUTH_MEDIA_S3_PATH_STYLE", "true")
+	t.Setenv("NYAUTH_MEDIA_S3_ACCESS_KEY_ID_FILE", accessKeyFile)
+	t.Setenv("NYAUTH_MEDIA_S3_SECRET_ACCESS_KEY_FILE", secretKeyFile)
+	cfg, err := Load(writeConfig(t, `
+database:
+  driver: postgres
+  dsn: postgres://local
+redis:
+  addr: localhost:6379
+auth:
+  issuer: http://localhost:8080
+  master_key: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+`))
+	if err != nil {
+		t.Fatalf("Load() error = %v", err)
+	}
+	if cfg.Media.Backend != "s3" || cfg.Media.S3.AccessKeyID != "access-key" || cfg.Media.S3.SecretAccessKey != "secret-key" {
+		t.Fatalf("media S3 credentials = %#v", cfg.Media.S3)
+	}
+	if cfg.Media.S3.Prefix != "avatars" || !cfg.Media.S3.PathStyle {
+		t.Fatalf("media S3 options = %#v", cfg.Media.S3)
+	}
+}
+
+func TestLoadRejectsS3MediaCredentialsFromYAML(t *testing.T) {
+	_, err := Load(writeConfig(t, `
+database:
+  driver: postgres
+  dsn: postgres://local
+redis:
+  addr: localhost:6379
+auth:
+  issuer: http://localhost:8080
+  master_key: MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=
+media:
+  s3:
+    secret_access_key: do-not-commit
+`))
+	if err == nil || !strings.Contains(err.Error(), "NYAUTH_MEDIA_S3_*") {
+		t.Fatalf("Load() error = %v", err)
+	}
+}
+
+func TestLoadRejectsInsecureProductionS3MediaEndpoint(t *testing.T) {
+	encodedKey := base64.StdEncoding.EncodeToString([]byte("89abcdef0123456789abcdef01234567"))
+	unsetEnvironment(t, "NYAUTH_MEDIA_S3_ACCESS_KEY_ID_FILE")
+	unsetEnvironment(t, "NYAUTH_MEDIA_S3_SECRET_ACCESS_KEY_FILE")
+	t.Setenv("NYAUTH_MEDIA_BACKEND", "s3")
+	t.Setenv("NYAUTH_MEDIA_S3_ENDPOINT", "http://minio.internal:9000")
+	t.Setenv("NYAUTH_MEDIA_S3_REGION", "auto")
+	t.Setenv("NYAUTH_MEDIA_S3_BUCKET", "nyauth-media")
+	t.Setenv("NYAUTH_MEDIA_S3_ACCESS_KEY_ID", "access-key")
+	t.Setenv("NYAUTH_MEDIA_S3_SECRET_ACCESS_KEY", "secret-key")
+	_, err := Load(writeConfig(t, `
+environment: production
+server:
+  secure_cookie: true
+  trusted_proxy_cidrs: ["10.20.30.40/32"]
+database:
+  driver: postgres
+  dsn: postgres://production
+redis:
+  addr: redis:6379
+  password: a-long-random-redis-password
+auth:
+  issuer: https://auth.company.test
+  master_key: `+encodedKey+`
+`))
+	if err == nil || !strings.Contains(err.Error(), "media.s3.endpoint must use HTTPS in production") {
+		t.Fatalf("Load() error = %v", err)
+	}
 }
 
 func TestLoadRejectsPlainSMTPInProduction(t *testing.T) {
@@ -410,6 +501,26 @@ telemetry:
 	}
 	if cfg.Redis.Password != "" || len(cfg.Auth.MasterKey) != 0 || cfg.Admin.Password != "" || cfg.Mail.SMTP.Password != "" || cfg.Telemetry.OTLP.Authorization != "" {
 		t.Fatalf("runtime-only configuration was loaded: %#v", cfg)
+	}
+}
+
+func TestLoadMaintenanceRejectsInsecureProductionS3MediaEndpoint(t *testing.T) {
+	unsetEnvironment(t, "NYAUTH_MEDIA_S3_ACCESS_KEY_ID_FILE")
+	unsetEnvironment(t, "NYAUTH_MEDIA_S3_SECRET_ACCESS_KEY_FILE")
+	t.Setenv("NYAUTH_MEDIA_BACKEND", "s3")
+	t.Setenv("NYAUTH_MEDIA_S3_ENDPOINT", "http://minio.internal:9000")
+	t.Setenv("NYAUTH_MEDIA_S3_REGION", "auto")
+	t.Setenv("NYAUTH_MEDIA_S3_BUCKET", "nyauth-media")
+	t.Setenv("NYAUTH_MEDIA_S3_ACCESS_KEY_ID", "access-key")
+	t.Setenv("NYAUTH_MEDIA_S3_SECRET_ACCESS_KEY", "secret-key")
+	_, err := LoadMaintenance(writeConfig(t, `
+environment: production
+database:
+  driver: postgres
+  dsn: postgres://migrator@postgres.internal/nyauth
+`))
+	if err == nil || !strings.Contains(err.Error(), "media.s3.endpoint must use HTTPS in production") {
+		t.Fatalf("LoadMaintenance() error = %v", err)
 	}
 }
 

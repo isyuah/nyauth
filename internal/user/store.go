@@ -43,7 +43,7 @@ func (s *Store) SetSecurityNotificationBuilder(builder account.SecurityNotificat
 	s.notificationBuilder = builder
 }
 
-const userSelectCols = `id, username, email, email_verified_at, password_hash, password_changed_at, display_name, avatar_url, status, role, auth_version, session_version, must_change_password, last_authenticated_at, last_login_at, last_login_ip, metadata, created_at, updated_at`
+const userSelectCols = `id, username, email, email_verified_at, password_hash, password_changed_at, display_name, CASE WHEN current_avatar_id IS NULL THEN NULL ELSE '/media/avatars/' || current_avatar_id::text || '/256.webp' END AS avatar_url, status, role, auth_version, session_version, must_change_password, last_authenticated_at, last_login_at, last_login_ip, metadata, created_at, updated_at`
 
 type rowScanner interface {
 	Scan(dest ...any) error
@@ -87,10 +87,10 @@ func (s *Store) Create(ctx context.Context, u *models.User) error {
 func insertUser(ctx context.Context, execer userExecer, u *models.User) error {
 	_, err := execer.Exec(ctx, `
 		INSERT INTO users (
-			id, username, email, password_hash, password_changed_at, display_name, avatar_url,
+			id, username, email, password_hash, password_changed_at, display_name,
 			status, role, auth_version, session_version, must_change_password, metadata
-		) VALUES ($1,$2,$3,$4,NOW(),$5,$6,$7,$8,$9,$10,$11,$12)
-	`, u.ID, u.Username, u.Email, u.PasswordHash, u.DisplayName, u.AvatarURL,
+		) VALUES ($1,$2,$3,$4,NOW(),$5,$6,$7,$8,$9,$10,$11)
+	`, u.ID, u.Username, u.Email, u.PasswordHash, u.DisplayName,
 		u.Status, u.Role, u.AuthVersion, u.SessionVersion, u.MustChangePassword, u.Metadata)
 	if err != nil {
 		return fmt.Errorf("inserting user: %w", err)
@@ -218,22 +218,15 @@ func (s *Store) UpdateSelf(ctx context.Context, id uuid.UUID, req models.UpdateU
 	if req.DisplayName != nil && *req.DisplayName != "" {
 		displayName = *req.DisplayName
 	}
-	var avatarURL any
-	if req.AvatarURL != nil && *req.AvatarURL != "" {
-		avatarURL = *req.AvatarURL
-	}
-
 	u, err := scanUser(s.db.QueryRow(ctx, `
 		UPDATE users SET
 			email=CASE WHEN $2 THEN $3::text ELSE email END,
 			email_verified_at=CASE WHEN $2 AND LOWER(COALESCE($3::text, '')) <> LOWER(COALESCE(email, '')) THEN NULL ELSE email_verified_at END,
 			display_name=CASE WHEN $4 THEN $5::text ELSE display_name END,
-			avatar_url=CASE WHEN $6 THEN $7::text ELSE avatar_url END,
 			updated_at=NOW()
 		WHERE id=$1
 		RETURNING `+userSelectCols,
 		id, req.Email != nil, email, req.DisplayName != nil, displayName,
-		req.AvatarURL != nil, avatarURL,
 	))
 	if err != nil {
 		return nil, fmt.Errorf("updating profile: %w", err)
@@ -315,35 +308,31 @@ func (s *Store) UpdateAdmin(ctx context.Context, id uuid.UUID, req models.AdminU
 			return nil, err
 		}
 	}
-	var email, displayName, avatarURL any
+	var email, displayName any
 	if req.Email != nil && *req.Email != "" {
 		email = *req.Email
 	}
 	if req.DisplayName != nil && *req.DisplayName != "" {
 		displayName = *req.DisplayName
 	}
-	if req.AvatarURL != nil && *req.AvatarURL != "" {
-		avatarURL = *req.AvatarURL
-	}
 	u, err := scanUser(tx.QueryRow(ctx, `
 		UPDATE users SET
 			email=CASE WHEN $2 THEN $3::text ELSE email END,
 			email_verified_at=CASE WHEN $2 AND LOWER(COALESCE($3::text, '')) <> LOWER(COALESCE(email, '')) THEN NULL ELSE email_verified_at END,
 			display_name=CASE WHEN $4 THEN $5::text ELSE display_name END,
-			avatar_url=CASE WHEN $6 THEN $7::text ELSE avatar_url END,
 			auth_version=CASE WHEN
 				($2 AND LOWER(COALESCE($3::text, '')) <> LOWER(COALESCE(email, '')))
-				OR ($8 AND $9::text <> status)
-				OR ($10 AND $11::text <> role)
+				OR ($6 AND $7::text <> status)
+				OR ($8 AND $9::text <> role)
 				THEN auth_version+1 ELSE auth_version END,
-			status=CASE WHEN $8 THEN $9::text ELSE status END,
-			role=CASE WHEN $10 THEN $11::text ELSE role END,
-			metadata=CASE WHEN $12 THEN $13::jsonb ELSE metadata END,
+			status=CASE WHEN $6 THEN $7::text ELSE status END,
+			role=CASE WHEN $8 THEN $9::text ELSE role END,
+			metadata=CASE WHEN $10 THEN $11::jsonb ELSE metadata END,
 			updated_at=NOW()
 		WHERE id=$1 RETURNING `+userSelectCols,
 		id, req.Email != nil, email, req.DisplayName != nil, displayName,
-		req.AvatarURL != nil, avatarURL, req.Status != nil, req.Status,
-		req.Role != nil, req.Role, req.Metadata != nil, req.Metadata,
+		req.Status != nil, req.Status, req.Role != nil, req.Role,
+		req.Metadata != nil, req.Metadata,
 	))
 	if err != nil {
 		return nil, fmt.Errorf("updating user: %w", err)

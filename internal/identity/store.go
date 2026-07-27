@@ -115,7 +115,7 @@ func (s *Store) Create(ctx context.Context, i *models.Identity, mutation audit.M
 }
 
 // CreateUserAndIdentity makes first-time external account creation atomic.
-func (s *Store) CreateUserAndIdentity(ctx context.Context, u *models.User, i *models.Identity) error {
+func (s *Store) CreateUserAndIdentity(ctx context.Context, u *models.User, i *models.Identity, options ...CreateUserAndIdentityOptions) error {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return err
@@ -123,10 +123,10 @@ func (s *Store) CreateUserAndIdentity(ctx context.Context, u *models.User, i *mo
 	defer tx.Rollback(ctx)
 	_, err = tx.Exec(ctx, `
 		INSERT INTO users (
-			id,username,email,email_verified_at,password_hash,display_name,avatar_url,
+			id,username,email,email_verified_at,password_hash,display_name,
 			status,role,auth_version,session_version,must_change_password,metadata
-		) VALUES ($1,$2,$3::text,CASE WHEN $3::text IS NULL THEN NULL ELSE NOW() END,NULL,$4,$5,$6,$7,$8,$9,FALSE,$10)
-	`, u.ID, u.Username, u.Email, u.DisplayName, u.AvatarURL, u.Status, u.Role, u.AuthVersion, u.SessionVersion, u.Metadata)
+		) VALUES ($1,$2,$3::text,CASE WHEN $3::text IS NULL THEN NULL ELSE NOW() END,NULL,$4,$5,$6,$7,$8,FALSE,$9)
+	`, u.ID, u.Username, u.Email, u.DisplayName, u.Status, u.Role, u.AuthVersion, u.SessionVersion, u.Metadata)
 	if err != nil {
 		return fmt.Errorf("creating external user: %w", err)
 	}
@@ -135,7 +135,22 @@ func (s *Store) CreateUserAndIdentity(ctx context.Context, u *models.User, i *mo
 	if err != nil {
 		return fmt.Errorf("binding external identity: %w", err)
 	}
+	if len(options) > 0 && options[0].AvatarImportJob != nil {
+		job := options[0].AvatarImportJob
+		_, err = tx.Exec(ctx, `
+			INSERT INTO provider_avatar_import_jobs (
+				id,provider_id,user_id,encrypted_avatar_url,status,available_at,created_at,updated_at
+			) VALUES ($1,$2,$3,$4,'pending',$5,$5,$5)
+		`, job.ID, job.ProviderID, u.ID, job.EncryptedAvatarURL, job.AvailableAt.UTC())
+		if err != nil {
+			return fmt.Errorf("queueing provider avatar import: %w", err)
+		}
+	}
 	return tx.Commit(ctx)
+}
+
+type CreateUserAndIdentityOptions struct {
+	AvatarImportJob *models.ProviderAvatarImportJob
 }
 
 func (s *Store) ListByUser(ctx context.Context, userID uuid.UUID) ([]models.Identity, error) {

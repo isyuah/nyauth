@@ -22,7 +22,9 @@ ARG VERSION=dev
 ARG VCS_REF=unknown
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
-    && rm -rf /var/lib/apt/lists/*
+    && rm -rf /var/lib/apt/lists/* \
+    && mkdir -p /var/lib/nyauth/media \
+    && chown -R 65532:65532 /var/lib/nyauth
 WORKDIR /app
 COPY --from=go-builder /nyauth /usr/local/bin/nyauth
 LABEL org.opencontainers.image.title="Nyauth" \

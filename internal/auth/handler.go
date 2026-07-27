@@ -76,6 +76,13 @@ func NewHandler(tokenService *TokenService, jwkManager *JWKManager, userService 
 func (h *Handler) SetSecurityAuditSink(sink SecurityAuditSink) { h.auditSink = sink }
 func (h *Handler) SetGrantMetricSink(sink GrantMetricSink)     { h.metricSink = sink }
 
+func (h *Handler) absolutePictureURL(value string) string {
+	if strings.HasPrefix(value, "/") {
+		return strings.TrimRight(h.config.Auth.Issuer, "/") + value
+	}
+	return value
+}
+
 func (h *Handler) recordSecurityAudit(ctx context.Context, event SecurityAuditEvent) {
 	if h.auditSink == nil {
 		return
@@ -433,7 +440,7 @@ func (h *Handler) handleAuthorizationCodeGrant(w http.ResponseWriter, r *http.Re
 				info["name"] = *u.DisplayName
 			}
 			if u.AvatarURL != nil {
-				info["picture"] = *u.AvatarURL
+				info["picture"] = h.absolutePictureURL(*u.AvatarURL)
 			}
 		}
 		if containsScope(stored.Scopes, "email") && u.Email != nil {
@@ -588,7 +595,7 @@ func (h *Handler) UserInfo(w http.ResponseWriter, r *http.Request) {
 			result["name"] = *u.DisplayName
 		}
 		if u.AvatarURL != nil {
-			result["picture"] = *u.AvatarURL
+			result["picture"] = h.absolutePictureURL(*u.AvatarURL)
 		}
 	}
 	if containsScope(scopes, "email") && u.Email != nil {

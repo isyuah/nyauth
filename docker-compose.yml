@@ -8,6 +8,8 @@ x-nyauth-environment: &nyauth-environment
   NYAUTH_REDIS_PASSWORD: "${NYAUTH_DEV_REDIS_PASSWORD:-local-dev-only-redis}"
   NYAUTH_AUTH_MASTER_KEY: "${NYAUTH_DEV_MASTER_KEY:-MDEyMzQ1Njc4OWFiY2RlZjAxMjM0NTY3ODlhYmNkZWY=}"
   NYAUTH_BOOTSTRAP_ADMIN_PASSWORD: "${NYAUTH_DEV_ADMIN_PASSWORD:-local-dev-only-admin}"
+  NYAUTH_MEDIA_BACKEND: "local"
+  NYAUTH_MEDIA_LOCAL_DIRECTORY: "/var/lib/nyauth/media"
   # 启用账户安全中心邮件（密码重置、邮箱验证/变更）时取消注释，
   # 并配合本地 SMTP 捕获工具（如 Mailpit：docker run -p 1025:1025 -p 8025:8025 axllent/mailpit）：
   # NYAUTH_MAIL_ENABLED: "true"
@@ -90,6 +92,10 @@ services:
       NYAUTH_DATABASE_DSN: "postgres://nyauth_migrator:${NYAUTH_DEV_MIGRATION_POSTGRES_PASSWORD:-local-dev-only-migration-postgres}@postgres:5432/nyauth?sslmode=disable"
       NYAUTH_DATABASE_RUNTIME_ROLE: "${NYAUTH_DATABASE_RUNTIME_ROLE:-nyauth_runtime}"
       NYAUTH_AUDIT_RETENTION: "${NYAUTH_AUDIT_RETENTION:-8760h}"
+      NYAUTH_MEDIA_BACKEND: "local"
+      NYAUTH_MEDIA_LOCAL_DIRECTORY: "/var/lib/nyauth/media"
+    volumes:
+      - media:/var/lib/nyauth/media
     depends_on:
       postgres:
         condition: service_healthy
@@ -113,6 +119,7 @@ services:
     environment: *nyauth-environment
     volumes:
       - ./config.docker.yaml:/etc/nyauth/config.yaml:ro
+      - media:/var/lib/nyauth/media
     ports:
       - "127.0.0.1:8080:8080"
     healthcheck:
@@ -134,3 +141,4 @@ services:
 
 volumes:
   pgdata:
+  media:
