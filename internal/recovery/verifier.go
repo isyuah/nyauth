@@ -25,6 +25,7 @@ type ResourceCounts struct {
 	JWKKeys        int64 `json:"jwk_keys"`
 	AuditLogs      int64 `json:"audit_logs"`
 	EmailOutbox    int64 `json:"email_outbox"`
+	Passkeys       int64 `json:"passkeys"`
 }
 
 // Report is emitted by the read-only recovery verifier. It never contains
@@ -37,6 +38,7 @@ type Report struct {
 	JWKEnvelopeVerified       bool           `json:"jwk_envelope_verified"`
 	ProviderEnvelopesVerified int64          `json:"provider_envelopes_verified"`
 	TOTPEnvelopesVerified     int64          `json:"totp_envelopes_verified"`
+	PasskeyEnvelopesVerified  int64          `json:"passkey_envelopes_verified"`
 	EmailEnvelopeRows         int64          `json:"email_envelope_rows"`
 	EmailEnvelopeSampled      int64          `json:"email_envelopes_sampled"`
 	EmailEnvelopeSampleLimit  int            `json:"email_envelope_sample_limit"`
@@ -68,7 +70,8 @@ func Verify(ctx context.Context, db *pgxpool.Pool, masterKey []byte) (Report, er
 			(SELECT COUNT(*) FROM oauth_providers),
 			(SELECT COUNT(*) FROM jwk_keys),
 			(SELECT COUNT(*) FROM audit_logs),
-			(SELECT COUNT(*) FROM email_outbox)
+			(SELECT COUNT(*) FROM email_outbox),
+			(SELECT COUNT(*) FROM user_passkey_credentials)
 	`).Scan(
 		&report.Counts.Users,
 		&report.Counts.OAuthClients,
@@ -76,6 +79,7 @@ func Verify(ctx context.Context, db *pgxpool.Pool, masterKey []byte) (Report, er
 		&report.Counts.JWKKeys,
 		&report.Counts.AuditLogs,
 		&report.Counts.EmailOutbox,
+		&report.Counts.Passkeys,
 	); err != nil {
 		return report, fmt.Errorf("counting recovered resources: %w", err)
 	}
@@ -112,6 +116,14 @@ func Verify(ctx context.Context, db *pgxpool.Pool, masterKey []byte) (Report, er
 		return report, err
 	}
 	report.TOTPEnvelopesVerified = verifiedTOTP
+	verifiedPasskeys, err := mfaService.VerifyStoredPasskeys(ctx)
+	if err != nil {
+		return report, err
+	}
+	if verifiedPasskeys != report.Counts.Passkeys {
+		return report, fmt.Errorf("verified Passkey envelope count %d does not match Passkey count %d", verifiedPasskeys, report.Counts.Passkeys)
+	}
+	report.PasskeyEnvelopesVerified = verifiedPasskeys
 
 	if err := verifyEmailEnvelopes(ctx, db, masterKey, &report); err != nil {
 		return report, err

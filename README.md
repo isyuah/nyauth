@@ -9,7 +9,7 @@
 - 第一方后台仅使用 `HttpOnly + SameSite=Lax` 会话 Cookie，并对修改请求强制校验 CSRF。
 - OAuth 授权码客户端强制使用 PKCE S256；不支持 plain、implicit 或 hybrid 流程。
 - JWT 固定使用 RS256，refresh token 采用 family 轮换与重复使用检测。
-- 数据库以嵌入二进制的迁移序列管理；当前开发 schema 为 7，发布 0.3.0 前会重新压缩基线。服务启动只校验 schema，不再隐式迁移。
+- 数据库以嵌入二进制的迁移序列管理；当前开发 schema 为 8，发布 0.3.0 前会重新压缩基线。服务启动只校验 schema，不再隐式迁移。
 - 旧数据库、session、token、JWK、Provider 凭据和 OAuth 客户端注册均不兼容。
 - 旧 Go/TypeScript SDK 已删除；OAuth/OIDC 集成以标准协议和成熟语言库为准。
 
@@ -25,7 +25,7 @@
 - 控制面认证：HttpOnly 会话、CSRF、强制首次改密、会话与令牌即时失效
 - 外部身份：GitHub、Google、通用 HTTPS OIDC Provider；不按邮箱自动合并账户
 - 管理后台：用户、客户端、Provider、审计与统计
-- 账户安全中心：设备会话、OAuth 授权、近期重新认证、TOTP 多因素验证、一次性恢复码、邮箱验证与密码恢复
+- 账户安全中心：设备会话、OAuth 授权、近期重新认证、TOTP、Passkey/WebAuthn、一次性恢复码、邮箱验证与密码恢复
 - 自助注册：关闭 / 邀请制 / 开放三种模式，域名白名单与邀请码均为运行时设置
 - 动态邮件：数据库版本化 SMTP 配置、真实测试邮件、免重启激活/回滚、共享熔断
 - 运维：严格 readiness、JSON 日志、内部 Prometheus、可选 OTLP 与审计 outbox
@@ -113,7 +113,7 @@ SMTP 的运行主配置保存在 PostgreSQL，可在服务运行期间按“候�
 生产环境由外部反向代理终止 TLS。只有配置的可信代理 CIDR 可以提供转发头。
 
 > [!IMPORTANT]
-> `auth.issuer` 必须与浏览器实际访问的公开地址完全一致（协议 + 域名）。第一方登录和账户操作接口会把请求的 `Origin` 与 issuer 比对，不一致会返回 `403 invalid request origin`。通过 Cloudflare Tunnel、frp 或任何反向代理暴露服务时，把 issuer 设为公开 HTTPS 域名，并只通过该域名访问后台。
+> `auth.issuer` 必须与浏览器实际访问的公开地址完全一致（协议 + 域名）。第一方登录和账户操作接口会把请求的 `Origin` 与 issuer 比对，不一致会返回 `403 invalid request origin`。WebAuthn 的 RP ID 固定取 issuer 的 hostname，origin 固定取其协议与 host；生产环境必须使用 HTTPS。更换公开 hostname 会使旧 Passkey 无法继续使用，不能作为普通热更新操作。通过 Cloudflare Tunnel、frp 或任何反向代理暴露服务时，把 issuer 设为公开 HTTPS 域名，并只通过该域名访问后台。
 
 完整的单机远程部署、secret 生成、反向代理、升级和回滚步骤见 [单机远程部署手册](docs/operations/single-host-deployment.md)。`docker-compose.prod.yml` 完全由环境变量和 Compose secret 配置，不读取 `config.production.yaml`，因此 Compose 部署不需要复制配置模板。`config.production.example.yaml` 只用于直接运行原生二进制的部署。
 
@@ -156,8 +156,12 @@ Nyauth 只通过 SMTP 发送邮件，不读取邮箱，也不需要 IMAP。生�
 | 方法 | 路径 | 描述 |
 |---|---|---|
 | POST | `/api/login` | 用户名密码登录；返回完整会话或 `202 mfa_required` |
+| POST | `/api/login/passkey/options` | 创建 discoverable Passkey 登录 ceremony；支持 Conditional UI |
+| POST | `/api/login/passkey/verify` | 使用 `X-WebAuthn-Ceremony` 完成 Passkey 登录 |
 | GET | `/api/login/mfa` | 恢复当前 5 分钟 MFA challenge |
 | POST | `/api/login/mfa` | 使用 TOTP 或一次性恢复码完成登录/重新认证 challenge |
+| POST | `/api/login/mfa/passkey/options` | 为当前 MFA challenge 创建 Passkey assertion options |
+| POST | `/api/login/mfa/passkey/verify` | 原子消费 Passkey ceremony 与 MFA challenge |
 | DELETE | `/api/login/mfa` | 取消当前 MFA challenge |
 | GET | `/api/session` | 返回用户、CSRF、`has_password`、`email_verified` 与最近认证时间 |
 | POST | `/api/logout` | 销毁当前会话 |
@@ -167,11 +171,18 @@ Nyauth 只通过 SMTP 发送邮件，不读取邮箱，也不需要 IMAP。生�
 | POST | `/api/me/password/set` | 外部身份账户在近期重新认证后设置本地密码 |
 | POST | `/api/me/reauth/password` | 使用当前密码完成近期重新认证 |
 | POST | `/api/me/reauth/{provider}` | 使用已绑定 Provider 完成近期重新认证 |
-| GET | `/api/me/mfa` | 查看 TOTP、恢复码余量和当前管理员强制策略 |
+| POST | `/api/me/reauth/passkey/options` | 使用已有 Passkey 创建近期重新认证 ceremony |
+| POST | `/api/me/reauth/passkey/verify` | 使用 `X-WebAuthn-Ceremony` 完成近期重新认证 |
+| GET | `/api/me/mfa` | 查看 TOTP、Passkey、恢复码余量和当前管理员强制策略 |
 | POST | `/api/me/mfa/totp/enroll` | 近期重新认证后生成待确认 TOTP secret |
 | POST | `/api/me/mfa/totp/enroll/confirm` | 校验首个 TOTP 并一次性返回 10 枚恢复码 |
 | POST | `/api/me/mfa/recovery-codes` | 近期重新认证后替换全部恢复码，新值只返回一次 |
 | DELETE | `/api/me/mfa/totp` | 近期重新认证后停用 TOTP，并使恢复码失效 |
+| GET | `/api/me/passkeys` | 列出当前 RP 下的 Passkey 及 backup/clone 状态 |
+| POST | `/api/me/passkeys/registration/options` | 近期重新认证后创建 discoverable credential 注册 ceremony |
+| POST | `/api/me/passkeys/registration/verify` | 校验并保存 Passkey，推进 `auth_version` 后轮换当前会话 |
+| PUT | `/api/me/passkeys/{id}` | 重命名 Passkey |
+| DELETE | `/api/me/passkeys/{id}` | 近期重新认证后删除 Passkey，并校验登录方式与管理员 MFA 不变量 |
 | POST | `/api/me/email/verification` | 请求邮箱验证邮件 |
 | POST | `/api/me/email/change` | 请求邮箱变更确认邮件 |
 | GET | `/api/me/sessions` | 查看设备会话 |
@@ -185,9 +196,11 @@ Nyauth 只通过 SMTP 发送邮件，不读取邮箱，也不需要 IMAP。生�
 | GET/POST | `/api/my/clients` | 管理当前用户拥有的 OAuth 客户端 |
 | POST | `/api/my/clients/{id}/rotate-secret` | 立即轮换 confidential client Secret，仅返回一次明文 |
 
-所有已认证修改请求都必须携带完整会话返回的 `X-CSRF-Token`。MFA pending 使用独立的 `nyauth_mfa_pending` HttpOnly Cookie 和 challenge 响应中的临时 CSRF；临时令牌不得覆盖正式会话 CSRF。pending 数据只保留 5 分钟，不进入设备会话列表或活跃会话统计。后台接口只接受会话 Cookie，不接受 OAuth Bearer token。
+所有已认证修改请求都必须携带完整会话返回的 `X-CSRF-Token`。MFA pending 使用独立的 `nyauth_mfa_pending` HttpOnly Cookie 和 challenge 响应中的临时 CSRF；临时令牌不得覆盖正式会话 CSRF。WebAuthn options 返回独立、不透明的 `ceremony_id`，完成请求通过 `X-WebAuthn-Ceremony` 携带；Conditional UI、显式登录和多标签页 ceremony 因此不会互相覆盖。pending 与 WebAuthn ceremony 都只保留约 5 分钟，不进入设备会话列表或活跃会话统计。后台接口只接受会话 Cookie，不接受 OAuth Bearer token。
 
-TOTP 使用 RFC 6238 的 SHA-1、30 秒、6 位参数和 `±1` time-step 窗口，成功 step 会在 PostgreSQL 行锁事务中记录并拒绝重放。TOTP secret 使用 master key envelope encryption，恢复码只保存 selector 摘要与 Argon2id 哈希。启用或停用因素会推进 `auth_version`，撤销既有浏览器会话与 OAuth refresh family，再为当前设备轮换新会话。密码和 Provider 重新认证均会在主因素后执行同一第二因素 challenge，不能只凭密码刷新近期认证时间。
+TOTP 使用 RFC 6238 的 SHA-1、30 秒、6 位参数和 `±1` time-step 窗口，成功 step 会在 PostgreSQL 行锁事务中记录并拒绝重放。TOTP secret 使用 master key envelope encryption，恢复码只保存 selector 摘要与 Argon2id 哈希。Passkey 注册强制 discoverable credential 与 user verification，attestation 为 `none`；完整 WebAuthn credential 使用 master key envelope encryption，credential ID 仅用于索引，每次 assertion 都在行锁事务中同步 sign count、clone warning、backup state 与完整密文。clone warning 会保留并写高风险审计，但不会仅凭该信号立即锁死账户。
+
+启用或停用因素会推进 `auth_version`，撤销既有浏览器会话与 OAuth refresh family，再为当前设备轮换新会话。密码和 Provider 重新认证均会在主因素后执行同一第二因素 challenge，不能只凭密码刷新近期认证时间。Passkey 可作为独立登录、MFA 第二因素和近期重新认证方式；TOTP 恢复码仍只属于 TOTP，不会被无依据地扩成账户级恢复凭据。
 
 ```typescript
 const session = await fetch('/api/session', {
@@ -274,7 +287,7 @@ Provider 不再从 YAML 或环境变量静态加载，只能由管理员写入�
 - `POST /api/admin/clients/{id}/rotate-secret`：立即轮换客户端 Secret，新值仅展示一次。
 - `GET /api/admin/users/{id}/sessions`、`DELETE /api/admin/users/{id}/sessions`：查看或撤销用户会话。
 - `GET/PUT /api/admin/settings/registration`：注册模式、邮箱验证要求、域名白名单、待验证期限与邀请默认值（运行时设置，免重启生效；修改要求近期重新认证）。
-- `GET/PUT /api/admin/settings/security`：TOTP 注册开关与管理员强制 MFA（运行时设置，免重启生效；修改要求近期重新认证）。开启强制策略前所有活动管理员必须已配置 TOTP；策略生效后，未配置 MFA 的用户不能被激活/晋升为管理员，活动管理员也不能停用唯一 TOTP。
+- `GET/PUT /api/admin/settings/security`：TOTP/Passkey 注册开关与管理员强制 MFA（运行时设置，免重启生效；修改要求近期重新认证）。开关只阻止新注册，不停用已有因素。开启强制策略前所有活动管理员必须在当前 RP 下至少配置 TOTP 或 Passkey；策略生效后，无因素用户不能被激活/晋升为管理员，活动管理员也不能删除其最后一个因素。
 - `GET/POST /api/admin/invites`、`DELETE /api/admin/invites/{id}`：邀请码管理；明文 code 仅创建响应返回一次，库中只存哈希；列表分别返回已使用与待验证预占数。创建要求近期重新认证，紧急吊销不要求。
 - `GET /api/admin/settings/mail`、`PUT /api/admin/settings/mail/candidate`，以及邮件设置下的 `candidate/test`、`activate`、`rollback`、`disable` POST：数据库动态 SMTP；候选必须实际测试成功并在十分钟内激活，所有读取和变更均要求近期重新认证，写操作还受 CSRF、限流和审计保护。
 
@@ -288,7 +301,7 @@ Nyauth 不要求使用专有 SDK。服务端应用应通过 Discovery 配置成�
 
 推荐库及安全约束见 [标准 OAuth/OIDC 集成指南](docs/oauth-oidc-integration.md)。近期不支持在浏览器中配置 confidential client secret，也不把 access/refresh token 持久化到 `localStorage`。
 
-单机备份、WAL/PITR、master key 恢复与演练见 [备份与恢复](docs/operations/backup-restore.md)；双实例拓扑与故障语义见 [高可用部署](docs/operations/high-availability.md)。仓库还提供受保护环境下手动触发的 `Isolated recovery drill` 工作流，用一次性 PostgreSQL、空 Redis、带资源计数 manifest 的备份产物和只读 `nyauth verify-recovery` 命令验证 JWK、Provider、TOTP 与邮件 envelope 并生成恢复证据。
+单机备份、WAL/PITR、master key 恢复与演练见 [备份与恢复](docs/operations/backup-restore.md)；双实例拓扑与故障语义见 [高可用部署](docs/operations/high-availability.md)。仓库还提供受保护环境下手动触发的 `Isolated recovery drill` 工作流，用一次性 PostgreSQL、空 Redis、带资源计数 manifest 的备份产物和只读 `nyauth verify-recovery` 命令验证 JWK、Provider、TOTP、Passkey 与邮件 envelope 并生成恢复证据。
 
 ## 质量检查
 

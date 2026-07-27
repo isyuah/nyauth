@@ -340,6 +340,13 @@ async function installDashboardCoreMocks(page: Page) {
   await page.route('**/api/admin/stats', (route) => fulfillJSON(route, 200, dashboardStats));
   await page.route('**/api/admin/stats/login-trend**', (route) => fulfillJSON(route, 200, dashboardLoginTrend));
   await page.route('**/api/admin/stats/recent-logins**', (route) => fulfillJSON(route, 200, []));
+  await page.route('**/.well-known/openid-configuration', (route) => fulfillJSON(route, 200, {
+    issuer: 'https://auth.example',
+    authorization_endpoint: 'https://auth.example/authorize',
+    token_endpoint: 'https://auth.example/token',
+    jwks_uri: 'https://auth.example/.well-known/jwks.json',
+    userinfo_endpoint: 'https://auth.example/userinfo',
+  }));
 }
 
 async function installAPIMocks(page: Page, state: MockState) {
@@ -442,6 +449,9 @@ async function installAPIMocks(page: Page, state: MockState) {
       await fulfillJSON(route, 200, {
         totp_available: true,
         totp_enrolled: false,
+        can_disable_totp: true,
+        passkeys_available: true,
+        passkeys_enrolled: 0,
         recovery_codes_remaining: 0,
         require_mfa_for_admins: false,
         required_for_current_user: false,
@@ -703,7 +713,7 @@ async function installAPIMocks(page: Page, state: MockState) {
     }
 
     if (path === '/api/admin/settings/security' && request.method() === 'GET') {
-      await fulfillJSON(route, 200, { totp_enabled: true, require_mfa_for_admins: false });
+      await fulfillJSON(route, 200, { totp_enabled: true, passkeys_enabled: true, require_mfa_for_admins: false });
       return;
     }
 
@@ -982,7 +992,7 @@ test('password reauthentication refreshes the session and CSRF token', async ({ 
   await installAPIMocks(page, state);
 
   await page.goto('/profile');
-  await page.getByRole('button', { name: '使用当前密码' }).click();
+  await page.getByRole('button', { name: '选择认证方式' }).click();
   const dialog = page.getByRole('dialog');
   await dialog.getByLabel(/^当前密码/).fill('current-password');
   await dialog.getByRole('button', { name: '使用密码验证' }).click();
@@ -1038,7 +1048,7 @@ test('password reauthentication completes MFA inline and promotes the formal CSR
   });
 
   await page.goto('/profile');
-  await page.getByRole('button', { name: '使用当前密码' }).click();
+  await page.getByRole('button', { name: '选择认证方式' }).click();
   const dialog = page.getByRole('dialog');
   await dialog.getByLabel(/^当前密码/).fill('current-password');
   await dialog.getByRole('button', { name: '使用密码验证' }).click();
@@ -1096,7 +1106,7 @@ test('cancelling reauthentication MFA preserves the existing formal-session CSRF
   });
 
   await page.goto('/profile');
-  await page.getByRole('button', { name: '使用当前密码' }).click();
+  await page.getByRole('button', { name: '选择认证方式' }).click();
   const dialog = page.getByRole('dialog');
   await dialog.getByLabel(/^当前密码/).fill('current-password');
   await dialog.getByRole('button', { name: '使用密码验证' }).click();
@@ -1133,6 +1143,9 @@ test('users can enroll TOTP, replace recovery codes, and disable the factor', as
       await fulfillJSON(route, 200, {
         totp_available: true,
         totp_enrolled: enrolled,
+        can_disable_totp: true,
+        passkeys_available: true,
+        passkeys_enrolled: 0,
         recovery_codes_remaining: enrolled ? 10 : 0,
         require_mfa_for_admins: false,
         required_for_current_user: false,
@@ -1678,7 +1691,7 @@ test('login distinguishes an unverified email from bad credentials', async ({ pa
   await page.goto('/login');
   await page.getByLabel('用户名').fill('pending-user');
   await page.getByLabel('密码').fill('a-valid-password-123');
-  await page.getByRole('button', { name: '登录' }).click();
+  await page.getByRole('button', { name: '登录', exact: true }).click();
 
   await expect(page.getByText('邮箱尚未验证，请先完成验证邮件中的确认再登录')).toBeVisible();
   await expect(page.getByRole('link', { name: '重发验证邮件' })).toHaveAttribute('href', '/resend-verification');

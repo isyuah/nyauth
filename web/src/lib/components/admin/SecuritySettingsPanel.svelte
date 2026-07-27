@@ -15,6 +15,7 @@
   const pendingSettingsStorageKey = 'nyauth:reauth:security-settings';
 
   let totpEnabled = $state(true);
+  let passkeysEnabled = $state(true);
   let requireMFAForAdmins = $state(false);
   let loaded = $state(false);
   let loading = $state(true);
@@ -24,10 +25,6 @@
   let missingAdmins = $state<string[]>([]);
   let reauthOpen = $state(false);
   let pendingSettings = $state<SecuritySettings | null>(null);
-
-  $effect(() => {
-    if (!totpEnabled && requireMFAForAdmins) requireMFAForAdmins = false;
-  });
 
   onMount(async () => {
     await loadSettings();
@@ -40,6 +37,7 @@
     try {
       const current = await api.admin.getSecuritySettings();
       totpEnabled = current.totp_enabled;
+      passkeysEnabled = current.passkeys_enabled;
       requireMFAForAdmins = current.require_mfa_for_admins;
       loaded = true;
     } catch (cause) {
@@ -54,6 +52,7 @@
     event.preventDefault();
     const payload: SecuritySettings = {
       totp_enabled: totpEnabled,
+      passkeys_enabled: passkeysEnabled,
       require_mfa_for_admins: requireMFAForAdmins,
     };
     pendingSettings = payload;
@@ -69,6 +68,7 @@
       const updated = await api.admin.updateSecuritySettings(payload);
       pendingSettings = null;
       totpEnabled = updated.totp_enabled;
+      passkeysEnabled = updated.passkeys_enabled;
       requireMFAForAdmins = updated.require_mfa_for_admins;
       saved = true;
     } catch (cause) {
@@ -96,16 +96,27 @@
     if (!raw) return;
     sessionStorage.removeItem(pendingSettingsStorageKey);
     try {
-      const restored = JSON.parse(raw) as SecuritySettings;
-      pendingSettings = restored;
-      totpEnabled = restored.totp_enabled;
-      requireMFAForAdmins = restored.require_mfa_for_admins;
+      const restored = JSON.parse(raw) as Partial<SecuritySettings>;
+      if (typeof restored.totp_enabled !== 'boolean'
+        || typeof restored.passkeys_enabled !== 'boolean'
+        || typeof restored.require_mfa_for_admins !== 'boolean') {
+        throw new TypeError('invalid stored security settings');
+      }
+      const validated: SecuritySettings = {
+        totp_enabled: restored.totp_enabled,
+        passkeys_enabled: restored.passkeys_enabled,
+        require_mfa_for_admins: restored.require_mfa_for_admins,
+      };
+      pendingSettings = validated;
+      totpEnabled = validated.totp_enabled;
+      passkeysEnabled = validated.passkeys_enabled;
+      requireMFAForAdmins = validated.require_mfa_for_admins;
       const providerError = consumeProviderAuthError();
       if (providerError) {
         error = providerError.message;
         return;
       }
-      await executeSave(restored, false);
+      await executeSave(validated, false);
     } catch {
       error = '无法恢复待保存的登录安全策略，请重新检查设置。';
     }
@@ -117,7 +128,7 @@
     <ShieldCheck size={18} class="text-nya-primary" />
     <h2 class="text-card-title text-nya-text-primary">登录安全策略</h2>
   </div>
-  <p class="mb-4 text-body text-nya-text-secondary">控制动态验证码注册和管理员强制 MFA，保存后无需重启即可同步到所有实例。</p>
+  <p class="mb-4 text-body text-nya-text-secondary">控制动态验证码、Passkey 注册和管理员强制 MFA，保存后无需重启即可同步到所有实例。</p>
 
   {#if loading}
     <p class="text-small text-nya-text-tertiary" role="status">正在加载登录安全策略…</p>
@@ -153,12 +164,22 @@
         <div class="border-t border-nya-divider pt-4">
           <div class="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
             <div class="max-w-2xl">
+              <p class="text-body-medium font-semibold text-nya-text-primary">允许注册 Passkey</p>
+              <p class="mt-1 text-small text-nya-text-secondary">关闭后只阻止新的 Passkey 注册；已经注册的 Passkey 仍可用于登录、MFA 和重新认证。</p>
+            </div>
+            <Switch bind:checked={passkeysEnabled} label="允许 Passkey 注册" />
+          </div>
+        </div>
+
+        <div class="border-t border-nya-divider pt-4">
+          <div class="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+            <div class="max-w-2xl">
               <p class="text-body-medium font-semibold text-nya-text-primary">要求所有活动管理员启用 MFA</p>
               <p class="mt-1 text-small text-nya-text-secondary">开启前，后端会核对每位活动管理员；未完成配置的账号会在下方明确列出。</p>
             </div>
-            <Switch bind:checked={requireMFAForAdmins} disabled={!totpEnabled} label="管理员强制 MFA" />
+            <Switch bind:checked={requireMFAForAdmins} label="管理员强制 MFA" />
           </div>
-          {#if !totpEnabled}<p class="mt-2 text-small text-nya-warning">必须先开放动态验证码注册，才能启用管理员强制 MFA。</p>{/if}
+          <p class="mt-2 text-small text-nya-text-tertiary">该策略接受已注册的动态验证码或 Passkey；保存时后端会验证所有活动管理员是否至少拥有一种因素。</p>
         </div>
       </div>
 

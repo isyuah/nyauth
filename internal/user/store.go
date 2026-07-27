@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -26,10 +27,17 @@ var (
 // Store handles user persistence.
 type Store struct {
 	db                  *pgxpool.Pool
+	passkeyRPID         string
 	notificationBuilder account.SecurityNotificationBuilder
 }
 
 func NewStore(db *pgxpool.Pool) *Store { return &Store{db: db} }
+
+// NewStoreForRP scopes administrator MFA checks to credentials usable by the
+// deployment's current WebAuthn relying party.
+func NewStoreForRP(db *pgxpool.Pool, passkeyRPID string) *Store {
+	return &Store{db: db, passkeyRPID: strings.ToLower(strings.TrimSpace(passkeyRPID))}
+}
 
 func (s *Store) SetSecurityNotificationBuilder(builder account.SecurityNotificationBuilder) {
 	s.notificationBuilder = builder
@@ -279,11 +287,16 @@ func (s *Store) UpdateAdmin(ctx context.Context, id uuid.UUID, req models.AdminU
 	if securityPolicy.RequireMFAForAdmins && targetStatus == models.UserStatusActive && targetRole == "admin" {
 		var enrolled bool
 		if err := tx.QueryRow(ctx, `
-			SELECT EXISTS (
-				SELECT 1 FROM user_totp_credentials
-				WHERE user_id=$1 AND confirmed_at IS NOT NULL
-			)
-		`, id).Scan(&enrolled); err != nil {
+			SELECT
+				EXISTS (
+					SELECT 1 FROM user_totp_credentials
+					WHERE user_id=$1 AND confirmed_at IS NOT NULL
+				)
+				OR EXISTS (
+					SELECT 1 FROM user_passkey_credentials
+					WHERE user_id=$1 AND ($2='' OR rp_id=$2)
+				)
+		`, id, s.passkeyRPID).Scan(&enrolled); err != nil {
 			return nil, err
 		}
 		if !enrolled {

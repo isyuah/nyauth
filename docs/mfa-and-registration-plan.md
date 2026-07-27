@@ -1,12 +1,12 @@
 # Passkey/TOTP 与自助注册/邀请制实施状态
 
-> 状态：Phase R、Phase S 与 Phase T 已完成；Phase P 是下一阶段（2026-07-27）。下文 Phase R 的早期数据模型草图仅保留设计背景，当前注册/邀请契约以 README 和实现为准。所有行为开关继续使用运行时设置，配置文件不新增业务开关。
+> 状态：Phase R、Phase S、Phase T 与 Phase P 已完成（2026-07-27）。下文 Phase R 的早期数据模型草图仅保留设计背景，当前注册/邀请契约以 README 和实现为准。所有行为开关继续使用运行时设置，配置文件不新增业务开关。
 
 ## 0. 顺序建议
 
 1. **Phase R：自助注册 + 邀请制**（先做——是接入真实应用的前置条件，且完全复用已有的邮件/token/限流基础设施，无新外部依赖）
 2. **Phase T：TOTP + 恢复码**（已完成）
-3. **Phase P：Passkey/WebAuthn**（下一阶段——引入 go-webauthn 库与浏览器 API，联调面最大）
+3. **Phase P：Passkey/WebAuthn**（已完成）
 
 三个阶段各自独立发布，中途可穿插其他工作。
 
@@ -57,6 +57,7 @@ CREATE TABLE invites (
 | 键 | 默认 | 说明 |
 |---|---|---|
 | `totp_enabled` | `true` | 是否允许用户启用 TOTP |
+| `passkeys_enabled` | `true` | 是否允许用户注册新 Passkey；不影响已有 Passkey 登录 |
 | `require_mfa_for_admins` | `false` | 管理员登录必须完成第二因素（开启前校验所有 admin 已配置 MFA，否则拒绝保存并列出未配置者） |
 
 ### 已实现契约
@@ -68,7 +69,7 @@ CREATE TABLE invites (
 - MFA pending 支持 `login` 与 `reauthentication` 两种 purpose。密码/Provider 重新认证也必须完成已绑定的第二因素，主因素本身不会刷新近期认证时间。
 - MFA pending CSRF 与正式 session CSRF 完全分离；验证和取消接口显式使用 challenge CSRF，不会覆盖或清空仍有效的正式会话令牌。
 - 启用/停用 TOTP 会在同一 PostgreSQL 事务中推进 `auth_version` 并写审计 outbox，随后清理旧 session/refresh family 并轮换当前会话。
-- 管理员强制策略通过 PostgreSQL advisory lock 与管理员角色/状态变更、TOTP 停用协调。开启前列出所有缺少 MFA 的活动管理员；开启后不能将无 MFA 用户激活或晋升为管理员，活动管理员不能停用 TOTP。
+- 管理员强制策略通过 PostgreSQL advisory lock 与管理员角色/状态变更、因素停用协调。开启前列出所有缺少 TOTP 或当前 RP Passkey 的活动管理员；开启后不能将无 MFA 用户激活或晋升为管理员，活动管理员不能删除最后一个因素。
 - 动态 `security` 设置通过 `LISTEN/NOTIFY` 与一分钟 reconciliation 在多实例同步，不要求重启。
 - `verify-recovery` 会只读认证所有已存 TOTP envelope；错误 master key 或被篡改密文会使恢复演练失败。
 
@@ -84,15 +85,31 @@ CREATE TABLE invites (
 - 集成测试覆盖密码与 Provider 登录、密码与 Provider reauth、TOTP 防重放、恢复码一次性消费、MFA pending 不计入 session、被撤销 session 不会被 reauth 复活、管理员策略并发不变量与恢复验证。
 - 前端覆盖登录 challenge、内联 reauth challenge、取消时正式 CSRF 保留，以及 TOTP 启用/恢复码替换/停用流程。
 
-## 3. Phase P：Passkey/WebAuthn
+## 3. Phase P：Passkey/WebAuthn（已完成）
 
-- 库：`github.com/go-webauthn/webauthn`（Go 生态事实标准）
-- RP ID/origin 取自 `auth.issuer`（又一个 issuer 必须等于公开域名的理由）
-- 新迁移计划为 `000008_passkeys`：保存 credential ID、公钥、sign count、transports、AAGUID、自定义名称、backup state 与 created/last_used 时间
-- 能力：① 独立登录方式（discoverable credential + 浏览器 conditional UI，登录页"使用通行密钥登录"）② 已登录用户的 step-up 重新认证手段（并入 reauth 框架，与密码/Provider reauth 并列）③ 作为 MFA 第二因素
-- 运行时设置：`security.passkeys_enabled`（默认 true）
-- 注册/删除通行密钥要求近期重新认证；删除最后一个凭据时校验用户还有其他登录方式（复用 identity 的"最后认证方式"检查思路）
-- 审计：`passkey.registered/removed/login`
+### 数据与 ceremony
+
+- 使用 `github.com/go-webauthn/webauthn v0.17.4`。RP ID 固定取启动时已校验的 `auth.issuer` hostname，origin 固定取其协议与 host，不从请求 Host 或转发头动态派生。
+- 迁移 `000008_passkeys` 按 RP ID 保存独立 32 字节 user handle 和 credential。credential ID 保持可索引；完整 credential 使用 master key envelope encryption，AAD 绑定 RP ID、记录 ID、用户 ID 与 credential ID。
+- 每次 assertion 都在 PostgreSQL 行锁事务中重加密完整 credential，并同步 sign count、clone warning、backup eligible/state、transport、AAGUID、attachment 与 last-used 时间。discoverable 登录按 user、handle、全部 credential 的固定顺序加锁，避免同一用户并发凭据更新丢失。
+- WebAuthn `SessionData` 以完整 MessagePack 保存在 Redis，不由客户端拆装。options 返回不透明 `ceremony_id`，完成请求通过 `X-WebAuthn-Ceremony` 携带，因此 Conditional UI、显式登录和多标签页可以并存。
+- Passkey MFA 用 Lua 原子核对并同时删除 WebAuthn ceremony 与父 `mfa_pending`；任一状态缺失或内容不匹配时都不消费另一项。
+
+### 已实现能力与策略
+
+- 支持 discoverable Passkey 独立登录、登录页 Conditional UI、密码/Provider 后的 MFA 第二因素、已登录用户的 step-up 重新认证，以及注册、列表、重命名和删除。
+- 注册强制 resident/discoverable credential、user verification required 与 attestation `none`；登录、MFA 和 reauth 同样要求 user verification。
+- `security.passkeys_enabled` 默认 `true`，只控制新注册。关闭后已有 Passkey 继续登录，语义与 `totp_enabled` 一致。
+- 注册和删除要求近期重新认证，并与当前 session 的 `auth_version/session_version` 绑定。成功后推进 `auth_version`、撤销旧 session/refresh family 并轮换当前 session。
+- 删除最后一枚 Passkey 会检查密码、Provider 身份和其他当前 RP Passkey；管理员强制 MFA 生效时还要求操作后仍保留 TOTP 或当前 RP Passkey。旧 RP 下已不可用的凭据不会满足这些策略。
+- clone warning 不会单独锁死账户，但会保留在 credential 状态并产生高风险审计。TOTP 恢复码继续保持 TOTP 专属语义。
+
+### API、审计与验证
+
+- 公开：`POST /api/login/passkey/options|verify`、`POST /api/login/mfa/passkey/options|verify`。
+- 当前用户：`POST /api/me/reauth/passkey/options|verify`、`GET /api/me/passkeys`、`POST /api/me/passkeys/registration/options|verify`、`PUT/DELETE /api/me/passkeys/{id}`。
+- 审计：`passkey.registered`、`passkey.renamed`、`passkey.removed`、`passkey.login`；clone warning 登录使用高风险等级。
+- `verify-recovery` 逐条认证 Passkey envelope，并在恢复证据中要求验证数等于数据库 Passkey 行数。Redis 灾难恢复继续使用空实例，旧 ceremony 不恢复。
 
 ## 4. 统一原则
 

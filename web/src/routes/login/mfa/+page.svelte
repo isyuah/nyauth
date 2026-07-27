@@ -6,7 +6,13 @@
   import { brandingStore, safeReturnPath, sessionStore } from '$lib/stores';
   import Button from '$lib/components/ui/Button.svelte';
   import Input from '$lib/components/ui/Input.svelte';
-  import { KeyRound, ShieldCheck } from 'lucide-svelte';
+  import {
+    WEBAUTHN_ERROR_CODES,
+    authenticationCredentialToJSON,
+    classifyWebAuthnError,
+    getCredential,
+  } from '$lib/webauthn';
+  import { Fingerprint, KeyRound, ShieldCheck } from 'lucide-svelte';
 
   let challenge = $state<MFARequiredResponse | null>(null);
   let selectedMethod = $state<MFAMethod>('totp');
@@ -17,6 +23,8 @@
   let error = $state('');
   let challengeExpired = $state(false);
   let now = $state(Date.now());
+  let passkeyController: AbortController | null = null;
+  let passkeyGeneration = 0;
 
   let returnTo = $derived(safeReturnPath($page.url.searchParams.get('return_to'), '/dashboard'));
   let requestedPurpose: MFAPurpose = $derived($page.url.searchParams.get('purpose') === 'reauthentication' ? 'reauthentication' : 'login');
@@ -34,7 +42,11 @@
   onMount(() => {
     const timer = window.setInterval(() => (now = Date.now()), 1_000);
     void restoreChallenge();
-    return () => window.clearInterval(timer);
+    return () => {
+      window.clearInterval(timer);
+      passkeyGeneration += 1;
+      passkeyController?.abort();
+    };
   });
 
   async function restoreChallenge() {
@@ -54,6 +66,10 @@
   }
 
   function selectMethod(method: MFAMethod) {
+    if (submitting || cancelling) return;
+    passkeyGeneration += 1;
+    passkeyController?.abort();
+    passkeyController = null;
     selectedMethod = method;
     code = '';
     error = '';
@@ -76,8 +92,13 @@
 
   async function verify(event: SubmitEvent) {
     event.preventDefault();
+    if (submitting || cancelling) return;
     const pending = challenge;
     if (!pending) return;
+    if (selectedMethod === 'passkey') {
+      await verifyPasskey();
+      return;
+    }
     const submittedCode = code.trim();
     error = '';
     if (!submittedCode) {
@@ -89,13 +110,16 @@
       return;
     }
 
+    const generation = ++passkeyGeneration;
     submitting = true;
     try {
       const purpose = pending.purpose;
       const session = await api.verifyLoginMFA(selectedMethod, submittedCode, pending.csrf_token);
+      if (generation !== passkeyGeneration) return;
       code = '';
       await finishMFA(session, purpose);
     } catch (cause) {
+      if (generation !== passkeyGeneration) return;
       if (cause instanceof ApiError && cause.status === 429 && cause.retryAfter) {
         error = `验证尝试过于频繁，请在 ${cause.retryAfter} 秒后重试。`;
       } else {
@@ -106,7 +130,64 @@
         challenge = null;
       }
     } finally {
-      submitting = false;
+      if (generation === passkeyGeneration) submitting = false;
+    }
+  }
+
+  function passkeyErrorMessage(cause: unknown): string {
+    switch (classifyWebAuthnError(cause)) {
+      case WEBAUTHN_ERROR_CODES.notAllowed:
+        return '未完成 Passkey 验证，系统验证窗口可能已关闭。';
+      case WEBAUTHN_ERROR_CODES.notSupported:
+        return '当前浏览器或设备不支持 Passkey。';
+      case WEBAUTHN_ERROR_CODES.security:
+        return '当前页面不满足 Passkey 的安全环境要求。';
+      default:
+        return cause instanceof Error ? cause.message : 'Passkey 验证失败';
+    }
+  }
+
+  async function verifyPasskey() {
+    const pending = challenge;
+    if (!pending || !pending.methods.includes('passkey')) return;
+    passkeyController?.abort();
+    const controller = new AbortController();
+    const generation = ++passkeyGeneration;
+    passkeyController = controller;
+    error = '';
+    submitting = true;
+    try {
+      const options = await api.beginMFAPasskey(pending.csrf_token, controller.signal);
+      if (controller.signal.aborted || generation !== passkeyGeneration) return;
+      const credential = await getCredential(options.public_key, {
+        mediation: options.mediation ?? 'required',
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted || generation !== passkeyGeneration) return;
+      const session = await api.finishMFAPasskey(
+        options.ceremony_id,
+        authenticationCredentialToJSON(credential),
+        pending.csrf_token,
+        controller.signal,
+      );
+      if (controller.signal.aborted || generation !== passkeyGeneration) return;
+      passkeyController = null;
+      await finishMFA(session, pending.purpose);
+    } catch (cause) {
+      if (classifyWebAuthnError(cause) !== WEBAUTHN_ERROR_CODES.aborted) {
+        if (cause instanceof ApiError && cause.status === 429 && cause.retryAfter) {
+          error = `验证尝试过于频繁，请在 ${cause.retryAfter} 秒后重试。`;
+        } else {
+          error = passkeyErrorMessage(cause);
+        }
+      }
+      if (cause instanceof ApiError && cause.serverMessage.trim().toLowerCase() === 'mfa challenge expired') {
+        challengeExpired = true;
+        challenge = null;
+      }
+    } finally {
+      if (passkeyController === controller) passkeyController = null;
+      if (generation === passkeyGeneration) submitting = false;
     }
   }
 
@@ -114,6 +195,9 @@
     const pending = challenge;
     if (!pending) return;
     cancelling = true;
+    passkeyGeneration += 1;
+    passkeyController?.abort();
+    passkeyController = null;
     error = '';
     try {
       await api.cancelLoginMFA(pending.csrf_token);
@@ -164,31 +248,35 @@
         </div>
 
         {#if challenge.methods.length > 1}
-          <div class="mb-4 grid grid-cols-2 gap-2" aria-label="选择验证方式">
-            <button
-              type="button"
-              aria-pressed={selectedMethod === 'totp'}
-              onclick={() => selectMethod('totp')}
-              class="rounded-nya-sm border px-3 py-2 text-small font-semibold transition-colors {selectedMethod === 'totp' ? 'border-nya-primary bg-nya-primary-soft text-nya-primary' : 'border-nya-border text-nya-text-secondary hover:bg-nya-surface-hover'}"
-            >动态验证码</button>
-            <button
-              type="button"
-              aria-pressed={selectedMethod === 'recovery_code'}
-              onclick={() => selectMethod('recovery_code')}
-              class="rounded-nya-sm border px-3 py-2 text-small font-semibold transition-colors {selectedMethod === 'recovery_code' ? 'border-nya-primary bg-nya-primary-soft text-nya-primary' : 'border-nya-border text-nya-text-secondary hover:bg-nya-surface-hover'}"
-            >恢复码</button>
+          <div class="mb-4 grid gap-2 sm:grid-cols-3" aria-label="选择验证方式">
+            {#each challenge.methods as method}
+              <button
+                type="button"
+                aria-pressed={selectedMethod === method}
+                disabled={submitting || cancelling}
+                onclick={() => selectMethod(method)}
+                class="rounded-nya-sm border px-3 py-2 text-small font-semibold transition-colors {selectedMethod === method ? 'border-nya-primary bg-nya-primary-soft text-nya-primary' : 'border-nya-border text-nya-text-secondary hover:bg-nya-surface-hover'}"
+              >{method === 'totp' ? '动态验证码' : method === 'recovery_code' ? '恢复码' : 'Passkey'}</button>
+            {/each}
           </div>
         {/if}
 
         <form onsubmit={verify} class="space-y-4">
           {#if error}<p class="rounded-nya-sm bg-nya-danger-soft px-3 py-2 text-small text-nya-danger" role="alert">{error}</p>{/if}
-          {#if selectedMethod === 'totp'}
+          {#if selectedMethod === 'passkey'}
+            <div class="rounded-nya-sm bg-nya-surface-muted px-4 py-4 text-center">
+              <Fingerprint size={26} class="mx-auto text-nya-primary" />
+              <p class="mt-2 text-body-medium font-semibold text-nya-text-primary">使用已注册的 Passkey</p>
+              <p class="mt-1 text-small text-nya-text-secondary">系统会调用设备解锁、指纹、面容或安全密钥完成验证。</p>
+            </div>
+          {:else if selectedMethod === 'totp'}
             <Input
               id="mfa-totp-code"
               label="6 位动态验证码"
               bind:value={code}
               inputmode="numeric"
               autocomplete="one-time-code"
+              disabled={submitting || cancelling}
               maxlength={6}
               required
               placeholder="123456"
@@ -200,14 +288,16 @@
               label="恢复码"
               bind:value={code}
               autocomplete="one-time-code"
+              disabled={submitting || cancelling}
               required
               placeholder="XXXXXXXX-XXXXXXXXXXXXXXXX"
               mono
             />
             <p class="text-small text-nya-text-tertiary">每枚恢复码只能使用一次，使用后请从安全中心查看剩余数量。</p>
           {/if}
-          <Button type="submit" variant="primary" size="lg" loading={submitting} disabled={remainingSeconds <= 0} fullWidth>
-            {challenge.purpose === 'reauthentication' ? '验证并返回' : '验证并登录'}
+          <Button type="submit" variant="primary" size="lg" loading={submitting} disabled={remainingSeconds <= 0 || cancelling} fullWidth>
+            {#if selectedMethod === 'passkey'}<Fingerprint size={17} />{/if}
+            {selectedMethod === 'passkey' ? '使用 Passkey 验证' : challenge.purpose === 'reauthentication' ? '验证并返回' : '验证并登录'}
           </Button>
         </form>
 

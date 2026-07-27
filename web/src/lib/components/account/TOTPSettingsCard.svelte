@@ -260,13 +260,13 @@
           <div>
             <p class="text-body-medium font-semibold text-nya-text-primary">动态验证码已保护此账户</p>
             <p class="mt-1 text-small text-nya-text-secondary">剩余 {status.recovery_codes_remaining} 枚一次性恢复码。</p>
-            {#if status.required_for_current_user}<p class="mt-1 text-small text-nya-warning">管理员安全策略要求保留多因素验证。</p>{/if}
+            {#if !status.can_disable_totp}<p class="mt-1 text-small text-nya-warning">管理员安全策略要求保留至少一种多因素验证方式；注册 Passkey 后可停用动态验证码。</p>{/if}
           </div>
           <div class="flex flex-wrap gap-2">
             <Button variant="secondary" loading={actionLoading === 'regenerate'} disabled={actionLoading !== null} onclick={() => void runProtectedAction('regenerate', true).catch(() => {})}>
               <RefreshCw size={15} /> 重新生成恢复码
             </Button>
-            <Button variant="ghost" disabled={status.required_for_current_user || actionLoading !== null} onclick={() => { disableError = ''; disableConfirmOpen = true; }}>
+            <Button variant="ghost" disabled={!status.can_disable_totp || actionLoading !== null} onclick={() => { disableError = ''; disableConfirmOpen = true; }}>
               <ShieldOff size={15} /> 停用
             </Button>
           </div>

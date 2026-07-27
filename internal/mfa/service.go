@@ -33,12 +33,14 @@ var (
 type Options struct {
 	ActiveKeyID string
 	MasterKeys  map[string][]byte
+	Passkeys    *PasskeyConfig
 }
 
 type Service struct {
 	db          *pgxpool.Pool
 	activeKeyID string
 	masterKeys  map[string][]byte
+	passkeys    *passkeyRuntime
 }
 
 type AuditContext struct {
@@ -69,6 +71,7 @@ type ChallengeCommitGate struct {
 type Status struct {
 	TOTPEnrolled           bool `json:"totp_enrolled"`
 	RecoveryCodesRemaining int  `json:"recovery_codes_remaining"`
+	PasskeysEnrolled       int  `json:"passkeys_enrolled"`
 }
 
 type Enrollment struct {
@@ -92,11 +95,19 @@ func NewService(db *pgxpool.Pool, options Options) (*Service, error) {
 		}
 		keys[keyID] = append([]byte(nil), key...)
 	}
-	return &Service{db: db, activeKeyID: options.ActiveKeyID, masterKeys: keys}, nil
+	passkeys, err := newPasskeyRuntime(options.Passkeys)
+	if err != nil {
+		return nil, err
+	}
+	return &Service{db: db, activeKeyID: options.ActiveKeyID, masterKeys: keys, passkeys: passkeys}, nil
 }
 
 func (s *Service) Status(ctx context.Context, userID uuid.UUID) (Status, error) {
 	var status Status
+	rpID := ""
+	if s.passkeys != nil {
+		rpID = s.passkeys.rpID
+	}
 	err := s.db.QueryRow(ctx, `
 		SELECT
 			EXISTS (
@@ -106,8 +117,12 @@ func (s *Service) Status(ctx context.Context, userID uuid.UUID) (Status, error) 
 			(
 				SELECT COUNT(*) FROM user_recovery_codes
 				WHERE user_id=$1 AND used_at IS NULL
+			),
+			(
+				SELECT COUNT(*) FROM user_passkey_credentials
+				WHERE user_id=$1 AND ($2='' OR rp_id=$2)
 			)
-	`, userID).Scan(&status.TOTPEnrolled, &status.RecoveryCodesRemaining)
+	`, userID, rpID).Scan(&status.TOTPEnrolled, &status.RecoveryCodesRemaining, &status.PasskeysEnrolled)
 	if err != nil {
 		return Status{}, fmt.Errorf("loading MFA status: %w", err)
 	}
@@ -153,12 +168,15 @@ func (s *Service) LoginMethods(ctx context.Context, userID uuid.UUID) ([]string,
 	if err != nil {
 		return nil, err
 	}
-	if !status.TOTPEnrolled {
-		return []string{}, nil
+	methods := make([]string, 0, 3)
+	if status.TOTPEnrolled {
+		methods = append(methods, "totp")
+		if status.RecoveryCodesRemaining > 0 {
+			methods = append(methods, "recovery_code")
+		}
 	}
-	methods := []string{"totp"}
-	if status.RecoveryCodesRemaining > 0 {
-		methods = append(methods, "recovery_code")
+	if status.PasskeysEnrolled > 0 {
+		methods = append(methods, "passkey")
 	}
 	return methods, nil
 }
@@ -557,7 +575,22 @@ func (s *Service) Disable(
 		return err
 	}
 	if security.RequireMFAForAdmins && role == "admin" {
-		return ErrRequiredByPolicy
+		rpID := ""
+		if s.passkeys != nil {
+			rpID = s.passkeys.rpID
+		}
+		var hasPasskey bool
+		if err := tx.QueryRow(ctx, `
+			SELECT EXISTS (
+				SELECT 1 FROM user_passkey_credentials
+				WHERE user_id=$1 AND ($2='' OR rp_id=$2)
+			)
+		`, userID, rpID).Scan(&hasPasskey); err != nil {
+			return fmt.Errorf("checking administrator Passkey enrollment: %w", err)
+		}
+		if !hasPasskey {
+			return ErrRequiredByPolicy
+		}
 	}
 	result, err := tx.Exec(ctx, `DELETE FROM user_totp_credentials WHERE user_id=$1 AND confirmed_at IS NOT NULL`, userID)
 	if err != nil {

@@ -28,6 +28,9 @@ const (
 type myMFAResponse struct {
 	TOTPAvailable          bool `json:"totp_available"`
 	TOTPEnrolled           bool `json:"totp_enrolled"`
+	CanDisableTOTP         bool `json:"can_disable_totp"`
+	PasskeysAvailable      bool `json:"passkeys_available"`
+	PasskeysEnrolled       int  `json:"passkeys_enrolled"`
 	RecoveryCodesRemaining int  `json:"recovery_codes_remaining"`
 	RequireMFAForAdmins    bool `json:"require_mfa_for_admins"`
 	RequiredForCurrentUser bool `json:"required_for_current_user"`
@@ -294,6 +297,20 @@ func (s *Server) handleVerifyMFAChallenge(w http.ResponseWriter, r *http.Request
 		writeAPIError(w, http.StatusServiceUnavailable, "MFA verification temporarily unavailable")
 		return
 	}
+	s.completeMFAChallenge(w, r, pending, current, authenticated, request.Method, limitIdentity)
+}
+
+func (s *Server) completeMFAChallenge(
+	w http.ResponseWriter,
+	r *http.Request,
+	pending *MFAPendingSession,
+	current *models.User,
+	authenticated *AuthenticatedSession,
+	secondFactor string,
+	limitIdentity string,
+) {
+	ip := requestIP(r)
+	var err error
 	current, err = s.userService.GetByID(r.Context(), current.ID)
 	if err != nil || current.Status != models.UserStatusActive ||
 		current.AuthVersion != pending.Data.AuthVersion || current.SessionVersion != pending.Data.SessionVersion {
@@ -324,7 +341,7 @@ func (s *Server) handleVerifyMFAChallenge(w http.ResponseWriter, r *http.Request
 		}
 		details := map[string]any{
 			"authentication_method": pending.Data.PrimaryMethod,
-			"second_factor":         request.Method,
+			"second_factor":         secondFactor,
 		}
 		if pending.Data.Provider != "" {
 			details["provider"] = pending.Data.Provider
@@ -343,7 +360,7 @@ func (s *Server) handleVerifyMFAChallenge(w http.ResponseWriter, r *http.Request
 	_ = s.loginLimiter.ResetIdentity(r.Context(), ip, limitIdentity)
 	details := map[string]any{
 		"authentication_method": pending.Data.PrimaryMethod,
-		"second_factor":         request.Method,
+		"second_factor":         secondFactor,
 	}
 	if pending.Data.Provider != "" {
 		details["provider"] = pending.Data.Provider
@@ -380,6 +397,8 @@ func (s *Server) handleGetMyMFA(w http.ResponseWriter, r *http.Request) {
 	security := s.settingsMgr.Security()
 	writeJSON(w, http.StatusOK, myMFAResponse{
 		TOTPAvailable: security.TOTPEnabled, TOTPEnrolled: status.TOTPEnrolled,
+		CanDisableTOTP:    !(current.Role == "admin" && security.RequireMFAForAdmins && status.PasskeysEnrolled == 0),
+		PasskeysAvailable: security.PasskeysEnabled, PasskeysEnrolled: status.PasskeysEnrolled,
 		RecoveryCodesRemaining: status.RecoveryCodesRemaining,
 		RequireMFAForAdmins:    security.RequireMFAForAdmins,
 		RequiredForCurrentUser: current.Role == "admin" && security.RequireMFAForAdmins,
@@ -563,8 +582,6 @@ func (s *Server) handleUpdateSecuritySettings(w http.ResponseWriter, r *http.Req
 				"error":          "all active administrators must enroll MFA before it can be required",
 				"missing_admins": missing.Usernames,
 			})
-		case errors.Is(err, settings.ErrTOTPNeededForAdminMFA):
-			writeAPIError(w, http.StatusBadRequest, err.Error())
 		default:
 			writeAPIError(w, http.StatusInternalServerError, "failed to store security settings")
 		}

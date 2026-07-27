@@ -32,7 +32,8 @@ export interface SessionInfo {
   authenticated_at?: string;
 }
 
-export type MFAMethod = 'totp' | 'recovery_code';
+export type MFAMethod = 'totp' | 'recovery_code' | 'passkey';
+export type CodeMFAMethod = Exclude<MFAMethod, 'passkey'>;
 export type MFAPurpose = 'login' | 'reauthentication';
 
 export interface MFARequiredResponse {
@@ -50,6 +51,9 @@ export type ReauthenticationResponse = SessionInfo | MFARequiredResponse;
 export interface MFAStatus {
   totp_available: boolean;
   totp_enrolled: boolean;
+  can_disable_totp: boolean;
+  passkeys_available: boolean;
+  passkeys_enrolled: number;
   recovery_codes_remaining: number;
   require_mfa_for_admins: boolean;
   required_for_current_user: boolean;
@@ -70,7 +74,35 @@ export interface RecoveryCodesResult {
 
 export interface SecuritySettings {
   totp_enabled: boolean;
+  passkeys_enabled: boolean;
   require_mfa_for_admins: boolean;
+}
+
+export interface WebAuthnOptionsResponse<TPublicKey> {
+  ceremony_id: string;
+  public_key: TPublicKey;
+  mediation?: CredentialMediationRequirement;
+  expires_at: string;
+}
+
+export type PasskeyAuthenticationOptions = WebAuthnOptionsResponse<PublicKeyCredentialRequestOptionsJSON>;
+export type PasskeyRegistrationOptions = WebAuthnOptionsResponse<PublicKeyCredentialCreationOptionsJSON>;
+
+export interface PasskeyCredential {
+  id: string;
+  name: string;
+  transports: string[];
+  aaguid?: string;
+  attachment?: string;
+  backup_eligible: boolean;
+  backup_state: boolean;
+  clone_warning: boolean;
+  created_at: string;
+  last_used_at?: string | null;
+}
+
+export interface PasskeyRegistrationResult extends SessionInfo {
+  passkey: PasskeyCredential;
 }
 
 export function isMFARequiredResponse(response: LoginResponse): response is MFARequiredResponse {
@@ -596,6 +628,24 @@ const API_ERROR_TRANSLATIONS: Record<string, string> = {
   'mfa is required for active administrators': '管理员策略要求保留多因素验证，当前无法停用',
   'all active administrators must enroll mfa before it can be required': '仍有管理员未启用多因素验证，暂时无法强制执行',
   'totp must remain enabled while administrator mfa is required': '要求管理员启用多因素验证时，必须同时开放动态验证码功能',
+  'passkey login temporarily unavailable': 'Passkey 登录暂时不可用，请稍后重试',
+  'passkey verification temporarily unavailable': 'Passkey 验证暂时不可用，请稍后重试',
+  'passkey reauthentication temporarily unavailable': 'Passkey 重新认证暂时不可用，请稍后重试',
+  'passkey registration temporarily unavailable': 'Passkey 注册暂时不可用，请稍后重试',
+  'passkey registered; please sign in again': 'Passkey 已注册，但当前会话无法继续使用，请重新登录',
+  'passkey removed; please sign in again': 'Passkey 已删除，但当前会话无法继续使用，请重新登录',
+  'passkey verification failed': 'Passkey 验证失败，请重试',
+  'passkey registration could not be verified': '无法验证这枚 Passkey，请重新注册',
+  'passkey enrollment is disabled': '管理员已关闭新的 Passkey 注册',
+  'this passkey is already registered': '这枚 Passkey 已经注册',
+  'no passkey is registered': '当前账户尚未注册 Passkey',
+  'passkey not found': 'Passkey 不存在或已被删除',
+  'passkey name must contain 1 to 64 characters': 'Passkey 名称须为 1 至 64 个字符',
+  'add a password, provider identity, or another passkey before removing this passkey': '请先添加密码、外部身份或另一枚 Passkey，再删除当前 Passkey',
+  'webauthn ceremony id is required': 'Passkey 验证状态缺失，请重新开始',
+  'webauthn ceremony expired': 'Passkey 验证已过期，请重新开始',
+  'webauthn ceremony is invalid': 'Passkey 验证状态无效，请重新开始',
+  'too many passkey ceremonies': 'Passkey 操作过于频繁，请稍后重试',
 };
 
 export function localizeAPIErrorMessage(message: string): string {
@@ -683,7 +733,7 @@ export const api = {
       method: 'POST', body: JSON.stringify({ username, password, return_to: returnTo }),
     }, false),
   getLoginMFA: () => req<MFARequiredResponse>('/api/login/mfa', { cache: 'no-store' }, false),
-  verifyLoginMFA: (method: MFAMethod, code: string, pendingCsrf: string) => req<SessionInfo>('/api/login/mfa', {
+  verifyLoginMFA: (method: CodeMFAMethod, code: string, pendingCsrf: string) => req<SessionInfo>('/api/login/mfa', {
     method: 'POST',
     headers: { 'X-CSRF-Token': pendingCsrf },
     body: JSON.stringify({ method, code }),
@@ -728,6 +778,35 @@ export const api = {
     method: 'POST',
     body: JSON.stringify({ return_to: returnTo }),
   }),
+  beginPasskeyLogin: (conditional: boolean, returnTo: string, signal?: AbortSignal) => req<PasskeyAuthenticationOptions>('/api/login/passkey/options', {
+    method: 'POST',
+    body: JSON.stringify({ conditional, return_to: returnTo }),
+    signal,
+  }, false),
+  finishPasskeyLogin: (ceremonyID: string, credential: unknown, signal?: AbortSignal) => req<SessionInfo>('/api/login/passkey/verify', {
+    method: 'POST',
+    headers: { 'X-WebAuthn-Ceremony': ceremonyID },
+    body: JSON.stringify(credential),
+    signal,
+  }, false),
+  beginMFAPasskey: (pendingCsrf: string, signal?: AbortSignal) => req<PasskeyAuthenticationOptions>('/api/login/mfa/passkey/options', {
+    method: 'POST',
+    headers: { 'X-CSRF-Token': pendingCsrf },
+    signal,
+  }, false),
+  finishMFAPasskey: (ceremonyID: string, credential: unknown, pendingCsrf: string, signal?: AbortSignal) => req<SessionInfo>('/api/login/mfa/passkey/verify', {
+    method: 'POST',
+    headers: { 'X-CSRF-Token': pendingCsrf, 'X-WebAuthn-Ceremony': ceremonyID },
+    body: JSON.stringify(credential),
+    signal,
+  }, false),
+  beginPasskeyReauthentication: (signal?: AbortSignal) => req<PasskeyAuthenticationOptions>('/api/me/reauth/passkey/options', { method: 'POST', signal }, false),
+  finishPasskeyReauthentication: (ceremonyID: string, credential: unknown, signal?: AbortSignal) => req<SessionInfo>('/api/me/reauth/passkey/verify', {
+    method: 'POST',
+    headers: { 'X-WebAuthn-Ceremony': ceremonyID },
+    body: JSON.stringify(credential),
+    signal,
+  }, false),
   getMyMFA: () => req<MFAStatus>('/api/me/mfa', { cache: 'no-store' }),
   beginTOTPEnrollment: () => req<TOTPEnrollment>('/api/me/mfa/totp/enroll', { method: 'POST' }),
   confirmTOTPEnrollment: (code: string) => req<TOTPConfirmationResult>('/api/me/mfa/totp/enroll/confirm', {
@@ -735,6 +814,23 @@ export const api = {
   }),
   regenerateRecoveryCodes: () => req<RecoveryCodesResult>('/api/me/mfa/recovery-codes', { method: 'POST' }),
   disableTOTP: () => req<SessionInfo>('/api/me/mfa/totp', { method: 'DELETE' }),
+  getMyPasskeys: () => req<{ passkeys: PasskeyCredential[] }>('/api/me/passkeys', { cache: 'no-store' }),
+  beginPasskeyRegistration: (name: string, signal?: AbortSignal) => req<PasskeyRegistrationOptions>('/api/me/passkeys/registration/options', {
+    method: 'POST',
+    body: JSON.stringify({ name }),
+    signal,
+  }),
+  finishPasskeyRegistration: (ceremonyID: string, credential: unknown, signal?: AbortSignal) => req<PasskeyRegistrationResult>('/api/me/passkeys/registration/verify', {
+    method: 'POST',
+    headers: { 'X-WebAuthn-Ceremony': ceremonyID },
+    body: JSON.stringify(credential),
+    signal,
+  }, false),
+  renamePasskey: (id: string, name: string) => req<PasskeyCredential>(`/api/me/passkeys/${encodeURIComponent(id)}`, {
+    method: 'PUT',
+    body: JSON.stringify({ name }),
+  }),
+  deletePasskey: (id: string) => req<SessionInfo>(`/api/me/passkeys/${encodeURIComponent(id)}`, { method: 'DELETE' }, false),
   setPassword: (newPassword: string) => req<SessionInfo>('/api/me/password/set', {
     method: 'POST',
     body: JSON.stringify({ new_password: newPassword }),

@@ -144,6 +144,12 @@ func describeMutation(r *http.Request, actor *models.User) (mutationAuditDescrip
 		return highRiskUserMutation(models.AuditRecoveryCodesGenerated, actor), true
 	case r.Method == http.MethodDelete && path == "/api/me/mfa/totp":
 		return highRiskUserMutation(models.AuditMFADisabled, actor), true
+	case r.Method == http.MethodPost && path == "/api/me/passkeys/registration/verify":
+		return mutationAuditDescriptor{event: models.AuditPasskeyRegistered, targetType: "passkey", riskLevel: "high", successAlreadyAudited: true}, true
+	case r.Method == http.MethodPut && strings.HasPrefix(path, "/api/me/passkeys/"):
+		return mutationAuditDescriptor{event: models.AuditPasskeyRenamed, targetType: "passkey", targetID: param("id"), successAlreadyAudited: true}, true
+	case r.Method == http.MethodDelete && strings.HasPrefix(path, "/api/me/passkeys/"):
+		return mutationAuditDescriptor{event: models.AuditPasskeyRemoved, targetType: "passkey", targetID: param("id"), riskLevel: "high", successAlreadyAudited: true}, true
 	case r.Method == http.MethodDelete && strings.HasPrefix(path, "/api/me/identities/"):
 		return mutationAuditDescriptor{event: models.AuditIdentityUnbound, targetType: "identity", targetID: param("id"), riskLevel: "high", successAlreadyAudited: true}, true
 	case r.Method == http.MethodPost && strings.HasPrefix(path, "/api/me/identities/") && strings.HasSuffix(path, "/bind"):

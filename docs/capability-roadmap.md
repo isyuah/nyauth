@@ -1,6 +1,6 @@
 # 能力路线图（0.4+ 展望）
 
-> 状态：与用户对齐于 2026-07-26。本文档记录"网站自身能力"的增强方向与取舍结论，按优先级排序。
+> 状态：更新于 2026-07-27。本文档记录"网站自身能力"的增强方向与取舍结论，按优先级排序。
 
 ## 结论摘要
 
@@ -9,7 +9,7 @@
 | 运行时设置（部分配置免重启） | 基础已落地；品牌、注册策略和数据库动态 SMTP 已免重启 | P0，持续扩展 |
 | 每客户端访问策略 | 做——当前任何活跃用户可授权任何应用，是真实安全缺口 | P1 |
 | TOTP + 恢复码 | Phase T 已完成：登录、reauth、管理员强制策略、恢复验证 | 已完成 |
-| Passkey/WebAuthn | Phase P 下一步：独立登录、Conditional UI、MFA 与 step-up | P1，进行中 |
+| Passkey/WebAuthn | Phase P 已完成：独立登录、Conditional UI、MFA、step-up 与安全中心管理 | 已完成 |
 | 自助注册 / 邀请制 | Phase R 已完成：关闭 / 邀请制 / 开放注册、验证与邀请预占生命周期 | 已完成 |
 | 事件 Webhook | 做——作为插件系统的替代品，复用审计 outbox | P2 |
 | 插件系统 | **不做进程内插件**；先观察 Webhook + /api/v1 能覆盖多少扩展需求 | 推迟 |
@@ -34,11 +34,12 @@
 
 方案草图：客户端增加 `access_policy`（`open` / `admins_only` / `allowlist`），allowlist 引用用户组；顺带引入最小化的用户组模型。授权端点与 client_credentials 都执行策略检查，拒绝时审计。这也是 `/api/v1` 的 scope 模型将来对接组织/团队概念的地基。
 
-## 3. MFA（TOTP 已完成，Passkey 下一步）
+## 3. MFA（Phase T/P 已完成）
 
 - TOTP 已实现 RFC 6238、time-step 防重放、一次性恢复码、密码/Provider MFA 与 step-up、动态管理员强制策略和 HA 同步。
-- Passkey 使用 WebAuthn 注册/登录，优先支持平台认证器与 discoverable credential；RP ID 和 origin 从公开 `auth.issuer` 派生。
-- Passkey 将同时支持独立登录、Conditional UI、MFA 第二因素与近期重新认证，并在每次认证后持久化 sign count、clone warning 与 backup state。
+- Passkey 已支持 discoverable 独立登录、Conditional UI、MFA 第二因素、近期重新认证与安全中心管理；RP ID 和 origin 从公开 `auth.issuer` 固定派生。
+- 完整 WebAuthn credential 加密存储，每次认证在事务中持久化 sign count、clone warning 与 backup state；Redis ceremony 使用不透明 ID，并与 MFA pending 原子消费。
+- 管理员强制 MFA 接受 TOTP 或当前 RP Passkey；两个注册开关都是运行时 enrollment 开关，不会停用已有因素。
 
 ## 4. 自助注册 / 邀请（已完成）
 
@@ -61,7 +62,7 @@
 ## 实施顺序建议
 
 ```
-当前 0.3.0-dev: Phase R/S/T 已完成
-下一检查点: Phase P Passkey/WebAuthn
-随后: /api/v1 Phase 1-2、每客户端访问策略与用户组、/api/v1 Phase 3-4、事件 Webhook
+当前 0.3.0-dev: Phase R/S/T/P 已完成
+下一检查点: /api/v1 Phase 1-2
+随后: 每客户端访问策略与用户组、/api/v1 Phase 3-4、事件 Webhook
 ```

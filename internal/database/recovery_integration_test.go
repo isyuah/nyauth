@@ -68,6 +68,16 @@ func TestRecoveryVerifierAuthenticatesRestoredEnvelopes(t *testing.T) {
 	if err := schema.pool.QueryRow(ctx, `SELECT secret_ciphertext FROM user_totp_credentials WHERE user_id=$1`, userID).Scan(&originalTOTPCiphertext); err != nil {
 		t.Fatalf("read recovery TOTP envelope: %v", err)
 	}
+	passkeyID := insertSyntheticPasskey(
+		t, schema, passkeyTestRPID, userID,
+		[]byte("recovery-passkey-credential"), "Recovery Passkey",
+	)
+	var originalPasskeyCiphertext string
+	if err := schema.pool.QueryRow(ctx, `
+		SELECT credential_ciphertext FROM user_passkey_credentials WHERE id=$1
+	`, passkeyID).Scan(&originalPasskeyCiphertext); err != nil {
+		t.Fatalf("read recovery Passkey envelope: %v", err)
+	}
 
 	accountService, err := account.NewService(account.NewStore(schema.pool), account.ServiceOptions{
 		PublicBaseURL: "https://auth.example.test",
@@ -99,11 +109,27 @@ func TestRecoveryVerifierAuthenticatesRestoredEnvelopes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
-	if !report.JWKEnvelopeVerified || report.ProviderEnvelopesVerified != 1 || report.TOTPEnvelopesVerified != 1 || report.EmailEnvelopeSampled != 1 {
+	if !report.JWKEnvelopeVerified || report.ProviderEnvelopesVerified != 1 || report.TOTPEnvelopesVerified != 1 ||
+		report.PasskeyEnvelopesVerified != 1 || report.EmailEnvelopeSampled != 1 {
 		t.Fatalf("unexpected envelope report: %#v", report)
 	}
-	if report.Counts.Users != 1 || report.Counts.OAuthProviders != 1 || report.Counts.EmailOutbox != 1 {
+	if report.Counts.Users != 1 || report.Counts.OAuthProviders != 1 || report.Counts.EmailOutbox != 1 || report.Counts.Passkeys != 1 {
 		t.Fatalf("unexpected resource counts: %#v", report.Counts)
+	}
+
+	tamperedPasskeyCiphertext := tamperPasskeyEnvelope(t, originalPasskeyCiphertext)
+	if _, err := schema.pool.Exec(ctx, `
+		UPDATE user_passkey_credentials SET credential_ciphertext=$2 WHERE id=$1
+	`, passkeyID, tamperedPasskeyCiphertext); err != nil {
+		t.Fatalf("tamper recovery Passkey envelope: %v", err)
+	}
+	if _, err := recovery.Verify(ctx, schema.pool, masterKey); err == nil || !strings.Contains(err.Error(), "Passkey envelope") {
+		t.Fatalf("Verify(tampered Passkey) error = %v", err)
+	}
+	if _, err := schema.pool.Exec(ctx, `
+		UPDATE user_passkey_credentials SET credential_ciphertext=$2 WHERE id=$1
+	`, passkeyID, originalPasskeyCiphertext); err != nil {
+		t.Fatalf("restore recovery Passkey envelope: %v", err)
 	}
 
 	if _, err := schema.pool.Exec(ctx, `UPDATE user_totp_credentials SET secret_ciphertext=secret_ciphertext || 'x' WHERE user_id=$1`, userID); err != nil {

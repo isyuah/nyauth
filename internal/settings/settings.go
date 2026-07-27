@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"log/slog"
 	"slices"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -32,7 +33,6 @@ const (
 var (
 	ErrRegistrationChanged     = errors.New("registration settings changed")
 	ErrMailConfigurationNeeded = errors.New("mail configuration is required for self-registration")
-	ErrTOTPNeededForAdminMFA   = errors.New("TOTP must remain enabled while administrator MFA is required")
 )
 
 // AdminsMissingMFAError identifies active administrators that prevent the
@@ -95,11 +95,12 @@ func DefaultRegistration() Registration {
 // off enrollment does not deactivate factors users already enrolled.
 type Security struct {
 	TOTPEnabled         bool `json:"totp_enabled"`
+	PasskeysEnabled     bool `json:"passkeys_enabled"`
 	RequireMFAForAdmins bool `json:"require_mfa_for_admins"`
 }
 
 func DefaultSecurity() Security {
-	return Security{TOTPEnabled: true, RequireMFAForAdmins: false}
+	return Security{TOTPEnabled: true, PasskeysEnabled: true, RequireMFAForAdmins: false}
 }
 
 // Manager caches the current settings snapshot and keeps it consistent across
@@ -108,6 +109,7 @@ func DefaultSecurity() Security {
 type Manager struct {
 	db               *pgxpool.Pool
 	brandingDefaults Branding
+	passkeyRPID      string
 	branding         atomic.Pointer[Branding]
 	registration     atomic.Pointer[Registration]
 	security         atomic.Pointer[Security]
@@ -116,6 +118,15 @@ type Manager struct {
 
 func NewManager(db *pgxpool.Pool, brandingDefaults Branding) *Manager {
 	return &Manager{db: db, brandingDefaults: brandingDefaults}
+}
+
+// NewManagerForRP scopes factor-policy checks to Passkeys that are usable by
+// the deployment's current WebAuthn relying party.
+func NewManagerForRP(db *pgxpool.Pool, brandingDefaults Branding, passkeyRPID string) *Manager {
+	return &Manager{
+		db: db, brandingDefaults: brandingDefaults,
+		passkeyRPID: strings.ToLower(strings.TrimSpace(passkeyRPID)),
+	}
 }
 
 // Branding returns the stored branding, or the config defaults before the
@@ -269,7 +280,8 @@ func (m *Manager) SetRegistration(
 }
 
 // SetSecurity persists the runtime MFA policy. Mandatory administrator MFA is
-// enabled only while every active administrator has a confirmed TOTP factor.
+// enabled only while every active administrator has at least one confirmed
+// factor. Enrollment switches do not deactivate factors already registered.
 // Management callers pass one trusted mutation audit so the setting and its
 // successful audit event commit atomically.
 func (m *Manager) SetSecurity(
@@ -283,14 +295,12 @@ func (m *Manager) SetSecurity(
 	if m.db == nil {
 		return errors.New("runtime settings storage is unavailable")
 	}
-	if security.RequireMFAForAdmins && !security.TOTPEnabled {
-		return ErrTOTPNeededForAdminMFA
-	}
 	if err := mutation.ValidateEvent(models.AuditSettingsUpdated); err != nil {
 		return fmt.Errorf("validating security settings audit: %w", err)
 	}
 	mutation = mutation.WithTarget("settings", securityKey).WithDetails(map[string]any{
 		"totp_enabled":           security.TOTPEnabled,
+		"passkeys_enabled":       security.PasskeysEnabled,
 		"require_mfa_for_admins": security.RequireMFAForAdmins,
 	})
 	encoded, err := json.Marshal(security)
@@ -309,11 +319,17 @@ func (m *Manager) SetSecurity(
 		rows, err := tx.Query(ctx, `
 			SELECT u.username
 			FROM users AS u
-			LEFT JOIN user_totp_credentials AS totp
-			  ON totp.user_id=u.id AND totp.confirmed_at IS NOT NULL
-			WHERE u.status='active' AND u.role='admin' AND totp.user_id IS NULL
+			WHERE u.status='active' AND u.role='admin'
+			  AND NOT EXISTS (
+				SELECT 1 FROM user_totp_credentials AS totp
+				WHERE totp.user_id=u.id AND totp.confirmed_at IS NOT NULL
+			  )
+			  AND NOT EXISTS (
+				SELECT 1 FROM user_passkey_credentials AS passkey
+				WHERE passkey.user_id=u.id AND ($1='' OR passkey.rp_id=$1)
+			  )
 			ORDER BY u.username
-		`)
+		`, m.passkeyRPID)
 		if err != nil {
 			return fmt.Errorf("checking administrator MFA enrollment: %w", err)
 		}

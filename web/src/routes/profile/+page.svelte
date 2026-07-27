@@ -3,7 +3,7 @@
   import { onMount } from 'svelte';
   import {
     api,
-    ApiError,
+    isRecentAuthenticationError,
     type BrowserSession,
     type ExternalIdentity,
     type OAuthAuthorization,
@@ -15,6 +15,7 @@
   import { PASSWORD_REQUIREMENT, passwordPolicyError } from '$lib/password-policy';
   import AppShell from '$lib/components/layout/AppShell.svelte';
   import ReauthenticationDialog from '$lib/components/account/ReauthenticationDialog.svelte';
+  import PasskeySettingsCard from '$lib/components/account/PasskeySettingsCard.svelte';
   import TOTPSettingsCard from '$lib/components/account/TOTPSettingsCard.svelte';
   import PageHeader from '$lib/components/layout/PageHeader.svelte';
   import Badge from '$lib/components/ui/Badge.svelte';
@@ -74,6 +75,7 @@
   let sessionConfirmOpen = $state(false);
   let sessionActionError = $state('');
   let authenticationClock = $state(Date.now());
+  let mfaFactorsRevision = $state(0);
 
   let hasPassword = $derived(session?.has_password ?? false);
   let emailVerified = $derived(session?.email_verified ?? false);
@@ -97,6 +99,11 @@
     sessionStore.setSession(next);
   }
 
+  function applyPasskeySession(next: SessionInfo) {
+    applySession(next);
+    mfaFactorsRevision += 1;
+  }
+
   function promptForReauthentication(message = '此操作需要最近 10 分钟内重新验证身份。') {
     actionError = message;
     reauthOpen = true;
@@ -107,10 +114,6 @@
     if (hasRecentAuthentication(session?.authenticated_at, authenticationClock)) return true;
     promptForReauthentication();
     return false;
-  }
-
-  function isRecentAuthenticationFailure(cause: unknown): boolean {
-    return cause instanceof ApiError && cause.status === 403;
   }
 
   function deviceLabel(userAgent = ''): string {
@@ -248,7 +251,7 @@
       emailChangeSent = true;
       newEmail = '';
     } catch (cause) {
-      if (isRecentAuthenticationFailure(cause)) {
+      if (isRecentAuthenticationError(cause)) {
         authenticationClock = Date.now();
         promptForReauthentication();
       } else {
@@ -322,7 +325,7 @@
       setPasswordOpen = false;
       notice = '本地密码已设置，当前会话已安全轮换。';
     } catch (cause) {
-      if (isRecentAuthenticationFailure(cause)) authenticationClock = Date.now();
+      if (isRecentAuthenticationError(cause)) authenticationClock = Date.now();
       setPasswordError = cause instanceof Error ? cause.message : '无法设置本地密码';
     } finally {
       setPasswordLoading = false;
@@ -346,7 +349,7 @@
       identities = identities.filter((identity) => identity.id !== target.id);
       notice = `已解绑 ${target.provider} 身份，当前会话已安全轮换。`;
     } catch (cause) {
-      if (isRecentAuthenticationFailure(cause)) {
+      if (isRecentAuthenticationError(cause)) {
         authenticationClock = Date.now();
         identityConfirmOpen = false;
         promptForReauthentication();
@@ -445,14 +448,21 @@
                 <div class="flex flex-col justify-between gap-4 px-7 py-5 sm:flex-row sm:items-center"><div><h2 class="text-card-title text-nya-text-primary">密码安全</h2>{#if hasPassword}<p class="mt-1 text-body text-nya-text-secondary">修改密码会退出其他设备并撤销已有令牌。</p>{:else}<p class="mt-1 text-body text-nya-text-secondary">此账户当前仅通过外部身份登录，可以额外设置本地密码。</p>{/if}</div>{#if hasPassword}<Button variant="secondary" onclick={() => goto('/change-password?return_to=/profile')}><KeyRound size={16} /> 修改密码</Button>{:else}<Button variant="secondary" onclick={openSetPassword}><KeyRound size={16} /> 设置本地密码</Button>{/if}</div>
               </section>
 
-              <TOTPSettingsCard
-                onsessionupdated={applySession}
+              {#key mfaFactorsRevision}
+                <TOTPSettingsCard
+                  onsessionupdated={applySession}
+                  providerReauthenticationFailed={initialProviderAuthError !== null}
+                />
+              {/key}
+
+              <PasskeySettingsCard
+                onsessionupdated={applyPasskeySession}
                 providerReauthenticationFailed={initialProviderAuthError !== null}
               />
 
               <section class="rounded-nya-card border border-nya-border bg-nya-surface shadow-nya-card">
                 <div class="flex flex-col justify-between gap-4 border-b border-nya-divider px-7 py-5 sm:flex-row sm:items-center"><div><h2 class="text-card-title text-nya-text-primary">近期重新认证</h2><p class="mt-1 text-body text-nya-text-secondary">邮箱变更、设置密码和身份解绑要求最近 10 分钟内重新验证身份。</p></div><Badge variant={recentAuthenticationValid ? 'success' : 'warning'}>{recentAuthenticationValid ? '认证有效' : '需要重新认证'}</Badge></div>
-                <div class="flex flex-wrap gap-3 px-7 py-5">{#if hasPassword}<Button variant="secondary" onclick={() => (reauthOpen = true)}><KeyRound size={15} /> 使用当前密码</Button>{/if}{#if identitiesLoading}<p class="text-body text-nya-text-tertiary" role="status">正在加载外部认证方式…</p>{:else if identitiesError}<p class="text-body text-nya-warning">外部身份暂时不可用，请在下方重试。</p>{:else}{#each identities as identity}<Button variant="secondary" loading={reauthProvider === identity.provider} onclick={() => beginProviderReauthentication(identity.provider)}><span>{providerIcons[identity.provider] || '🔗'}</span> 使用 {identity.provider}</Button>{/each}{#if !hasPassword && identities.length === 0}<p class="text-body text-nya-danger">当前没有可用于重新认证的登录方式，请联系管理员。</p>{/if}{/if}</div>
+                <div class="flex flex-wrap gap-3 px-7 py-5"><Button variant="secondary" onclick={() => (reauthOpen = true)}><KeyRound size={15} /> 选择认证方式</Button>{#if identitiesLoading}<p class="text-body text-nya-text-tertiary" role="status">正在加载外部认证方式…</p>{:else if identitiesError}<p class="text-body text-nya-warning">外部身份暂时不可用，请在下方重试。</p>{:else}{#each identities as identity}<Button variant="secondary" loading={reauthProvider === identity.provider} onclick={() => beginProviderReauthentication(identity.provider)}><span>{providerIcons[identity.provider] || '🔗'}</span> 使用 {identity.provider}</Button>{/each}{/if}</div>
               </section>
 
               <section class="rounded-nya-card border border-nya-border bg-nya-surface shadow-nya-card">

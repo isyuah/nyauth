@@ -33,6 +33,8 @@ describe('localizeAPIErrorMessage', () => {
     ['MFA challenge expired', '多因素验证已过期，请重新登录'],
     ['TOTP enrollment is disabled', '管理员已关闭动态验证码注册'],
     ['MFA is required for active administrators', '管理员策略要求保留多因素验证，当前无法停用'],
+    ['Passkey registered; please sign in again', 'Passkey 已注册，但当前会话无法继续使用，请重新登录'],
+    ['Passkey removed; please sign in again', 'Passkey 已删除，但当前会话无法继续使用，请重新登录'],
   ])('maps stable authentication error %s', (message, expected) => {
     expect(localizeAPIErrorMessage(message)).toBe(expected);
   });
@@ -47,7 +49,7 @@ describe('MFA API contract', () => {
     status: 'mfa_required',
     purpose: 'login',
     username: 'alice',
-    methods: ['totp', 'recovery_code'],
+    methods: ['totp', 'recovery_code', 'passkey'],
     csrf_token: 'mfa-csrf',
     expires_at: '2026-07-27T12:05:00Z',
   };
@@ -139,12 +141,119 @@ describe('MFA API contract', () => {
 
     let caught: unknown;
     try {
-      await api.admin.updateSecuritySettings({ totp_enabled: true, require_mfa_for_admins: true });
+      await api.admin.updateSecuritySettings({ totp_enabled: true, passkeys_enabled: true, require_mfa_for_admins: true });
     } catch (cause) {
       caught = cause;
     }
 
     expect(missingAdminsFromError(caught)).toEqual(['admin-a', 'admin-b']);
+  });
+
+  it('uses the public Passkey login routes and sends the ceremony only in its header', async () => {
+    const options = {
+      ceremony_id: 'login-ceremony',
+      public_key: { challenge: 'AQID', rpId: 'localhost' },
+      mediation: 'required',
+      expires_at: '2026-07-27T12:05:00Z',
+    };
+    const credential = { id: 'credential-id', type: 'public-key', response: { signature: 'BAUG' } };
+    const responses = [
+      new Response(JSON.stringify(options), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+      new Response(JSON.stringify(session), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    ];
+    const fetchMock = vi.fn(async () => responses.shift()!);
+    vi.stubGlobal('fetch', fetchMock);
+
+    await api.beginPasskeyLogin(true, '/dashboard');
+    await api.finishPasskeyLogin(options.ceremony_id, credential);
+
+    const [, beginInit] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(JSON.parse(String(beginInit.body))).toEqual({ conditional: true, return_to: '/dashboard' });
+    const [, finishInit] = fetchMock.mock.calls[1] as unknown as [string, RequestInit];
+    const finishHeaders = new Headers(finishInit.headers);
+    expect(finishHeaders.get('X-WebAuthn-Ceremony')).toBe('login-ceremony');
+    expect(finishHeaders.get('X-CSRF-Token')).toBeNull();
+    expect(JSON.parse(String(finishInit.body))).toEqual(credential);
+  });
+
+  it('sends both pending CSRF and ceremony headers for Passkey MFA', async () => {
+    const options = {
+      ceremony_id: 'mfa-ceremony',
+      public_key: { challenge: 'AQID' },
+      mediation: 'required',
+      expires_at: '2026-07-27T12:05:00Z',
+    };
+    const credential = { id: 'credential-id', type: 'public-key', response: { signature: 'BAUG' } };
+    const responses = [
+      new Response(JSON.stringify(options), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+      new Response(JSON.stringify(session), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    ];
+    const fetchMock = vi.fn(async () => responses.shift()!);
+    vi.stubGlobal('fetch', fetchMock);
+    setCsrfToken('formal-session-csrf');
+
+    await api.beginMFAPasskey('pending-mfa-csrf');
+    await api.finishMFAPasskey(options.ceremony_id, credential, 'pending-mfa-csrf');
+
+    const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit]>;
+    for (const [, init] of calls) {
+      const headers = new Headers(init.headers);
+      expect(headers.get('X-CSRF-Token')).toBe('pending-mfa-csrf');
+    }
+    const finishHeaders = new Headers(calls[1][1].headers);
+    expect(finishHeaders.get('X-WebAuthn-Ceremony')).toBe('mfa-ceremony');
+  });
+
+  it('matches Passkey management and reauthentication routes exactly', async () => {
+    const options = {
+      ceremony_id: 'ceremony-id',
+      public_key: { challenge: 'AQID' },
+      expires_at: '2026-07-27T12:05:00Z',
+    };
+    const passkey = {
+      id: '22222222-2222-2222-2222-222222222222',
+      name: 'Laptop',
+      transports: ['internal'],
+      backup_eligible: true,
+      backup_state: true,
+      clone_warning: false,
+      created_at: '2026-07-27T12:00:00Z',
+    };
+    const responses = [
+      new Response(JSON.stringify({ passkeys: [passkey] }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+      new Response(JSON.stringify(options), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+      new Response(JSON.stringify({ ...session, passkey }), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+      new Response(JSON.stringify(passkey), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+      new Response(JSON.stringify(session), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+      new Response(JSON.stringify(options), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+      new Response(JSON.stringify(session), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    ];
+    const fetchMock = vi.fn(async () => responses.shift()!);
+    vi.stubGlobal('fetch', fetchMock);
+    const credential = { id: 'credential-id', type: 'public-key', response: {} };
+
+    await api.getMyPasskeys();
+    await api.beginPasskeyRegistration('Laptop');
+    await api.finishPasskeyRegistration('ceremony-id', credential);
+    await api.renamePasskey(passkey.id, 'Security key');
+    await api.deletePasskey(passkey.id);
+    await api.beginPasskeyReauthentication();
+    await api.finishPasskeyReauthentication('ceremony-id', credential);
+
+    const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit]>;
+    expect(calls.map(([url]) => url)).toEqual([
+      '/api/me/passkeys',
+      '/api/me/passkeys/registration/options',
+      '/api/me/passkeys/registration/verify',
+      `/api/me/passkeys/${passkey.id}`,
+      `/api/me/passkeys/${passkey.id}`,
+      '/api/me/reauth/passkey/options',
+      '/api/me/reauth/passkey/verify',
+    ]);
+    expect(JSON.parse(String(calls[1][1].body))).toEqual({ name: 'Laptop' });
+    expect(new Headers(calls[2][1].headers).get('X-WebAuthn-Ceremony')).toBe('ceremony-id');
+    expect(calls[3][1].method).toBe('PUT');
+    expect(calls[4][1].method).toBe('DELETE');
   });
 
   it('returns a purpose-tagged MFA challenge from password reauthentication', async () => {

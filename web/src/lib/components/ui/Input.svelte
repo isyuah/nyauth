@@ -27,7 +27,7 @@
     mono?: boolean;
     required?: boolean;
     id?: string;
-    autocomplete?: 'current-password' | 'new-password' | 'username' | 'email' | 'one-time-code' | 'off';
+    autocomplete?: 'current-password' | 'new-password' | 'username' | 'username webauthn' | 'email' | 'one-time-code' | 'off';
     inputmode?: 'text' | 'numeric' | 'email' | 'url' | 'search' | 'tel' | 'decimal' | 'none';
     maxlength?: number;
     oninput?: (e: Event) => void;
