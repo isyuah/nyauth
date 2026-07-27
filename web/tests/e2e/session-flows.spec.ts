@@ -1,4 +1,5 @@
 import { expect, test, type Locator, type Page, type Route } from '@playwright/test';
+import { readFile } from 'node:fs/promises';
 import type {
   DashboardStats,
   LoginTrend,
@@ -61,6 +62,10 @@ interface MockState {
   adminProviderUpdateCSRF?: string | null;
   adminProviderTestRequests?: number;
   systemStatus?: typeof systemStatus;
+  avatarURL?: string | null;
+  avatarUploadCSRF?: string | null;
+  avatarUploadContentType?: string | null;
+  avatarDeleteCSRF?: string | null;
 }
 
 const user = {
@@ -68,7 +73,7 @@ const user = {
   username: 'alice',
   email: 'alice@example.com',
   display_name: 'Alice',
-  avatar_url: null,
+  avatar_url: null as string | null,
   metadata: { department: 'engineering' },
   status: 'active',
   role: 'user' as Role,
@@ -152,6 +157,8 @@ const externalProvider = {
   token_url: 'https://idp.example/token',
   userinfo_url: 'https://idp.example/userinfo',
   enabled: true,
+  import_avatar: false,
+  avatar_allowed_hosts: [],
   revision: 4,
   metadata: { environment: 'production' },
   created_at: '2026-01-01T00:00:00Z',
@@ -172,6 +179,7 @@ const systemStatus = {
     providers: { status: 'degraded', latency_ms: 8, snapshot_revision: 12 },
     jwk: { status: 'ok', latency_ms: 1 },
     mail: { status: 'ok', mode: 'fallback', configured: true, available: true, circuit_state: 'closed' },
+    media: { status: 'ok', backend: 'local', configured: true },
   },
   active_signing_key: {
     kid: 'signing-key-2026-07',
@@ -350,6 +358,13 @@ async function installDashboardCoreMocks(page: Page) {
 }
 
 async function installAPIMocks(page: Page, state: MockState) {
+  await page.route('**/media/avatars/**', (route) => route.fulfill({
+    status: 200,
+    contentType: 'image/webp',
+    body: Buffer.from('UklGRiIAAABXRUJQVlA4IBYAAAAwAQCdASoBAAEAAUAmJaQAA3AA/v89WAAAAA==', 'base64'),
+    headers: { 'X-Content-Type-Options': 'nosniff', 'Cache-Control': 'public, max-age=86400, immutable' },
+  }));
+
   await page.route('**/api/**', async (route) => {
     const request = route.request();
     const requestURL = new URL(request.url());
@@ -459,6 +474,11 @@ async function installAPIMocks(page: Page, state: MockState) {
       return;
     }
 
+    if (path === '/api/me/passkeys' && request.method() === 'GET') {
+      await fulfillJSON(route, 200, { passkeys: [] });
+      return;
+    }
+
     if (path === `/api/me/identities/${githubIdentity.id}` && request.method() === 'DELETE') {
       state.identityDeleteCSRF = await request.headerValue('x-csrf-token');
       state.identities = [];
@@ -496,8 +516,23 @@ async function installAPIMocks(page: Page, state: MockState) {
       return;
     }
 
+    if (path === '/api/me/avatar' && request.method() === 'POST') {
+      state.avatarUploadCSRF = await request.headerValue('x-csrf-token');
+      state.avatarUploadContentType = await request.headerValue('content-type');
+      state.avatarURL = '/media/avatars/77777777-7777-7777-7777-777777777777/256.webp';
+      await fulfillJSON(route, 200, { ...user, role: state.role, avatar_url: state.avatarURL });
+      return;
+    }
+
+    if (path === '/api/me/avatar' && request.method() === 'DELETE') {
+      state.avatarDeleteCSRF = await request.headerValue('x-csrf-token');
+      state.avatarURL = null;
+      await fulfillJSON(route, 200, { ...user, role: state.role, avatar_url: null });
+      return;
+    }
+
     if (path === '/api/me') {
-      await fulfillJSON(route, 200, { ...user, role: state.role });
+      await fulfillJSON(route, 200, { ...user, role: state.role, avatar_url: state.avatarURL ?? user.avatar_url });
       return;
     }
 
@@ -600,6 +635,20 @@ async function installAPIMocks(page: Page, state: MockState) {
         ...(state.adminUserUpdateBody as object),
         updated_at: '2026-01-03T00:00:00Z',
       });
+      return;
+    }
+
+    if (path === `/api/admin/users/${user.id}/avatar` && request.method() === 'POST' && state.adminUsers) {
+      const updated = { ...state.adminUsers[0], avatar_url: '/media/avatars/88888888-8888-8888-8888-888888888888/256.webp' };
+      state.adminUsers = [updated];
+      await fulfillJSON(route, 200, updated);
+      return;
+    }
+
+    if (path === `/api/admin/users/${user.id}/avatar` && request.method() === 'DELETE' && state.adminUsers) {
+      const updated = { ...state.adminUsers[0], avatar_url: null };
+      state.adminUsers = [updated];
+      await fulfillJSON(route, 200, updated);
       return;
     }
 
@@ -897,6 +946,38 @@ test('administrator profile stays in the user center and marks the profile tab a
   await expect(page.getByRole('complementary', { name: '管理后台导航' })).toHaveCount(0);
   await expect(sidebar.getByRole('link', { name: '个人资料', exact: true })).toHaveAttribute('aria-current', 'page');
   await expect(sidebar.getByRole('link', { name: '管理后台', exact: true })).toBeVisible();
+});
+
+test('users crop, upload, and remove a managed avatar with CSRF', async ({ page }) => {
+  const state: MockState = {
+    authenticated: true,
+    mustChangePassword: false,
+    role: 'user',
+    csrfToken: 'csrf-avatar',
+    avatarURL: null,
+  };
+  await installAPIMocks(page, state);
+  await page.goto('/profile');
+
+  const avatarFixture = await readFile(new URL('../../static/logo.png', import.meta.url));
+
+  await page.locator('input[type="file"][accept*="image/webp"]').setInputFiles({
+    name: 'avatar.png',
+    mimeType: 'image/png',
+    buffer: avatarFixture,
+  });
+  const cropDialog = page.getByRole('dialog', { name: '裁剪头像' });
+  await expect(cropDialog).toBeVisible();
+  await cropDialog.getByRole('button', { name: '上传头像' }).click();
+
+  await expect(cropDialog).toBeHidden();
+  await expect(page.getByAltText('用户头像')).toBeVisible();
+  expect(state.avatarUploadCSRF).toBe('csrf-avatar');
+  expect(state.avatarUploadContentType).toMatch(/^multipart\/form-data; boundary=/);
+
+  await page.getByRole('button', { name: '删除头像' }).click();
+  await expect(page.getByAltText('用户头像')).toHaveCount(0);
+  expect(state.avatarDeleteCSRF).toBe('csrf-avatar');
 });
 
 test('owned applications show the used quota as a compact fraction', async ({ page }) => {
@@ -2136,7 +2217,6 @@ test('administrators can update user profiles and remove a confirmed external id
   const drawer = page.getByRole('dialog', { name: /用户详情/ });
   await drawer.getByLabel('邮箱', { exact: true }).fill('alice.updated@example.com');
   await drawer.getByLabel('显示名称', { exact: true }).fill('Alice Updated');
-  await drawer.getByLabel('头像 URL', { exact: true }).fill('https://cdn.example/alice.png');
   await drawer.getByLabel('Metadata（JSON 字符串键值）').fill(JSON.stringify({
     department: 'security',
     region: 'apac',
@@ -2148,7 +2228,6 @@ test('administrators can update user profiles and remove a confirmed external id
   expect(state.adminUserUpdateBody).toEqual({
     email: 'alice.updated@example.com',
     display_name: 'Alice Updated',
-    avatar_url: 'https://cdn.example/alice.png',
     metadata: { department: 'security', region: 'apac' },
   });
 
@@ -2201,6 +2280,8 @@ test('provider edits preserve the stored secret when the secret input is empty',
     authorization_url: 'https://idp.example/authorize',
     token_url: 'https://idp.example/token',
     userinfo_url: 'https://idp.example/userinfo',
+    import_avatar: false,
+    avatar_allowed_hosts: [],
     enabled: true,
   });
   expect(state.adminProviderUpdateBody).not.toHaveProperty('client_secret');
@@ -2293,6 +2374,8 @@ test('disabled provider creation is a single request with an explicit enabled st
     client_secret: 'disabled-secret',
     enabled: false,
     scopes: ['read:user', 'user:email'],
+    import_avatar: false,
+    avatar_allowed_hosts: [],
   });
 });
 

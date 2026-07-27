@@ -6,6 +6,7 @@
   import { formatStringMetadata, parseStringMetadata } from '$lib/admin-form-utils';
   import { PASSWORD_REQUIREMENT, passwordPolicyError } from '$lib/password-policy';
   import PageHeader from '$lib/components/layout/PageHeader.svelte';
+  import AvatarCropper from '$lib/components/account/AvatarCropper.svelte';
   import Pagination from '$lib/components/data-display/Pagination.svelte';
   import Badge from '$lib/components/ui/Badge.svelte';
   import Button from '$lib/components/ui/Button.svelte';
@@ -40,7 +41,7 @@
   let drawerOpen = $state(false);
   let selectedUser = $state<User | null>(null);
   let selectedRole = $state<UserRole>('user');
-  let profileForm = $state({ email: '', display_name: '', avatar_url: '', metadata: '{}' });
+  let profileForm = $state({ email: '', display_name: '', metadata: '{}' });
   let profileSaving = $state(false);
   let profileError = $state('');
   let profileNotice = $state('');
@@ -188,7 +189,6 @@
     profileForm = {
       email: user.email || '',
       display_name: user.display_name || '',
-      avatar_url: user.avatar_url || '',
       metadata: formatStringMetadata(user.metadata),
     };
     profileError = '';
@@ -225,7 +225,6 @@
       const updated = await api.admin.updateUser(selectedUser.id, {
         email: profileForm.email.trim(),
         display_name: profileForm.display_name.trim(),
-        avatar_url: profileForm.avatar_url.trim(),
         metadata,
       });
       selectedUser = updated;
@@ -233,7 +232,6 @@
       profileForm = {
         email: updated.email || '',
         display_name: updated.display_name || '',
-        avatar_url: updated.avatar_url || '',
         metadata: formatStringMetadata(updated.metadata),
       };
       profileNotice = '用户资料已更新。';
@@ -242,6 +240,23 @@
     } finally {
       profileSaving = false;
     }
+  }
+
+  function applySelectedUser(updated: User) {
+    selectedUser = updated;
+    users = users.map((item) => item.id === updated.id ? updated : item);
+  }
+
+  async function uploadSelectedUserAvatar(blob: Blob) {
+    if (!selectedUser) return;
+    applySelectedUser(await api.admin.uploadUserAvatar(selectedUser.id, blob));
+    profileNotice = '用户头像已更新。';
+  }
+
+  async function removeSelectedUserAvatar() {
+    if (!selectedUser) return;
+    applySelectedUser(await api.admin.removeUserAvatar(selectedUser.id));
+    profileNotice = '用户头像已删除。';
   }
 
   function requestIdentityRemoval(identity: ExternalIdentity) {
@@ -434,7 +449,7 @@
         <form onsubmit={saveProfile} class="space-y-3">
           <Input id="admin-user-email" label="邮箱" type="email" bind:value={profileForm.email} autocomplete="email" placeholder="可选" />
           <Input id="admin-user-display-name" label="显示名称" bind:value={profileForm.display_name} placeholder="可选" />
-          <Input id="admin-user-avatar-url" label="头像 URL" type="url" bind:value={profileForm.avatar_url} placeholder="https://example.com/avatar.png" />
+          <div><p class="mb-2 text-body-medium text-nya-text-primary">头像</p><AvatarCropper currentUrl={selectedUser.avatar_url} onupload={uploadSelectedUserAvatar} onremove={removeSelectedUserAvatar} /></div>
           <div><label for="admin-user-metadata" class="mb-1.5 block text-body-medium text-nya-text-primary">Metadata（JSON 字符串键值）</label><textarea id="admin-user-metadata" bind:value={profileForm.metadata} rows="5" spellcheck="false" class="w-full rounded-nya-sm border border-nya-border bg-nya-surface px-3 py-2 font-mono text-small focus:border-nya-primary focus:outline-none focus:ring-2 focus:ring-nya-primary/24"></textarea></div>
           <div class="flex justify-end"><Button type="submit" variant="primary" size="sm" loading={profileSaving}>保存资料</Button></div>
         </form>

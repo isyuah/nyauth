@@ -403,6 +403,7 @@ async function installPasskeyMocks(page: Page, state: PasskeyMockState) {
           providers: { status: 'ok', latency_ms: 1, snapshot_revision: 1 },
           jwk: { status: 'ok', latency_ms: 1 },
           mail: { status: 'ok', mode: 'disabled', configured: false, available: false, circuit_state: 'closed' },
+          media: { status: 'ok', backend: 'local', configured: true },
         },
         active_signing_key: null,
       });

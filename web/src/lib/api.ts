@@ -210,6 +210,8 @@ export interface ExternalProvider {
   token_url?: string | null;
   userinfo_url?: string | null;
   enabled: boolean;
+  import_avatar: boolean;
+  avatar_allowed_hosts: string[];
   revision: number;
   metadata?: Record<string, string>;
   created_at: string;
@@ -222,6 +224,8 @@ export interface CreateProviderInput {
   client_id: string;
   client_secret: string;
   enabled: boolean;
+  import_avatar?: boolean;
+  avatar_allowed_hosts?: string[];
   scopes?: string[];
   discovery_url?: string;
   authorization_url?: string;
@@ -238,6 +242,8 @@ export interface UpdateProviderInput {
   token_url?: string;
   userinfo_url?: string;
   enabled?: boolean;
+  import_avatar?: boolean;
+  avatar_allowed_hosts?: string[];
 }
 
 export interface ProviderTestResult {
@@ -516,6 +522,12 @@ export interface SystemStatus {
       available: boolean;
       circuit_state: MailCircuitState;
     };
+    media: {
+      status: ComponentStatus;
+      backend: 'local' | 's3' | string;
+      configured: boolean;
+      last_error_at?: string;
+    };
   };
   active_signing_key?: {
     kid: string;
@@ -543,7 +555,6 @@ export interface CreateUserInput {
 export interface UpdateUserInput {
   email?: string | null;
   display_name?: string | null;
-  avatar_url?: string | null;
   status?: UserStatus;
   role?: UserRole;
   metadata?: Record<string, string>;
@@ -646,6 +657,14 @@ const API_ERROR_TRANSLATIONS: Record<string, string> = {
   'webauthn ceremony expired': 'Passkey 验证已过期，请重新开始',
   'webauthn ceremony is invalid': 'Passkey 验证状态无效，请重新开始',
   'too many passkey ceremonies': 'Passkey 操作过于频繁，请稍后重试',
+  'avatar image exceeds 8 mib': '头像文件不能超过 8 MiB',
+  'avatar media type must be jpeg, png, or static webp': '仅支持 JPEG、PNG 或静态 WebP 头像',
+  'animated webp avatars are not supported': '不支持动态 WebP 头像',
+  'avatar image dimensions are invalid': '头像尺寸或总像素数超出限制',
+  'user avatar upload must be square after browser crop': '头像必须先裁剪为正方形',
+  'too many avatar operations': '头像操作过于频繁，请稍后重试',
+  'avatar operation is temporarily unavailable': '头像操作暂时不可用，请稍后重试',
+  'avatar storage is temporarily unavailable': '头像存储暂时不可用，请稍后重试',
 };
 
 export function localizeAPIErrorMessage(message: string): string {
@@ -745,8 +764,14 @@ export const api = {
   session: () => req<SessionInfo>('/api/session', { cache: 'no-store' }, false),
   logout: () => req<void>('/api/logout', { method: 'POST' }),
   getMe: () => req<User>('/api/me'),
-  updateMe: (data: Pick<UpdateUserInput, 'display_name' | 'avatar_url'>) =>
+  updateMe: (data: Pick<UpdateUserInput, 'display_name'>) =>
     req<User>('/api/me', { method: 'PUT', body: JSON.stringify(data) }),
+  uploadAvatar: (blob: Blob) => {
+    const body = new FormData();
+    body.append('avatar', blob, blob.type === 'image/png' ? 'avatar.png' : 'avatar.webp');
+    return req<User>('/api/me/avatar', { method: 'POST', body });
+  },
+  removeAvatar: () => req<User>('/api/me/avatar', { method: 'DELETE' }),
   changePassword: (currentPassword: string, newPassword: string) =>
     req<SessionInfo>('/api/me/password', {
       method: 'POST',
@@ -926,6 +951,12 @@ export const api = {
     },
     createUser: (data: CreateUserInput) => req<User>('/api/admin/users', { method: 'POST', body: JSON.stringify(data) }),
     updateUser: (id: string, data: UpdateUserInput) => req<User>(`/api/admin/users/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+    uploadUserAvatar: (id: string, blob: Blob) => {
+      const body = new FormData();
+      body.append('avatar', blob, blob.type === 'image/png' ? 'avatar.png' : 'avatar.webp');
+      return req<User>(`/api/admin/users/${id}/avatar`, { method: 'POST', body });
+    },
+    removeUserAvatar: (id: string) => req<User>(`/api/admin/users/${id}/avatar`, { method: 'DELETE' }),
     deleteUser: (id: string) => req<void>(`/api/admin/users/${id}`, { method: 'DELETE' }),
     resetPassword: (id: string, password: string) =>
       req<void>(`/api/admin/users/${id}/reset-password`, { method: 'POST', body: JSON.stringify({ password }) }),
