@@ -17,6 +17,7 @@ import (
 	"github.com/nyasharp/nyauth/internal/crypto"
 	"github.com/nyasharp/nyauth/internal/identity"
 	"github.com/nyasharp/nyauth/internal/provider"
+	"github.com/nyasharp/nyauth/internal/user"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
 
@@ -316,13 +317,33 @@ func (s *Server) finishExternalReauthentication(w http.ResponseWriter, r *http.R
 		s.providerCallbackFailure(w, r, "reauth", returnTo, "identity_mismatch", http.StatusForbidden)
 		return
 	}
-	updated, err := s.userService.RecordAuthentication(r.Context(), current.ID)
-	if err != nil {
-		s.providerCallbackFailure(w, r, "reauth", returnTo, "reauthentication_failed", http.StatusInternalServerError)
+	ctx := withAuthenticatedSession(r.Context(), authenticated)
+	requestWithSession := r.WithContext(ctx)
+	_, mfaRequired, mfaErr := s.beginReauthenticationMFAPending(w, requestWithSession, current, "provider", providerName, returnTo)
+	if mfaErr != nil {
+		s.providerCallbackFailure(w, r, "reauth", returnTo, "mfa_unavailable", http.StatusServiceUnavailable)
 		return
 	}
-	ctx := withAuthenticatedSession(r.Context(), authenticated)
-	if _, err := s.sessionMiddleware.MarkReauthenticated(r.WithContext(ctx), updated); err != nil {
+	if mfaRequired {
+		s.telemetry.RecordProviderEvent(r.Context(), "callback", "reauth", "success", "mfa_required", -1)
+		target := "/login/mfa?purpose=reauthentication&return_to=" + url.QueryEscape(safeReturnPath(returnTo, "/profile"))
+		http.Redirect(w, r, target, http.StatusFound)
+		return
+	}
+	updated, err := s.userService.RecordAuthentication(
+		r.Context(), current.ID, current.AuthVersion, current.SessionVersion,
+	)
+	if err != nil {
+		status := http.StatusInternalServerError
+		code := "reauthentication_failed"
+		if errors.Is(err, user.ErrAuthStateChanged) {
+			status = http.StatusUnauthorized
+			code = "account_changed"
+		}
+		s.providerCallbackFailure(w, r, "reauth", returnTo, code, status)
+		return
+	}
+	if _, err := s.sessionMiddleware.MarkReauthenticated(requestWithSession, updated); err != nil {
 		s.providerCallbackFailure(w, r, "reauth", returnTo, "session_failed", http.StatusServiceUnavailable)
 		return
 	}
@@ -398,6 +419,23 @@ func (s *Server) finishExternalLogin(w http.ResponseWriter, r *http.Request, pro
 	}
 	if err != nil || current == nil || current.Status != models.UserStatusActive {
 		s.providerCallbackFailure(w, r, "login", returnTo, "account_unavailable", http.StatusForbidden)
+		return
+	}
+	_, mfaRequired, mfaErr := s.beginMFAPending(w, r, current, "provider", providerName, returnTo)
+	if mfaErr != nil {
+		code := "mfa_unavailable"
+		status := http.StatusServiceUnavailable
+		if errors.Is(mfaErr, errMFAEnrollmentRequired) {
+			code = "mfa_enrollment_required"
+			status = http.StatusForbidden
+		}
+		s.providerCallbackFailure(w, r, "login", returnTo, code, status)
+		return
+	}
+	if mfaRequired {
+		s.telemetry.RecordProviderEvent(r.Context(), "callback", "login", "success", "mfa_required", -1)
+		target := "/login/mfa?return_to=" + url.QueryEscape(safeReturnPath(returnTo, "/dashboard"))
+		http.Redirect(w, r, target, http.StatusFound)
 		return
 	}
 	if _, err := s.sessionMiddleware.CreateSession(w, r, current); err != nil {

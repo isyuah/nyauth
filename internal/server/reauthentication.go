@@ -44,7 +44,7 @@ func (s *Server) handlePasswordReauthentication(w http.ResponseWriter, r *http.R
 		writeAPIError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	updated, err := s.userService.Reauthenticate(r.Context(), current.ID, request.Password)
+	verified, err := s.userService.VerifyPasswordForReauthentication(r.Context(), current.ID, request.Password)
 	if err != nil {
 		switch {
 		case errors.Is(err, user.ErrPasswordUnavailable):
@@ -52,6 +52,26 @@ func (s *Server) handlePasswordReauthentication(w http.ResponseWriter, r *http.R
 		case errors.Is(err, user.ErrInvalidCredentials):
 			writeAPIError(w, http.StatusUnauthorized, "invalid credentials")
 		default:
+			writeAPIError(w, http.StatusInternalServerError, "reauthentication failed")
+		}
+		return
+	}
+	mfaResponse, mfaRequired, err := s.beginReauthenticationMFAPending(w, r, verified, "password", "", "/profile")
+	if err != nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "MFA verification temporarily unavailable")
+		return
+	}
+	if mfaRequired {
+		writeJSON(w, http.StatusAccepted, mfaResponse)
+		return
+	}
+	updated, err := s.userService.RecordAuthentication(
+		r.Context(), current.ID, verified.AuthVersion, verified.SessionVersion,
+	)
+	if err != nil {
+		if errors.Is(err, user.ErrAuthStateChanged) {
+			writeAPIError(w, http.StatusUnauthorized, "account changed; sign in again")
+		} else {
 			writeAPIError(w, http.StatusInternalServerError, "reauthentication failed")
 		}
 		return

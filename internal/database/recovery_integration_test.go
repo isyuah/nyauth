@@ -10,6 +10,7 @@ import (
 	"github.com/nyasharp/nyauth/internal/account"
 	"github.com/nyasharp/nyauth/internal/auth"
 	"github.com/nyasharp/nyauth/internal/database"
+	"github.com/nyasharp/nyauth/internal/mfa"
 	"github.com/nyasharp/nyauth/internal/provider"
 	"github.com/nyasharp/nyauth/internal/recovery"
 	"github.com/nyasharp/nyauth/pkg/models"
@@ -54,6 +55,20 @@ func TestRecoveryVerifierAuthenticatesRestoredEnvelopes(t *testing.T) {
 		t.Fatalf("insert recovery provider: %v", err)
 	}
 
+	mfaService, err := mfa.NewService(schema.pool, mfa.Options{
+		ActiveKeyID: "primary", MasterKeys: map[string][]byte{"primary": masterKey},
+	})
+	if err != nil {
+		t.Fatalf("New MFA service: %v", err)
+	}
+	if _, err := mfaService.BeginEnrollment(ctx, userID, "Nyauth Recovery", "recovery-admin", time.Now().UTC()); err != nil {
+		t.Fatalf("store recovery TOTP envelope: %v", err)
+	}
+	var originalTOTPCiphertext string
+	if err := schema.pool.QueryRow(ctx, `SELECT secret_ciphertext FROM user_totp_credentials WHERE user_id=$1`, userID).Scan(&originalTOTPCiphertext); err != nil {
+		t.Fatalf("read recovery TOTP envelope: %v", err)
+	}
+
 	accountService, err := account.NewService(account.NewStore(schema.pool), account.ServiceOptions{
 		PublicBaseURL: "https://auth.example.test",
 		ActiveKeyID:   "primary",
@@ -84,11 +99,21 @@ func TestRecoveryVerifierAuthenticatesRestoredEnvelopes(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Verify: %v", err)
 	}
-	if !report.JWKEnvelopeVerified || report.ProviderEnvelopesVerified != 1 || report.EmailEnvelopeSampled != 1 {
+	if !report.JWKEnvelopeVerified || report.ProviderEnvelopesVerified != 1 || report.TOTPEnvelopesVerified != 1 || report.EmailEnvelopeSampled != 1 {
 		t.Fatalf("unexpected envelope report: %#v", report)
 	}
 	if report.Counts.Users != 1 || report.Counts.OAuthProviders != 1 || report.Counts.EmailOutbox != 1 {
 		t.Fatalf("unexpected resource counts: %#v", report.Counts)
+	}
+
+	if _, err := schema.pool.Exec(ctx, `UPDATE user_totp_credentials SET secret_ciphertext=secret_ciphertext || 'x' WHERE user_id=$1`, userID); err != nil {
+		t.Fatalf("tamper recovery TOTP envelope: %v", err)
+	}
+	if _, err := recovery.Verify(ctx, schema.pool, masterKey); err == nil || !strings.Contains(err.Error(), "TOTP envelope") {
+		t.Fatalf("Verify(tampered TOTP) error = %v", err)
+	}
+	if _, err := schema.pool.Exec(ctx, `UPDATE user_totp_credentials SET secret_ciphertext=$2 WHERE user_id=$1`, userID, originalTOTPCiphertext); err != nil {
+		t.Fatalf("restore recovery TOTP envelope: %v", err)
 	}
 
 	if _, err := schema.pool.Exec(ctx, `UPDATE email_outbox SET encrypted_message=encrypted_message || 'x' WHERE id=$1`, outbox.ID); err != nil {

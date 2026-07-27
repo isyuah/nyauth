@@ -136,6 +136,7 @@ func TestDescribeRegistrationAdministrationMutations(t *testing.T) {
 		successAlreadyAudited   bool
 	}{
 		{http.MethodPut, "/api/admin/settings/registration", "/api/admin/settings/registration", "", models.AuditSettingsUpdated, "settings", "high", false},
+		{http.MethodPut, "/api/admin/settings/security", "/api/admin/settings/security", "", models.AuditSettingsUpdated, "settings", "high", true},
 		{http.MethodPost, "/api/admin/invites", "/api/admin/invites", "", models.AuditInviteCreated, "invite", "medium", true},
 		{http.MethodDelete, "/api/admin/invites/invite-1", "/api/admin/invites/{id}", "invite-1", models.AuditInviteRevoked, "invite", "medium", true},
 	} {

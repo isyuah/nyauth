@@ -1,6 +1,6 @@
 <script lang="ts">
   import { page } from '$app/stores';
-  import { api, ApiError } from '$lib/api';
+  import { api, ApiError, isMFARequiredResponse } from '$lib/api';
   import { brandingStore, consumeProviderAuthError, safeReturnPath, sessionStore } from '$lib/stores';
   import { goto } from '$app/navigation';
   import { onMount } from 'svelte';
@@ -69,7 +69,13 @@
     pendingVerification = false;
     loading = true;
     try {
-      const session = await api.login(username, password);
+      const result = await api.login(username, password, returnTo);
+      password = '';
+      if (isMFARequiredResponse(result)) {
+        await goto(`/login/mfa?return_to=${encodeURIComponent(returnTo)}`);
+        return;
+      }
+      const session = result;
       sessionStore.setSession(session);
       if (session.must_change_password) {
         goto(`/change-password?return_to=${encodeURIComponent(returnTo)}`);

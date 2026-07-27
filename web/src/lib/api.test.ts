@@ -1,5 +1,13 @@
-import { describe, expect, it } from 'vitest';
-import { localizeAPIErrorMessage } from './api';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import {
+  api,
+  isMFARequiredResponse,
+  localizeAPIErrorMessage,
+  missingAdminsFromError,
+  setCsrfToken,
+  type MFARequiredResponse,
+  type SessionInfo,
+} from './api';
 import { PASSWORD_REQUIREMENT } from './password-policy';
 
 describe('localizeAPIErrorMessage', () => {
@@ -21,11 +29,141 @@ describe('localizeAPIErrorMessage', () => {
     ['mail settings changed; reload and try again', '邮件设置已被其他管理员修改，请重新加载后再试'],
     ['a successful candidate test is required', '激活前必须先成功发送候选配置的测试邮件'],
     ['close self-registration before disabling mail', '禁用邮件服务前必须先关闭自助注册'],
+    ['invalid MFA code', '验证码或恢复码不正确'],
+    ['MFA challenge expired', '多因素验证已过期，请重新登录'],
+    ['TOTP enrollment is disabled', '管理员已关闭动态验证码注册'],
+    ['MFA is required for active administrators', '管理员策略要求保留多因素验证，当前无法停用'],
   ])('maps stable authentication error %s', (message, expected) => {
     expect(localizeAPIErrorMessage(message)).toBe(expected);
   });
 
   it('preserves unrelated API errors', () => {
     expect(localizeAPIErrorMessage('provider temporarily unavailable')).toBe('provider temporarily unavailable');
+  });
+});
+
+describe('MFA API contract', () => {
+  const mfaRequired: MFARequiredResponse = {
+    status: 'mfa_required',
+    purpose: 'login',
+    username: 'alice',
+    methods: ['totp', 'recovery_code'],
+    csrf_token: 'mfa-csrf',
+    expires_at: '2026-07-27T12:05:00Z',
+  };
+
+  const session: SessionInfo = {
+    user: {
+      id: '11111111-1111-1111-1111-111111111111',
+      username: 'alice',
+      email: 'alice@example.com',
+      display_name: 'Alice',
+      role: 'user',
+      status: 'active',
+      created_at: '2026-01-01T00:00:00Z',
+    },
+    csrf_token: 'session-csrf',
+    must_change_password: false,
+    has_password: true,
+    email_verified: true,
+    authenticated_at: '2026-07-27T12:00:00Z',
+  };
+
+  beforeEach(() => setCsrfToken(''));
+
+  afterEach(() => {
+    setCsrfToken('');
+    vi.unstubAllGlobals();
+  });
+
+  it('sends return_to, narrows the 202 response, and explicitly uses pending CSRF for verification', async () => {
+    const responses = [
+      new Response(JSON.stringify(mfaRequired), { status: 202, headers: { 'Content-Type': 'application/json' } }),
+      new Response(JSON.stringify(session), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    ];
+    const fetchMock = vi.fn(async () => responses.shift()!);
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await api.login('alice', 'correct horse battery staple', '/authorize?client_id=demo');
+    expect(isMFARequiredResponse(result)).toBe(true);
+
+    const [, loginInit] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(JSON.parse(String(loginInit.body))).toEqual({
+      username: 'alice',
+      password: 'correct horse battery staple',
+      return_to: '/authorize?client_id=demo',
+    });
+
+    await api.verifyLoginMFA('recovery_code', 'ABCDEFGH-234567ABCDEFGH', mfaRequired.csrf_token);
+    const [, verifyInit] = fetchMock.mock.calls[1] as unknown as [string, RequestInit];
+    expect(new Headers(verifyInit.headers).get('X-CSRF-Token')).toBe('mfa-csrf');
+    expect(JSON.parse(String(verifyInit.body))).toEqual({
+      method: 'recovery_code',
+      code: 'ABCDEFGH-234567ABCDEFGH',
+    });
+  });
+
+  it('does not replace or clear the formal-session CSRF during a reauthentication challenge', async () => {
+    const challenge: MFARequiredResponse = {
+      ...mfaRequired,
+      purpose: 'reauthentication',
+      csrf_token: 'reauth-mfa-csrf',
+    };
+    const responses = [
+      new Response(JSON.stringify(challenge), { status: 202, headers: { 'Content-Type': 'application/json' } }),
+      new Response(null, { status: 204 }),
+      new Response(JSON.stringify(session.user), { status: 200, headers: { 'Content-Type': 'application/json' } }),
+    ];
+    const fetchMock = vi.fn(async () => responses.shift()!);
+    vi.stubGlobal('fetch', fetchMock);
+    setCsrfToken('formal-session-csrf');
+
+    const result = await api.reauthenticateWithPassword('current password');
+    expect(isMFARequiredResponse(result)).toBe(true);
+    await api.cancelLoginMFA(challenge.csrf_token);
+    await api.updateMe({ display_name: 'Alice', avatar_url: '' });
+
+    const [, reauthInit] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(new Headers(reauthInit.headers).get('X-CSRF-Token')).toBe('formal-session-csrf');
+    const [, cancelInit] = fetchMock.mock.calls[1] as unknown as [string, RequestInit];
+    expect(new Headers(cancelInit.headers).get('X-CSRF-Token')).toBe('reauth-mfa-csrf');
+    const [, updateInit] = fetchMock.mock.calls[2] as unknown as [string, RequestInit];
+    expect(new Headers(updateInit.headers).get('X-CSRF-Token')).toBe('formal-session-csrf');
+  });
+
+  it('preserves missing_admins from a structured security-settings error', async () => {
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify({
+      error: 'all active administrators must enroll MFA before it can be required',
+      missing_admins: ['admin-a', 'admin-b', 42],
+    }), { status: 409, headers: { 'Content-Type': 'application/json' } })));
+
+    let caught: unknown;
+    try {
+      await api.admin.updateSecuritySettings({ totp_enabled: true, require_mfa_for_admins: true });
+    } catch (cause) {
+      caught = cause;
+    }
+
+    expect(missingAdminsFromError(caught)).toEqual(['admin-a', 'admin-b']);
+  });
+
+  it('returns a purpose-tagged MFA challenge from password reauthentication', async () => {
+    const challenge: MFARequiredResponse = {
+      ...mfaRequired,
+      purpose: 'reauthentication',
+      csrf_token: 'reauth-mfa-csrf',
+    };
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(challenge), {
+      status: 202,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+
+    const result = await api.reauthenticateWithPassword('current password');
+    expect(isMFARequiredResponse(result)).toBe(true);
+    if (isMFARequiredResponse(result)) expect(result.purpose).toBe('reauthentication');
+
+    const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(JSON.parse(String(init.body))).toEqual({ password: 'current password' });
   });
 });

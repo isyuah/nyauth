@@ -11,6 +11,7 @@ import (
 	"github.com/nyasharp/nyauth/internal/account"
 	"github.com/nyasharp/nyauth/internal/auth"
 	"github.com/nyasharp/nyauth/internal/database"
+	"github.com/nyasharp/nyauth/internal/mfa"
 	"github.com/nyasharp/nyauth/internal/provider"
 )
 
@@ -35,6 +36,7 @@ type Report struct {
 	SigningKeyID              string         `json:"signing_key_id"`
 	JWKEnvelopeVerified       bool           `json:"jwk_envelope_verified"`
 	ProviderEnvelopesVerified int64          `json:"provider_envelopes_verified"`
+	TOTPEnvelopesVerified     int64          `json:"totp_envelopes_verified"`
 	EmailEnvelopeRows         int64          `json:"email_envelope_rows"`
 	EmailEnvelopeSampled      int64          `json:"email_envelopes_sampled"`
 	EmailEnvelopeSampleLimit  int            `json:"email_envelope_sample_limit"`
@@ -98,6 +100,18 @@ func Verify(ctx context.Context, db *pgxpool.Pool, masterKey []byte) (Report, er
 		return report, fmt.Errorf("verified provider envelope count %d does not match provider count %d", verifiedProviders, report.Counts.OAuthProviders)
 	}
 	report.ProviderEnvelopesVerified = verifiedProviders
+
+	mfaService, err := mfa.NewService(db, mfa.Options{
+		ActiveKeyID: "primary", MasterKeys: map[string][]byte{"primary": masterKey},
+	})
+	if err != nil {
+		return report, fmt.Errorf("configuring recovered TOTP verification: %w", err)
+	}
+	verifiedTOTP, err := mfaService.VerifyStoredSecrets(ctx)
+	if err != nil {
+		return report, err
+	}
+	report.TOTPEnvelopesVerified = verifiedTOTP
 
 	if err := verifyEmailEnvelopes(ctx, db, masterKey, &report); err != nil {
 		return report, err

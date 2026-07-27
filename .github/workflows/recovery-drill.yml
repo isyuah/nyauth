@@ -200,6 +200,7 @@ jobs:
             .schema_dirty == false and
             .jwk_envelope_verified == true and
             .provider_envelopes_verified == .counts.oauth_providers and
+            (.totp_envelopes_verified | type == "number" and . >= 0) and
             .email_envelopes_sampled <= .email_envelope_rows
           ' .recovery-verification.json >/dev/null
       - name: Start isolated Nyauth
@@ -300,7 +301,7 @@ jobs:
               echo
               echo '## Envelope verification'
               echo '```json'
-              jq '{schema_version,schema_dirty,counts,jwk_envelope_verified,provider_envelopes_verified,email_envelope_rows,email_envelopes_sampled,email_envelope_sample_limit}' .recovery-verification.json
+              jq '{schema_version,schema_dirty,counts,jwk_envelope_verified,provider_envelopes_verified,totp_envelopes_verified,email_envelope_rows,email_envelopes_sampled,email_envelope_sample_limit}' .recovery-verification.json
               echo '```'
             fi
           } > recovery-drill-report.md

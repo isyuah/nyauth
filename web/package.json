@@ -17,6 +17,7 @@
     "@sveltejs/adapter-static": "^3.0.0",
     "@sveltejs/kit": "^2.0.0",
     "@sveltejs/vite-plugin-svelte": "^5.0.0",
+    "@types/qrcode": "^1.5.6",
     "autoprefixer": "^10.4.20",
     "postcss": "^8.4.49",
     "svelte": "^5.0.0",
@@ -29,7 +30,8 @@
   "dependencies": {
     "bits-ui": "^2.18.1",
     "chart.js": "^4.5.1",
-    "lucide-svelte": "^0.468.0"
+    "lucide-svelte": "^0.468.0",
+    "qrcode": "^1.5.4"
   },
   "type": "module"
 }

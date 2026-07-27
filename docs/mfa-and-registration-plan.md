@@ -1,12 +1,12 @@
-# Passkey/TOTP 与自助注册/邀请制 实施计划（草案）
+# Passkey/TOTP 与自助注册/邀请制实施状态
 
-> 状态：Phase R 已完成；Phase T 与 Phase P 仍是待实施草案（2026-07-26）。下文 Phase R 的早期数据模型草图仅保留设计背景，当前注册/邀请契约以 README 和实现为准。所有行为开关继续使用运行时设置，配置文件不新增业务开关。
+> 状态：Phase R、Phase S 与 Phase T 已完成；Phase P 是下一阶段（2026-07-27）。下文 Phase R 的早期数据模型草图仅保留设计背景，当前注册/邀请契约以 README 和实现为准。所有行为开关继续使用运行时设置，配置文件不新增业务开关。
 
 ## 0. 顺序建议
 
 1. **Phase R：自助注册 + 邀请制**（先做——是接入真实应用的前置条件，且完全复用已有的邮件/token/限流基础设施，无新外部依赖）
-2. **Phase T：TOTP + 恢复码**（次之——纯服务端实现，简单可靠）
-3. **Phase P：Passkey/WebAuthn**（最后——引入 go-webauthn 库与浏览器 API，联调面最大）
+2. **Phase T：TOTP + 恢复码**（已完成）
+3. **Phase P：Passkey/WebAuthn**（下一阶段——引入 go-webauthn 库与浏览器 API，联调面最大）
 
 三个阶段各自独立发布，中途可穿插其他工作。
 
@@ -50,7 +50,7 @@ CREATE TABLE invites (
 - 登录页在 mode != closed 时显示"注册"入口；注册页按 mode/邀请码状态渲染
 - 审计事件：`user.registered`、`invite.created/revoked/consumed`
 
-## 2. Phase T：TOTP + 恢复码
+## 2. Phase T：TOTP + 恢复码（已完成）
 
 ### 运行时设置（新增 `security` 组）
 
@@ -59,20 +59,36 @@ CREATE TABLE invites (
 | `totp_enabled` | `true` | 是否允许用户启用 TOTP |
 | `require_mfa_for_admins` | `false` | 管理员登录必须完成第二因素（开启前校验所有 admin 已配置 MFA，否则拒绝保存并列出未配置者） |
 
-### 设计
+### 已实现契约
 
-- 新迁移（编号在实施时分配）：`user_mfa`（TOTP secret 用 master key envelope 加密）+ `recovery_codes`（argon2id 哈希，一次性）
-- 标准 TOTP（RFC 6238，30s/6 位，±1 窗口），防重放：记录最近成功的 time-step
-- 登录流：密码/外部身份验证成功 → 若用户有 MFA → 会话进入 `mfa_pending` 半状态（不发全量会话）→ `POST /api/login/mfa` 校验 TOTP 或恢复码 → 升级为完整会话；`mfa_pending` 状态只能访问 MFA 校验端点
-- 启用/停用 TOTP 要求近期重新认证（复用 reauth 框架）；启用时生成 10 个恢复码（一次性显示）
-- 个人资料"安全"区新增 MFA 卡片：启用向导（QR + 手动密钥 + 首次校验）、恢复码重新生成、停用
-- 审计：`mfa.enrolled/disabled/challenge_failed`、`recovery_code.used`
+- 迁移 `000007_totp_mfa` 新增 `user_totp_credentials` 与 `user_recovery_codes`。TOTP secret 使用 master key envelope encryption，AAD 绑定用户 ID；恢复码以随机 selector 定位单行，再用 Argon2id 校验完整值。
+- 标准参数为 RFC 6238 / SHA-1 / 30 秒 / 6 位 / `±1` 窗口。最近成功 time-step 在 `FOR UPDATE` 事务内推进，相同或更旧 step 会作为重放拒绝。
+- 启用时生成 10 枚恢复码并只返回一次；恢复码原子消费，重新生成会让旧集合全部失效。
+- 密码和外部 Provider 登录都先建立独立 Redis `mfa_pending` 状态，而不是完整 session。Cookie 为 `nyauth_mfa_pending`，TTL 5 分钟，不进入用户 session set、设备列表或活跃会话统计。
+- MFA pending 支持 `login` 与 `reauthentication` 两种 purpose。密码/Provider 重新认证也必须完成已绑定的第二因素，主因素本身不会刷新近期认证时间。
+- MFA pending CSRF 与正式 session CSRF 完全分离；验证和取消接口显式使用 challenge CSRF，不会覆盖或清空仍有效的正式会话令牌。
+- 启用/停用 TOTP 会在同一 PostgreSQL 事务中推进 `auth_version` 并写审计 outbox，随后清理旧 session/refresh family 并轮换当前会话。
+- 管理员强制策略通过 PostgreSQL advisory lock 与管理员角色/状态变更、TOTP 停用协调。开启前列出所有缺少 MFA 的活动管理员；开启后不能将无 MFA 用户激活或晋升为管理员，活动管理员不能停用 TOTP。
+- 动态 `security` 设置通过 `LISTEN/NOTIFY` 与一分钟 reconciliation 在多实例同步，不要求重启。
+- `verify-recovery` 会只读认证所有已存 TOTP envelope；错误 master key 或被篡改密文会使恢复演练失败。
+
+### API
+
+- 公开：`GET/POST/DELETE /api/login/mfa`
+- 当前用户：`GET /api/me/mfa`、`POST /api/me/mfa/totp/enroll`、`POST /api/me/mfa/totp/enroll/confirm`、`POST /api/me/mfa/recovery-codes`、`DELETE /api/me/mfa/totp`
+- 管理：`GET/PUT /api/admin/settings/security`
+
+### 审计与测试
+
+- 审计：`mfa.enrolled`、`mfa.disabled`、`mfa.challenge_failed`、`recovery_code.used`、`recovery_code.regenerated`。
+- 集成测试覆盖密码与 Provider 登录、密码与 Provider reauth、TOTP 防重放、恢复码一次性消费、MFA pending 不计入 session、被撤销 session 不会被 reauth 复活、管理员策略并发不变量与恢复验证。
+- 前端覆盖登录 challenge、内联 reauth challenge、取消时正式 CSRF 保留，以及 TOTP 启用/恢复码替换/停用流程。
 
 ## 3. Phase P：Passkey/WebAuthn
 
 - 库：`github.com/go-webauthn/webauthn`（Go 生态事实标准）
 - RP ID/origin 取自 `auth.issuer`（又一个 issuer 必须等于公开域名的理由）
-- 新迁移（编号在实施时分配）：`webauthn_credentials`（credential_id、公钥、sign_count、transports、aaguid、自定义名称、created/last_used_at）
+- 新迁移计划为 `000008_passkeys`：保存 credential ID、公钥、sign count、transports、AAGUID、自定义名称、backup state 与 created/last_used 时间
 - 能力：① 独立登录方式（discoverable credential + 浏览器 conditional UI，登录页"使用通行密钥登录"）② 已登录用户的 step-up 重新认证手段（并入 reauth 框架，与密码/Provider reauth 并列）③ 作为 MFA 第二因素
 - 运行时设置：`security.passkeys_enabled`（默认 true）
 - 注册/删除通行密钥要求近期重新认证；删除最后一个凭据时校验用户还有其他登录方式（复用 identity 的"最后认证方式"检查思路）

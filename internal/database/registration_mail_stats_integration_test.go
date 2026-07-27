@@ -34,7 +34,7 @@ func TestRegistrationStatsMigrationBackfillsLifecycleHistory(t *testing.T) {
 		t.Fatalf("create migration runner: %v", err)
 	}
 	t.Cleanup(func() { _, _ = runner.Close() })
-	if err := runner.Steps(-1); err != nil {
+	if err := runner.Migrate(5); err != nil {
 		t.Fatalf("migrate observability down: %v", err)
 	}
 
@@ -75,7 +75,7 @@ func TestRegistrationStatsMigrationBackfillsLifecycleHistory(t *testing.T) {
 	); err != nil {
 		t.Fatalf("insert registration backfill history: %v", err)
 	}
-	if err := runner.Steps(1); err != nil {
+	if err := runner.Migrate(6); err != nil {
 		t.Fatalf("migrate observability up: %v", err)
 	}
 

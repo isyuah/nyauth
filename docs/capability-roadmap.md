@@ -8,7 +8,8 @@
 |---|---|---|
 | 运行时设置（部分配置免重启） | 基础已落地；品牌、注册策略和数据库动态 SMTP 已免重启 | P0，持续扩展 |
 | 每客户端访问策略 | 做——当前任何活跃用户可授权任何应用，是真实安全缺口 | P1 |
-| Passkey/WebAuthn + TOTP 两步验证 | 做——认证产品的核心竞争力，reauth 基础设施已就绪 | P1 |
+| TOTP + 恢复码 | Phase T 已完成：登录、reauth、管理员强制策略、恢复验证 | 已完成 |
+| Passkey/WebAuthn | Phase P 下一步：独立登录、Conditional UI、MFA 与 step-up | P1，进行中 |
 | 自助注册 / 邀请制 | Phase R 已完成：关闭 / 邀请制 / 开放注册、验证与邀请预占生命周期 | 已完成 |
 | 事件 Webhook | 做——作为插件系统的替代品，复用审计 outbox | P2 |
 | 插件系统 | **不做进程内插件**；先观察 Webhook + /api/v1 能覆盖多少扩展需求 | 推迟 |
@@ -33,11 +34,11 @@
 
 方案草图：客户端增加 `access_policy`（`open` / `admins_only` / `allowlist`），allowlist 引用用户组；顺带引入最小化的用户组模型。授权端点与 client_credentials 都执行策略检查，拒绝时审计。这也是 `/api/v1` 的 scope 模型将来对接组织/团队概念的地基。
 
-## 3. Passkey / TOTP（P1）
+## 3. MFA（TOTP 已完成，Passkey 下一步）
 
-- WebAuthn 注册/登录（passkey 优先，平台认证器）；`internal/server/reauthentication.go` 的"近期认证"框架直接复用，passkey 可作为 step-up 手段
-- TOTP 作为兜底二因素；恢复码一次性生成
-- 数据模型：`user_credentials` 表（类型 + 公钥/密钥 envelope 加密），沿用 master key 加密体系
+- TOTP 已实现 RFC 6238、time-step 防重放、一次性恢复码、密码/Provider MFA 与 step-up、动态管理员强制策略和 HA 同步。
+- Passkey 使用 WebAuthn 注册/登录，优先支持平台认证器与 discoverable credential；RP ID 和 origin 从公开 `auth.issuer` 派生。
+- Passkey 将同时支持独立登录、Conditional UI、MFA 第二因素与近期重新认证，并在每次认证后持久化 sign count、clone warning 与 backup state。
 
 ## 4. 自助注册 / 邀请（已完成）
 
@@ -60,8 +61,7 @@
 ## 实施顺序建议
 
 ```
-0.4.0: /api/v1 Phase 1-2（已有设计）+ 运行时设置基础 + 品牌设置
-0.5.0: 每客户端访问策略 + 用户组最小模型 + /api/v1 Phase 3-4
-0.6.0: Passkey/TOTP
-0.7.0: 邀请注册 + Webhook
+当前 0.3.0-dev: Phase R/S/T 已完成
+下一检查点: Phase P Passkey/WebAuthn
+随后: /api/v1 Phase 1-2、每客户端访问策略与用户组、/api/v1 Phase 3-4、事件 Webhook
 ```

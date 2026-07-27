@@ -282,6 +282,22 @@ local now = (tonumber(redisTime[1]) * 1000) + math.floor(tonumber(redisTime[2]) 
 redis.call("ZADD", KEYS[3], now + tonumber(ARGV[2]), KEYS[1])
 return 1
 `)
+var updateSessionScript = redis.NewScript(`
+local current = redis.call("GET", KEYS[1])
+if not current then return 0 end
+local value = cjson.decode(current)
+if value["user_key"] ~= ARGV[3] then return -1 end
+if tonumber(value["auth_version"]) ~= tonumber(ARGV[4]) then return -1 end
+if tonumber(value["session_version"]) ~= tonumber(ARGV[5]) then return -1 end
+redis.call("SET", KEYS[1], ARGV[1], "PX", ARGV[2])
+redis.call("SADD", KEYS[2], KEYS[1])
+local currentTTL = redis.call("PTTL", KEYS[2])
+if currentTTL < tonumber(ARGV[2]) then redis.call("PEXPIRE", KEYS[2], ARGV[2]) end
+local redisTime = redis.call("TIME")
+local now = (tonumber(redisTime[1]) * 1000) + math.floor(tonumber(redisTime[2]) / 1000)
+redis.call("ZADD", KEYS[3], now + tonumber(ARGV[2]), KEYS[1])
+return 1
+`)
 var deleteOtherSessionsScript = redis.NewScript(`
 local members = redis.call("SMEMBERS", KEYS[1])
 local deleted = 0
@@ -795,6 +811,49 @@ func (s *Store) SaveSession(ctx context.Context, sessionID string, data *Session
 	sessionKey := secretKey(sessionPrefix, sessionID)
 	userSet := userSessionsPrefix + data.UserKey
 	return saveSessionScript.Run(ctx, s.rdb, []string{sessionKey, userSet, allSessionsKey}, encoded, ttlMillis).Err()
+}
+
+// UpdateSession refreshes an existing session atomically without recreating or
+// upgrading a session that was concurrently revoked. The stored user binding
+// and both expected security versions must still match.
+func (s *Store) UpdateSession(
+	ctx context.Context,
+	sessionID string,
+	data *SessionData,
+	expectedAuthVersion, expectedSessionVersion int64,
+	ttl time.Duration,
+) error {
+	if sessionID == "" || data == nil || data.UserID == "" || data.CSRFToken == "" || data.PublicID == "" {
+		return ErrInvalidTokenData
+	}
+	data.UserKey = digest(data.UserID)
+	encoded, err := json.Marshal(data)
+	if err != nil {
+		return err
+	}
+	ttlMillis, err := ttlMilliseconds(ttl)
+	if err != nil {
+		return err
+	}
+	sessionKey := secretKey(sessionPrefix, sessionID)
+	userSet := userSessionsPrefix + data.UserKey
+	result, err := updateSessionScript.Run(
+		ctx, s.rdb, []string{sessionKey, userSet, allSessionsKey},
+		encoded, ttlMillis, data.UserKey, expectedAuthVersion, expectedSessionVersion,
+	).Int()
+	if err != nil {
+		return err
+	}
+	switch result {
+	case 0:
+		return ErrNotFound
+	case -1:
+		return ErrValueMismatch
+	case 1:
+		return nil
+	default:
+		return fmt.Errorf("unexpected session update result %d", result)
+	}
 }
 func (s *Store) GetSession(ctx context.Context, sessionID string) (*SessionData, error) {
 	var value SessionData

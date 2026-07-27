@@ -9,7 +9,7 @@
 - 第一方后台仅使用 `HttpOnly + SameSite=Lax` 会话 Cookie，并对修改请求强制校验 CSRF。
 - OAuth 授权码客户端强制使用 PKCE S256；不支持 plain、implicit 或 hybrid 流程。
 - JWT 固定使用 RS256，refresh token 采用 family 轮换与重复使用检测。
-- 数据库迁移压缩为嵌入二进制的单一 `000001` 基线，服务启动只校验 schema，不再隐式迁移。
+- 数据库以嵌入二进制的迁移序列管理；当前开发 schema 为 7，发布 0.3.0 前会重新压缩基线。服务启动只校验 schema，不再隐式迁移。
 - 旧数据库、session、token、JWK、Provider 凭据和 OAuth 客户端注册均不兼容。
 - 旧 Go/TypeScript SDK 已删除；OAuth/OIDC 集成以标准协议和成熟语言库为准。
 
@@ -25,7 +25,7 @@
 - 控制面认证：HttpOnly 会话、CSRF、强制首次改密、会话与令牌即时失效
 - 外部身份：GitHub、Google、通用 HTTPS OIDC Provider；不按邮箱自动合并账户
 - 管理后台：用户、客户端、Provider、审计与统计
-- 账户安全中心：设备会话、OAuth 授权、近期重新认证、邮箱验证与密码恢复
+- 账户安全中心：设备会话、OAuth 授权、近期重新认证、TOTP 多因素验证、一次性恢复码、邮箱验证与密码恢复
 - 自助注册：关闭 / 邀请制 / 开放三种模式，域名白名单与邀请码均为运行时设置
 - 动态邮件：数据库版本化 SMTP 配置、真实测试邮件、免重启激活/回滚、共享熔断
 - 运维：严格 readiness、JSON 日志、内部 Prometheus、可选 OTLP 与审计 outbox
@@ -151,11 +151,14 @@ Nyauth 只通过 SMTP 发送邮件，不读取邮箱，也不需要 IMAP。生�
 
 ## 第一方会话 API
 
-`POST /api/login` 创建会话 Cookie，不返回 OAuth access/refresh token。
+`POST /api/login` 在无需第二因素时直接创建会话 Cookie；已启用 MFA 的账户返回 `202 mfa_required`，只有完成临时 challenge 后才创建完整会话。第一方登录不返回 OAuth access/refresh token。
 
 | 方法 | 路径 | 描述 |
 |---|---|---|
-| POST | `/api/login` | 用户名密码登录并创建会话 |
+| POST | `/api/login` | 用户名密码登录；返回完整会话或 `202 mfa_required` |
+| GET | `/api/login/mfa` | 恢复当前 5 分钟 MFA challenge |
+| POST | `/api/login/mfa` | 使用 TOTP 或一次性恢复码完成登录/重新认证 challenge |
+| DELETE | `/api/login/mfa` | 取消当前 MFA challenge |
 | GET | `/api/session` | 返回用户、CSRF、`has_password`、`email_verified` 与最近认证时间 |
 | POST | `/api/logout` | 销毁当前会话 |
 | GET | `/api/me` | 当前用户资料 |
@@ -164,6 +167,11 @@ Nyauth 只通过 SMTP 发送邮件，不读取邮箱，也不需要 IMAP。生�
 | POST | `/api/me/password/set` | 外部身份账户在近期重新认证后设置本地密码 |
 | POST | `/api/me/reauth/password` | 使用当前密码完成近期重新认证 |
 | POST | `/api/me/reauth/{provider}` | 使用已绑定 Provider 完成近期重新认证 |
+| GET | `/api/me/mfa` | 查看 TOTP、恢复码余量和当前管理员强制策略 |
+| POST | `/api/me/mfa/totp/enroll` | 近期重新认证后生成待确认 TOTP secret |
+| POST | `/api/me/mfa/totp/enroll/confirm` | 校验首个 TOTP 并一次性返回 10 枚恢复码 |
+| POST | `/api/me/mfa/recovery-codes` | 近期重新认证后替换全部恢复码，新值只返回一次 |
+| DELETE | `/api/me/mfa/totp` | 近期重新认证后停用 TOTP，并使恢复码失效 |
 | POST | `/api/me/email/verification` | 请求邮箱验证邮件 |
 | POST | `/api/me/email/change` | 请求邮箱变更确认邮件 |
 | GET | `/api/me/sessions` | 查看设备会话 |
@@ -177,7 +185,9 @@ Nyauth 只通过 SMTP 发送邮件，不读取邮箱，也不需要 IMAP。生�
 | GET/POST | `/api/my/clients` | 管理当前用户拥有的 OAuth 客户端 |
 | POST | `/api/my/clients/{id}/rotate-secret` | 立即轮换 confidential client Secret，仅返回一次明文 |
 
-除安全方法外，所有已认证 `/api` 请求都必须携带 `/api/session` 返回的 `X-CSRF-Token`。后台接口只接受会话 Cookie，不接受 OAuth Bearer token。
+所有已认证修改请求都必须携带完整会话返回的 `X-CSRF-Token`。MFA pending 使用独立的 `nyauth_mfa_pending` HttpOnly Cookie 和 challenge 响应中的临时 CSRF；临时令牌不得覆盖正式会话 CSRF。pending 数据只保留 5 分钟，不进入设备会话列表或活跃会话统计。后台接口只接受会话 Cookie，不接受 OAuth Bearer token。
+
+TOTP 使用 RFC 6238 的 SHA-1、30 秒、6 位参数和 `±1` time-step 窗口，成功 step 会在 PostgreSQL 行锁事务中记录并拒绝重放。TOTP secret 使用 master key envelope encryption，恢复码只保存 selector 摘要与 Argon2id 哈希。启用或停用因素会推进 `auth_version`，撤销既有浏览器会话与 OAuth refresh family，再为当前设备轮换新会话。密码和 Provider 重新认证均会在主因素后执行同一第二因素 challenge，不能只凭密码刷新近期认证时间。
 
 ```typescript
 const session = await fetch('/api/session', {
@@ -264,6 +274,7 @@ Provider 不再从 YAML 或环境变量静态加载，只能由管理员写入�
 - `POST /api/admin/clients/{id}/rotate-secret`：立即轮换客户端 Secret，新值仅展示一次。
 - `GET /api/admin/users/{id}/sessions`、`DELETE /api/admin/users/{id}/sessions`：查看或撤销用户会话。
 - `GET/PUT /api/admin/settings/registration`：注册模式、邮箱验证要求、域名白名单、待验证期限与邀请默认值（运行时设置，免重启生效；修改要求近期重新认证）。
+- `GET/PUT /api/admin/settings/security`：TOTP 注册开关与管理员强制 MFA（运行时设置，免重启生效；修改要求近期重新认证）。开启强制策略前所有活动管理员必须已配置 TOTP；策略生效后，未配置 MFA 的用户不能被激活/晋升为管理员，活动管理员也不能停用唯一 TOTP。
 - `GET/POST /api/admin/invites`、`DELETE /api/admin/invites/{id}`：邀请码管理；明文 code 仅创建响应返回一次，库中只存哈希；列表分别返回已使用与待验证预占数。创建要求近期重新认证，紧急吊销不要求。
 - `GET /api/admin/settings/mail`、`PUT /api/admin/settings/mail/candidate`，以及邮件设置下的 `candidate/test`、`activate`、`rollback`、`disable` POST：数据库动态 SMTP；候选必须实际测试成功并在十分钟内激活，所有读取和变更均要求近期重新认证，写操作还受 CSRF、限流和审计保护。
 
@@ -277,7 +288,7 @@ Nyauth 不要求使用专有 SDK。服务端应用应通过 Discovery 配置成�
 
 推荐库及安全约束见 [标准 OAuth/OIDC 集成指南](docs/oauth-oidc-integration.md)。近期不支持在浏览器中配置 confidential client secret，也不把 access/refresh token 持久化到 `localStorage`。
 
-单机备份、WAL/PITR、master key 恢复与演练见 [备份与恢复](docs/operations/backup-restore.md)；双实例拓扑与故障语义见 [高可用部署](docs/operations/high-availability.md)。仓库还提供受保护环境下手动触发的 `Isolated recovery drill` 工作流，用一次性 PostgreSQL、空 Redis、带资源计数 manifest 的备份产物和只读 `nyauth verify-recovery` 命令生成恢复证据。
+单机备份、WAL/PITR、master key 恢复与演练见 [备份与恢复](docs/operations/backup-restore.md)；双实例拓扑与故障语义见 [高可用部署](docs/operations/high-availability.md)。仓库还提供受保护环境下手动触发的 `Isolated recovery drill` 工作流，用一次性 PostgreSQL、空 Redis、带资源计数 manifest 的备份产物和只读 `nyauth verify-recovery` 命令验证 JWK、Provider、TOTP 与邮件 envelope 并生成恢复证据。
 
 ## 质量检查
 

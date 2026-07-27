@@ -16,12 +16,15 @@ import (
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/nyasharp/nyauth/internal/audit"
 	"github.com/nyasharp/nyauth/internal/runtimecoord"
+	"github.com/nyasharp/nyauth/pkg/models"
 )
 
 const (
 	brandingKey            = "branding"
 	registrationKey        = "registration"
+	securityKey            = "security"
 	notificationChannel    = "nyauth_settings_changed"
 	reconciliationInterval = 60 * time.Second
 )
@@ -29,7 +32,18 @@ const (
 var (
 	ErrRegistrationChanged     = errors.New("registration settings changed")
 	ErrMailConfigurationNeeded = errors.New("mail configuration is required for self-registration")
+	ErrTOTPNeededForAdminMFA   = errors.New("TOTP must remain enabled while administrator MFA is required")
 )
+
+// AdminsMissingMFAError identifies active administrators that prevent the
+// mandatory-MFA policy from being enabled.
+type AdminsMissingMFAError struct {
+	Usernames []string
+}
+
+func (e *AdminsMissingMFAError) Error() string {
+	return "all active administrators must enroll MFA before it can be required"
+}
 
 // Branding holds the values the web UI uses to present the deployment
 // (sidebar wordmark, login heading, logo).
@@ -77,6 +91,17 @@ func DefaultRegistration() Registration {
 	}
 }
 
+// Security controls runtime enrollment and administrator MFA policy. Turning
+// off enrollment does not deactivate factors users already enrolled.
+type Security struct {
+	TOTPEnabled         bool `json:"totp_enabled"`
+	RequireMFAForAdmins bool `json:"require_mfa_for_admins"`
+}
+
+func DefaultSecurity() Security {
+	return Security{TOTPEnabled: true, RequireMFAForAdmins: false}
+}
+
 // Manager caches the current settings snapshot and keeps it consistent across
 // instances with the same LISTEN/NOTIFY + reconciliation pattern the provider
 // manager uses. Config values act as defaults when nothing is stored yet.
@@ -85,6 +110,7 @@ type Manager struct {
 	brandingDefaults Branding
 	branding         atomic.Pointer[Branding]
 	registration     atomic.Pointer[Registration]
+	security         atomic.Pointer[Security]
 	loadMu           sync.Mutex
 }
 
@@ -109,6 +135,14 @@ func (m *Manager) Registration() Registration {
 	return DefaultRegistration()
 }
 
+// Security returns the stored security policy or the safe defaults.
+func (m *Manager) Security() Security {
+	if snapshot := m.security.Load(); snapshot != nil {
+		return *snapshot
+	}
+	return DefaultSecurity()
+}
+
 // Load refreshes every settings group from the database. Missing rows reset
 // the corresponding group to its defaults so deletes propagate too.
 func (m *Manager) Load(ctx context.Context) error {
@@ -118,7 +152,7 @@ func (m *Manager) Load(ctx context.Context) error {
 		return nil
 	}
 	rows, err := m.db.Query(ctx, `SELECT key, value FROM runtime_settings WHERE key = ANY($1)`,
-		[]string{brandingKey, registrationKey})
+		[]string{brandingKey, registrationKey, securityKey})
 	if err != nil {
 		return fmt.Errorf("loading runtime settings: %w", err)
 	}
@@ -154,6 +188,16 @@ func (m *Manager) Load(ctx context.Context) error {
 		m.registration.Store(&registration)
 	} else {
 		m.registration.Store(nil)
+	}
+
+	if raw, ok := stored[securityKey]; ok {
+		security := DefaultSecurity()
+		if err := json.Unmarshal(raw, &security); err != nil {
+			return fmt.Errorf("decoding stored security settings: %w", err)
+		}
+		m.security.Store(&security)
+	} else {
+		m.security.Store(nil)
 	}
 	return nil
 }
@@ -222,6 +266,111 @@ func (m *Manager) SetRegistration(
 	}
 	m.registration.Store(&registration)
 	return nil
+}
+
+// SetSecurity persists the runtime MFA policy. Mandatory administrator MFA is
+// enabled only while every active administrator has a confirmed TOTP factor.
+// Management callers pass one trusted mutation audit so the setting and its
+// successful audit event commit atomically.
+func (m *Manager) SetSecurity(
+	ctx context.Context,
+	security Security,
+	updatedBy string,
+	mutation audit.MutationAudit,
+) error {
+	m.loadMu.Lock()
+	defer m.loadMu.Unlock()
+	if m.db == nil {
+		return errors.New("runtime settings storage is unavailable")
+	}
+	if security.RequireMFAForAdmins && !security.TOTPEnabled {
+		return ErrTOTPNeededForAdminMFA
+	}
+	if err := mutation.ValidateEvent(models.AuditSettingsUpdated); err != nil {
+		return fmt.Errorf("validating security settings audit: %w", err)
+	}
+	mutation = mutation.WithTarget("settings", securityKey).WithDetails(map[string]any{
+		"totp_enabled":           security.TOTPEnabled,
+		"require_mfa_for_admins": security.RequireMFAForAdmins,
+	})
+	encoded, err := json.Marshal(security)
+	if err != nil {
+		return fmt.Errorf("encoding %s settings: %w", securityKey, err)
+	}
+	tx, err := m.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("starting security settings transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	if err := runtimecoord.LockSecurityExclusive(ctx, tx); err != nil {
+		return err
+	}
+	if security.RequireMFAForAdmins {
+		rows, err := tx.Query(ctx, `
+			SELECT u.username
+			FROM users AS u
+			LEFT JOIN user_totp_credentials AS totp
+			  ON totp.user_id=u.id AND totp.confirmed_at IS NOT NULL
+			WHERE u.status='active' AND u.role='admin' AND totp.user_id IS NULL
+			ORDER BY u.username
+		`)
+		if err != nil {
+			return fmt.Errorf("checking administrator MFA enrollment: %w", err)
+		}
+		var missing []string
+		for rows.Next() {
+			var username string
+			if err := rows.Scan(&username); err != nil {
+				rows.Close()
+				return fmt.Errorf("reading administrator MFA enrollment: %w", err)
+			}
+			missing = append(missing, username)
+		}
+		rows.Close()
+		if err := rows.Err(); err != nil {
+			return fmt.Errorf("checking administrator MFA enrollment: %w", err)
+		}
+		if len(missing) > 0 {
+			return &AdminsMissingMFAError{Usernames: missing}
+		}
+	}
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO runtime_settings (key, value, updated_by, updated_at)
+		VALUES ($1, $2, $3, now())
+		ON CONFLICT (key) DO UPDATE SET
+			value=EXCLUDED.value, updated_by=EXCLUDED.updated_by, updated_at=EXCLUDED.updated_at
+	`, securityKey, encoded, updatedBy); err != nil {
+		return fmt.Errorf("storing %s settings: %w", securityKey, err)
+	}
+	if err := audit.EnqueueMutationTx(ctx, tx, mutation); err != nil {
+		return fmt.Errorf("auditing security settings: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `SELECT pg_notify($1, $2)`, notificationChannel, securityKey); err != nil {
+		return fmt.Errorf("notifying security settings change: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("committing security settings: %w", err)
+	}
+	m.security.Store(&security)
+	return nil
+}
+
+// LoadSecurityTx reads the authoritative security policy while the caller's
+// transaction holds the shared policy lock.
+func LoadSecurityTx(ctx context.Context, tx pgx.Tx) (Security, error) {
+	security := DefaultSecurity()
+	var raw []byte
+	err := tx.QueryRow(ctx, `SELECT value FROM runtime_settings WHERE key=$1 FOR SHARE`, securityKey).Scan(&raw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return security, nil
+	}
+	if err != nil {
+		return Security{}, fmt.Errorf("locking security settings: %w", err)
+	}
+	if err := json.Unmarshal(raw, &security); err != nil {
+		return Security{}, fmt.Errorf("decoding stored security settings: %w", err)
+	}
+	return security, nil
 }
 
 // LoadRegistrationTx reads and locks the authoritative registration policy.

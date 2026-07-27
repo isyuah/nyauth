@@ -138,6 +138,12 @@ func describeMutation(r *http.Request, actor *models.User) (mutationAuditDescrip
 		return highRiskUserMutation(models.AuditUserPasswordChanged, actor), true
 	case r.Method == http.MethodPost && path == "/api/me/password/set":
 		return highRiskUserMutation(models.AuditUserPasswordSet, actor), true
+	case r.Method == http.MethodPost && path == "/api/me/mfa/totp/enroll/confirm":
+		return highRiskUserMutation(models.AuditMFAEnrolled, actor), true
+	case r.Method == http.MethodPost && path == "/api/me/mfa/recovery-codes":
+		return highRiskUserMutation(models.AuditRecoveryCodesGenerated, actor), true
+	case r.Method == http.MethodDelete && path == "/api/me/mfa/totp":
+		return highRiskUserMutation(models.AuditMFADisabled, actor), true
 	case r.Method == http.MethodDelete && strings.HasPrefix(path, "/api/me/identities/"):
 		return mutationAuditDescriptor{event: models.AuditIdentityUnbound, targetType: "identity", targetID: param("id"), riskLevel: "high", successAlreadyAudited: true}, true
 	case r.Method == http.MethodPost && strings.HasPrefix(path, "/api/me/identities/") && strings.HasSuffix(path, "/bind"):
@@ -191,6 +197,8 @@ func describeMutation(r *http.Request, actor *models.User) (mutationAuditDescrip
 		return mutationAuditDescriptor{event: models.AuditSettingsUpdated, targetType: "settings", targetID: "branding", riskLevel: "medium"}, true
 	case r.Method == http.MethodPut && path == "/api/admin/settings/registration":
 		return mutationAuditDescriptor{event: models.AuditSettingsUpdated, targetType: "settings", targetID: "registration", riskLevel: "high"}, true
+	case r.Method == http.MethodPut && path == "/api/admin/settings/security":
+		return mutationAuditDescriptor{event: models.AuditSettingsUpdated, targetType: "settings", targetID: "security", riskLevel: "high", successAlreadyAudited: true}, true
 	case r.Method == http.MethodPut && path == "/api/admin/settings/mail/candidate":
 		return mutationAuditDescriptor{event: models.AuditMailSettingsSaved, targetType: "mail_config", riskLevel: "high", successAlreadyAudited: true}, true
 	case r.Method == http.MethodPost && path == "/api/admin/settings/mail/candidate/test":

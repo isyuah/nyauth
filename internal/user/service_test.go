@@ -56,7 +56,7 @@ func (s *bootstrapStore) List(context.Context, models.Pagination, string, models
 func (s *bootstrapStore) RecordLogin(context.Context, uuid.UUID, string) error {
 	return errors.New("unused")
 }
-func (s *bootstrapStore) RecordAuthentication(context.Context, uuid.UUID) (*models.User, error) {
+func (s *bootstrapStore) RecordAuthentication(context.Context, uuid.UUID, int64, int64) (*models.User, error) {
 	return nil, errors.New("unused")
 }
 func (s *bootstrapStore) Count(context.Context) (int64, error) { return s.count, nil }
@@ -116,7 +116,7 @@ func (s *securityStore) GetByUsername(context.Context, string) (*models.User, er
 	return s.user, nil
 }
 
-func (s *securityStore) RecordAuthentication(context.Context, uuid.UUID) (*models.User, error) {
+func (s *securityStore) RecordAuthentication(context.Context, uuid.UUID, int64, int64) (*models.User, error) {
 	s.authenticationRecorded = true
 	return s.user, nil
 }

@@ -32,6 +32,51 @@ export interface SessionInfo {
   authenticated_at?: string;
 }
 
+export type MFAMethod = 'totp' | 'recovery_code';
+export type MFAPurpose = 'login' | 'reauthentication';
+
+export interface MFARequiredResponse {
+  status: 'mfa_required';
+  purpose: MFAPurpose;
+  username: string;
+  methods: MFAMethod[];
+  csrf_token: string;
+  expires_at: string;
+}
+
+export type LoginResponse = SessionInfo | MFARequiredResponse;
+export type ReauthenticationResponse = SessionInfo | MFARequiredResponse;
+
+export interface MFAStatus {
+  totp_available: boolean;
+  totp_enrolled: boolean;
+  recovery_codes_remaining: number;
+  require_mfa_for_admins: boolean;
+  required_for_current_user: boolean;
+}
+
+export interface TOTPEnrollment {
+  secret: string;
+  otpauth_uri: string;
+}
+
+export interface TOTPConfirmationResult extends SessionInfo {
+  recovery_codes: string[];
+}
+
+export interface RecoveryCodesResult {
+  recovery_codes: string[];
+}
+
+export interface SecuritySettings {
+  totp_enabled: boolean;
+  require_mfa_for_admins: boolean;
+}
+
+export function isMFARequiredResponse(response: LoginResponse): response is MFARequiredResponse {
+  return 'status' in response && response.status === 'mfa_required';
+}
+
 export interface ExternalIdentity {
   id: string;
   user_id: string;
@@ -472,16 +517,30 @@ export interface UpdateUserInput {
   metadata?: Record<string, string>;
 }
 
+export interface APIErrorResponse {
+  error?: string;
+  error_description?: string;
+  message?: string;
+  missing_admins?: unknown;
+  [key: string]: unknown;
+}
+
 export class ApiError extends Error {
   constructor(
     message: string,
     readonly status: number,
     readonly retryAfter?: number,
     readonly serverMessage: string = message,
+    readonly response?: APIErrorResponse,
   ) {
     super(message);
     this.name = 'ApiError';
   }
+}
+
+export function missingAdminsFromError(cause: unknown): string[] {
+  if (!(cause instanceof ApiError) || !Array.isArray(cause.response?.missing_admins)) return [];
+  return cause.response.missing_admins.filter((value): value is string => typeof value === 'string' && value.trim() !== '');
 }
 
 const PASSWORD_POLICY_ERROR = 'password must be valid utf-8 and 12 to 1024 bytes';
@@ -521,6 +580,22 @@ const API_ERROR_TRANSLATIONS: Record<string, string> = {
   'plain smtp is forbidden in production': '生产环境禁止使用明文 SMTP',
   'public_base_url must use https in production': '生产环境的公开地址必须使用 HTTPS',
   'email is invalid': '邮箱地址格式无效',
+  'mfa challenge expired': '多因素验证已过期，请重新登录',
+  'mfa challenge temporarily unavailable': '多因素验证暂时不可用，请稍后重试',
+  'mfa verification temporarily unavailable': '多因素验证暂时不可用，请稍后重试',
+  'too many mfa attempts': '验证尝试过于频繁，请稍后再试',
+  'invalid mfa code': '验证码或恢复码不正确',
+  'invalid totp code': '动态验证码不正确',
+  'unsupported mfa method': '当前验证方式不可用，请刷新页面重试',
+  'account changed; sign in again': '账户安全状态已变化，请重新登录',
+  'mfa enrollment is required; contact an administrator': '管理员策略要求启用多因素验证，请联系管理员协助完成设置',
+  'totp enrollment is disabled': '管理员已关闭动态验证码注册',
+  'totp is already enrolled': '动态验证码已经启用',
+  'totp enrollment must be restarted': '本次设置已失效，请重新开始启用动态验证码',
+  'totp is not enrolled': '尚未启用动态验证码',
+  'mfa is required for active administrators': '管理员策略要求保留多因素验证，当前无法停用',
+  'all active administrators must enroll mfa before it can be required': '仍有管理员未启用多因素验证，暂时无法强制执行',
+  'totp must remain enabled while administrator mfa is required': '要求管理员启用多因素验证时，必须同时开放动态验证码功能',
 };
 
 export function localizeAPIErrorMessage(message: string): string {
@@ -556,7 +631,7 @@ async function req<T>(path: string, opts: RequestInit = {}, redirectOnUnauthoriz
   if (opts.body && !(opts.body instanceof FormData) && !requestHeaders.has('Content-Type')) {
     requestHeaders.set('Content-Type', 'application/json');
   }
-  if (path.startsWith('/api/') && isMutation(opts.method) && csrfToken) {
+  if (path.startsWith('/api/') && isMutation(opts.method) && csrfToken && !requestHeaders.has('X-CSRF-Token')) {
     requestHeaders.set('X-CSRF-Token', csrfToken);
   }
 
@@ -567,7 +642,7 @@ async function req<T>(path: string, opts: RequestInit = {}, redirectOnUnauthoriz
   });
 
   if (!res.ok) {
-    const body = await res.json().catch(() => ({})) as { error?: string; error_description?: string; message?: string };
+    const body = await res.json().catch(() => ({})) as APIErrorResponse;
     if (res.status === 401 && redirectOnUnauthorized) {
       setCsrfToken('');
       if (typeof window !== 'undefined' && window.location.pathname !== '/login') {
@@ -582,6 +657,7 @@ async function req<T>(path: string, opts: RequestInit = {}, redirectOnUnauthoriz
       res.status,
       Number.isFinite(retryAfter) ? retryAfter : undefined,
       message,
+      body,
     );
   }
 
@@ -594,14 +670,28 @@ async function req<T>(path: string, opts: RequestInit = {}, redirectOnUnauthoriz
   } catch {
     throw new ApiError('服务返回了无法解析的响应', res.status);
   }
-  const maybeSession = data as Partial<SessionInfo>;
-  if (maybeSession.csrf_token) setCsrfToken(maybeSession.csrf_token);
+  const maybeSession = data as Partial<SessionInfo> & { status?: unknown };
+  if (maybeSession.csrf_token && maybeSession.status !== 'mfa_required') {
+    setCsrfToken(maybeSession.csrf_token);
+  }
   return data;
 }
 
 export const api = {
-  login: (username: string, password: string) =>
-    req<SessionInfo>('/api/login', { method: 'POST', body: JSON.stringify({ username, password }) }, false),
+  login: (username: string, password: string, returnTo: string) =>
+    req<LoginResponse>('/api/login', {
+      method: 'POST', body: JSON.stringify({ username, password, return_to: returnTo }),
+    }, false),
+  getLoginMFA: () => req<MFARequiredResponse>('/api/login/mfa', { cache: 'no-store' }, false),
+  verifyLoginMFA: (method: MFAMethod, code: string, pendingCsrf: string) => req<SessionInfo>('/api/login/mfa', {
+    method: 'POST',
+    headers: { 'X-CSRF-Token': pendingCsrf },
+    body: JSON.stringify({ method, code }),
+  }, false),
+  cancelLoginMFA: (pendingCsrf: string) => req<void>('/api/login/mfa', {
+    method: 'DELETE',
+    headers: { 'X-CSRF-Token': pendingCsrf },
+  }, false),
   session: () => req<SessionInfo>('/api/session', { cache: 'no-store' }, false),
   logout: () => req<void>('/api/logout', { method: 'POST' }),
   getMe: () => req<User>('/api/me'),
@@ -630,7 +720,7 @@ export const api = {
   getMySessions: () => req<BrowserSession[]>('/api/me/sessions'),
   revokeMySession: (id: string) => req<void>(`/api/me/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   revokeOtherSessions: () => req<{ revoked: number }>('/api/me/sessions/revoke-others', { method: 'POST' }),
-  reauthenticateWithPassword: (password: string) => req<SessionInfo>('/api/me/reauth/password', {
+  reauthenticateWithPassword: (password: string) => req<ReauthenticationResponse>('/api/me/reauth/password', {
     method: 'POST',
     body: JSON.stringify({ password }),
   }, false),
@@ -638,6 +728,13 @@ export const api = {
     method: 'POST',
     body: JSON.stringify({ return_to: returnTo }),
   }),
+  getMyMFA: () => req<MFAStatus>('/api/me/mfa', { cache: 'no-store' }),
+  beginTOTPEnrollment: () => req<TOTPEnrollment>('/api/me/mfa/totp/enroll', { method: 'POST' }),
+  confirmTOTPEnrollment: (code: string) => req<TOTPConfirmationResult>('/api/me/mfa/totp/enroll/confirm', {
+    method: 'POST', body: JSON.stringify({ code }),
+  }),
+  regenerateRecoveryCodes: () => req<RecoveryCodesResult>('/api/me/mfa/recovery-codes', { method: 'POST' }),
+  disableTOTP: () => req<SessionInfo>('/api/me/mfa/totp', { method: 'DELETE' }),
   setPassword: (newPassword: string) => req<SessionInfo>('/api/me/password/set', {
     method: 'POST',
     body: JSON.stringify({ new_password: newPassword }),
@@ -698,6 +795,9 @@ export const api = {
     getRegistrationSettings: () => req<RegistrationSettings>('/api/admin/settings/registration'),
     updateRegistrationSettings: (settings: RegistrationSettings) =>
       req<RegistrationSettings>('/api/admin/settings/registration', { method: 'PUT', body: JSON.stringify(settings) }),
+    getSecuritySettings: () => req<SecuritySettings>('/api/admin/settings/security'),
+    updateSecuritySettings: (settings: SecuritySettings) =>
+      req<SecuritySettings>('/api/admin/settings/security', { method: 'PUT', body: JSON.stringify(settings) }),
     getMailSettings: () => req<MailSettings>('/api/admin/settings/mail'),
     saveMailCandidate: (settings: SaveMailCandidateInput) =>
       req<SaveMailCandidateResult>('/api/admin/settings/mail/candidate', { method: 'PUT', body: JSON.stringify(settings) }),

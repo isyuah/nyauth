@@ -68,6 +68,16 @@ type AdminUpdateUserRequest struct {
 type LoginRequest struct {
 	Username string `json:"username" validate:"required"`
 	Password string `json:"password" validate:"required"`
+	ReturnTo string `json:"return_to,omitempty"`
+}
+
+type MFARequiredResponse struct {
+	Status    string    `json:"status"`
+	Purpose   string    `json:"purpose"`
+	Username  string    `json:"username"`
+	Methods   []string  `json:"methods"`
+	CSRFToken string    `json:"csrf_token"`
+	ExpiresAt time.Time `json:"expires_at"`
 }
 
 // ChangePasswordRequest changes the password for the current user.

@@ -47,6 +47,9 @@ describe('cleanProviderAuthError', () => {
   it.each([
     ['identity_mismatch', '本次验证的外部身份与当前账户不匹配。'],
     ['reauthentication_failed', '重新认证失败，请稍后重试。'],
+    ['mfa_unavailable', '多因素验证暂时不可用，请稍后重试。'],
+    ['mfa_enrollment_required', '管理员策略要求启用多因素验证，请联系管理员协助完成设置。'],
+    ['account_changed', '账户安全状态已变化，请重新登录后再试。'],
   ])('maps the reauthentication error %s', (code, message) => {
     expect(cleanProviderAuthError(`https://auth.example/profile?auth_error=${code}`)).toEqual({
       message,

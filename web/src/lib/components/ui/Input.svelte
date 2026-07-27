@@ -13,6 +13,8 @@
     required = false,
     id = '',
     autocomplete,
+    inputmode,
+    maxlength,
     oninput,
   }: {
     label?: string;
@@ -25,7 +27,9 @@
     mono?: boolean;
     required?: boolean;
     id?: string;
-    autocomplete?: 'current-password' | 'new-password' | 'username' | 'email' | 'off';
+    autocomplete?: 'current-password' | 'new-password' | 'username' | 'email' | 'one-time-code' | 'off';
+    inputmode?: 'text' | 'numeric' | 'email' | 'url' | 'search' | 'tel' | 'decimal' | 'none';
+    maxlength?: number;
     oninput?: (e: Event) => void;
   } = $props();
 
@@ -44,6 +48,8 @@
     {readonly}
     {required}
     {autocomplete}
+    {inputmode}
+    {maxlength}
     aria-invalid={error ? 'true' : undefined}
     aria-describedby={describedBy}
     bind:value
