@@ -1,6 +1,7 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   api,
+  buildAuditLogExportURL,
   isMFARequiredResponse,
   localizeAPIErrorMessage,
   missingAdminsFromError,
@@ -350,5 +351,77 @@ describe('admin user insights API contract', () => {
       '/api/admin/users/user%20id%2Fwith%20separators/clients?page=2&page_size=10',
       '/api/admin/users/user%20id%2Fwith%20separators/activity?page=3&page_size=25',
     ]);
+  });
+});
+
+describe('audit API contract', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('uses the options endpoint and maps exact filters to backend parameter names', async () => {
+    const fetchMock = vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const body = url.endsWith('/options')
+        ? { events: ['user.login'], results: ['success'], risks: ['low'], target_types: ['user'] }
+        : { items: [], total: 0, page: 2, page_size: 25, total_pages: 0 };
+      return new Response(JSON.stringify(body), { status: 200, headers: { 'Content-Type': 'application/json' } });
+    });
+    vi.stubGlobal('fetch', fetchMock);
+
+    await api.admin.getAuditLogOptions();
+    await api.admin.getAuditLogs({
+      page: 2,
+      pageSize: 25,
+      event: 'user.login',
+      result: 'failure',
+      risk: 'high',
+      actor: 'alice',
+      target: 'oauth',
+      subjectUserId: 'user/id',
+      targetType: 'client',
+      targetId: 'client id',
+      ip: '192.0.2.10',
+      from: '2026-07-27T01:00:00.000Z',
+      to: '2026-07-27T02:00:00.000Z',
+    });
+
+    expect(fetchMock.mock.calls[0][0]).toBe('/api/admin/audit-logs/options');
+    const requestURL = new URL(String(fetchMock.mock.calls[1][0]), 'https://auth.example');
+    expect(Object.fromEntries(requestURL.searchParams)).toEqual({
+      page: '2',
+      page_size: '25',
+      event: 'user.login',
+      result: 'failure',
+      risk: 'high',
+      actor: 'alice',
+      target: 'oauth',
+      subject_user_id: 'user/id',
+      target_type: 'client',
+      target_id: 'client id',
+      ip: '192.0.2.10',
+      from: '2026-07-27T01:00:00.000Z',
+      to: '2026-07-27T02:00:00.000Z',
+    });
+  });
+
+  it('builds exports from the same filter mapping without pagination', () => {
+    const url = new URL(buildAuditLogExportURL({
+      page: 4,
+      pageSize: 10,
+      subjectUserId: 'subject-user',
+      targetType: 'provider',
+      targetId: 'github',
+      from: '2026-07-01T00:00:00.000Z',
+      to: '2026-07-02T00:00:00.000Z',
+    }, 'cef'), 'https://auth.example');
+
+    expect(Object.fromEntries(url.searchParams)).toEqual({
+      subject_user_id: 'subject-user',
+      target_type: 'provider',
+      target_id: 'github',
+      from: '2026-07-01T00:00:00.000Z',
+      to: '2026-07-02T00:00:00.000Z',
+      format: 'cef',
+      limit: '50000',
+    });
   });
 });

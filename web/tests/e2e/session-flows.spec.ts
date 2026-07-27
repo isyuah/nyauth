@@ -5,6 +5,7 @@ import type {
   AdminUserOverview,
   AdminUserSecurity,
   AuditLog,
+  AuditLogOptions,
   DashboardStats,
   LoginTrend,
   MailConfig,
@@ -83,6 +84,10 @@ interface MockState {
   adminUserAuthorizationRequests?: Record<string, number>;
   adminUserClientRequests?: Record<string, number>;
   adminUserActivityRequests?: Record<string, number>;
+  auditLogs?: AuditLog[];
+  auditLogQueries?: string[];
+  auditLogOptionsRequests?: number;
+  auditExportQueries?: string[];
 }
 
 const user: User = {
@@ -345,6 +350,13 @@ const adminUserActivity: AuditLog = {
   risk_level: 'low',
   details: { fields: ['display_name'] },
   created_at: '2026-01-03T00:00:00Z',
+};
+
+const auditLogOptions: AuditLogOptions = {
+  events: ['user.login', 'user.profile_updated', 'client.updated', 'provider.updated'],
+  results: ['success', 'failure'],
+  risks: ['low', 'medium', 'high', 'critical'],
+  target_types: ['user', 'client', 'provider'],
 };
 
 type AdminUserRequestCounterKey =
@@ -652,6 +664,41 @@ async function installAPIMocks(page: Page, state: MockState) {
 
     if (path === '/api/my/clients') {
       await fulfillJSON(route, 200, { items: [oauthClient], total: 1, page: 1, page_size: 50, total_pages: 1 });
+      return;
+    }
+
+    if (path === '/api/admin/audit-logs/options' && request.method() === 'GET') {
+      state.auditLogOptionsRequests = (state.auditLogOptionsRequests || 0) + 1;
+      await fulfillJSON(route, 200, auditLogOptions);
+      return;
+    }
+
+    if (path === '/api/admin/audit-logs' && request.method() === 'GET') {
+      const pageNumber = Math.max(1, Number(requestURL.searchParams.get('page')) || 1);
+      const pageSize = Math.max(1, Number(requestURL.searchParams.get('page_size')) || 20);
+      const auditLogs = state.auditLogs || [adminUserActivity];
+      const start = (pageNumber - 1) * pageSize;
+      state.auditLogQueries ||= [];
+      state.auditLogQueries.push(requestURL.search);
+      await fulfillJSON(route, 200, {
+        items: auditLogs.slice(start, start + pageSize),
+        total: auditLogs.length,
+        page: pageNumber,
+        page_size: pageSize,
+        total_pages: Math.ceil(auditLogs.length / pageSize),
+      });
+      return;
+    }
+
+    if (path === '/api/admin/audit-logs/export' && request.method() === 'GET') {
+      state.auditExportQueries ||= [];
+      state.auditExportQueries.push(requestURL.search);
+      await route.fulfill({
+        status: 200,
+        contentType: 'application/x-ndjson',
+        body: `${JSON.stringify(adminUserActivity)}\n`,
+        headers: { 'Content-Disposition': 'attachment; filename="audit.ndjson"' },
+      });
       return;
     }
 
@@ -3244,6 +3291,144 @@ test('provider reauthentication restores SMTP fields once without retaining or r
   expect(saveBodies[1].password).toBe('reentered-after-provider');
   expect(state.providerReauthBody).toEqual({ return_to: '/admin/settings/mail' });
   expect(state.providerReauthCSRF).toBe('csrf-mail-provider');
+});
+
+test('audit filters use backend options, exact URL parameters, quick ranges and removable chips', async ({ page }) => {
+  const state: MockState = {
+    authenticated: true,
+    mustChangePassword: false,
+    role: 'admin',
+    csrfToken: 'csrf-audit',
+    auditLogs: [adminUserActivity],
+  };
+  await installAPIMocks(page, state);
+
+  await page.goto('/admin/audit');
+  await expect(page.getByRole('heading', { name: '审计日志' })).toBeVisible();
+  await expect.poll(() => state.auditLogOptionsRequests || 0).toBe(1);
+  await expect(page.getByLabel('事件')).toHaveAttribute('list', 'audit-event-options');
+  await expect(page.locator('#audit-event-options option[value="user.login"]')).toHaveCount(1);
+
+  await page.getByRole('button', { name: '最近 1 小时' }).click();
+  await expect(page).toHaveURL(/from=.*&to=/);
+  const quickRangeURL = new URL(page.url());
+  const quickFrom = new Date(quickRangeURL.searchParams.get('from') || '').getTime();
+  const quickTo = new Date(quickRangeURL.searchParams.get('to') || '').getTime();
+  expect(quickFrom).not.toBeNaN();
+  expect(quickTo).not.toBeNaN();
+  expect(quickTo - quickFrom).toBe(60 * 60 * 1000);
+  expect(quickRangeURL.searchParams.get('from')).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:00\.000Z$/);
+
+  await page.getByLabel('事件').fill('user.login');
+  await page.getByLabel('结果').click();
+  await page.getByRole('option', { name: '失败', exact: true }).click();
+  await page.getByLabel('风险').click();
+  await page.getByRole('option', { name: '高', exact: true }).click();
+  await page.getByLabel('操作者（模糊）').fill('alice');
+  await page.getByLabel('目标（模糊）').fill('oauth');
+  await page.getByLabel('主体用户 ID（精确）').fill(user.id);
+  await page.getByLabel('目标类型（精确）').click();
+  await page.getByRole('option', { name: '客户端', exact: true }).click();
+  await page.getByLabel('目标 ID（精确）').fill('client-123');
+  await page.getByLabel('IP 地址').fill('192.0.2.10');
+  await page.getByRole('button', { name: '应用筛选' }).click();
+
+  await expect(page).toHaveURL(/subject_user_id=/);
+  const filteredURL = new URL(page.url());
+  expect(Object.fromEntries([
+    'event', 'result', 'risk', 'actor', 'target', 'subject_user_id', 'target_type', 'target_id', 'ip',
+  ].map((key) => [key, filteredURL.searchParams.get(key)]))).toEqual({
+    event: 'user.login',
+    result: 'failure',
+    risk: 'high',
+    actor: 'alice',
+    target: 'oauth',
+    subject_user_id: user.id,
+    target_type: 'client',
+    target_id: 'client-123',
+    ip: '192.0.2.10',
+  });
+  const latestListQuery = new URLSearchParams((state.auditLogQueries?.at(-1) || '').replace(/^\?/, ''));
+  expect(latestListQuery.get('subject_user_id')).toBe(user.id);
+  expect(latestListQuery.get('target_type')).toBe('client');
+  expect(latestListQuery.get('target_id')).toBe('client-123');
+  await expect(page.getByRole('button', { name: `移除筛选：主体用户 ID：${user.id}` })).toBeVisible();
+  await expect(page.getByRole('button', { name: '移除筛选：目标 ID：client-123' })).toBeVisible();
+
+  const downloadPromise = page.waitForEvent('download');
+  await page.getByRole('button', { name: 'NDJSON' }).click();
+  const download = await downloadPromise;
+  await expect.poll(() => state.auditExportQueries?.length || 0).toBe(1);
+  const exportQuery = new URLSearchParams((state.auditExportQueries?.[0] || '').replace(/^\?/, ''));
+  expect(exportQuery.get('subject_user_id')).toBe(user.id);
+  expect(exportQuery.get('target_type')).toBe('client');
+  expect(exportQuery.get('target_id')).toBe('client-123');
+  expect(exportQuery.get('from')).toBe(filteredURL.searchParams.get('from'));
+  expect(exportQuery.get('to')).toBe(filteredURL.searchParams.get('to'));
+  await download.cancel();
+
+  await page.getByRole('button', { name: '移除筛选：目标 ID：client-123' }).click();
+  await expect(page).not.toHaveURL(/target_id=/);
+  await page.getByRole('button', { name: '清除全部筛选' }).click();
+  await expect(page).toHaveURL(/\/admin\/audit$/);
+  await expect(page.getByLabel('已启用筛选')).toHaveCount(0);
+});
+
+test('audit details show protected request context and real management links', async ({ page }) => {
+  const clientTarget = 'client-123';
+  const providerTarget = 'github';
+  const state: MockState = {
+    authenticated: true,
+    mustChangePassword: false,
+    role: 'admin',
+    csrfToken: 'csrf-audit-details',
+    auditLogs: [
+      {
+        ...adminUserActivity,
+        details: {
+          fields: ['display_name'],
+          password: 'must-not-render',
+          nested: { access_token: 'also-must-not-render', note: 'kept' },
+        },
+      },
+      {
+        ...adminUserActivity,
+        id: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+        event: 'client.updated',
+        target_type: 'client',
+        target_id: clientTarget,
+      },
+      {
+        ...adminUserActivity,
+        id: 'bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb',
+        event: 'provider.updated',
+        target_type: 'provider',
+        target_id: providerTarget,
+      },
+    ],
+  };
+  await installAPIMocks(page, state);
+
+  await page.goto('/admin/audit');
+  await page.getByRole('button', { name: '查看审计详情：user.profile_updated' }).click();
+  const drawer = page.getByRole('dialog', { name: '审计记录详情' });
+  await expect(drawer).toBeVisible();
+  await expect(drawer.getByText(adminUserActivity.user_agent!)).toBeVisible();
+  const details = drawer.getByTestId('audit-details-json');
+  await expect(details).toContainText('"password": "[已脱敏]"');
+  await expect(details).toContainText('"access_token": "[已脱敏]"');
+  await expect(drawer.getByText('must-not-render')).toHaveCount(0);
+  await expect(drawer.getByText('also-must-not-render')).toHaveCount(0);
+  await expect(details).toContainText('"note": "kept"');
+  await expect(drawer.getByRole('link', { name: '打开目标管理入口' })).toHaveAttribute('href', `/admin/users/${user.id}`);
+
+  await drawer.getByRole('button', { name: '关闭侧边栏' }).click();
+  await page.getByRole('button', { name: '查看审计详情：client.updated' }).click();
+  await expect(page.getByRole('dialog', { name: '审计记录详情' }).getByRole('link', { name: '打开目标管理入口' })).toHaveAttribute('href', '/admin/clients');
+
+  await page.getByRole('dialog', { name: '审计记录详情' }).getByRole('button', { name: '关闭侧边栏' }).click();
+  await page.getByRole('button', { name: '查看审计详情：provider.updated' }).click();
+  await expect(page.getByRole('dialog', { name: '审计记录详情' }).getByRole('link', { name: '打开目标管理入口' })).toHaveAttribute('href', '/admin/providers');
 });
 
 test('the system status page renders the backend status DTO and admin navigation entry', async ({ page }) => {

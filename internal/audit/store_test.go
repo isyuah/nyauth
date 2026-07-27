@@ -39,3 +39,13 @@ func TestBuildListFilterEmpty(t *testing.T) {
 		t.Fatalf("empty filter returned where=%q args=%v", where, args)
 	}
 }
+
+func TestBuildListFilterUsesExactTargetFilters(t *testing.T) {
+	where, args := buildListFilter(ListFilter{TargetType: "user", TargetID: "user-123"})
+	if !strings.Contains(where, "target_type = $1") || !strings.Contains(where, "target_id = $2") {
+		t.Fatalf("exact target filter missing from %q", where)
+	}
+	if len(args) != 2 || args[0] != "user" || args[1] != "user-123" {
+		t.Fatalf("arguments = %#v", args)
+	}
+}

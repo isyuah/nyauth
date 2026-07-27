@@ -210,7 +210,7 @@ func (s *Server) handleAdminUserActivity(w http.ResponseWriter, r *http.Request)
 			ID: item.ID, Event: item.Event, ActorID: item.ActorID, ActorName: item.ActorName,
 			TargetType: item.TargetType, TargetID: item.TargetID, IPAddress: item.IPAddress,
 			UserAgent: item.UserAgent, Result: item.Result, RiskLevel: item.RiskLevel,
-			Details: item.Details, CreatedAt: item.CreatedAt,
+			Details: audit.RedactDetails(item.Details), CreatedAt: item.CreatedAt,
 		})
 	}
 	writeJSON(w, http.StatusOK, result)

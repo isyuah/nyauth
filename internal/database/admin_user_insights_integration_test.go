@@ -233,6 +233,13 @@ func TestAdminUserCreationSourcesInsightsAndExactActivity(t *testing.T) {
 	if activity.Total != 2 || len(activity.Items) != 2 {
 		t.Fatalf("exact user activity = %#v", activity)
 	}
+	exactTarget, err := auditStore.List(ctx, 1, 20, audit.ListFilter{TargetType: "user", TargetID: managed.ID.String()})
+	if err != nil {
+		t.Fatalf("list exact audit target: %v", err)
+	}
+	if exactTarget.Total != 1 || len(exactTarget.Items) != 1 || exactTarget.Items[0].TargetID == nil || *exactTarget.Items[0].TargetID != managed.ID.String() {
+		t.Fatalf("exact audit target = %#v", exactTarget)
+	}
 
 	if _, err := schema.pool.Exec(ctx, `DELETE FROM users WHERE id=$1`, bootstrapUser.ID); err != nil {
 		t.Fatalf("delete managed-user creator: %v", err)

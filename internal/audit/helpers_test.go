@@ -46,3 +46,38 @@ func TestOutboxEventFromAuditLogRejectsSensitiveDetails(t *testing.T) {
 		})
 	}
 }
+
+func TestRedactDetailsProtectsLegacyAndNestedSensitiveKeys(t *testing.T) {
+	input := map[string]interface{}{
+		"method":        "provider",
+		"access_token":  "legacy-token",
+		"recovery_code": "legacy-recovery-code",
+		"nested": map[string]interface{}{
+			"client_secret": "legacy-secret",
+			"totp_seed":     "legacy-totp-seed",
+			"safe":          "visible",
+		},
+		"items": []interface{}{map[string]interface{}{"csrf_token": "legacy-csrf"}},
+	}
+	redacted := RedactDetails(input)
+	if redacted["method"] != "provider" || redacted["access_token"] != "[REDACTED]" || redacted["recovery_code"] != "[REDACTED]" {
+		t.Fatalf("top-level redaction = %#v", redacted)
+	}
+	nested := redacted["nested"].(map[string]interface{})
+	if nested["client_secret"] != "[REDACTED]" || nested["totp_seed"] != "[REDACTED]" || nested["safe"] != "visible" {
+		t.Fatalf("nested redaction = %#v", nested)
+	}
+	items := redacted["items"].([]interface{})
+	if items[0].(map[string]interface{})["csrf_token"] != "[REDACTED]" {
+		t.Fatalf("slice redaction = %#v", items)
+	}
+	if input["access_token"] != "legacy-token" {
+		t.Fatalf("input map was mutated: %#v", input)
+	}
+	empty := map[string]interface{}{}
+	redactedEmpty := RedactDetails(empty)
+	redactedEmpty["safe"] = "detached"
+	if len(empty) != 0 {
+		t.Fatalf("empty input map was not detached: %#v", empty)
+	}
+}

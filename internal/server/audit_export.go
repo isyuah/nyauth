@@ -9,7 +9,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/nyasharp/nyauth/internal/audit"
 	"github.com/nyasharp/nyauth/internal/buildinfo"
 	"github.com/nyasharp/nyauth/pkg/models"
@@ -20,21 +19,6 @@ const (
 	maximumAuditExportLimit = 50_000
 	maximumAuditExportRange = 31 * 24 * time.Hour
 )
-
-type auditExportRecord struct {
-	ID         uuid.UUID              `json:"id"`
-	Event      string                 `json:"event"`
-	ActorID    *uuid.UUID             `json:"actor_id,omitempty"`
-	ActorName  *string                `json:"actor_name,omitempty"`
-	TargetType *string                `json:"target_type,omitempty"`
-	TargetID   *string                `json:"target_id,omitempty"`
-	IPAddress  *string                `json:"ip_address,omitempty"`
-	UserAgent  *string                `json:"user_agent,omitempty"`
-	Result     string                 `json:"result"`
-	RiskLevel  string                 `json:"risk_level"`
-	Details    map[string]interface{} `json:"details,omitempty"`
-	CreatedAt  time.Time              `json:"created_at"`
-}
 
 func (s *Server) handleExportAuditLogs(w http.ResponseWriter, r *http.Request) {
 	format := strings.ToLower(strings.TrimSpace(r.URL.Query().Get("format")))
@@ -79,12 +63,7 @@ func (s *Server) handleExportAuditLogs(w http.ResponseWriter, r *http.Request) {
 			_, writeErr := fmt.Fprintln(w, auditLogCEF(entry))
 			return writeErr
 		}
-		return encoder.Encode(auditExportRecord{
-			ID: entry.ID, Event: entry.Event, ActorID: entry.ActorID, ActorName: entry.ActorName,
-			TargetType: entry.TargetType, TargetID: entry.TargetID, IPAddress: entry.IPAddress,
-			UserAgent: entry.UserAgent, Result: entry.Result, RiskLevel: entry.RiskLevel,
-			Details: entry.Details, CreatedAt: entry.CreatedAt,
-		})
+		return encoder.Encode(adminAuditLogFromModel(entry))
 	})
 	if err == nil {
 		return
@@ -97,26 +76,17 @@ func (s *Server) handleExportAuditLogs(w http.ResponseWriter, r *http.Request) {
 }
 
 func auditExportFilter(r *http.Request, now time.Time) (audit.ListFilter, error) {
-	filter := audit.ListFilter{
-		Event: r.URL.Query().Get("event"), Result: r.URL.Query().Get("result"),
-		RiskLevel: r.URL.Query().Get("risk"), Actor: r.URL.Query().Get("actor"),
-		Target: r.URL.Query().Get("target"), IPAddress: r.URL.Query().Get("ip"),
+	filter, err := auditLogFilterFromRequest(r)
+	if err != nil {
+		return filter, err
 	}
 	to := now.UTC()
-	from := to.Add(-24 * time.Hour)
-	if raw := strings.TrimSpace(r.URL.Query().Get("from")); raw != "" {
-		parsed, err := time.Parse(time.RFC3339, raw)
-		if err != nil {
-			return filter, fmt.Errorf("from must be RFC3339")
-		}
-		from = parsed.UTC()
+	if filter.CreatedTo != nil {
+		to = filter.CreatedTo.UTC()
 	}
-	if raw := strings.TrimSpace(r.URL.Query().Get("to")); raw != "" {
-		parsed, err := time.Parse(time.RFC3339, raw)
-		if err != nil {
-			return filter, fmt.Errorf("to must be RFC3339")
-		}
-		to = parsed.UTC()
+	from := to.Add(-24 * time.Hour)
+	if filter.CreatedFrom != nil {
+		from = filter.CreatedFrom.UTC()
 	}
 	if !to.After(from) {
 		return filter, fmt.Errorf("to must be later than from")
