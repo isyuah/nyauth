@@ -347,10 +347,13 @@ func buildMIMEMessage(from, recipient *mail.Address, message EmailMessage) ([]by
 	}
 	var body bytes.Buffer
 	body.WriteString("Date: " + time.Now().UTC().Format(time.RFC1123Z) + "\r\n")
-	body.WriteString("Message-ID: <" + messageID + "@nyauth.local>\r\n")
+	body.WriteString("Message-ID: <" + messageID + "@" + messageIDDomain(from.Address) + ">\r\n")
 	body.WriteString("From: " + from.String() + "\r\n")
 	body.WriteString("To: " + recipient.String() + "\r\n")
 	body.WriteString("Subject: " + mime.QEncoding.Encode("utf-8", message.Subject) + "\r\n")
+	body.WriteString("Auto-Submitted: auto-generated\r\n")
+	body.WriteString("X-Auto-Response-Suppress: All\r\n")
+	body.WriteString("Content-Language: zh-CN\r\n")
 	body.WriteString("MIME-Version: 1.0\r\n")
 
 	if message.HTMLBody == "" {
@@ -394,6 +397,14 @@ func buildMIMEMessage(from, recipient *mail.Address, message EmailMessage) ([]by
 		return nil, fmt.Errorf("finishing multipart email: %w", err)
 	}
 	return body.Bytes(), nil
+}
+
+func messageIDDomain(fromAddress string) string {
+	separator := strings.LastIndexByte(strings.TrimSpace(fromAddress), '@')
+	if separator >= 0 && separator+1 < len(fromAddress) {
+		return strings.ToLower(strings.TrimSpace(fromAddress[separator+1:]))
+	}
+	return "localhost"
 }
 
 func normalizeCRLF(value string) string {

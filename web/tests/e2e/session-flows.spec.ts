@@ -340,6 +340,13 @@ async function installDashboardCoreMocks(page: Page) {
   await page.route('**/api/admin/stats', (route) => fulfillJSON(route, 200, dashboardStats));
   await page.route('**/api/admin/stats/login-trend**', (route) => fulfillJSON(route, 200, dashboardLoginTrend));
   await page.route('**/api/admin/stats/recent-logins**', (route) => fulfillJSON(route, 200, []));
+  await page.route('**/.well-known/openid-configuration', (route) => fulfillJSON(route, 200, {
+    issuer: 'https://auth.example',
+    authorization_endpoint: 'https://auth.example/authorize',
+    token_endpoint: 'https://auth.example/token',
+    jwks_uri: 'https://auth.example/.well-known/jwks.json',
+    userinfo_endpoint: 'https://auth.example/userinfo',
+  }));
 }
 
 async function installAPIMocks(page: Page, state: MockState) {
@@ -435,6 +442,20 @@ async function installAPIMocks(page: Page, state: MockState) {
       state.hasPassword = true;
       state.csrfToken = 'csrf-password-set';
       await fulfillJSON(route, 200, sessionResponse(state));
+      return;
+    }
+
+    if (path === '/api/me/mfa' && request.method() === 'GET') {
+      await fulfillJSON(route, 200, {
+        totp_available: true,
+        totp_enrolled: false,
+        can_disable_totp: true,
+        passkeys_available: true,
+        passkeys_enrolled: 0,
+        recovery_codes_remaining: 0,
+        require_mfa_for_admins: false,
+        required_for_current_user: false,
+      });
       return;
     }
 
@@ -691,6 +712,11 @@ async function installAPIMocks(page: Page, state: MockState) {
       return;
     }
 
+    if (path === '/api/admin/settings/security' && request.method() === 'GET') {
+      await fulfillJSON(route, 200, { totp_enabled: true, passkeys_enabled: true, require_mfa_for_admins: false });
+      return;
+    }
+
     if (path.startsWith('/api/admin/')) {
       state.adminRequestSeen = true;
       await fulfillJSON(route, 403, { error: 'forbidden' });
@@ -733,6 +759,7 @@ test('login requires first password change and sends CSRF', async ({ page }) => 
   await page.getByRole('button', { name: '登录', exact: true }).click();
 
   await expect(page).toHaveURL(/\/change-password\?return_to=%2Fdashboard$/);
+  await expect(page.getByRole('button', { name: /返回/ })).toHaveCount(0);
   const passwordInputs = page.locator('input[type="password"]');
   await passwordInputs.nth(0).fill('temporary-password');
   await passwordInputs.nth(1).fill('a-new-password-123');
@@ -754,6 +781,7 @@ test('wrong current password stays on the change-password page and preserves CSR
   await installAPIMocks(page, state);
 
   await page.goto('/change-password?return_to=/profile');
+  await expect(page.getByRole('button', { name: '返回个人资料' })).toBeVisible();
   const passwordInputs = page.locator('input[type="password"]');
   await passwordInputs.nth(0).fill('wrong-current-password');
   await passwordInputs.nth(1).fill('a-new-password-123');
@@ -852,6 +880,37 @@ test('the desktop sidebar recovers after the window shrinks below the mobile bre
 
   await page.setViewportSize({ width: 1280, height: 900 });
   await expect(sidebar).toHaveCSS('width', '248px');
+});
+
+test('administrator profile stays in the user center and marks the profile tab active', async ({ page }) => {
+  await installAPIMocks(page, {
+    authenticated: true,
+    mustChangePassword: false,
+    role: 'admin',
+    csrfToken: 'csrf-admin-profile',
+  });
+
+  await page.goto('/profile');
+
+  const sidebar = page.getByRole('complementary', { name: '用户中心导航' });
+  await expect(sidebar).toBeVisible();
+  await expect(page.getByRole('complementary', { name: '管理后台导航' })).toHaveCount(0);
+  await expect(sidebar.getByRole('link', { name: '个人资料', exact: true })).toHaveAttribute('aria-current', 'page');
+  await expect(sidebar.getByRole('link', { name: '管理后台', exact: true })).toBeVisible();
+});
+
+test('owned applications show the used quota as a compact fraction', async ({ page }) => {
+  await installAPIMocks(page, {
+    authenticated: true,
+    mustChangePassword: false,
+    role: 'user',
+    csrfToken: 'csrf-client-quota',
+  });
+
+  await page.goto('/dashboard/apps');
+
+  await expect(page.getByText('1/10', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: '创建应用' }).first()).toBeEnabled();
 });
 
 test('mobile navigation traps focus, closes with Escape, and restores the menu trigger', async ({ page }) => {
@@ -966,15 +1025,332 @@ test('password reauthentication refreshes the session and CSRF token', async ({ 
   await installAPIMocks(page, state);
 
   await page.goto('/profile');
-  await page.getByRole('button', { name: '使用当前密码' }).click();
+  await page.getByRole('button', { name: '选择认证方式' }).click();
   const dialog = page.getByRole('dialog');
   await dialog.getByLabel(/^当前密码/).fill('current-password');
-  await dialog.getByRole('button', { name: '重新认证' }).click();
+  await dialog.getByRole('button', { name: '使用密码验证' }).click();
 
   await expect(dialog).toBeHidden();
   await expect(page.getByText('认证有效')).toBeVisible();
   expect(state.reauthCSRF).toBe('csrf-user');
   expect(state.reauthBody).toEqual({ password: 'current-password' });
+});
+
+test('password reauthentication completes MFA inline and promotes the formal CSRF only after verification', async ({ page }) => {
+  const state: MockState = {
+    authenticated: true,
+    mustChangePassword: false,
+    role: 'user',
+    csrfToken: 'csrf-formal-before-mfa',
+  };
+  await installAPIMocks(page, state);
+  const challenge = {
+    status: 'mfa_required',
+    purpose: 'reauthentication',
+    username: 'alice',
+    methods: ['totp', 'recovery_code'],
+    csrf_token: 'csrf-mfa-pending',
+    expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+  };
+  let primaryCSRF: string | null = null;
+  let verificationCSRF: string | null = null;
+  let verificationBody: unknown;
+  let restoreRequests = 0;
+  await page.route('**/api/**', async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    if (path === '/api/me/reauth/password' && request.method() === 'POST') {
+      primaryCSRF = await request.headerValue('x-csrf-token');
+      await fulfillJSON(route, 202, challenge);
+      return;
+    }
+    if (path === '/api/login/mfa' && request.method() === 'GET') {
+      restoreRequests += 1;
+      await fulfillJSON(route, 200, challenge);
+      return;
+    }
+    if (path === '/api/login/mfa' && request.method() === 'POST') {
+      verificationCSRF = await request.headerValue('x-csrf-token');
+      verificationBody = request.postDataJSON();
+      state.authenticatedAt = new Date().toISOString();
+      state.csrfToken = 'csrf-formal-after-mfa';
+      await fulfillJSON(route, 200, sessionResponse(state));
+      return;
+    }
+    await route.fallback();
+  });
+
+  await page.goto('/profile');
+  await page.getByRole('button', { name: '选择认证方式' }).click();
+  const dialog = page.getByRole('dialog');
+  await dialog.getByLabel(/^当前密码/).fill('current-password');
+  await dialog.getByRole('button', { name: '使用密码验证' }).click();
+  await expect(dialog.getByText('密码已通过，请完成第二项验证')).toBeVisible();
+  expect(restoreRequests).toBe(0);
+  await dialog.getByLabel('6 位动态验证码').fill('123456');
+  await dialog.getByRole('button', { name: '完成重新认证' }).click();
+
+  await expect(dialog).toBeHidden();
+  await expect(page.getByText('认证有效')).toBeVisible();
+  await page.getByRole('button', { name: '退出其他设备' }).click();
+  const revokeDialog = page.getByRole('dialog');
+  await revokeDialog.getByRole('button', { name: '退出其他设备' }).click();
+
+  expect(primaryCSRF).toBe('csrf-formal-before-mfa');
+  expect(verificationCSRF).toBe('csrf-mfa-pending');
+  expect(verificationBody).toEqual({ method: 'totp', code: '123456' });
+  expect(state.revokeOthersCSRF).toBe('csrf-formal-after-mfa');
+});
+
+test('cancelling reauthentication MFA preserves the existing formal-session CSRF', async ({ page }) => {
+  const state: MockState = {
+    authenticated: true,
+    mustChangePassword: false,
+    role: 'user',
+    csrfToken: 'csrf-formal-preserved',
+  };
+  await installAPIMocks(page, state);
+  const challenge = {
+    status: 'mfa_required',
+    purpose: 'reauthentication',
+    username: 'alice',
+    methods: ['totp'],
+    csrf_token: 'csrf-cancel-pending',
+    expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+  };
+  let cancellationCSRF: string | null = null;
+  await page.route('**/api/**', async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    if (path === '/api/me/reauth/password' && request.method() === 'POST') {
+      await fulfillJSON(route, 202, challenge);
+      return;
+    }
+    if (path === '/api/login/mfa' && request.method() === 'GET') {
+      await fulfillJSON(route, 200, challenge);
+      return;
+    }
+    if (path === '/api/login/mfa' && request.method() === 'DELETE') {
+      cancellationCSRF = await request.headerValue('x-csrf-token');
+      await route.fulfill({ status: 204 });
+      return;
+    }
+    await route.fallback();
+  });
+
+  await page.goto('/profile');
+  await page.getByRole('button', { name: '选择认证方式' }).click();
+  const dialog = page.getByRole('dialog');
+  await dialog.getByLabel(/^当前密码/).fill('current-password');
+  await dialog.getByRole('button', { name: '使用密码验证' }).click();
+  await expect(dialog.getByText('密码已通过，请完成第二项验证')).toBeVisible();
+  await dialog.getByRole('button', { name: '取消', exact: true }).click();
+  await expect(dialog).toBeHidden();
+
+  await page.getByRole('button', { name: '退出其他设备' }).click();
+  const revokeDialog = page.getByRole('dialog');
+  await revokeDialog.getByRole('button', { name: '退出其他设备' }).click();
+
+  expect(cancellationCSRF).toBe('csrf-cancel-pending');
+  expect(state.revokeOthersCSRF).toBe('csrf-formal-preserved');
+});
+
+test('users can enroll TOTP, replace recovery codes, and disable the factor', async ({ page }) => {
+  const state: MockState = {
+    authenticated: true,
+    mustChangePassword: false,
+    role: 'user',
+    csrfToken: 'csrf-before-totp',
+    authenticatedAt: new Date().toISOString(),
+  };
+  await installAPIMocks(page, state);
+  let enrolled = false;
+  let enrollCSRF: string | null = null;
+  let confirmCSRF: string | null = null;
+  let regenerateCSRF: string | null = null;
+  let disableCSRF: string | null = null;
+  await page.route('**/api/**', async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    if (path === '/api/me/mfa' && request.method() === 'GET') {
+      await fulfillJSON(route, 200, {
+        totp_available: true,
+        totp_enrolled: enrolled,
+        can_disable_totp: true,
+        passkeys_available: true,
+        passkeys_enrolled: 0,
+        recovery_codes_remaining: enrolled ? 10 : 0,
+        require_mfa_for_admins: false,
+        required_for_current_user: false,
+      });
+      return;
+    }
+    if (path === '/api/me/mfa/totp/enroll' && request.method() === 'POST') {
+      enrollCSRF = await request.headerValue('x-csrf-token');
+      await fulfillJSON(route, 200, {
+        secret: 'JBSWY3DPEHPK3PXP',
+        otpauth_uri: 'otpauth://totp/Nyauth%3Aalice?secret=JBSWY3DPEHPK3PXP&issuer=Nyauth&algorithm=SHA1&digits=6&period=30',
+      });
+      return;
+    }
+    if (path === '/api/me/mfa/totp/enroll/confirm' && request.method() === 'POST') {
+      confirmCSRF = await request.headerValue('x-csrf-token');
+      enrolled = true;
+      state.csrfToken = 'csrf-after-totp-enroll';
+      await fulfillJSON(route, 200, {
+        ...sessionResponse(state),
+        recovery_codes: ['AAAA2222-BBBB2222CCCC2222', 'DDDD2222-EEEE2222FFFF2222'],
+      });
+      return;
+    }
+    if (path === '/api/me/mfa/recovery-codes' && request.method() === 'POST') {
+      regenerateCSRF = await request.headerValue('x-csrf-token');
+      await fulfillJSON(route, 200, {
+        recovery_codes: ['GGGG2222-HHHH2222IIII2222', 'JJJJ2222-KKKK2222LLLL2222'],
+      });
+      return;
+    }
+    if (path === '/api/me/mfa/totp' && request.method() === 'DELETE') {
+      disableCSRF = await request.headerValue('x-csrf-token');
+      enrolled = false;
+      state.csrfToken = 'csrf-after-totp-disable';
+      await fulfillJSON(route, 200, sessionResponse(state));
+      return;
+    }
+    await route.fallback();
+  });
+
+  await page.goto('/profile');
+  await page.getByRole('button', { name: '启用动态验证码' }).click();
+  const enrollmentDialog = page.getByRole('dialog', { name: '启用动态验证码' });
+  await expect(enrollmentDialog.getByText('JBSWY3DPEHPK3PXP')).toBeVisible();
+  await enrollmentDialog.getByLabel('6 位动态验证码').fill('123456');
+  await enrollmentDialog.getByRole('button', { name: '确认并启用' }).click();
+
+  const recoveryDialog = page.getByRole('dialog', { name: '保存恢复码' });
+  await expect(recoveryDialog.getByText('AAAA2222-BBBB2222CCCC2222')).toBeVisible();
+  await expect(recoveryDialog.getByRole('button', { name: '关闭对话框' })).toHaveCount(0);
+  await page.keyboard.press('Escape');
+  await expect(recoveryDialog).toBeVisible();
+  await recoveryDialog.getByRole('button', { name: '我已安全保存' }).click();
+  await expect(page.getByText('动态验证码已保护此账户')).toBeVisible();
+
+  await page.getByRole('button', { name: '重新生成恢复码' }).click();
+  const regeneratedDialog = page.getByRole('dialog', { name: '新的恢复码' });
+  await expect(regeneratedDialog.getByText('GGGG2222-HHHH2222IIII2222')).toBeVisible();
+  await regeneratedDialog.getByRole('button', { name: '我已安全保存' }).click();
+
+  await page.getByRole('button', { name: '停用', exact: true }).click();
+  const disableDialog = page.getByRole('dialog', { name: '停用动态验证码' });
+  await disableDialog.getByRole('button', { name: '确认停用' }).click();
+  await expect(page.getByText('尚未启用动态验证码')).toBeVisible();
+
+  expect(enrollCSRF).toBe('csrf-before-totp');
+  expect(confirmCSRF).toBe('csrf-before-totp');
+  expect(regenerateCSRF).toBe('csrf-after-totp-enroll');
+  expect(disableCSRF).toBe('csrf-after-totp-enroll');
+});
+
+test('provider reauthentication denial does not replay a pending TOTP action', async ({ page }) => {
+  const state: MockState = {
+    authenticated: true,
+    mustChangePassword: false,
+    role: 'user',
+    csrfToken: 'csrf-provider-totp-denied',
+    hasPassword: false,
+    identities: [githubIdentity],
+    providerReauthError: 'provider_denied',
+  };
+  await installAPIMocks(page, state);
+  let enrollmentAttempts = 0;
+  await page.route('**/api/me/mfa/totp/enroll', async (route) => {
+    enrollmentAttempts += 1;
+    await fulfillJSON(route, 403, { error: 'recent authentication is required' });
+  });
+
+  await page.goto('/profile');
+  await page.getByRole('button', { name: '启用动态验证码' }).click();
+  const reauthentication = page.getByRole('dialog', { name: '重新验证身份' });
+  await expect(reauthentication).toBeVisible();
+  await reauthentication.getByRole('button', { name: '使用 github 验证' }).click();
+
+  await expect(page.getByText('你取消了外部身份提供商的授权。')).toBeVisible();
+  expect(enrollmentAttempts).toBe(1);
+  expect(await page.evaluate(() => sessionStorage.getItem('nyauth:reauth:mfa-action'))).toBeNull();
+});
+
+test('provider reauthentication completes MFA before replaying a pending TOTP action once', async ({ page }) => {
+  const state: MockState = {
+    authenticated: true,
+    mustChangePassword: false,
+    role: 'user',
+    csrfToken: 'csrf-provider-mfa-before',
+    hasPassword: false,
+    identities: [githubIdentity],
+  };
+  await installAPIMocks(page, state);
+  const challenge = {
+    status: 'mfa_required',
+    purpose: 'reauthentication',
+    username: 'alice',
+    methods: ['totp'],
+    csrf_token: 'csrf-provider-mfa-pending',
+    expires_at: new Date(Date.now() + 5 * 60 * 1000).toISOString(),
+  };
+  const enrollmentCSRFs: Array<string | null> = [];
+  let providerCSRF: string | null = null;
+  let verificationCSRF: string | null = null;
+  await page.route('**/api/**', async (route) => {
+    const request = route.request();
+    const path = new URL(request.url()).pathname;
+    if (path === '/api/me/mfa/totp/enroll' && request.method() === 'POST') {
+      enrollmentCSRFs.push(await request.headerValue('x-csrf-token'));
+      if (enrollmentCSRFs.length === 1) {
+        await fulfillJSON(route, 403, { error: 'recent authentication is required' });
+      } else {
+        await fulfillJSON(route, 200, {
+          secret: 'JBSWY3DPEHPK3PXP',
+          otpauth_uri: 'otpauth://totp/Nyauth%3Aalice?secret=JBSWY3DPEHPK3PXP&issuer=Nyauth&algorithm=SHA1&digits=6&period=30',
+        });
+      }
+      return;
+    }
+    if (path === '/api/me/reauth/github' && request.method() === 'POST') {
+      providerCSRF = await request.headerValue('x-csrf-token');
+      await fulfillJSON(route, 200, {
+        redirect_url: new URL('/login/mfa?purpose=reauthentication&return_to=%2Fprofile', request.url()).toString(),
+      });
+      return;
+    }
+    if (path === '/api/login/mfa' && request.method() === 'GET') {
+      await fulfillJSON(route, 200, challenge);
+      return;
+    }
+    if (path === '/api/login/mfa' && request.method() === 'POST') {
+      verificationCSRF = await request.headerValue('x-csrf-token');
+      state.authenticatedAt = new Date().toISOString();
+      state.csrfToken = 'csrf-provider-mfa-after';
+      await fulfillJSON(route, 200, sessionResponse(state));
+      return;
+    }
+    await route.fallback();
+  });
+
+  await page.goto('/profile');
+  await page.getByRole('button', { name: '启用动态验证码' }).click();
+  const reauthentication = page.getByRole('dialog', { name: '重新验证身份' });
+  await reauthentication.getByRole('button', { name: '使用 github 验证' }).click();
+
+  await expect(page).toHaveURL(/\/login\/mfa/);
+  await page.getByLabel('6 位动态验证码').fill('123456');
+  await page.getByRole('button', { name: '验证并返回' }).click();
+
+  await expect(page).toHaveURL(/\/profile$/);
+  await expect(page.getByRole('dialog', { name: '启用动态验证码' })).toBeVisible();
+  expect(providerCSRF).toBe('csrf-provider-mfa-before');
+  expect(verificationCSRF).toBe('csrf-provider-mfa-pending');
+  expect(enrollmentCSRFs).toEqual(['csrf-provider-mfa-before', 'csrf-provider-mfa-after']);
+  expect(await page.evaluate(() => sessionStorage.getItem('nyauth:reauth:mfa-action'))).toBeNull();
 });
 
 test('an external-only account can set a local password after recent authentication', async ({ page }) => {
@@ -1348,7 +1724,7 @@ test('login distinguishes an unverified email from bad credentials', async ({ pa
   await page.goto('/login');
   await page.getByLabel('用户名').fill('pending-user');
   await page.getByLabel('密码').fill('a-valid-password-123');
-  await page.getByRole('button', { name: '登录' }).click();
+  await page.getByRole('button', { name: '登录', exact: true }).click();
 
   await expect(page.getByText('邮箱尚未验证，请先完成验证邮件中的确认再登录')).toBeVisible();
   await expect(page.getByRole('link', { name: '重发验证邮件' })).toHaveAttribute('href', '/resend-verification');

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
@@ -16,6 +17,7 @@ import (
 
 type Store struct {
 	db                  *pgxpool.Pool
+	passkeyRPID         string
 	notificationBuilder account.SecurityNotificationBuilder
 }
 
@@ -24,6 +26,13 @@ const usersEmailUniqueConstraint = "idx_users_email_normalized"
 var ErrLastAuthenticationMethod = errors.New("cannot remove the last authentication method")
 
 func NewStore(db *pgxpool.Pool) *Store { return &Store{db: db} }
+
+// NewStoreForRP scopes Passkey-based authentication invariants to the RP that
+// can actually authenticate this deployment. Credentials registered for a
+// previous issuer host must not keep an otherwise unreachable account alive.
+func NewStoreForRP(db *pgxpool.Pool, passkeyRPID string) *Store {
+	return &Store{db: db, passkeyRPID: strings.ToLower(strings.TrimSpace(passkeyRPID))}
+}
 
 func (s *Store) SetSecurityNotificationBuilder(builder account.SecurityNotificationBuilder) {
 	s.notificationBuilder = builder
@@ -116,7 +125,7 @@ func (s *Store) CreateUserAndIdentity(ctx context.Context, u *models.User, i *mo
 		INSERT INTO users (
 			id,username,email,email_verified_at,password_hash,display_name,avatar_url,
 			status,role,auth_version,session_version,must_change_password,metadata
-		) VALUES ($1,$2,$3,CASE WHEN $3::text IS NULL THEN NULL ELSE NOW() END,NULL,$4,$5,$6,$7,$8,$9,FALSE,$10)
+		) VALUES ($1,$2,$3::text,CASE WHEN $3::text IS NULL THEN NULL ELSE NOW() END,NULL,$4,$5,$6,$7,$8,$9,FALSE,$10)
 	`, u.ID, u.Username, u.Email, u.DisplayName, u.AvatarURL, u.Status, u.Role, u.AuthVersion, u.SessionVersion, u.Metadata)
 	if err != nil {
 		return fmt.Errorf("creating external user: %w", err)
@@ -179,6 +188,15 @@ func (s *Store) DeleteOwned(ctx context.Context, userID, identityID uuid.UUID, m
 	if err := tx.QueryRow(ctx, `SELECT password_hash IS NOT NULL FROM users WHERE id=$1`, userID).Scan(&hasPassword); err != nil {
 		return err
 	}
+	var hasPasskey bool
+	if err := tx.QueryRow(ctx, `
+		SELECT EXISTS (
+			SELECT 1 FROM user_passkey_credentials
+			WHERE user_id=$1 AND ($2='' OR rp_id=$2)
+		)
+	`, userID, s.passkeyRPID).Scan(&hasPasskey); err != nil {
+		return err
+	}
 	var identityCount int
 	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM identities WHERE user_id=$1`, userID).Scan(&identityCount); err != nil {
 		return err
@@ -187,7 +205,7 @@ func (s *Store) DeleteOwned(ctx context.Context, userID, identityID uuid.UUID, m
 	if err := tx.QueryRow(ctx, `SELECT provider FROM identities WHERE id=$1 AND user_id=$2 FOR UPDATE`, identityID, userID).Scan(&providerName); err != nil {
 		return err
 	}
-	if !hasPassword && identityCount <= 1 {
+	if !hasPassword && !hasPasskey && identityCount <= 1 {
 		return ErrLastAuthenticationMethod
 	}
 	if _, err := tx.Exec(ctx, `DELETE FROM identities WHERE id=$1 AND user_id=$2`, identityID, userID); err != nil {

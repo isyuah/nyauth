@@ -8,7 +8,7 @@
   import Button from '$lib/components/ui/Button.svelte';
   import Input from '$lib/components/ui/Input.svelte';
   import ResourceState from '$lib/components/ui/ResourceState.svelte';
-  import { KeyRound } from 'lucide-svelte';
+  import { ArrowLeft, KeyRound } from 'lucide-svelte';
 
   let currentPassword = $state('');
   let newPassword = $state('');
@@ -17,7 +17,11 @@
   let loading = $state(false);
   let ready = $state(false);
   let sessionError = $state('');
+  let canReturn = $state(false);
+  let roleHome = $state('/dashboard');
   let returnTo = $derived(safeReturnPath($page.url.searchParams.get('return_to'), '/dashboard'));
+  let backTarget = $derived(returnTo === '/change-password' ? roleHome : returnTo);
+  let backLabel = $derived(backTarget === '/profile' ? '返回个人资料' : backTarget.startsWith('/admin') ? '返回管理后台' : '返回用户中心');
 
   async function initialize() {
     sessionError = '';
@@ -29,6 +33,8 @@
       } else if (!session.has_password) {
         await goto('/profile');
       } else {
+        roleHome = session.user.role === 'admin' ? '/admin' : '/dashboard';
+        canReturn = !session.must_change_password;
         ready = true;
       }
     } catch (cause) {
@@ -73,6 +79,9 @@
 {:else if ready}
   <div class="min-h-screen flex items-center justify-center px-4 bg-[var(--nya-bg)]">
     <div class="w-full max-w-[420px] bg-[var(--nya-surface)] border border-[var(--nya-border)] p-8" style="border-radius: var(--nya-radius-card); box-shadow: var(--nya-shadow-card);">
+      {#if canReturn}
+        <div class="mb-5"><Button variant="ghost" size="sm" onclick={() => goto(backTarget)}><ArrowLeft size={15} /> {backLabel}</Button></div>
+      {/if}
       <div class="flex items-center gap-3 mb-2">
         <KeyRound size={22} style="color: var(--nya-primary);" />
         <h1 style="font-size: 20px; font-weight: 700;">修改密码</h1>

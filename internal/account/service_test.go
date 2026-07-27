@@ -135,14 +135,14 @@ func newTestService(t *testing.T, store *fakeServiceStore) *Service {
 
 func TestServicePublicBaseURLCanBeUpdatedForNewMessages(t *testing.T) {
 	service := newTestService(t, &fakeServiceStore{})
-	before, err := service.actionMessage(ActionEmailVerification, "alice@example.test", testRawToken, time.Hour)
+	before, err := service.actionMessage(ActionEmailVerification, "alice@example.test", "alice", testRawToken, time.Hour)
 	if err != nil {
 		t.Fatalf("actionMessage(before): %v", err)
 	}
 	if err := service.SetPublicBaseURL("https://new-auth.example.test/prefix"); err != nil {
 		t.Fatalf("SetPublicBaseURL: %v", err)
 	}
-	after, err := service.actionMessage(ActionEmailVerification, "alice@example.test", testRawToken, time.Hour)
+	after, err := service.actionMessage(ActionEmailVerification, "alice@example.test", "alice", testRawToken, time.Hour)
 	if err != nil {
 		t.Fatalf("actionMessage(after): %v", err)
 	}
@@ -152,6 +152,49 @@ func TestServicePublicBaseURLCanBeUpdatedForNewMessages(t *testing.T) {
 	}
 	if err := service.SetPublicBaseURL("https://user:secret@example.test"); err == nil {
 		t.Fatal("SetPublicBaseURL accepted credentials")
+	}
+}
+
+func TestActionMessageRendersPurposeSpecificTransactionalEmail(t *testing.T) {
+	service := newTestService(t, &fakeServiceStore{})
+	tests := []struct {
+		action      Action
+		subject     string
+		heading     string
+		buttonLabel string
+		path        string
+	}{
+		{ActionPasswordReset, "[Nyauth] 重置你的密码", "重置你的密码", "重置密码", "/reset-password"},
+		{ActionEmailVerification, "[Nyauth] 验证你的邮箱地址", "验证你的邮箱地址", "验证邮箱", "/verify-email"},
+		{ActionEmailChange, "[Nyauth] 确认邮箱地址变更", "确认新的邮箱地址", "确认邮箱变更", "/change-email"},
+	}
+	for _, test := range tests {
+		t.Run(string(test.action), func(t *testing.T) {
+			message, err := service.actionMessage(
+				test.action, "alice@example.test", "Alice <管理员>", testRawToken, 90*time.Minute,
+			)
+			if err != nil {
+				t.Fatalf("actionMessage: %v", err)
+			}
+			if message.Subject != test.subject {
+				t.Fatalf("subject = %q, want %q", message.Subject, test.subject)
+			}
+			link := "https://auth.example.test/base" + test.path + "?token=" + testRawToken
+			for name, body := range map[string]string{"text": message.TextBody, "html": message.HTMLBody} {
+				if !strings.Contains(body, test.heading) || !strings.Contains(body, test.buttonLabel) ||
+					!strings.Contains(body, link) || !strings.Contains(body, "90 分钟") {
+					t.Fatalf("%s body is missing transactional content: %q", name, body)
+				}
+			}
+			if !strings.Contains(message.HTMLBody, "<!doctype html>") ||
+				!strings.Contains(message.HTMLBody, "Alice &lt;管理员&gt;") ||
+				strings.Contains(message.HTMLBody, "Alice <管理员>") {
+				t.Fatalf("HTML body is incomplete or did not escape the username: %q", message.HTMLBody)
+			}
+			if strings.Contains(message.HTMLBody, "<img") {
+				t.Fatal("transactional template unexpectedly loads a remote image")
+			}
+		})
 	}
 }
 

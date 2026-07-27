@@ -3,6 +3,7 @@
   import { api, isRecentAuthenticationError, type RegistrationMode, type RegistrationSettings, type SystemStatus } from '$lib/api';
   import { brandingStore, consumeProviderAuthError } from '$lib/stores';
   import MailSettingsPanel from '$lib/components/admin/MailSettingsPanel.svelte';
+  import SecuritySettingsPanel from '$lib/components/admin/SecuritySettingsPanel.svelte';
   import ReauthenticationDialog from '$lib/components/account/ReauthenticationDialog.svelte';
   import PageHeader from '$lib/components/layout/PageHeader.svelte';
   import ResourceState from '$lib/components/ui/ResourceState.svelte';
@@ -260,6 +261,8 @@
     </form>
   {/if}
 </section>
+
+<SecuritySettingsPanel />
 
 <ResourceState
   {loading}

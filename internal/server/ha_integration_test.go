@@ -3,9 +3,13 @@ package server
 import (
 	"bytes"
 	"context"
+	"crypto/ecdsa"
+	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/sha256"
 	"embed"
 	"encoding/base64"
+	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
@@ -20,12 +24,16 @@ import (
 	"testing"
 	"time"
 
+	"github.com/fxamacker/cbor/v2"
+	"github.com/go-webauthn/webauthn/protocol"
+	gowebauthn "github.com/go-webauthn/webauthn/webauthn"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nyasharp/nyauth/internal/auth"
 	"github.com/nyasharp/nyauth/internal/config"
+	nyacrypto "github.com/nyasharp/nyauth/internal/crypto"
 	"github.com/nyasharp/nyauth/internal/database"
 	"github.com/nyasharp/nyauth/internal/session"
 	"github.com/nyasharp/nyauth/internal/telemetry"
@@ -52,6 +60,12 @@ type haTokenHTTPResult struct {
 	status int
 	body   []byte
 	err    error
+}
+
+type haPasskeyFixture struct {
+	credentialID []byte
+	userHandle   []byte
+	privateKey   *ecdsa.PrivateKey
 }
 
 func TestHAHTTPServersShareSessionAndAccountState(t *testing.T) {
@@ -230,6 +244,97 @@ func TestHAHTTPServersShareSessionAndAccountState(t *testing.T) {
 		t.Fatalf("logout administrator through other instance: status=%d body=%s", response.StatusCode, body)
 	}
 	_ = readHAResponse(t, response)
+}
+
+func TestHAHTTPServersFinishPasskeyLoginAcrossInstances(t *testing.T) {
+	cluster := newHAHTTPTestCluster(t)
+	ctx, cancel := context.WithTimeout(context.Background(), haIntegrationTimeout)
+	defer cancel()
+
+	marker := strings.ReplaceAll(uuid.NewString(), "-", "")
+	current, err := cluster.apps[0].userService.Create(ctx, models.CreateUserRequest{
+		Username: "ha_passkey_" + marker, Password: "ha-passkey-password-123", Metadata: map[string]string{},
+	})
+	if err != nil {
+		t.Fatalf("create Passkey user: %v", err)
+	}
+	fixture := insertHAPasskeyFixture(t, ctx, cluster.apps[0].db, current.ID)
+	ip := fmt.Sprintf("2001:db8:%s:%s::71", marker[:4], marker[4:8])
+	cluster.trackRedisKey("nyauth:passkey-ceremony-limit:ip:" + limitDigest(ip))
+	cluster.trackRedisKey("nyauth:login-limit:ip:" + limitDigest(ip))
+
+	optionsResponse := cluster.request(
+		t, 0, http.MethodPost, "/api/login/passkey/options",
+		strings.NewReader(`{"conditional":false,"return_to":"/profile"}`), nil, "", ip,
+	)
+	if optionsResponse.StatusCode != http.StatusOK {
+		body := readHAResponse(t, optionsResponse)
+		t.Fatalf("begin Passkey login through first instance: status=%d body=%s", optionsResponse.StatusCode, body)
+	}
+	var options struct {
+		CeremonyID string                                     `json:"ceremony_id"`
+		PublicKey  protocol.PublicKeyCredentialRequestOptions `json:"public_key"`
+	}
+	decodeHAResponse(t, optionsResponse, &options)
+	if options.CeremonyID == "" || options.PublicKey.Challenge.String() == "" {
+		t.Fatalf("first instance returned incomplete Passkey options: %#v", options)
+	}
+	cluster.trackRedisKey("nyauth:webauthn-ceremony:" + haDigest(options.CeremonyID))
+	payload := haPasskeyAssertionPayload(t, options.PublicKey, fixture, 1)
+
+	verified := cluster.passkeyRequest(
+		t, 1, "/api/login/passkey/verify", payload, options.CeremonyID, ip,
+	)
+	if verified.StatusCode != http.StatusOK {
+		body := readHAResponse(t, verified)
+		t.Fatalf("finish Passkey login through second instance: status=%d body=%s", verified.StatusCode, body)
+	}
+	var sessionCookie *http.Cookie
+	for _, cookie := range verified.Cookies() {
+		if cookie.Name == sessionCookieName && cookie.Value != "" {
+			sessionCookie = cookie
+			break
+		}
+	}
+	if sessionCookie == nil || !sessionCookie.HttpOnly {
+		_ = readHAResponse(t, verified)
+		t.Fatalf("Passkey login response is missing an HttpOnly session cookie: %#v", sessionCookie)
+	}
+	var authenticated models.SessionResponse
+	decodeHAResponse(t, verified, &authenticated)
+	if authenticated.User == nil || authenticated.User.ID != current.ID || authenticated.CSRFToken == "" {
+		t.Fatalf("unexpected Passkey login session: %#v", authenticated)
+	}
+	sessionKey := "nyauth:session:" + haDigest(sessionCookie.Value)
+	cluster.trackRedisKey(sessionKey)
+	cluster.sessionMembers[sessionKey] = struct{}{}
+	cluster.trackRedisKey("nyauth:user-sessions:" + haDigest(current.ID.String()))
+
+	replayed := cluster.passkeyRequest(
+		t, 0, "/api/login/passkey/verify", payload, options.CeremonyID, ip,
+	)
+	if replayed.StatusCode != http.StatusUnauthorized {
+		body := readHAResponse(t, replayed)
+		t.Fatalf("replay consumed Passkey ceremony: status=%d body=%s", replayed.StatusCode, body)
+	}
+	_ = readHAResponse(t, replayed)
+
+	var signCount int64
+	var passkeyAuditCount int
+	if err := cluster.apps[1].db.QueryRow(ctx, `
+		SELECT credential.sign_count,
+		       (SELECT COUNT(*) FROM audit_event_outbox
+		        WHERE event=$2 AND aggregate_id=credential.id::text)
+		FROM user_passkey_credentials AS credential
+		WHERE credential.rp_id=$1 AND credential.credential_id=$3
+	`, "nyauth-ha.invalid", models.AuditPasskeyLogin, fixture.credentialID).Scan(
+		&signCount, &passkeyAuditCount,
+	); err != nil {
+		t.Fatalf("load cross-instance Passkey state: %v", err)
+	}
+	if signCount != 1 || passkeyAuditCount != 1 {
+		t.Fatalf("cross-instance Passkey state: sign_count=%d audits=%d", signCount, passkeyAuditCount)
+	}
 }
 
 func TestHAHTTPServersConsumeAuthorizationCodeOnce(t *testing.T) {
@@ -781,6 +886,148 @@ func (c *haHTTPTestCluster) request(t *testing.T, instance int, method, path str
 		t.Fatalf("perform %s %s through instance %d: %v", method, path, instance, err)
 	}
 	return response
+}
+
+func (c *haHTTPTestCluster) passkeyRequest(
+	t *testing.T,
+	instance int,
+	path string,
+	body []byte,
+	ceremonyID, ip string,
+) *http.Response {
+	t.Helper()
+	request, err := http.NewRequest(http.MethodPost, c.httpServers[instance].URL+path, bytes.NewReader(body))
+	if err != nil {
+		t.Fatalf("create Passkey request: %v", err)
+	}
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set(webAuthnCeremonyHeader, ceremonyID)
+	if ip != "" {
+		request.Header.Set("X-Forwarded-For", ip)
+	}
+	response, err := c.httpServers[instance].Client().Do(request)
+	if err != nil {
+		t.Fatalf("execute Passkey request through instance %d: %v", instance, err)
+	}
+	return response
+}
+
+func insertHAPasskeyFixture(
+	t *testing.T,
+	ctx context.Context,
+	db *pgxpool.Pool,
+	userID uuid.UUID,
+) haPasskeyFixture {
+	t.Helper()
+	privateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate HA Passkey key: %v", err)
+	}
+	credentialID := make([]byte, 32)
+	userHandle := make([]byte, 32)
+	if _, err := rand.Read(credentialID); err != nil {
+		t.Fatalf("generate HA Passkey credential ID: %v", err)
+	}
+	if _, err := rand.Read(userHandle); err != nil {
+		t.Fatalf("generate HA Passkey user handle: %v", err)
+	}
+	publicKey, err := cbor.Marshal(map[int]any{
+		1: 2, 3: -7, -1: 1,
+		-2: privateKey.PublicKey.X.FillBytes(make([]byte, 32)),
+		-3: privateKey.PublicKey.Y.FillBytes(make([]byte, 32)),
+	})
+	if err != nil {
+		t.Fatalf("encode HA Passkey public key: %v", err)
+	}
+	credential := gowebauthn.Credential{
+		ID: credentialID, PublicKey: publicKey, AttestationFormat: "none",
+		Flags: gowebauthn.CredentialFlags{UserPresent: true, UserVerified: true},
+		Authenticator: gowebauthn.Authenticator{
+			AAGUID: make([]byte, 16), Attachment: protocol.Platform,
+		},
+	}
+	encoded, err := credential.MarshalMsg(nil)
+	if err != nil {
+		t.Fatalf("encode HA Passkey credential: %v", err)
+	}
+	rowID := uuid.New()
+	ciphertext, err := nyacrypto.EncryptEnvelope(
+		[]byte("0123456789abcdef0123456789abcdef"), "primary", "mfa.passkey.credential", encoded,
+		haPasskeyAAD("nyauth-ha.invalid", rowID, userID, credentialID),
+	)
+	if err != nil {
+		t.Fatalf("encrypt HA Passkey credential: %v", err)
+	}
+	if _, err := db.Exec(ctx, `
+		WITH inserted_handle AS (
+			INSERT INTO user_passkey_handles (rp_id,user_id,user_handle)
+			VALUES ($1,$2,$3)
+			RETURNING rp_id,user_id
+		)
+		INSERT INTO user_passkey_credentials (
+			id,rp_id,user_id,credential_id,credential_ciphertext,name,aaguid,attachment
+		)
+		SELECT $4,rp_id,user_id,$5,$6,'HA Passkey',$7,'platform'
+		FROM inserted_handle
+	`, "nyauth-ha.invalid", userID, userHandle, rowID, credentialID, ciphertext, make([]byte, 16)); err != nil {
+		t.Fatalf("insert HA Passkey fixture: %v", err)
+	}
+	return haPasskeyFixture{credentialID: credentialID, userHandle: userHandle, privateKey: privateKey}
+}
+
+func haPasskeyAssertionPayload(
+	t *testing.T,
+	options protocol.PublicKeyCredentialRequestOptions,
+	fixture haPasskeyFixture,
+	signCount uint32,
+) []byte {
+	t.Helper()
+	rpIDHash := sha256.Sum256([]byte("nyauth-ha.invalid"))
+	authenticatorData := make([]byte, 37)
+	copy(authenticatorData, rpIDHash[:])
+	authenticatorData[32] = 0x01 | 0x04
+	binary.BigEndian.PutUint32(authenticatorData[33:], signCount)
+	clientDataJSON, err := json.Marshal(map[string]any{
+		"type": "webauthn.get", "challenge": options.Challenge.String(),
+		"origin": "http://nyauth-ha.invalid", "crossOrigin": false,
+	})
+	if err != nil {
+		t.Fatalf("encode HA assertion client data: %v", err)
+	}
+	clientDataHash := sha256.Sum256(clientDataJSON)
+	signedData := make([]byte, 0, len(authenticatorData)+len(clientDataHash))
+	signedData = append(signedData, authenticatorData...)
+	signedData = append(signedData, clientDataHash[:]...)
+	signedHash := sha256.Sum256(signedData)
+	signature, err := ecdsa.SignASN1(rand.Reader, fixture.privateKey, signedHash[:])
+	if err != nil {
+		t.Fatalf("sign HA Passkey assertion: %v", err)
+	}
+	encodedCredentialID := base64.RawURLEncoding.EncodeToString(fixture.credentialID)
+	payload, err := json.Marshal(map[string]any{
+		"id": encodedCredentialID, "rawId": encodedCredentialID, "type": "public-key",
+		"authenticatorAttachment": "platform", "clientExtensionResults": map[string]any{},
+		"response": map[string]any{
+			"clientDataJSON":    base64.RawURLEncoding.EncodeToString(clientDataJSON),
+			"authenticatorData": base64.RawURLEncoding.EncodeToString(authenticatorData),
+			"signature":         base64.RawURLEncoding.EncodeToString(signature),
+			"userHandle":        base64.RawURLEncoding.EncodeToString(fixture.userHandle),
+		},
+	})
+	if err != nil {
+		t.Fatalf("encode HA Passkey assertion: %v", err)
+	}
+	return payload
+}
+
+func haPasskeyAAD(rpID string, rowID, userID uuid.UUID, credentialID []byte) []byte {
+	value := make([]byte, 0, len(rpID)+1+16+16+1+len(credentialID))
+	value = append(value, rpID...)
+	value = append(value, 0)
+	value = append(value, rowID[:]...)
+	value = append(value, userID[:]...)
+	value = append(value, 0)
+	return append(value, credentialID...)
 }
 
 func (c *haHTTPTestCluster) trackRedisKey(key string) {

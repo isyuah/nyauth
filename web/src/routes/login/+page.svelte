@@ -1,16 +1,26 @@
 <script lang="ts">
   import { page } from '$app/stores';
-  import { api, ApiError } from '$lib/api';
+  import { api, ApiError, isMFARequiredResponse } from '$lib/api';
   import { brandingStore, consumeProviderAuthError, safeReturnPath, sessionStore } from '$lib/stores';
   import { goto } from '$app/navigation';
   import { onMount } from 'svelte';
   import Button from '$lib/components/ui/Button.svelte';
   import Input from '$lib/components/ui/Input.svelte';
+  import {
+    WEBAUTHN_ERROR_CODES,
+    authenticationCredentialToJSON,
+    classifyWebAuthnError,
+    getCredential,
+    isConditionalMediationAvailable,
+  } from '$lib/webauthn';
+  import { Fingerprint } from 'lucide-svelte';
 
   let username = $state('');
   let password = $state('');
   let error = $state('');
   let loading = $state(false);
+  let passkeyLoading = $state(false);
+  let passkeySupported = $state(false);
   let providers = $state<Array<{ name: string; type: string }>>([]);
   let providersLoading = $state(true);
   let providersError = $state('');
@@ -19,6 +29,14 @@
 
   let registrationOpen = $state(false);
   let pendingVerification = $state(false);
+  let conditionalController: AbortController | null = null;
+  let conditionalGeneration = 0;
+  let conditionalAvailable = false;
+  let conditionalRestartTimer: number | null = null;
+  let conditionalRestartAttempts = 0;
+  let mounted = false;
+  let explicitPasskeyController: AbortController | null = null;
+  let explicitPasskeyGeneration = 0;
 
   async function loadProviders() {
     providersLoading = true;
@@ -42,7 +60,17 @@
     }
   }
 
-  onMount(async () => {
+  onMount(() => {
+    mounted = true;
+    void initialize();
+    return () => {
+      mounted = false;
+      abortConditional();
+      abortExplicitPasskey();
+    };
+  });
+
+  async function initialize() {
     const providerError = consumeProviderAuthError();
     if (providerError) {
       error = providerError.message;
@@ -61,23 +89,157 @@
       error = cause instanceof Error ? `会话检查失败：${cause.message}` : '暂时无法连接认证服务';
     }
     await Promise.all([loadProviders(), loadRegistrationOptions()]);
-  });
+    if (!mounted) return;
+    passkeySupported = typeof PublicKeyCredential !== 'undefined' && navigator.credentials !== undefined;
+    conditionalAvailable = passkeySupported && await isConditionalMediationAvailable();
+    if (mounted && conditionalAvailable) void startConditionalLogin();
+  }
+
+  function clearConditionalRestart() {
+    if (conditionalRestartTimer !== null) window.clearTimeout(conditionalRestartTimer);
+    conditionalRestartTimer = null;
+  }
+
+  function abortConditional() {
+    clearConditionalRestart();
+    conditionalGeneration += 1;
+    conditionalController?.abort();
+    conditionalController = null;
+  }
+
+  function scheduleConditionalLogin(resetAttempts = false) {
+    if (!mounted || !conditionalAvailable) return;
+    if (resetAttempts) conditionalRestartAttempts = 0;
+    if (conditionalRestartAttempts >= 3) return;
+    clearConditionalRestart();
+    const delays = [250, 1_000, 5_000];
+    const delay = delays[conditionalRestartAttempts] ?? 5_000;
+    conditionalRestartAttempts += 1;
+    conditionalRestartTimer = window.setTimeout(() => {
+      conditionalRestartTimer = null;
+      if (mounted && !loading && !passkeyLoading) void startConditionalLogin();
+    }, delay);
+  }
+
+  function abortExplicitPasskey() {
+    explicitPasskeyGeneration += 1;
+    explicitPasskeyController?.abort();
+    explicitPasskeyController = null;
+    passkeyLoading = false;
+  }
+
+  async function completeLogin(session: Awaited<ReturnType<typeof api.finishPasskeyLogin>>) {
+    sessionStore.setSession(session);
+    if (session.must_change_password) {
+      await goto(`/change-password?return_to=${encodeURIComponent(returnTo)}`);
+    } else if (returnTo.startsWith('/authorize')) {
+      window.location.href = returnTo;
+    } else {
+      await goto(returnTo);
+    }
+  }
+
+  function passkeyErrorMessage(cause: unknown): string {
+    switch (classifyWebAuthnError(cause)) {
+      case WEBAUTHN_ERROR_CODES.notAllowed:
+        return '未选择 Passkey，或系统验证窗口已关闭。';
+      case WEBAUTHN_ERROR_CODES.notSupported:
+        return '当前浏览器或设备不支持 Passkey。';
+      case WEBAUTHN_ERROR_CODES.security:
+        return '当前页面不满足 Passkey 的安全环境要求，请使用 HTTPS 或 localhost。';
+      case WEBAUTHN_ERROR_CODES.invalidState:
+        return '这枚 Passkey 当前无法使用，请尝试其他登录方式。';
+      default:
+        return cause instanceof Error ? cause.message : 'Passkey 登录失败';
+    }
+  }
+
+  async function startConditionalLogin() {
+    abortConditional();
+    const controller = new AbortController();
+    const generation = ++conditionalGeneration;
+    conditionalController = controller;
+    try {
+      const options = await api.beginPasskeyLogin(true, returnTo, controller.signal);
+      if (controller.signal.aborted || generation !== conditionalGeneration) return;
+      const credential = await getCredential(options.public_key, {
+        mediation: 'conditional',
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted || generation !== conditionalGeneration) return;
+      const session = await api.finishPasskeyLogin(
+        options.ceremony_id,
+        authenticationCredentialToJSON(credential),
+        controller.signal,
+      );
+      conditionalController = null;
+      await completeLogin(session);
+    } catch (cause) {
+      const code = classifyWebAuthnError(cause);
+      if (generation === conditionalGeneration) {
+        conditionalController = null;
+        if (code !== WEBAUTHN_ERROR_CODES.aborted) scheduleConditionalLogin();
+      }
+    }
+  }
+
+  async function handlePasskeyLogin() {
+    abortConditional();
+    abortExplicitPasskey();
+    error = '';
+    pendingVerification = false;
+    passkeyLoading = true;
+    const controller = new AbortController();
+    const generation = ++explicitPasskeyGeneration;
+    explicitPasskeyController = controller;
+    let completed = false;
+    try {
+      const options = await api.beginPasskeyLogin(false, returnTo, controller.signal);
+      if (controller.signal.aborted || generation !== explicitPasskeyGeneration) return;
+      const credential = await getCredential(options.public_key, {
+        mediation: options.mediation ?? 'required',
+        signal: controller.signal,
+      });
+      if (controller.signal.aborted || generation !== explicitPasskeyGeneration) return;
+      const session = await api.finishPasskeyLogin(
+        options.ceremony_id,
+        authenticationCredentialToJSON(credential),
+        controller.signal,
+      );
+      if (controller.signal.aborted || generation !== explicitPasskeyGeneration) return;
+      await completeLogin(session);
+      completed = true;
+    } catch (cause) {
+      if (classifyWebAuthnError(cause) !== WEBAUTHN_ERROR_CODES.aborted) {
+        error = passkeyErrorMessage(cause);
+      }
+    } finally {
+      if (explicitPasskeyController === controller) {
+        explicitPasskeyController = null;
+        passkeyLoading = false;
+      }
+      if (!completed && generation === explicitPasskeyGeneration) scheduleConditionalLogin(true);
+    }
+  }
 
   async function handleLogin(e: Event) {
     e.preventDefault();
+    abortConditional();
+    abortExplicitPasskey();
     error = '';
     pendingVerification = false;
     loading = true;
+    let completed = false;
     try {
-      const session = await api.login(username, password);
-      sessionStore.setSession(session);
-      if (session.must_change_password) {
-        goto(`/change-password?return_to=${encodeURIComponent(returnTo)}`);
-      } else if (returnTo.startsWith('/authorize')) {
-        window.location.href = returnTo;
-      } else {
-        goto(returnTo);
+      const result = await api.login(username, password, returnTo);
+      password = '';
+      if (isMFARequiredResponse(result)) {
+        completed = true;
+        await goto(`/login/mfa?return_to=${encodeURIComponent(returnTo)}`);
+        return;
       }
+      await completeLogin(result);
+      completed = true;
     } catch (err) {
       pendingVerification = err instanceof ApiError
         && err.status === 403
@@ -89,10 +251,13 @@
       }
     } finally {
       loading = false;
+      if (!completed) scheduleConditionalLogin(true);
     }
   }
 
   function handleOAuth(name: string) {
+    abortConditional();
+    abortExplicitPasskey();
     window.location.href = `/auth/${encodeURIComponent(name)}/authorize?return_to=${encodeURIComponent(returnTo)}`;
   }
 </script>
@@ -118,7 +283,7 @@
       {/if}
 
       <form onsubmit={handleLogin} class="space-y-4">
-        <Input id="username" label="用户名" bind:value={username} required autocomplete="username" placeholder="输入用户名" />
+        <Input id="username" label="用户名" bind:value={username} required autocomplete="username webauthn" placeholder="输入用户名" />
         <Input id="password" type="password" label="密码" bind:value={password} required autocomplete="current-password" placeholder="输入密码" />
 
         <div class="flex items-center justify-between">
@@ -126,10 +291,18 @@
           <a href="/forgot-password" class="text-small text-nya-primary hover:underline">忘记密码？</a>
         </div>
 
-        <Button type="submit" {loading} size="lg" variant="primary" fullWidth>
+        <Button type="submit" {loading} disabled={passkeyLoading} size="lg" variant="primary" fullWidth>
           {loading ? '登录中...' : '登录'}
         </Button>
       </form>
+
+      {#if passkeySupported}
+        <div class="mt-4">
+          <Button variant="secondary" size="lg" fullWidth loading={passkeyLoading} disabled={loading} onclick={handlePasskeyLogin}>
+            <Fingerprint size={18} /> 使用 Passkey 登录
+          </Button>
+        </div>
+      {/if}
 
       {#if providersLoading}
         <p class="mt-5 text-center text-small text-nya-text-tertiary" role="status">正在加载外部登录方式…</p>

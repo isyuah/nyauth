@@ -476,7 +476,7 @@ func (s *Service) prepareActionEmail(accountUser *models.User, action Action, cl
 	if err != nil {
 		return nil, fmt.Errorf("encrypting account action claims: %w", err)
 	}
-	message, err := s.actionMessage(action, claims.Email, rawToken, ttl)
+	message, err := s.actionMessage(action, claims.Email, accountUser.Username, rawToken, ttl)
 	if err != nil {
 		return nil, err
 	}
@@ -539,33 +539,22 @@ func (s *Service) newOutboxEmail(userID uuid.UUID, messageType string, message E
 	}, nil
 }
 
-func (s *Service) actionMessage(action Action, recipient, rawToken string, ttl time.Duration) (EmailMessage, error) {
-	var path, subject, lead string
-	switch action {
-	case ActionPasswordReset:
-		path, subject, lead = "/reset-password", "重置 Nyauth 密码", "请在 "+formatActionTTL(ttl)+"内确认重置您的 Nyauth 密码。"
-	case ActionEmailVerification:
-		path, subject, lead = "/verify-email", "验证 Nyauth 邮箱", "请在 "+formatActionTTL(ttl)+"内确认此邮箱属于您的 Nyauth 账户。"
-	case ActionEmailChange:
-		path, subject, lead = "/change-email", "确认 Nyauth 邮箱变更", "请在 "+formatActionTTL(ttl)+"内确认将此邮箱绑定到您的 Nyauth 账户。"
-	default:
-		return EmailMessage{}, fmt.Errorf("unsupported account action %q", action)
+func (s *Service) actionMessage(action Action, recipient, username, rawToken string, ttl time.Duration) (EmailMessage, error) {
+	ttlText := formatActionTTL(ttl)
+	definition, err := accountActionEmailDefinitionFor(action, ttlText)
+	if err != nil {
+		return EmailMessage{}, err
 	}
 	baseURL := s.publicBaseURL.Load()
 	if baseURL == nil {
 		return EmailMessage{}, fmt.Errorf("public base URL is unavailable")
 	}
 	actionURL := *baseURL
-	actionURL.Path = strings.TrimSuffix(actionURL.Path, "/") + path
+	actionURL.Path = strings.TrimSuffix(actionURL.Path, "/") + definition.Path
 	query := actionURL.Query()
 	query.Set("token", rawToken)
 	actionURL.RawQuery = query.Encode()
-	link := actionURL.String()
-	return EmailMessage{
-		To: recipient, Subject: subject,
-		TextBody: lead + "\n\n" + link + "\n\n如果这不是您本人操作，可以忽略此邮件。",
-		HTMLBody: "<p>" + html.EscapeString(lead) + "</p><p><a href=\"" + html.EscapeString(link) + "\">继续操作</a></p><p>如果这不是您本人操作，可以忽略此邮件。</p>",
-	}, nil
+	return renderAccountActionEmail(recipient, username, actionURL.String(), ttlText, definition)
 }
 
 func formatActionTTL(ttl time.Duration) string {

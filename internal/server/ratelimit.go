@@ -22,11 +22,20 @@ if identity > tonumber(ARGV[1]) or address > tonumber(ARGV[2]) then return {0, r
 return {1, retry}
 `)
 
+var singleLimitScript = redis.NewScript(`
+local count = redis.call("INCR", KEYS[1])
+if count == 1 then redis.call("PEXPIRE", KEYS[1], ARGV[2]) end
+local ttl = redis.call("PTTL", KEYS[1])
+if count > tonumber(ARGV[1]) then return {0, ttl} end
+return {1, ttl}
+`)
+
 type LoginLimiter struct {
 	rdb           *redis.Client
 	window        time.Duration
 	identityLimit int
 	ipLimit       int
+	ceremonyLimit int
 }
 
 // AccountActionLimiter bounds email-producing account actions without storing
@@ -60,7 +69,7 @@ const (
 )
 
 func NewLoginLimiter(rdb *redis.Client) *LoginLimiter {
-	return &LoginLimiter{rdb: rdb, window: 5 * time.Minute, identityLimit: 5, ipLimit: 30}
+	return &LoginLimiter{rdb: rdb, window: 5 * time.Minute, identityLimit: 5, ipLimit: 30, ceremonyLimit: 120}
 }
 
 func NewAccountActionLimiter(rdb *redis.Client) *AccountActionLimiter {
@@ -111,6 +120,46 @@ func (l *LoginLimiter) Reserve(ctx context.Context, ip, username string) (bool, 
 }
 func (l *LoginLimiter) ResetIdentity(ctx context.Context, ip, username string) error {
 	return l.rdb.Del(ctx, "nyauth:login-limit:identity:"+limitDigest(ip+"\x00"+username)).Err()
+}
+
+func (l *LoginLimiter) ReserveIP(ctx context.Context, ip string) (bool, time.Duration, error) {
+	return reserveSingleLimit(
+		ctx, l.rdb, "nyauth:login-limit:ip:"+limitDigest(ip), l.ipLimit, l.window,
+	)
+}
+
+func (l *LoginLimiter) ReservePasskeyCeremony(ctx context.Context, ip string) (bool, time.Duration, error) {
+	return reserveSingleLimit(
+		ctx, l.rdb, "nyauth:passkey-ceremony-limit:ip:"+limitDigest(ip), l.ceremonyLimit, l.window,
+	)
+}
+
+func reserveSingleLimit(
+	ctx context.Context,
+	rdb *redis.Client,
+	key string,
+	limit int,
+	window time.Duration,
+) (bool, time.Duration, error) {
+	values, err := singleLimitScript.Run(ctx, rdb, []string{key}, limit, window.Milliseconds()).Slice()
+	if err != nil {
+		return false, 0, err
+	}
+	if len(values) != 2 {
+		return false, 0, fmt.Errorf("invalid rate limit result")
+	}
+	allowed, ok := values[0].(int64)
+	if !ok {
+		return false, 0, fmt.Errorf("invalid rate limit status")
+	}
+	millis, ok := values[1].(int64)
+	if !ok {
+		return false, 0, fmt.Errorf("invalid rate limit TTL")
+	}
+	if millis < 1000 {
+		millis = 1000
+	}
+	return allowed == 1, time.Duration(millis) * time.Millisecond, nil
 }
 
 func (l *AccountActionLimiter) Reserve(ctx context.Context, action, ip, subject string) (bool, time.Duration, error) {

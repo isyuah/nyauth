@@ -3,7 +3,7 @@
   import { onMount } from 'svelte';
   import {
     api,
-    ApiError,
+    isRecentAuthenticationError,
     type BrowserSession,
     type ExternalIdentity,
     type OAuthAuthorization,
@@ -14,6 +14,9 @@
   import { consumeProviderAuthError, sessionStore } from '$lib/stores';
   import { PASSWORD_REQUIREMENT, passwordPolicyError } from '$lib/password-policy';
   import AppShell from '$lib/components/layout/AppShell.svelte';
+  import ReauthenticationDialog from '$lib/components/account/ReauthenticationDialog.svelte';
+  import PasskeySettingsCard from '$lib/components/account/PasskeySettingsCard.svelte';
+  import TOTPSettingsCard from '$lib/components/account/TOTPSettingsCard.svelte';
   import PageHeader from '$lib/components/layout/PageHeader.svelte';
   import Badge from '$lib/components/ui/Badge.svelte';
   import Button from '$lib/components/ui/Button.svelte';
@@ -24,6 +27,8 @@
   import { AppWindow, Calendar, CheckCircle, KeyRound, Link2, LogOut, Mail, MonitorSmartphone, Save, Send, Shield } from 'lucide-svelte';
 
   type SessionAction = { kind: 'single'; session: BrowserSession } | { kind: 'others' } | null;
+
+  const initialProviderAuthError = consumeProviderAuthError();
 
   let session = $state<SessionInfo | null>(null);
   let me = $state<User | null>(null);
@@ -38,7 +43,7 @@
   let saved = $state(false);
   let loadError = $state('');
   let actionError = $state('');
-  let notice = $state('');
+  let notice = $state(initialProviderAuthError?.message ?? '');
   let loading = $state(true);
   let identitiesLoading = $state(false);
   let identitiesError = $state('');
@@ -52,9 +57,6 @@
   let authorizationConfirmOpen = $state(false);
   let authorizationActionError = $state('');
   let reauthOpen = $state(false);
-  let reauthPassword = $state('');
-  let reauthLoading = $state(false);
-  let reauthError = $state('');
   let reauthProvider = $state('');
   let setPasswordOpen = $state(false);
   let setPasswordValue = $state('');
@@ -73,6 +75,7 @@
   let sessionConfirmOpen = $state(false);
   let sessionActionError = $state('');
   let authenticationClock = $state(Date.now());
+  let mfaFactorsRevision = $state(0);
 
   let hasPassword = $derived(session?.has_password ?? false);
   let emailVerified = $derived(session?.email_verified ?? false);
@@ -96,12 +99,14 @@
     sessionStore.setSession(next);
   }
 
+  function applyPasskeySession(next: SessionInfo) {
+    applySession(next);
+    mfaFactorsRevision += 1;
+  }
+
   function promptForReauthentication(message = '此操作需要最近 10 分钟内重新验证身份。') {
     actionError = message;
-    if (hasPassword) {
-      reauthError = '';
-      reauthOpen = true;
-    }
+    reauthOpen = true;
   }
 
   function requireRecentAuthentication(): boolean {
@@ -109,10 +114,6 @@
     if (hasRecentAuthentication(session?.authenticated_at, authenticationClock)) return true;
     promptForReauthentication();
     return false;
-  }
-
-  function isRecentAuthenticationFailure(cause: unknown): boolean {
-    return cause instanceof ApiError && cause.status === 403;
   }
 
   function deviceLabel(userAgent = ''): string {
@@ -171,7 +172,6 @@
 
   async function loadProfile() {
     loading = true;
-    notice = consumeProviderAuthError()?.message ?? '';
     loadError = '';
     actionError = '';
     try {
@@ -251,7 +251,7 @@
       emailChangeSent = true;
       newEmail = '';
     } catch (cause) {
-      if (isRecentAuthenticationFailure(cause)) {
+      if (isRecentAuthenticationError(cause)) {
         authenticationClock = Date.now();
         promptForReauthentication();
       } else {
@@ -274,22 +274,10 @@
     }
   }
 
-  async function handlePasswordReauthentication(event: SubmitEvent) {
-    event.preventDefault();
-    reauthLoading = true;
-    reauthError = '';
-    try {
-      const next = await api.reauthenticateWithPassword(reauthPassword);
-      applySession(next);
-      reauthPassword = '';
-      reauthOpen = false;
-      actionError = '';
-      notice = '身份验证已刷新，敏感操作将在 10 分钟内可用。';
-    } catch (cause) {
-      reauthError = cause instanceof Error ? cause.message : '重新认证失败';
-    } finally {
-      reauthLoading = false;
-    }
+  function handleProfileReauthenticated(next: SessionInfo) {
+    applySession(next);
+    actionError = '';
+    notice = '身份验证已刷新，敏感操作将在 10 分钟内可用。';
   }
 
   async function beginProviderReauthentication(provider: string) {
@@ -337,7 +325,7 @@
       setPasswordOpen = false;
       notice = '本地密码已设置，当前会话已安全轮换。';
     } catch (cause) {
-      if (isRecentAuthenticationFailure(cause)) authenticationClock = Date.now();
+      if (isRecentAuthenticationError(cause)) authenticationClock = Date.now();
       setPasswordError = cause instanceof Error ? cause.message : '无法设置本地密码';
     } finally {
       setPasswordLoading = false;
@@ -361,7 +349,7 @@
       identities = identities.filter((identity) => identity.id !== target.id);
       notice = `已解绑 ${target.provider} 身份，当前会话已安全轮换。`;
     } catch (cause) {
-      if (isRecentAuthenticationFailure(cause)) {
+      if (isRecentAuthenticationError(cause)) {
         authenticationClock = Date.now();
         identityConfirmOpen = false;
         promptForReauthentication();
@@ -426,7 +414,7 @@
 {#if loading || !session}
   <div class="min-h-screen bg-nya-bg p-6"><div class="mx-auto max-w-2xl pt-20"><ResourceState {loading} error={loadError} onretry={loadProfile}>{#snippet children()}{/snippet}</ResourceState></div></div>
 {:else}
-  <AppShell section={session.user.role === 'admin' ? 'admin' : 'user'}>
+  <AppShell section="user">
     <div class="mx-auto max-w-4xl">
       <PageHeader title="个人资料" description="管理账户资料、安全设置、设备会话和外部身份" />
 
@@ -460,9 +448,21 @@
                 <div class="flex flex-col justify-between gap-4 px-7 py-5 sm:flex-row sm:items-center"><div><h2 class="text-card-title text-nya-text-primary">密码安全</h2>{#if hasPassword}<p class="mt-1 text-body text-nya-text-secondary">修改密码会退出其他设备并撤销已有令牌。</p>{:else}<p class="mt-1 text-body text-nya-text-secondary">此账户当前仅通过外部身份登录，可以额外设置本地密码。</p>{/if}</div>{#if hasPassword}<Button variant="secondary" onclick={() => goto('/change-password?return_to=/profile')}><KeyRound size={16} /> 修改密码</Button>{:else}<Button variant="secondary" onclick={openSetPassword}><KeyRound size={16} /> 设置本地密码</Button>{/if}</div>
               </section>
 
+              {#key mfaFactorsRevision}
+                <TOTPSettingsCard
+                  onsessionupdated={applySession}
+                  providerReauthenticationFailed={initialProviderAuthError !== null}
+                />
+              {/key}
+
+              <PasskeySettingsCard
+                onsessionupdated={applyPasskeySession}
+                providerReauthenticationFailed={initialProviderAuthError !== null}
+              />
+
               <section class="rounded-nya-card border border-nya-border bg-nya-surface shadow-nya-card">
                 <div class="flex flex-col justify-between gap-4 border-b border-nya-divider px-7 py-5 sm:flex-row sm:items-center"><div><h2 class="text-card-title text-nya-text-primary">近期重新认证</h2><p class="mt-1 text-body text-nya-text-secondary">邮箱变更、设置密码和身份解绑要求最近 10 分钟内重新验证身份。</p></div><Badge variant={recentAuthenticationValid ? 'success' : 'warning'}>{recentAuthenticationValid ? '认证有效' : '需要重新认证'}</Badge></div>
-                <div class="flex flex-wrap gap-3 px-7 py-5">{#if hasPassword}<Button variant="secondary" onclick={() => { reauthError = ''; reauthOpen = true; }}><KeyRound size={15} /> 使用当前密码</Button>{/if}{#if identitiesLoading}<p class="text-body text-nya-text-tertiary" role="status">正在加载外部认证方式…</p>{:else if identitiesError}<p class="text-body text-nya-warning">外部身份暂时不可用，请在下方重试。</p>{:else}{#each identities as identity}<Button variant="secondary" loading={reauthProvider === identity.provider} onclick={() => beginProviderReauthentication(identity.provider)}><span>{providerIcons[identity.provider] || '🔗'}</span> 使用 {identity.provider}</Button>{/each}{#if !hasPassword && identities.length === 0}<p class="text-body text-nya-danger">当前没有可用于重新认证的登录方式，请联系管理员。</p>{/if}{/if}</div>
+                <div class="flex flex-wrap gap-3 px-7 py-5"><Button variant="secondary" onclick={() => (reauthOpen = true)}><KeyRound size={15} /> 选择认证方式</Button>{#if identitiesLoading}<p class="text-body text-nya-text-tertiary" role="status">正在加载外部认证方式…</p>{:else if identitiesError}<p class="text-body text-nya-warning">外部身份暂时不可用，请在下方重试。</p>{:else}{#each identities as identity}<Button variant="secondary" loading={reauthProvider === identity.provider} onclick={() => beginProviderReauthentication(identity.provider)}><span>{providerIcons[identity.provider] || '🔗'}</span> 使用 {identity.provider}</Button>{/each}{/if}</div>
               </section>
 
               <section class="rounded-nya-card border border-nya-border bg-nya-surface shadow-nya-card">
@@ -545,13 +545,12 @@
   onconfirm={removeIdentity}
 />
 
-<Modal bind:open={reauthOpen} title="使用当前密码重新认证" description="成功后，敏感账户操作将在 10 分钟内可用" size="sm">
-  <form onsubmit={handlePasswordReauthentication} class="space-y-4">
-    {#if reauthError}<p class="rounded-nya-sm bg-nya-danger-soft px-3 py-2 text-small text-nya-danger" role="alert">{reauthError}</p>{/if}
-    <Input id="reauth-current-password" label="当前密码" type="password" bind:value={reauthPassword} autocomplete="current-password" required />
-    <div class="flex justify-end gap-2"><Button variant="secondary" onclick={() => (reauthOpen = false)} disabled={reauthLoading}>取消</Button><Button type="submit" variant="primary" loading={reauthLoading}>重新认证</Button></div>
-  </form>
-</Modal>
+<ReauthenticationDialog
+  bind:open={reauthOpen}
+  returnTo="/profile"
+  description="成功后，敏感账户操作将在 10 分钟内可用"
+  onauthenticated={handleProfileReauthenticated}
+/>
 
 <Modal bind:open={setPasswordOpen} title="设置本地密码" description="设置后可以同时使用用户名密码和外部身份登录" size="sm">
   {#if recentAuthenticationValid}

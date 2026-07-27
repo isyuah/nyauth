@@ -30,6 +30,7 @@ import (
 	"github.com/nyasharp/nyauth/internal/identity"
 	"github.com/nyasharp/nyauth/internal/invite"
 	"github.com/nyasharp/nyauth/internal/mailruntime"
+	"github.com/nyasharp/nyauth/internal/mfa"
 	"github.com/nyasharp/nyauth/internal/provider"
 	"github.com/nyasharp/nyauth/internal/registration"
 	"github.com/nyasharp/nyauth/internal/session"
@@ -70,16 +71,23 @@ type Server struct {
 	accountLimiter      *AccountActionLimiter
 	mailSettingsLimiter *MailSettingsLimiter
 	mailManager         *mailruntime.Manager
+	mfaService          *mfa.Service
 	emailDispatcher     *account.Dispatcher
 	readiness           readinessState
 }
 
 func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS, telemetryRuntime *telemetry.Runtime) (*Server, error) {
 	crypto.SetArgon2Concurrency(cfg.Auth.Argon2Concurrency)
-	userStore := user.NewStore(db)
+	issuerURL, err := url.Parse(cfg.Auth.Issuer)
+	if err != nil {
+		return nil, fmt.Errorf("parsing Passkey issuer: %w", err)
+	}
+	passkeyRPID := strings.ToLower(issuerURL.Hostname())
+	rpOrigin := (&url.URL{Scheme: issuerURL.Scheme, Host: issuerURL.Host}).String()
+	userStore := user.NewStoreForRP(db, passkeyRPID)
 	clientStore := client.NewStore(db)
 	authorizationStore := authorization.NewStore(db)
-	identityStore := identity.NewStore(db)
+	identityStore := identity.NewStoreForRP(db, passkeyRPID)
 	sessionStore := session.NewStore(rdb)
 	userService := user.NewService(userStore)
 	clientService := client.NewService(clientStore)
@@ -88,7 +96,17 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 	providerMgr := provider.NewManager(db, cfg.Auth.MasterKey, cfg.IsProduction())
 	authHandler := auth.NewHandler(tokenService, jwkManager, userService, clientStore, sessionStore, cfg)
 	consentHandler := auth.NewConsentHandler(sessionStore, tokenService, clientStore, authorizationStore, cfg)
-	s := &Server{cfg: cfg, db: db, rdb: rdb, webFS: webFS, trustedProxies: parseTrustedProxyCIDRs(cfg.Server.TrustedProxyCIDRs), userService: userService, clientService: clientService, providerMgr: providerMgr, identityStore: identityStore, sessionStore: sessionStore, tokenService: tokenService, jwkManager: jwkManager, authHandler: authHandler, consentHandler: consentHandler, sessionMiddleware: NewSessionMiddleware(sessionStore, cfg.Server.SecureCookie), loginLimiter: NewLoginLimiter(rdb), accountLimiter: NewAccountActionLimiter(rdb), mailSettingsLimiter: NewMailSettingsLimiter(rdb), auditStore: audit.NewStore(db), authorizationStore: authorizationStore, statsHandler: stats.NewHandler(db, rdb), settingsMgr: settings.NewManager(db, settings.Branding{Title: cfg.Web.Title, LogoURL: cfg.Web.LogoURL}), inviteStore: invite.NewStore(db), registrationStore: registration.NewStore(db), telemetry: telemetryRuntime}
+	mfaService, err := mfa.NewService(db, mfa.Options{
+		ActiveKeyID: "primary", MasterKeys: map[string][]byte{"primary": cfg.Auth.MasterKey},
+		Passkeys: &mfa.PasskeyConfig{
+			RPID: passkeyRPID, RPDisplayName: cfg.Web.Title,
+			RPOrigins: []string{rpOrigin},
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("configuring MFA service: %w", err)
+	}
+	s := &Server{cfg: cfg, db: db, rdb: rdb, webFS: webFS, trustedProxies: parseTrustedProxyCIDRs(cfg.Server.TrustedProxyCIDRs), userService: userService, clientService: clientService, providerMgr: providerMgr, identityStore: identityStore, sessionStore: sessionStore, tokenService: tokenService, jwkManager: jwkManager, authHandler: authHandler, consentHandler: consentHandler, sessionMiddleware: NewSessionMiddleware(sessionStore, cfg.Server.SecureCookie), loginLimiter: NewLoginLimiter(rdb), accountLimiter: NewAccountActionLimiter(rdb), mailSettingsLimiter: NewMailSettingsLimiter(rdb), auditStore: audit.NewStore(db), authorizationStore: authorizationStore, statsHandler: stats.NewHandler(db, rdb), settingsMgr: settings.NewManagerForRP(db, settings.Branding{Title: cfg.Web.Title, LogoURL: cfg.Web.LogoURL}, passkeyRPID), inviteStore: invite.NewStore(db), registrationStore: registration.NewStore(db), telemetry: telemetryRuntime, mfaService: mfaService}
 	if err := telemetryRuntime.BindPoolObservers(db, rdb); err != nil {
 		return nil, fmt.Errorf("configuring dependency pool metrics: %w", err)
 	}
@@ -207,7 +225,7 @@ func (s *Server) buildRouter() *chi.Mux {
 	r.Use(middleware.Timeout(30 * time.Second))
 	issuer, _ := url.Parse(s.cfg.Auth.Issuer)
 	allowedOrigin := issuer.Scheme + "://" + issuer.Host
-	r.Use(cors.Handler(cors.Options{AllowedOrigins: []string{allowedOrigin}, AllowedMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"}, AllowedHeaders: []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token"}, ExposedHeaders: []string{"Retry-After"}, AllowCredentials: true, MaxAge: 300}))
+	r.Use(cors.Handler(cors.Options{AllowedOrigins: []string{allowedOrigin}, AllowedMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"}, AllowedHeaders: []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token", "X-WebAuthn-Ceremony"}, ExposedHeaders: []string{"Retry-After"}, AllowCredentials: true, MaxAge: 300}))
 	r.Get("/livez", s.handleLiveness)
 	r.Get("/readyz", s.handleReadiness)
 	if s.telemetry != nil {
@@ -220,6 +238,13 @@ func (s *Server) buildRouter() *chi.Mux {
 	})
 	r.Route("/api", func(r chi.Router) {
 		r.Post("/login", s.handleLogin)
+		r.Post("/login/passkey/options", s.handleBeginPasskeyLogin)
+		r.Post("/login/passkey/verify", s.handleFinishPasskeyLogin)
+		r.Get("/login/mfa", s.handleGetMFAChallenge)
+		r.Post("/login/mfa", s.handleVerifyMFAChallenge)
+		r.Post("/login/mfa/passkey/options", s.handleBeginMFAPasskey)
+		r.Post("/login/mfa/passkey/verify", s.handleFinishMFAPasskey)
+		r.Delete("/login/mfa", s.handleCancelMFAChallenge)
 		r.Get("/branding", s.handleGetBranding)
 		r.Get("/registration", s.handleRegistrationOptions)
 		r.Post("/register", s.handleRegister)
@@ -242,6 +267,18 @@ func (s *Server) buildRouter() *chi.Mux {
 			r.Post("/me/password/set", s.handleSetPassword)
 			r.Post("/me/reauth/password", s.handlePasswordReauthentication)
 			r.Post("/me/reauth/{provider}", s.handleProviderReauthentication)
+			r.Post("/me/reauth/passkey/options", s.handleBeginPasskeyReauthentication)
+			r.Post("/me/reauth/passkey/verify", s.handleFinishPasskeyReauthentication)
+			r.Get("/me/mfa", s.handleGetMyMFA)
+			r.Post("/me/mfa/totp/enroll", s.handleBeginTOTPEnrollment)
+			r.Post("/me/mfa/totp/enroll/confirm", s.handleConfirmTOTPEnrollment)
+			r.Post("/me/mfa/recovery-codes", s.handleRegenerateRecoveryCodes)
+			r.Delete("/me/mfa/totp", s.handleDisableTOTP)
+			r.Get("/me/passkeys", s.handleListPasskeys)
+			r.Post("/me/passkeys/registration/options", s.handleBeginPasskeyRegistration)
+			r.Post("/me/passkeys/registration/verify", s.handleFinishPasskeyRegistration)
+			r.Put("/me/passkeys/{id}", s.handleRenamePasskey)
+			r.Delete("/me/passkeys/{id}", s.handleDeletePasskey)
 			r.Post("/me/email/verification", s.handleRequestEmailVerification)
 			r.Post("/me/email/change", s.handleRequestEmailChange)
 			r.Get("/me/sessions", s.handleListMySessions)
@@ -269,6 +306,8 @@ func (s *Server) buildRouter() *chi.Mux {
 			r.Put("/admin/branding", s.handleUpdateBranding)
 			r.Get("/admin/settings/registration", s.handleGetRegistrationSettings)
 			r.Put("/admin/settings/registration", s.handleUpdateRegistrationSettings)
+			r.Get("/admin/settings/security", s.handleGetSecuritySettings)
+			r.Put("/admin/settings/security", s.handleUpdateSecuritySettings)
 			r.Get("/admin/settings/mail", s.handleGetMailSettings)
 			r.Put("/admin/settings/mail/candidate", s.handleSaveMailCandidate)
 			r.Post("/admin/settings/mail/candidate/test", s.handleTestMailCandidate)

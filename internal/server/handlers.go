@@ -103,6 +103,24 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
+	returnTo := safeReturnPath(request.ReturnTo, "/dashboard")
+	mfaResponse, mfaRequired, err := s.beginMFAPending(w, r, current, "password", "", returnTo)
+	if err != nil {
+		if errors.Is(err, errMFAEnrollmentRequired) {
+			s.telemetry.RecordAuthEvent(r.Context(), "login", "mfa_enrollment_required")
+			writeAPIError(w, http.StatusForbidden, "MFA enrollment is required; contact an administrator")
+		} else {
+			s.telemetry.RecordAuthEvent(r.Context(), "login", "mfa_unavailable")
+			writeAPIError(w, http.StatusServiceUnavailable, "MFA verification temporarily unavailable")
+		}
+		return
+	}
+	if mfaRequired {
+		_ = s.loginLimiter.ResetIdentity(r.Context(), ip, strings.ToLower(request.Username))
+		s.telemetry.RecordAuthEvent(r.Context(), "login", "mfa_required")
+		writeJSON(w, http.StatusAccepted, mfaResponse)
+		return
+	}
 	authenticated, err := s.sessionMiddleware.CreateSession(w, r, current)
 	if err != nil {
 		s.telemetry.RecordAuthEvent(r.Context(), "login", "session_error")
@@ -335,7 +353,7 @@ func (s *Server) handleUserStatus(w http.ResponseWriter, r *http.Request, status
 	}
 	updated, err := s.userService.AdminUpdate(r.Context(), id, models.AdminUpdateUserRequest{Status: &status}, mutation)
 	if err != nil {
-		if errors.Is(err, user.ErrLastActiveAdmin) {
+		if errors.Is(err, user.ErrLastActiveAdmin) || errors.Is(err, user.ErrAdminMFARequired) {
 			writeAPIError(w, http.StatusConflict, err.Error())
 		} else {
 			writeAPIError(w, http.StatusInternalServerError, "failed to update user status")
@@ -368,7 +386,7 @@ func (s *Server) handleUpdateUserRole(w http.ResponseWriter, r *http.Request) {
 	}
 	updated, err := s.userService.AdminUpdate(r.Context(), id, models.AdminUpdateUserRequest{Role: &request.Role}, mutation)
 	if err != nil {
-		if errors.Is(err, user.ErrLastActiveAdmin) {
+		if errors.Is(err, user.ErrLastActiveAdmin) || errors.Is(err, user.ErrAdminMFARequired) {
 			writeAPIError(w, http.StatusConflict, err.Error())
 		} else {
 			writeAPIError(w, http.StatusInternalServerError, "failed to update role")

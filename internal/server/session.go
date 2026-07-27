@@ -12,7 +12,9 @@ import (
 )
 
 const sessionCookieName = "nyauth_session"
+const mfaPendingCookieName = "nyauth_mfa_pending"
 const sessionTTL = 24 * time.Hour
+const mfaPendingTTL = 5 * time.Minute
 
 type SessionMiddleware struct {
 	sessionStore *session.Store
@@ -26,6 +28,11 @@ func NewSessionMiddleware(store *session.Store, secureCookie bool) *SessionMiddl
 type AuthenticatedSession struct {
 	ID   string
 	Data *session.SessionData
+}
+
+type MFAPendingSession struct {
+	Token string
+	Data  *session.MFAPendingData
 }
 
 func (m *SessionMiddleware) CreateSession(w http.ResponseWriter, r *http.Request, user *models.User) (*AuthenticatedSession, error) {
@@ -64,15 +71,22 @@ func (m *SessionMiddleware) MarkReauthenticated(r *http.Request, user *models.Us
 	if authenticated == nil || authenticated.Data == nil {
 		return nil, errors.New("authenticated session is unavailable")
 	}
+	expectedAuthVersion := authenticated.Data.AuthVersion
+	expectedSessionVersion := authenticated.Data.SessionVersion
 	now := time.Now().UTC()
-	authenticated.Data.AuthenticatedAt = now
-	authenticated.Data.LastSeenAt = now
-	authenticated.Data.Username = user.Username
-	authenticated.Data.AuthVersion = user.AuthVersion
-	authenticated.Data.SessionVersion = user.SessionVersion
-	if err := m.sessionStore.SaveSession(r.Context(), authenticated.ID, authenticated.Data, sessionTTL); err != nil {
+	updatedData := *authenticated.Data
+	updatedData.AuthenticatedAt = now
+	updatedData.LastSeenAt = now
+	updatedData.Username = user.Username
+	updatedData.AuthVersion = user.AuthVersion
+	updatedData.SessionVersion = user.SessionVersion
+	if err := m.sessionStore.UpdateSession(
+		r.Context(), authenticated.ID, &updatedData,
+		expectedAuthVersion, expectedSessionVersion, sessionTTL,
+	); err != nil {
 		return nil, err
 	}
+	authenticated.Data = &updatedData
 	return authenticated, nil
 }
 
@@ -101,11 +115,64 @@ func (m *SessionMiddleware) GetSession(r *http.Request) (*AuthenticatedSession, 
 	return &AuthenticatedSession{ID: cookie.Value, Data: data}, nil
 }
 
+func (m *SessionMiddleware) CreateMFAPending(w http.ResponseWriter, r *http.Request, data *session.MFAPendingData) (*MFAPendingSession, error) {
+	if existing, err := r.Cookie(mfaPendingCookieName); err == nil {
+		_ = m.sessionStore.DeleteMFAPending(r.Context(), existing.Value)
+	}
+	token, err := crypto.GenerateRandomString(32)
+	if err != nil {
+		return nil, err
+	}
+	if err := m.sessionStore.SaveMFAPending(r.Context(), token, data, mfaPendingTTL); err != nil {
+		return nil, err
+	}
+	m.setNamedCookie(w, mfaPendingCookieName, token, int(mfaPendingTTL.Seconds()))
+	return &MFAPendingSession{Token: token, Data: data}, nil
+}
+
+func (m *SessionMiddleware) GetMFAPending(r *http.Request) (*MFAPendingSession, error) {
+	cookie, err := r.Cookie(mfaPendingCookieName)
+	if err != nil {
+		return nil, err
+	}
+	data, err := m.sessionStore.GetMFAPending(r.Context(), cookie.Value)
+	if err != nil {
+		return nil, err
+	}
+	return &MFAPendingSession{Token: cookie.Value, Data: data}, nil
+}
+
+func (m *SessionMiddleware) ConsumeMFAPending(w http.ResponseWriter, r *http.Request) (*MFAPendingSession, error) {
+	cookie, err := r.Cookie(mfaPendingCookieName)
+	if err != nil {
+		return nil, err
+	}
+	data, err := m.sessionStore.ConsumeMFAPending(r.Context(), cookie.Value)
+	if err != nil {
+		return nil, err
+	}
+	m.clearNamedCookie(w, mfaPendingCookieName)
+	return &MFAPendingSession{Token: cookie.Value, Data: data}, nil
+}
+
+func (m *SessionMiddleware) DestroyMFAPending(w http.ResponseWriter, r *http.Request) {
+	if cookie, err := r.Cookie(mfaPendingCookieName); err == nil {
+		_ = m.sessionStore.DeleteMFAPending(r.Context(), cookie.Value)
+	}
+	m.clearNamedCookie(w, mfaPendingCookieName)
+}
+
 func (m *SessionMiddleware) setCookie(w http.ResponseWriter, value string, maxAge int) {
-	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: value, Path: "/", HttpOnly: true, Secure: m.secureCookie, SameSite: http.SameSiteLaxMode, MaxAge: maxAge, Expires: time.Now().Add(time.Duration(maxAge) * time.Second)})
+	m.setNamedCookie(w, sessionCookieName, value, maxAge)
 }
 func (m *SessionMiddleware) clearCookie(w http.ResponseWriter) {
-	http.SetCookie(w, &http.Cookie{Name: sessionCookieName, Value: "", Path: "/", HttpOnly: true, Secure: m.secureCookie, SameSite: http.SameSiteLaxMode, MaxAge: -1, Expires: time.Unix(1, 0)})
+	m.clearNamedCookie(w, sessionCookieName)
+}
+func (m *SessionMiddleware) setNamedCookie(w http.ResponseWriter, name, value string, maxAge int) {
+	http.SetCookie(w, &http.Cookie{Name: name, Value: value, Path: "/", HttpOnly: true, Secure: m.secureCookie, SameSite: http.SameSiteLaxMode, MaxAge: maxAge, Expires: time.Now().Add(time.Duration(maxAge) * time.Second)})
+}
+func (m *SessionMiddleware) clearNamedCookie(w http.ResponseWriter, name string) {
+	http.SetCookie(w, &http.Cookie{Name: name, Value: "", Path: "/", HttpOnly: true, Secure: m.secureCookie, SameSite: http.SameSiteLaxMode, MaxAge: -1, Expires: time.Unix(1, 0)})
 }
 
 type contextKey string

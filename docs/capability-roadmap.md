@@ -1,14 +1,16 @@
 # 能力路线图（0.4+ 展望）
 
-> 状态：与用户对齐于 2026-07-26。本文档记录"网站自身能力"的增强方向与取舍结论，按优先级排序。
+> 状态：更新于 2026-07-27。本文档记录"网站自身能力"的增强方向与取舍结论，按优先级排序。
 
 ## 结论摘要
 
 | 方向 | 结论 | 优先级 |
 |---|---|---|
 | 运行时设置（部分配置免重启） | 基础已落地；品牌、注册策略和数据库动态 SMTP 已免重启 | P0，持续扩展 |
-| 每客户端访问策略 | 做——当前任何活跃用户可授权任何应用，是真实安全缺口 | P1 |
-| Passkey/WebAuthn + TOTP 两步验证 | 做——认证产品的核心竞争力，reauth 基础设施已就绪 | P1 |
+| 受控头像存储 | 做——默认本地持久化，支持 S3 兼容对象存储，禁止任意展示 URL | P1，公开生产前 |
+| 每客户端访问策略 | 已完成——支持 open、admins_only 和 allowlist，并在授权与用户 Token 使用时持续执行 | 已完成 |
+| TOTP + 恢复码 | Phase T 已完成：登录、reauth、管理员强制策略、恢复验证 | 已完成 |
+| Passkey/WebAuthn | Phase P 已完成：独立登录、Conditional UI、MFA、step-up 与安全中心管理 | 已完成 |
 | 自助注册 / 邀请制 | Phase R 已完成：关闭 / 邀请制 / 开放注册、验证与邀请预占生命周期 | 已完成 |
 | 事件 Webhook | 做——作为插件系统的替代品，复用审计 outbox | P2 |
 | 插件系统 | **不做进程内插件**；先观察 Webhook + /api/v1 能覆盖多少扩展需求 | 推迟 |
@@ -27,25 +29,30 @@
 - 多实例使用 PostgreSQL `LISTEN/NOTIFY` 和定时 reconciliation；静态邮件环境变量只作为首次 fallback/bootstrap。
 - 后续再按风险与收益迁入限流阈值、audit retention 等运营设置。
 
-## 2. 每客户端访问策略（P1）
+## 2. 每客户端访问策略（已完成）
 
-现状：任何 `active` 用户可以完成对任何 OAuth 客户端的授权。接入内部应用时通常需要"只有指定用户/角色可以登录此应用"。
+OAuth 客户端已支持 `open`、`admins_only` 和 `allowlist`。策略在用户授权流程和后续用户 Token 使用时持续执行，白名单移除无需等待既有 access token 自然过期；`client_credentials` 机器流程不受用户访问策略影响。管理后台可维护策略和白名单，并对拒绝和名单变更写入审计。
 
-方案草图：客户端增加 `access_policy`（`open` / `admins_only` / `allowlist`），allowlist 引用用户组；顺带引入最小化的用户组模型。授权端点与 client_credentials 都执行策略检查，拒绝时审计。这也是 `/api/v1` 的 scope 模型将来对接组织/团队概念的地基。
+## 3. 受控头像存储（P1）
 
-## 3. Passkey / TOTP（P1）
+当前直接保存并渲染用户提供的 `avatar_url` 不作为生产长期方案。后续改为用户上传图片，服务端校验、解码、重编码并生成固定尺寸变体；默认使用本地持久化目录，HA/远程部署支持 S3 兼容对象存储。浏览器只加载 Nyauth 管理的稳定地址，Provider 头像也不得直接透传外部 URL。
 
-- WebAuthn 注册/登录（passkey 优先，平台认证器）；`internal/server/reauthentication.go` 的"近期认证"框架直接复用，passkey 可作为 step-up 手段
-- TOTP 作为兜底二因素；恢复码一次性生成
-- 数据模型：`user_credentials` 表（类型 + 公钥/密钥 envelope 加密），沿用 master key 加密体系
+完整威胁模型、数据模型、API、对象回收和迁移边界见 [受控头像存储与对象存储设计](avatar-storage-design.md)。在该能力落地前，生产环境应留空头像字段或仅使用管理员控制域名下的静态不可变资源。
 
-## 4. 自助注册 / 邀请（已完成）
+## 4. MFA（Phase T/P 已完成）
+
+- TOTP 已实现 RFC 6238、time-step 防重放、一次性恢复码、密码/Provider MFA 与 step-up、动态管理员强制策略和 HA 同步。
+- Passkey 已支持 discoverable 独立登录、Conditional UI、MFA 第二因素、近期重新认证与安全中心管理；RP ID 和 origin 从公开 `auth.issuer` 固定派生。
+- 完整 WebAuthn credential 加密存储，每次认证在事务中持久化 sign count、clone warning 与 backup state；Redis ceremony 使用不透明 ID，并与 MFA pending 原子消费。
+- 管理员强制 MFA 接受 TOTP 或当前 RP Passkey；两个注册开关都是运行时 enrollment 开关，不会停用已有因素。
+
+## 5. 自助注册 / 邀请（已完成）
 
 - 邀请码/邀请链接由管理员生成，支持限次、限期、预占、验证后消费和过期释放。
 - 支持关闭、邀请制和开放注册；开放注册强制邮箱验证，SMTP 不可用时注册在创建用户前返回 `503`。
 - 注册策略是运行时设置，并与动态 SMTP 的 configured/available 状态做跨依赖校验。
 
-## 5. 事件 Webhook（P2）——插件系统的替代品
+## 6. 事件 Webhook（P2）——插件系统的替代品
 
 **为什么不做进程内插件**：认证服务器的插件意味着第三方代码进入信任边界内——能触碰会话、密钥和用户数据，这与 0.3.0 整个安全加固方向相悖；Go 的 `plugin` 机制在 Windows 上不可用、跨版本脆弱；wasm/进程外插件的工程成本远超当前收益。
 
@@ -60,8 +67,8 @@
 ## 实施顺序建议
 
 ```
-0.4.0: /api/v1 Phase 1-2（已有设计）+ 运行时设置基础 + 品牌设置
-0.5.0: 每客户端访问策略 + 用户组最小模型 + /api/v1 Phase 3-4
-0.6.0: Passkey/TOTP
-0.7.0: 邀请注册 + Webhook
+当前 0.3.0-dev: Phase R/S/T/P 已完成
+公开生产前: 受控头像存储与任意 avatar_url 收口
+下一检查点: 0.3.0 RC 的受控头像、账户/后台信息架构和审计体验收口
+RC 之后: 自动更新评估；/api/v1、用户组和事件 Webhook 继续推迟
 ```

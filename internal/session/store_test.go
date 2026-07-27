@@ -73,6 +73,33 @@ func TestUserCanListAndRevokeSessionByPublicID(t *testing.T) {
 	}
 }
 
+func TestUpdateSessionCannotResurrectARevokedSession(t *testing.T) {
+	store, _ := testStore(t)
+	ctx := context.Background()
+	data := &SessionData{UserID: "user-reauth", Username: "alice", AuthVersion: 2, SessionVersion: 1}
+	if err := store.SaveSession(ctx, "reauth-session", data, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	data.AuthenticatedAt = time.Now().UTC()
+	if err := store.UpdateSession(ctx, "reauth-session", data, 2, 1, time.Hour); err != nil {
+		t.Fatalf("update existing session: %v", err)
+	}
+	data.AuthVersion = 3
+	if err := store.UpdateSession(ctx, "reauth-session", data, 3, 1, time.Hour); !errors.Is(err, ErrValueMismatch) {
+		t.Fatalf("concurrent security-version upgrade error=%v", err)
+	}
+	data.AuthVersion = 2
+	if err := store.DeleteSession(ctx, "reauth-session"); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.UpdateSession(ctx, "reauth-session", data, 2, 1, time.Hour); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("update revoked session error=%v", err)
+	}
+	if _, err := store.GetSession(ctx, "reauth-session"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("revoked session was recreated: %v", err)
+	}
+}
+
 func TestDeleteUserSessionsBeforeVersionKeepsCurrentAndFutureGenerations(t *testing.T) {
 	store, _ := testStore(t)
 	ctx := context.Background()

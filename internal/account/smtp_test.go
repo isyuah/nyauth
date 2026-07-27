@@ -208,6 +208,26 @@ func TestSMTPSenderProbeAndSend(t *testing.T) {
 	if !strings.Contains(sendSession.message, "Subject: Runtime test") || !strings.Contains(sendSession.message, "hello") {
 		t.Fatalf("unexpected SMTP message: %q", sendSession.message)
 	}
+	for _, header := range []string{
+		"Message-ID: <", "@example.test>", "Auto-Submitted: auto-generated",
+		"X-Auto-Response-Suppress: All", "Content-Language: zh-CN",
+	} {
+		if !strings.Contains(sendSession.message, header) {
+			t.Fatalf("SMTP message is missing trusted transactional header %q: %q", header, sendSession.message)
+		}
+	}
+	if strings.Contains(sendSession.message, "@nyauth.local>") {
+		t.Fatalf("SMTP message retained the local-only Message-ID domain: %q", sendSession.message)
+	}
+}
+
+func TestMessageIDDomainUsesSenderDomainAndSafeLocalFallback(t *testing.T) {
+	if domain := messageIDDomain("NOREPLY@Example.COM"); domain != "example.com" {
+		t.Fatalf("sender Message-ID domain = %q, want example.com", domain)
+	}
+	if domain := messageIDDomain("local-sender"); domain != "localhost" {
+		t.Fatalf("local Message-ID fallback = %q, want localhost", domain)
+	}
 }
 
 func TestSMTPSenderSendIgnoresDisconnectAfterDataAccepted(t *testing.T) {

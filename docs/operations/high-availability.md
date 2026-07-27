@@ -9,7 +9,7 @@ Nyauth 的高可用形态是多个无状态应用实例共享外部 PostgreSQL �
 - PostgreSQL 提供高可用、备份、PITR 和连接上限管理。
 - PostgreSQL 平台预先创建相互独立的迁移登录角色和 runtime 登录角色；迁移角色拥有目标数据库与应用 schema，runtime 角色不得拥有 superuser、createdb、createrole 或 schema CREATE 权限。
 - Redis 使用认证、TLS、`noeviction` 和故障转移能力。
-- 所有应用实例使用同一 issuer、master key、Cookie 配置和可信代理 CIDR。
+- 所有应用实例使用同一 issuer、master key、Cookie 配置和可信代理 CIDR。WebAuthn RP ID 固定取 issuer hostname；实例间不一致会直接破坏 Passkey ceremony，更换 hostname 会使旧 Passkey 不可用。
 - 反向代理只向 `/readyz` 返回成功的实例发送流量。
 - 迁移由独立一次性任务执行，应用启动不隐式修改 schema。
 
@@ -67,7 +67,7 @@ docker compose -f docker-compose.ha.yml ps
 
 ## 一致性模型
 
-- Session、授权码和 Token 安全状态由共享 Redis 保证。
+- Session、MFA pending、WebAuthn ceremony、授权码和 Token 安全状态由共享 Redis 保证；Passkey MFA 的 ceremony 与父 pending 由 Lua 原子消费，不需要粘性会话。
 - JWK 轮换由 PostgreSQL advisory lock 保证单写者。
 - Provider 变更通过 PostgreSQL `LISTEN/NOTIFY` 通知，并使用周期 reconciliation 修复丢失通知。
 - 动态 SMTP 的活动版本、上一版本和熔断状态由 PostgreSQL 共享；变更通过 `LISTEN/NOTIFY` 同步，并每分钟 reconciliation。每 30 秒最多一个实例取得熔断探测权。
@@ -89,5 +89,6 @@ docker compose -f docker-compose.ha.yml ps
 - SMTP 候选激活、回滚和禁用在所有实例收敛；模拟丢失通知后也能在 reconciliation 周期内一致。
 - SMTP 配置/认证/TLS 故障或传输故障达到阈值后共享熔断只打开一次，注册返回 `503`，探测成功后所有实例恢复投递。
 - 用户暂停、密码重置和会话撤销在所有实例立即生效。
+- Passkey options 可在一个实例创建、在另一实例完成；同一 ceremony 只能成功消费一次，Passkey MFA 不会留下可单独重放的父 challenge。
 
-CI 的真实 PostgreSQL/Redis 集成测试使用两个独立 HTTP Server、连接池和 Redis client，覆盖 Cookie 跨实例使用、用户暂停后的跨实例失效，以及通过 `/token` 并发交换同一授权码时只有一个请求成功。组件级测试继续覆盖 Provider 通知与 reconciliation、JWK advisory lock 和 Refresh family 并发轮换。完整部署仍应在目标反向代理和托管依赖上重复上述故障验证。
+CI 的真实 PostgreSQL/Redis 集成测试使用两个独立 HTTP Server、连接池和 Redis client，覆盖 Cookie 跨实例使用、用户暂停后的跨实例失效、Passkey options 跨实例完成与单次消费，以及通过 `/token` 并发交换同一授权码时只有一个请求成功。组件级测试继续覆盖 Provider 通知与 reconciliation、JWK advisory lock 和 Refresh family 并发轮换。完整部署仍应在目标反向代理和托管依赖上重复上述故障验证。

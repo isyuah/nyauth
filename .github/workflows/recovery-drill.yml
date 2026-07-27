@@ -109,7 +109,7 @@ jobs:
             (.backup_created_at | type == "string") and
             (.backup_created_at | length > 0) and
             (.counts | type == "object") and
-            ([.counts.users, .counts.oauth_clients, .counts.oauth_providers, .counts.jwk_keys, .counts.audit_logs, .counts.email_outbox]
+            ([.counts.users, .counts.oauth_clients, .counts.oauth_providers, .counts.jwk_keys, .counts.audit_logs, .counts.email_outbox, .counts.passkeys]
               | all(type == "number" and . >= 0 and floor == .))
           ' "${manifest}" >/dev/null
           backup_created_at="$(jq --raw-output '.backup_created_at' "${manifest}")"
@@ -177,7 +177,8 @@ jobs:
                 'oauth_providers',(SELECT COUNT(*) FROM oauth_providers),
                 'jwk_keys',(SELECT COUNT(*) FROM jwk_keys),
                 'audit_logs',(SELECT COUNT(*) FROM audit_logs),
-                'email_outbox',(SELECT COUNT(*) FROM email_outbox)
+                'email_outbox',(SELECT COUNT(*) FROM email_outbox),
+                'passkeys',(SELECT COUNT(*) FROM user_passkey_credentials)
               )::text
             " | sed '/^[[:space:]]*$/d' > .recovery-restored-counts.json
           jq --sort-keys '.counts' .recovery-input/recovery-manifest.json > .recovery-expected-counts.json
@@ -200,6 +201,8 @@ jobs:
             .schema_dirty == false and
             .jwk_envelope_verified == true and
             .provider_envelopes_verified == .counts.oauth_providers and
+            (.totp_envelopes_verified | type == "number" and . >= 0) and
+            .passkey_envelopes_verified == .counts.passkeys and
             .email_envelopes_sampled <= .email_envelope_rows
           ' .recovery-verification.json >/dev/null
       - name: Start isolated Nyauth
@@ -300,7 +303,7 @@ jobs:
               echo
               echo '## Envelope verification'
               echo '```json'
-              jq '{schema_version,schema_dirty,counts,jwk_envelope_verified,provider_envelopes_verified,email_envelope_rows,email_envelopes_sampled,email_envelope_sample_limit}' .recovery-verification.json
+              jq '{schema_version,schema_dirty,counts,jwk_envelope_verified,provider_envelopes_verified,totp_envelopes_verified,passkey_envelopes_verified,email_envelope_rows,email_envelopes_sampled,email_envelope_sample_limit}' .recovery-verification.json
               echo '```'
             fi
           } > recovery-drill-report.md

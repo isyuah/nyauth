@@ -22,6 +22,9 @@ const (
 	// registrationMailLockKey is process-independent and intentionally scoped
 	// to the invariant between self-registration and runtime SMTP state.
 	registrationMailLockKey int64 = 0x4e5941555448
+	// securityPolicyLockKey protects the invariant between the runtime MFA
+	// policy, administrator role changes, and removal of administrator factors.
+	securityPolicyLockKey int64 = 0x4e59414d4641
 )
 
 var (
@@ -51,6 +54,24 @@ func LockRegistrationShared(ctx context.Context, tx pgx.Tx) error {
 func LockRegistrationExclusive(ctx context.Context, tx pgx.Tx) error {
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, registrationMailLockKey); err != nil {
 		return fmt.Errorf("locking registration and mail coordination exclusive: %w", err)
+	}
+	return nil
+}
+
+// LockSecurityShared permits ordinary factor and role operations to proceed
+// concurrently while excluding a security-policy transition.
+func LockSecurityShared(ctx context.Context, tx pgx.Tx) error {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared($1)`, securityPolicyLockKey); err != nil {
+		return fmt.Errorf("locking security policy shared: %w", err)
+	}
+	return nil
+}
+
+// LockSecurityExclusive serializes a runtime security-policy transition with
+// administrator role changes and factor removal.
+func LockSecurityExclusive(ctx context.Context, tx pgx.Tx) error {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, securityPolicyLockKey); err != nil {
+		return fmt.Errorf("locking security policy exclusive: %w", err)
 	}
 	return nil
 }

@@ -43,6 +43,19 @@ func TestRegistrationFallsBackToSafeDefaults(t *testing.T) {
 	}
 }
 
+func TestSecurityFallsBackToEnrollmentEnabledAndOptionalAdminMFA(t *testing.T) {
+	manager := NewManager(nil, Branding{Title: "Nya"})
+	security := manager.Security()
+	if !security.TOTPEnabled || !security.PasskeysEnabled || security.RequireMFAForAdmins {
+		t.Fatalf("security defaults = %#v", security)
+	}
+	stored := Security{TOTPEnabled: false, PasskeysEnabled: false, RequireMFAForAdmins: false}
+	manager.security.Store(&stored)
+	if got := manager.Security(); got.TOTPEnabled || got.PasskeysEnabled || got.RequireMFAForAdmins {
+		t.Fatalf("security snapshot = %#v", got)
+	}
+}
+
 func TestValidRegistrationMode(t *testing.T) {
 	for _, mode := range []string{RegistrationClosed, RegistrationInviteOnly, RegistrationOpen} {
 		if !ValidRegistrationMode(mode) {
@@ -64,6 +77,9 @@ func TestLoadWithoutDatabaseKeepsDefaults(t *testing.T) {
 	}
 	if registration := manager.Registration(); registration.Mode != RegistrationClosed {
 		t.Fatalf("registration = %#v", registration)
+	}
+	if security := manager.Security(); !security.TOTPEnabled || !security.PasskeysEnabled || security.RequireMFAForAdmins {
+		t.Fatalf("security = %#v", security)
 	}
 }
 

@@ -24,6 +24,7 @@ var (
 	ErrInvalidInput        = errors.New("invalid input")
 	ErrPasswordUnavailable = errors.New("password login is not available for this account")
 	ErrPasswordConfigured  = errors.New("a local password is already configured")
+	ErrAuthStateChanged    = errors.New("authentication state changed")
 	ErrInviteInvalid       = registration.ErrInviteInvalid
 	// ErrEmailVerificationPending is returned only after the supplied
 	// credentials verified correctly, so revealing it is safe and actionable.
@@ -44,7 +45,7 @@ type serviceStore interface {
 	Delete(ctx context.Context, id uuid.UUID, mutation audit.MutationAudit) error
 	List(ctx context.Context, p models.Pagination, search string, status models.UserStatus) (*models.PaginatedResponse[models.User], error)
 	RecordLogin(ctx context.Context, id uuid.UUID, ip string) error
-	RecordAuthentication(ctx context.Context, id uuid.UUID) (*models.User, error)
+	RecordAuthentication(ctx context.Context, id uuid.UUID, authVersion, sessionVersion int64) (*models.User, error)
 	Count(ctx context.Context) (int64, error)
 	BootstrapAdmin(ctx context.Context, u *models.User) (bool, error)
 }
@@ -342,9 +343,10 @@ func (s *Service) SetPassword(ctx context.Context, id uuid.UUID, newPassword str
 	return s.store.SetPasswordIfMissing(ctx, id, hash, mutation)
 }
 
-// Reauthenticate verifies the existing local factor and records a fresh
-// authentication instant without changing the password or login history.
-func (s *Service) Reauthenticate(ctx context.Context, id uuid.UUID, password string) (*models.User, error) {
+// VerifyPasswordForReauthentication verifies the local primary factor without
+// yet marking the session as recently authenticated. MFA-enabled accounts use
+// this before completing their second-factor challenge.
+func (s *Service) VerifyPasswordForReauthentication(ctx context.Context, id uuid.UUID, password string) (*models.User, error) {
 	u, err := s.store.GetByID(ctx, id)
 	if err != nil || u == nil || u.Status != models.UserStatusActive {
 		return nil, ErrInvalidCredentials
@@ -356,11 +358,21 @@ func (s *Service) Reauthenticate(ctx context.Context, id uuid.UUID, password str
 	if verifyErr != nil || !ok {
 		return nil, ErrInvalidCredentials
 	}
-	return s.store.RecordAuthentication(ctx, id)
+	return u, nil
 }
 
-func (s *Service) RecordAuthentication(ctx context.Context, id uuid.UUID) (*models.User, error) {
-	return s.store.RecordAuthentication(ctx, id)
+// Reauthenticate verifies the existing local factor and records a fresh
+// authentication instant without changing the password or login history.
+func (s *Service) Reauthenticate(ctx context.Context, id uuid.UUID, password string) (*models.User, error) {
+	verified, err := s.VerifyPasswordForReauthentication(ctx, id, password)
+	if err != nil {
+		return nil, err
+	}
+	return s.store.RecordAuthentication(ctx, id, verified.AuthVersion, verified.SessionVersion)
+}
+
+func (s *Service) RecordAuthentication(ctx context.Context, id uuid.UUID, authVersion, sessionVersion int64) (*models.User, error) {
+	return s.store.RecordAuthentication(ctx, id, authVersion, sessionVersion)
 }
 
 func (s *Service) Delete(ctx context.Context, id uuid.UUID, mutation audit.MutationAudit) error {

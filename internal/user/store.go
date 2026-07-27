@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -18,15 +19,25 @@ import (
 	"github.com/nyasharp/nyauth/pkg/models"
 )
 
-var ErrLastActiveAdmin = errors.New("cannot remove the last active administrator")
+var (
+	ErrLastActiveAdmin  = errors.New("cannot remove the last active administrator")
+	ErrAdminMFARequired = errors.New("the user must enroll MFA before becoming an active administrator")
+)
 
 // Store handles user persistence.
 type Store struct {
 	db                  *pgxpool.Pool
+	passkeyRPID         string
 	notificationBuilder account.SecurityNotificationBuilder
 }
 
 func NewStore(db *pgxpool.Pool) *Store { return &Store{db: db} }
+
+// NewStoreForRP scopes administrator MFA checks to credentials usable by the
+// deployment's current WebAuthn relying party.
+func NewStoreForRP(db *pgxpool.Pool, passkeyRPID string) *Store {
+	return &Store{db: db, passkeyRPID: strings.ToLower(strings.TrimSpace(passkeyRPID))}
+}
 
 func (s *Store) SetSecurityNotificationBuilder(builder account.SecurityNotificationBuilder) {
 	s.notificationBuilder = builder
@@ -236,6 +247,16 @@ func (s *Store) UpdateAdmin(ctx context.Context, id uuid.UUID, req models.AdminU
 		return nil, err
 	}
 	defer tx.Rollback(ctx)
+	var securityPolicy settings.Security
+	if req.Role != nil || req.Status != nil {
+		if err := runtimecoord.LockSecurityShared(ctx, tx); err != nil {
+			return nil, err
+		}
+		securityPolicy, err = settings.LoadSecurityTx(ctx, tx)
+		if err != nil {
+			return nil, err
+		}
+	}
 	if _, err := tx.Exec(ctx, `LOCK TABLE users IN SHARE ROW EXCLUSIVE MODE`); err != nil {
 		return nil, err
 	}
@@ -253,6 +274,33 @@ func (s *Store) UpdateAdmin(ctx context.Context, id uuid.UUID, req models.AdminU
 		}
 		if count <= 1 {
 			return nil, ErrLastActiveAdmin
+		}
+	}
+	targetStatus := currentStatus
+	if req.Status != nil {
+		targetStatus = *req.Status
+	}
+	targetRole := currentRole
+	if req.Role != nil {
+		targetRole = *req.Role
+	}
+	if securityPolicy.RequireMFAForAdmins && targetStatus == models.UserStatusActive && targetRole == "admin" {
+		var enrolled bool
+		if err := tx.QueryRow(ctx, `
+			SELECT
+				EXISTS (
+					SELECT 1 FROM user_totp_credentials
+					WHERE user_id=$1 AND confirmed_at IS NOT NULL
+				)
+				OR EXISTS (
+					SELECT 1 FROM user_passkey_credentials
+					WHERE user_id=$1 AND ($2='' OR rp_id=$2)
+				)
+		`, id, s.passkeyRPID).Scan(&enrolled); err != nil {
+			return nil, err
+		}
+		if !enrolled {
+			return nil, ErrAdminMFARequired
 		}
 	}
 	if currentStatus == models.UserStatusPending && req.Status != nil && *req.Status == models.UserStatusActive {
@@ -552,10 +600,14 @@ func (s *Store) RecordLogin(ctx context.Context, id uuid.UUID, ip string) error 
 	return err
 }
 
-func (s *Store) RecordAuthentication(ctx context.Context, id uuid.UUID) (*models.User, error) {
+func (s *Store) RecordAuthentication(ctx context.Context, id uuid.UUID, authVersion, sessionVersion int64) (*models.User, error) {
 	u, err := scanUser(s.db.QueryRow(ctx, `
 		UPDATE users SET last_authenticated_at=NOW(),updated_at=NOW()
-		WHERE id=$1 RETURNING `+userSelectCols, id))
+		WHERE id=$1 AND status='active' AND auth_version=$2 AND session_version=$3
+		RETURNING `+userSelectCols, id, authVersion, sessionVersion))
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrAuthStateChanged
+	}
 	if err != nil {
 		return nil, fmt.Errorf("recording authentication: %w", err)
 	}
