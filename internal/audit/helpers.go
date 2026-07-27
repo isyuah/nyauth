@@ -150,10 +150,46 @@ func outboxEventFromAuditLog(entry *models.AuditLog) (OutboxEvent, error) {
 
 func sensitiveAuditDetailKey(key string) bool {
 	normalized := strings.ToLower(strings.TrimSpace(key))
-	for _, fragment := range []string{"password", "secret", "token", "cookie", "csrf", "nonce", "authorization_code", "code_verifier"} {
+	for _, fragment := range []string{
+		"password", "passphrase", "secret", "token", "credential", "cookie", "csrf", "nonce",
+		"authorization_code", "code_verifier", "recovery_code", "totp", "private_key", "api_key",
+	} {
 		if strings.Contains(normalized, fragment) {
 			return true
 		}
 	}
 	return false
+}
+
+// RedactDetails returns a detached copy safe for administrator-facing JSON and
+// exports. Older rows may predate the current write-time key checks, and nested
+// maps were never covered by that top-level validation.
+func RedactDetails(details map[string]interface{}) map[string]interface{} {
+	if details == nil {
+		return nil
+	}
+	redacted := make(map[string]interface{}, len(details))
+	for key, value := range details {
+		if sensitiveAuditDetailKey(key) {
+			redacted[key] = "[REDACTED]"
+			continue
+		}
+		redacted[key] = redactAuditDetailValue(value)
+	}
+	return redacted
+}
+
+func redactAuditDetailValue(value interface{}) interface{} {
+	switch typed := value.(type) {
+	case map[string]interface{}:
+		return RedactDetails(typed)
+	case []interface{}:
+		values := make([]interface{}, len(typed))
+		for index := range typed {
+			values[index] = redactAuditDetailValue(typed[index])
+		}
+		return values
+	default:
+		return value
+	}
 }

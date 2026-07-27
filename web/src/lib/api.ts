@@ -420,9 +420,53 @@ export interface AuditLogFilters {
   risk?: string;
   actor?: string;
   target?: string;
+  subjectUserId?: string;
+  targetType?: string;
+  targetId?: string;
   ip?: string;
   from?: string;
   to?: string;
+}
+
+export interface AuditLogOptions {
+  events: string[];
+  results: string[];
+  risks: string[];
+  target_types: string[];
+}
+
+const auditLogFilterParameters = {
+  event: 'event',
+  result: 'result',
+  risk: 'risk',
+  actor: 'actor',
+  target: 'target',
+  subjectUserId: 'subject_user_id',
+  targetType: 'target_type',
+  targetId: 'target_id',
+  ip: 'ip',
+  from: 'from',
+  to: 'to',
+} as const;
+
+export function buildAuditLogSearchParams(filters: AuditLogFilters = {}, includePagination = true): URLSearchParams {
+  const params = new URLSearchParams();
+  if (includePagination) {
+    params.set('page', String(filters.page || 1));
+    params.set('page_size', String(filters.pageSize || 20));
+  }
+  for (const [filterKey, parameter] of Object.entries(auditLogFilterParameters) as Array<[keyof typeof auditLogFilterParameters, string]>) {
+    const value = filters[filterKey];
+    if (value) params.set(parameter, value);
+  }
+  return params;
+}
+
+export function buildAuditLogExportURL(filters: AuditLogFilters, format: 'ndjson' | 'cef', limit = 50_000): string {
+  const params = buildAuditLogSearchParams(filters, false);
+  params.set('format', format);
+  params.set('limit', String(limit));
+  return `/api/admin/audit-logs/export?${params}`;
 }
 
 export interface BrowserSession {
@@ -1054,14 +1098,9 @@ export const api = {
     testProvider: (id: string) => req<ProviderTestResult>(`/api/admin/providers/${encodeURIComponent(id)}/test`, { method: 'POST' }),
     deleteProvider: (id: string) => req<void>(`/api/admin/providers/${encodeURIComponent(id)}`, { method: 'DELETE' }),
     getAuditLogs: (filters: AuditLogFilters = {}) => {
-      const params = new URLSearchParams({
-        page: String(filters.page || 1),
-        page_size: String(filters.pageSize || 20),
-      });
-      for (const key of ['event', 'result', 'risk', 'actor', 'target', 'ip', 'from', 'to'] as const) {
-        if (filters[key]) params.set(key, filters[key]);
-      }
+      const params = buildAuditLogSearchParams(filters);
       return req<PaginatedResponse<AuditLog>>(`/api/admin/audit-logs?${params}`);
     },
+    getAuditLogOptions: () => req<AuditLogOptions>('/api/admin/audit-logs/options'),
   },
 };

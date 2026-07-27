@@ -12,12 +12,14 @@ import (
 
 func TestAuditExportFilterAppliesBoundedDefaultWindow(t *testing.T) {
 	now := time.Date(2026, time.July, 26, 12, 0, 0, 0, time.UTC)
-	request := httptest.NewRequest("GET", "/api/admin/audit-logs/export?event=user.login", nil)
+	subject := uuid.MustParse("35f7d711-78c3-42ec-a73a-0a4ae197504c")
+	request := httptest.NewRequest("GET", "/api/admin/audit-logs/export?event=user.login&subject_user_id="+subject.String()+"&target_type=user&target_id=target-1", nil)
 	filter, err := auditExportFilter(request, now)
 	if err != nil {
 		t.Fatalf("auditExportFilter() error = %v", err)
 	}
-	if filter.Event != "user.login" || filter.CreatedFrom == nil || filter.CreatedTo == nil {
+	if filter.Event != "user.login" || filter.SubjectUserID == nil || *filter.SubjectUserID != subject ||
+		filter.TargetType != "user" || filter.TargetID != "target-1" || filter.CreatedFrom == nil || filter.CreatedTo == nil {
 		t.Fatalf("unexpected filter: %#v", filter)
 	}
 	if !filter.CreatedFrom.Equal(now.Add(-24*time.Hour)) || !filter.CreatedTo.Equal(now) {

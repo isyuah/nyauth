@@ -17,6 +17,8 @@ type ListFilter struct {
 	RiskLevel     string
 	Actor         string
 	Target        string
+	TargetType    string
+	TargetID      string
 	IPAddress     string
 	SubjectUserID *uuid.UUID
 	CreatedFrom   *time.Time
@@ -165,6 +167,12 @@ func buildListFilter(filter ListFilter) (string, []any) {
 	}
 	if value := strings.TrimSpace(filter.Target); value != "" {
 		addRepeated("(target_id ILIKE '%%' || $%d || '%%' OR target_type ILIKE '%%' || $%d || '%%')", value)
+	}
+	if value := strings.TrimSpace(filter.TargetType); value != "" {
+		add("target_type = $%d", value)
+	}
+	if value := strings.TrimSpace(filter.TargetID); value != "" {
+		add("target_id = $%d", value)
 	}
 	if value := strings.TrimSpace(filter.IPAddress); value != "" {
 		add("ip_address = $%d", value)

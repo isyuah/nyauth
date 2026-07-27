@@ -441,38 +441,6 @@ func (s *Server) revokeUserSecurityState(ctx context.Context, userID uuid.UUID, 
 	}
 }
 
-func (s *Server) handleListAuditLogs(w http.ResponseWriter, r *http.Request) {
-	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
-	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
-	filter := audit.ListFilter{
-		Event: r.URL.Query().Get("event"), Result: r.URL.Query().Get("result"),
-		RiskLevel: r.URL.Query().Get("risk"), Actor: r.URL.Query().Get("actor"),
-		Target: r.URL.Query().Get("target"), IPAddress: r.URL.Query().Get("ip"),
-	}
-	if value := r.URL.Query().Get("from"); value != "" {
-		parsed, parseErr := time.Parse(time.RFC3339, value)
-		if parseErr != nil {
-			writeAPIError(w, http.StatusBadRequest, "from must be RFC3339")
-			return
-		}
-		filter.CreatedFrom = &parsed
-	}
-	if value := r.URL.Query().Get("to"); value != "" {
-		parsed, parseErr := time.Parse(time.RFC3339, value)
-		if parseErr != nil {
-			writeAPIError(w, http.StatusBadRequest, "to must be RFC3339")
-			return
-		}
-		filter.CreatedTo = &parsed
-	}
-	result, err := s.auditStore.List(r.Context(), page, pageSize, filter)
-	if err != nil {
-		writeAPIError(w, http.StatusInternalServerError, "failed to list audit logs")
-		return
-	}
-	writeJSON(w, http.StatusOK, result)
-}
-
 func (s *Server) handleListMyClients(w http.ResponseWriter, r *http.Request) {
 	current := currentUserFromContext(r)
 	result, err := s.clientService.ListByOwner(r.Context(), current.ID.String(), 1, 50)

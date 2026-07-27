@@ -383,6 +383,7 @@ func (s *Server) buildRouter() *chi.Mux {
 			r.Get("/admin/stats/registration-trend", s.statsHandler.GetRegistrationTrend)
 			r.Get("/admin/stats/mail-trend", s.statsHandler.GetMailTrend)
 			r.Get("/admin/stats/recent-logins", s.statsHandler.GetRecentLogins)
+			r.Get("/admin/audit-logs/options", s.handleAuditLogOptions)
 			r.Get("/admin/audit-logs", s.handleListAuditLogs)
 			r.Get("/admin/audit-logs/export", s.handleExportAuditLogs)
 			userHandler := user.NewHandler(s.userService)
