@@ -759,6 +759,7 @@ test('login requires first password change and sends CSRF', async ({ page }) => 
   await page.getByRole('button', { name: '登录', exact: true }).click();
 
   await expect(page).toHaveURL(/\/change-password\?return_to=%2Fdashboard$/);
+  await expect(page.getByRole('button', { name: /返回/ })).toHaveCount(0);
   const passwordInputs = page.locator('input[type="password"]');
   await passwordInputs.nth(0).fill('temporary-password');
   await passwordInputs.nth(1).fill('a-new-password-123');
@@ -780,6 +781,7 @@ test('wrong current password stays on the change-password page and preserves CSR
   await installAPIMocks(page, state);
 
   await page.goto('/change-password?return_to=/profile');
+  await expect(page.getByRole('button', { name: '返回个人资料' })).toBeVisible();
   const passwordInputs = page.locator('input[type="password"]');
   await passwordInputs.nth(0).fill('wrong-current-password');
   await passwordInputs.nth(1).fill('a-new-password-123');
@@ -878,6 +880,37 @@ test('the desktop sidebar recovers after the window shrinks below the mobile bre
 
   await page.setViewportSize({ width: 1280, height: 900 });
   await expect(sidebar).toHaveCSS('width', '248px');
+});
+
+test('administrator profile stays in the user center and marks the profile tab active', async ({ page }) => {
+  await installAPIMocks(page, {
+    authenticated: true,
+    mustChangePassword: false,
+    role: 'admin',
+    csrfToken: 'csrf-admin-profile',
+  });
+
+  await page.goto('/profile');
+
+  const sidebar = page.getByRole('complementary', { name: '用户中心导航' });
+  await expect(sidebar).toBeVisible();
+  await expect(page.getByRole('complementary', { name: '管理后台导航' })).toHaveCount(0);
+  await expect(sidebar.getByRole('link', { name: '个人资料', exact: true })).toHaveAttribute('aria-current', 'page');
+  await expect(sidebar.getByRole('link', { name: '管理后台', exact: true })).toBeVisible();
+});
+
+test('owned applications show the used quota as a compact fraction', async ({ page }) => {
+  await installAPIMocks(page, {
+    authenticated: true,
+    mustChangePassword: false,
+    role: 'user',
+    csrfToken: 'csrf-client-quota',
+  });
+
+  await page.goto('/dashboard/apps');
+
+  await expect(page.getByText('1/10', { exact: true })).toBeVisible();
+  await expect(page.getByRole('button', { name: '创建应用' }).first()).toBeEnabled();
 });
 
 test('mobile navigation traps focus, closes with Escape, and restores the menu trigger', async ({ page }) => {

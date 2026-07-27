@@ -414,7 +414,7 @@
 {#if loading || !session}
   <div class="min-h-screen bg-nya-bg p-6"><div class="mx-auto max-w-2xl pt-20"><ResourceState {loading} error={loadError} onretry={loadProfile}>{#snippet children()}{/snippet}</ResourceState></div></div>
 {:else}
-  <AppShell section={session.user.role === 'admin' ? 'admin' : 'user'}>
+  <AppShell section="user">
     <div class="mx-auto max-w-4xl">
       <PageHeader title="个人资料" description="管理账户资料、安全设置、设备会话和外部身份" />
 

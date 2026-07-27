@@ -12,7 +12,9 @@
   import SecretReveal from '$lib/components/ui/SecretReveal.svelte';
   import { AppWindow, Plus, RefreshCw } from 'lucide-svelte';
 
+  const clientLimit = 10;
   let clients = $state<OAuthClient[]>([]);
+  let clientTotal = $state<number | null>(null);
   let loading = $state(true);
   let showCreate = $state(false);
   let creating = $state(false);
@@ -28,12 +30,15 @@
   let rotateTarget = $state<OAuthClient | null>(null);
   let rotateOpen = $state(false);
   let rotateError = $state('');
+  let quotaReached = $derived(clientTotal !== null && clientTotal >= clientLimit);
 
   async function loadApps() {
     loading = true;
     pageError = '';
     try {
-      clients = (await api.my.getClients()).items;
+      const result = await api.my.getClients();
+      clients = result.items;
+      clientTotal = result.total;
     } catch (cause) {
       pageError = cause instanceof Error ? cause.message : '应用列表加载失败';
     } finally {
@@ -122,8 +127,13 @@
 
 <svelte:head><title>我的应用 - Nya</title></svelte:head>
 
-<PageHeader title="我的应用" description="管理你创建的 OAuth / OIDC 客户端（上限 10 个）">
-  {#snippet action()}<Button variant="primary" onclick={() => { createdSecret = ''; showCreate = true; }}><Plus size={16} /> 创建应用</Button>{/snippet}
+<PageHeader title="我的应用" description="管理你创建的 OAuth / OIDC 客户端">
+  {#snippet action()}
+    <div class="flex items-center gap-3">
+      <span title="已创建应用 / 配额上限"><Badge variant={quotaReached ? 'warning' : 'default'}>{clientTotal === null ? `—/${clientLimit}` : `${clientTotal}/${clientLimit}`}</Badge></span>
+      <Button variant="primary" disabled={quotaReached} onclick={() => { createdSecret = ''; showCreate = true; }}><Plus size={16} /> 创建应用</Button>
+    </div>
+  {/snippet}
 </PageHeader>
 
 {#if createdSecret}<div class="mb-4 rounded-nya-md border border-nya-info/20 bg-nya-info-soft px-5 py-4"><p class="mb-2 text-body-medium text-nya-info">请立即复制并安全保存 Client Secret，离开本页后无法再次查看。</p><SecretReveal value={createdSecret} label="Client Secret" /></div>{/if}
