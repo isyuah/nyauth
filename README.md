@@ -9,7 +9,7 @@
 - 第一方后台仅使用 `HttpOnly + SameSite=Lax` 会话 Cookie，并对修改请求强制校验 CSRF。
 - OAuth 授权码客户端强制使用 PKCE S256；不支持 plain、implicit 或 hybrid 流程。
 - JWT 固定使用 RS256，refresh token 采用 family 轮换与重复使用检测。
-- 数据库以嵌入二进制的迁移序列管理；当前开发 schema 为 8，发布 0.3.0 前会重新压缩基线。服务启动只校验 schema，不再隐式迁移。
+- 数据库以嵌入二进制的迁移序列管理；当前开发 schema 为 9，发布 0.3.0 前会重新压缩基线。服务启动只校验 schema，不再隐式迁移。
 - 旧数据库、session、token、JWK、Provider 凭据和 OAuth 客户端注册均不兼容。
 - 旧 Go/TypeScript SDK 已删除；OAuth/OIDC 集成以标准协议和成熟语言库为准。
 
@@ -28,6 +28,7 @@
 - 账户安全中心：设备会话、OAuth 授权、近期重新认证、TOTP、Passkey/WebAuthn、一次性恢复码、邮箱验证与密码恢复
 - 自助注册：关闭 / 邀请制 / 开放三种模式，域名白名单与邀请码均为运行时设置
 - 动态邮件：数据库版本化 SMTP 配置、真实测试邮件、免重启激活/回滚、共享熔断
+- 安全头像：浏览器 1:1 裁剪、服务端重编码、本地持久化或私有 S3、Provider 首次异步导入
 - 运维：严格 readiness、JSON 日志、内部 Prometheus、可选 OTLP 与审计 outbox
 - 集成方式：标准 OAuth/OIDC Discovery、成熟语言库与 BFF 会话模式
 
@@ -59,7 +60,7 @@ curl.exe --fail http://localhost:8080/readyz
 docker compose logs --follow nyauth
 ```
 
-开发 Compose 将应用、PostgreSQL 和 Redis 分别绑定到 `127.0.0.1:8080`、`127.0.0.1:5432` 和 `127.0.0.1:6379`，并通过一次性 `migrate` service 初始化空数据库。正常停止使用 `docker compose down`，数据会保留在命名 volume 中。不要使用 `docker compose down -v`；`-v` 会删除本地 PostgreSQL 数据。
+开发 Compose 将应用、PostgreSQL 和 Redis 分别绑定到 `127.0.0.1:8080`、`127.0.0.1:5432` 和 `127.0.0.1:6379`，并通过一次性 `migrate` service 初始化空数据库。头像使用 `media` 命名 volume 挂载到 `/var/lib/nyauth/media`，与 PostgreSQL 的 `pgdata` 分开持久化。正常停止使用 `docker compose down`，两个 volume 都会保留。不要使用 `docker compose down -v`；`-v` 会同时删除本地 PostgreSQL 和头像数据。
 
 ### 使用本机服务
 
@@ -106,6 +107,8 @@ go run ./cmd/nyauth serve -config config.yaml
 
 配置文件采用严格解码，未知字段（包括已删除的旧 `providers` 配置）会直接导致启动失败。环境变量统一使用 `NYAUTH_` 前缀和下划线层级，例如 `server.trusted_proxy_cidrs` 对应 `NYAUTH_SERVER_TRUSTED_PROXY_CIDRS`。数据库 DSN、Redis 密码、master key、bootstrap 管理员密码、SMTP 密码和 OTLP Authorization 均支持 `*_FILE`；同一项不能同时设置直接值与文件值。
 
+头像默认使用 `media.backend=local` 和 `media.local.directory=data/media`。本机原生运行时应为该目录建立独立备份；Compose 则使用上述 `media` volume。用户上传只接受 JPEG、PNG 和静态 WebP，严格限制为 8 MiB、最大边 4096、最多 16,777,216 像素，并在服务端重新生成 64/128/256/512 四种 WebP，不保存原图或任意外部 URL。完整安全契约见 [安全头像媒体契约](docs/avatar-storage-design.md)。
+
 SMTP 的运行主配置保存在 PostgreSQL，可在服务运行期间按“候选 → 真实测试邮件 → 激活”流程修改，无需重启。`NYAUTH_MAIL_*` 与 SMTP password file 仅作为数据库尚未明确激活或禁用配置时的首次 fallback/bootstrap；完整的本地 PowerShell 操作、远程 `curl` 操作、回滚与熔断语义见 [动态 SMTP 配置与故障处理](docs/operations/runtime-mail.md)。Nyauth 只发信，不读取邮箱，因此无需 IMAP。
 
 ## 生产部署
@@ -130,6 +133,7 @@ Compose 部署至少设置：
 - `NYAUTH_AUTH_ISSUER`：生产 HTTPS issuer
 - `NYAUTH_TRUSTED_PROXY_CIDRS`：准确的反向代理 CIDR
 - `NYAUTH_PROXY_NETWORK`：已由反向代理平台创建并加入的外部 Docker network
+- 可选 `NYAUTH_MEDIA_BACKEND`、`NYAUTH_MEDIA_LOCAL_DIRECTORY`：单机默认分别为 `local` 和 `/var/lib/nyauth/media`
 - 可选 `NYAUTH_BOOTSTRAP_ADMIN_USERNAME`、`NYAUTH_BOOTSTRAP_ADMIN_EMAIL`、`NYAUTH_BOOTSTRAP_ADMIN_PASSWORD`
 
 先检查 Compose 展开结果，再启动：
@@ -139,13 +143,29 @@ docker compose --env-file .env.production -f docker-compose.prod.yml config --qu
 docker compose --env-file .env.production -f docker-compose.prod.yml up -d
 ```
 
+单机生产默认使用独立 `media` volume。需要从首次头像上传起使用 AWS S3、R2、MinIO 等私有 S3 兼容存储时，使用仓库中的 `docker-compose.media-s3.yml` override，并在所有 `config`、`up`、`maintenance`、升级和停止命令中保留同一组 `-f` 参数：
+
+```bash
+docker compose --env-file .env.production \
+  -f docker-compose.prod.yml \
+  -f docker-compose.media-s3.yml \
+  config --quiet
+
+docker compose --env-file .env.production \
+  -f docker-compose.prod.yml \
+  -f docker-compose.media-s3.yml \
+  up -d
+```
+
+S3 override 要求 `NYAUTH_MEDIA_S3_REGION`、`NYAUTH_MEDIA_S3_BUCKET`、access key ID 与 secret access key 文件；可选配置 HTTPS endpoint、prefix 和 path-style。bucket 必须保持私有，浏览器始终通过 Nyauth 同源 `/media` 路由读取。存储后端是静态部署选择，当前没有已填充环境的 local/S3 自动迁移工具；已有未清理头像对象时，`serve` 与 `maintenance` 会拒绝切换到另一后端。详细 secret 与命令见 [单机远程部署手册](docs/operations/single-host-deployment.md)。
+
 生产 Compose 不发布 PostgreSQL/Redis 端口，应用仅通过预先创建的 external proxy network 暴露 `8080`；Compose 不创建或删除该网络。应用与迁移容器使用非 root 用户、只读根文件系统、临时 `/tmp`、cap drop 和 `no-new-privileges`。
 
 如果未提供 bootstrap 密码，空用户库会生成一次性随机管理员密码并只写入一次启动日志；如果通过环境变量提供密码，则不会回显。两种情况都要求首次登录修改密码。
 
-生产切换到此基线时必须使用全新的 PostgreSQL/Redis 空 volume。删除旧 volume 是人工运维动作，应用不会自动执行。运行账号只拥有业务表 DML 权限；迁移账号由一次性 `migrate` service 和受控的 `maintenance` 调度使用。生产 Compose 可按月运行 `docker compose -f docker-compose.prod.yml run --rm migrate maintenance`，不得把迁移 DSN 提供给常驻应用容器。审计保留期可通过 `NYAUTH_AUDIT_RETENTION` 配置，默认 8760 小时。
+生产切换到此基线时必须使用全新的 PostgreSQL/Redis 空 volume；本地头像模式还必须建立并纳入备份新的 `media` volume。删除旧 volume 是人工运维动作，应用不会自动执行。运行账号只拥有业务表 DML 权限；迁移账号由一次性 `migrate` service 和受控的 `maintenance` 调度使用。生产 Compose 可按月运行 `docker compose -f docker-compose.prod.yml run --rm migrate maintenance`，不得把迁移 DSN 提供给常驻应用容器；使用 S3 override 时该命令也必须追加相同 override。审计保留期可通过 `NYAUTH_AUDIT_RETENTION` 配置，默认 8760 小时。
 
-Prometheus 指标默认由仅限内部网络访问的 `/metrics` 提供。除 HTTP、OAuth、依赖和连接池指标外，还包含注册结果、邮箱验证耗时、SMTP 错误类别、共享熔断状态、outbox backlog 与最老待发邮件年龄；标签不会包含邮箱、用户名、用户 ID、邀请码、SMTP 主机或原始错误。可选 OTLP HTTP 导出使用 `NYAUTH_TELEMETRY_OTLP_ENABLED`、`NYAUTH_TELEMETRY_OTLP_ENDPOINT`、`NYAUTH_TELEMETRY_OTLP_EXPORT_INTERVAL` 和 `NYAUTH_TELEMETRY_OTLP_TIMEOUT`；collector Authorization 建议通过 `NYAUTH_TELEMETRY_OTLP_AUTHORIZATION_FILE` 注入，生产 endpoint 必须使用 HTTPS。
+Prometheus 指标默认由仅限内部网络访问的 `/metrics` 提供。除 HTTP、OAuth、依赖和连接池指标外，还包含注册结果、邮箱验证耗时、SMTP 错误类别、共享熔断状态、outbox backlog、最老待发邮件年龄，以及头像操作、处理耗时、存储错误和待清理记录；标签不会包含邮箱、用户名、用户 ID、邀请码、SMTP 主机、头像 object key 或原始错误。可选 OTLP HTTP 导出使用 `NYAUTH_TELEMETRY_OTLP_ENABLED`、`NYAUTH_TELEMETRY_OTLP_ENDPOINT`、`NYAUTH_TELEMETRY_OTLP_EXPORT_INTERVAL` 和 `NYAUTH_TELEMETRY_OTLP_TIMEOUT`；collector Authorization 建议通过 `NYAUTH_TELEMETRY_OTLP_AUTHORIZATION_FILE` 注入，生产 endpoint 必须使用 HTTPS。
 
 Nyauth 只通过 SMTP 发送邮件，不读取邮箱，也不需要 IMAP。生产 SMTP 应在服务启动后写入数据库：管理员先保存不可变候选，向指定地址实际发送测试邮件，再在测试成功后的十分钟内激活；后续可免重启切换候选、回滚上一数据库版本或在关闭注册后禁用。所有配置操作要求管理员最近十分钟内重新认证，密码使用 master key envelope encryption，API 只返回 `password_configured`。`NYAUTH_MAIL_*`、单机 `docker/compose.prod.smtp-password-file.yml` 和 HA `docker/compose.ha.smtp-password-file.yml` 仅保留为首次 fallback/bootstrap。详见 [动态 SMTP 配置与故障处理](docs/operations/runtime-mail.md)。
 
@@ -166,7 +186,10 @@ Nyauth 只通过 SMTP 发送邮件，不读取邮箱，也不需要 IMAP。生�
 | GET | `/api/session` | 返回用户、CSRF、`has_password`、`email_verified` 与最近认证时间 |
 | POST | `/api/logout` | 销毁当前会话 |
 | GET | `/api/me` | 当前用户资料 |
-| PUT | `/api/me` | 修改 display name、avatar |
+| PUT | `/api/me` | 修改 display name |
+| POST | `/api/me/avatar` | 上传浏览器裁剪后的受控头像，返回更新后的用户资料 |
+| DELETE | `/api/me/avatar` | 删除当前头像，返回更新后的用户资料 |
+| GET | `/media/avatars/{avatar_id}/{size}.webp` | 读取 active 头像的 64/128/256/512 WebP 变体 |
 | POST | `/api/me/password` | 使用当前密码修改密码并轮换会话 |
 | POST | `/api/me/password/set` | 外部身份账户在近期重新认证后设置本地密码 |
 | POST | `/api/me/reauth/password` | 使用当前密码完成近期重新认证 |
@@ -261,7 +284,7 @@ OAuth 客户端支持 `post_logout_redirect_uris`。`/end_session` 仅允许跳�
 | GET | `/readyz` | 检查 schema、PostgreSQL、Redis、活动 JWK 与 Provider 快照 |
 | GET | `/metrics` | 仅允许内部或可信来源访问的 Prometheus 指标 |
 
-旧 `/health` 已删除。`/readyz` 失败返回 503，响应不会包含数据库地址、原始依赖错误或 secret。SMTP 故障不进入 `/readyz`，避免邮件降级让登录与 OAuth/OIDC 整体下线；管理员通过 `/api/admin/system/status` 的 `services.mail` 和邮件设置状态查看 `degraded/unavailable` 与熔断信息。
+旧 `/health` 已删除。`/readyz` 失败返回 503，响应不会包含数据库地址、原始依赖错误或 secret。SMTP 和头像媒体存储故障都不进入 `/readyz`，避免非核心能力降级让登录与 OAuth/OIDC 整体下线；管理员通过 `/api/admin/system/status` 的 `services.mail`、`services.media` 和对应设置状态查看降级信息。媒体故障期间头像上传或读取返回 `503`；删除以 PostgreSQL 中解除当前引用为成功边界，对象删除失败会标记降级并交给后台清理重试。
 
 ## 外部身份
 
@@ -275,17 +298,20 @@ OAuth 客户端支持 `post_logout_redirect_uris`。`/end_session` 仅允许跳�
 
 Provider 不再从 YAML 或环境变量静态加载，只能由管理员写入数据库。Client secret 使用 master key envelope 加密；禁用或删除通过 PostgreSQL `LISTEN/NOTIFY` 刷新其他实例，并由 60 秒 reconciliation 修复丢失通知。Provider 配置检查只表示“配置有效”或“Discovery 可访问”，不伪称上游登录已经成功。
 
+管理员可为 Provider 启用默认关闭的 `import_avatar`。它只在外部身份首次创建本地用户时异步导入一次，不阻塞登录、后续不持续同步，也绝不覆盖用户主动上传的头像。GitHub 和 Google 使用代码内置的严格图片主机；通用 OIDC 必须配置精确公共 DNS 主机 allowlist。远程获取只允许 HTTPS/443，对每次重定向重新检查主机和全部解析地址，并阻断私网、loopback、link-local、云元数据与 DNS rebinding。上游 URL 使用 master key 加密，完成或最终失败后清空；浏览器只会看到 Nyauth 生成的媒体地址。
+
 ## 管理与运维 API
 
 内部管理界面继续使用 Cookie + CSRF，不是稳定的自动化 API：
 
-- `GET /api/admin/system/status`：版本、schema、PostgreSQL/Redis/JWK/Provider 状态与延迟。
+- `GET /api/admin/system/status`：版本、schema、PostgreSQL/Redis/JWK/Provider、SMTP 与头像媒体状态。
 - `GET /api/admin/stats`：快照化的用户、会话、注册、邮件 backlog、24 小时失败尝试和 SMTP 熔断摘要。
 - `GET /api/admin/stats/login-trend`、`registration-trend`、`mail-trend`：按 UTC 返回 7–90 天的补零趋势；注册趋势含邀请预占/消费/释放，邮件趋势区分其他失败尝试（不含永久拒收）、永久拒收与过期。
 - `GET /api/admin/audit-logs`：按事件、结果、风险、Actor、Target、IP 和时间筛选。
 - `GET /api/admin/audit-logs/export`：按最多 31 天、50,000 条流式导出 NDJSON 或 CEF；CEF 可导入常见 SIEM。
 - `POST /api/admin/clients/{id}/rotate-secret`：立即轮换客户端 Secret，新值仅展示一次。
 - `GET /api/admin/users/{id}/sessions`、`DELETE /api/admin/users/{id}/sessions`：查看或撤销用户会话。
+- `POST /api/admin/users/{id}/avatar`、`DELETE /api/admin/users/{id}/avatar`：管理员上传或删除用户头像，受 CSRF、限流与审计保护。
 - `GET/PUT /api/admin/settings/registration`：注册模式、邮箱验证要求、域名白名单、待验证期限与邀请默认值（运行时设置，免重启生效；修改要求近期重新认证）。
 - `GET/PUT /api/admin/settings/security`：TOTP/Passkey 注册开关与管理员强制 MFA（运行时设置，免重启生效；修改要求近期重新认证）。开关只阻止新注册，不停用已有因素。开启强制策略前所有活动管理员必须在当前 RP 下至少配置 TOTP 或 Passkey；策略生效后，无因素用户不能被激活/晋升为管理员，活动管理员也不能删除其最后一个因素。
 - `GET/POST /api/admin/invites`、`DELETE /api/admin/invites/{id}`：邀请码管理；明文 code 仅创建响应返回一次，库中只存哈希；列表分别返回已使用与待验证预占数。创建要求近期重新认证，紧急吊销不要求。
@@ -301,7 +327,7 @@ Nyauth 不要求使用专有 SDK。服务端应用应通过 Discovery 配置成�
 
 推荐库及安全约束见 [标准 OAuth/OIDC 集成指南](docs/oauth-oidc-integration.md)。近期不支持在浏览器中配置 confidential client secret，也不把 access/refresh token 持久化到 `localStorage`。
 
-单机备份、WAL/PITR、master key 恢复与演练见 [备份与恢复](docs/operations/backup-restore.md)；双实例拓扑与故障语义见 [高可用部署](docs/operations/high-availability.md)。仓库还提供受保护环境下手动触发的 `Isolated recovery drill` 工作流，用一次性 PostgreSQL、空 Redis、带资源计数 manifest 的备份产物和只读 `nyauth verify-recovery` 命令验证 JWK、Provider、TOTP、Passkey 与邮件 envelope 并生成恢复证据。
+单机备份、WAL/PITR、master key、local media/S3 恢复与演练见 [备份与恢复](docs/operations/backup-restore.md)；双实例拓扑、共享私有 S3 与故障语义见 [高可用部署](docs/operations/high-availability.md)；头像输入、存储、Provider 导入和清理边界见 [安全头像媒体契约](docs/avatar-storage-design.md)。仓库还提供受保护环境下手动触发的 `Isolated recovery drill` 工作流，用一次性 PostgreSQL、空 Redis、带资源计数 manifest 的备份产物和只读 `nyauth verify-recovery` 命令验证 JWK、Provider、TOTP、Passkey 与邮件 envelope 并生成恢复证据；当前该自动化不恢复或抽查头像对象，媒体恢复必须按备份手册另行留证。
 
 ## 质量检查
 

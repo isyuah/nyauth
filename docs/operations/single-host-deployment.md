@@ -1,6 +1,6 @@
 # Nyauth 单机远程部署手册
 
-本手册使用 `docker-compose.prod.yml` 在一台 Linux 主机上运行 Nyauth、PostgreSQL 和 Redis，并由同机或外部平台的通用反向代理终止 TLS。Compose 不发布应用或数据库端口；反向代理通过预先创建的 external Docker network 访问 `nyauth:8080`。
+本手册使用 `docker-compose.prod.yml` 在一台 Linux 主机上运行 Nyauth、PostgreSQL 和 Redis，并由同机或外部平台的通用反向代理终止 TLS。Compose 不发布应用或数据库端口；反向代理通过预先创建的 external Docker network 访问 `nyauth:8080`。头像默认保存到独立的本地 `media` volume，也可在首次开放头像上传前通过 `docker-compose.media-s3.yml` 切换到私有 S3 兼容存储。
 
 生产数据的备份与恢复要求见 [备份与恢复手册](backup-restore.md)。需要外部 PostgreSQL、外部 Redis 或双应用实例时，使用 [高可用部署](high-availability.md)，不要把本手册的内置数据库拓扑直接扩展成多主机部署。
 
@@ -11,7 +11,8 @@
 - 安装 Docker Engine 与 Compose v2，并由受控运维账号管理部署目录。
 - 从发布产物取得 `ghcr.io/nyasharp/nyauth@sha256:<64-hex-digest>`。生产环境固定 digest，不使用 `latest` 或可移动 tag。
 - 在首次启动前确定 PostgreSQL runtime role 名称。内置初始化脚本只在空 PostgreSQL volume 上执行；已有数据库改名或新增角色必须由 DBA 显式处理。
-- 建立 PostgreSQL、master key 和部署配置备份，明确 RPO/RTO 和回滚负责人。
+- 在首次开放头像上传前确定使用本地 media volume 还是私有 S3。当前没有已填充环境的 local/S3 自动迁移工具。
+- 建立 PostgreSQL、头像媒体、master key 和部署配置备份，明确 RPO/RTO 和回滚负责人。
 
 `auth.issuer` 必须是浏览器唯一使用的公开 HTTPS origin，例如 `https://auth.example.com`。协议、主机名或端口任一不一致都会使同源检查、Cookie 或 OIDC 校验失败。
 
@@ -39,7 +40,7 @@ docker network inspect nyauth-proxy
 
 ## 部署目录与 secret
 
-以下示例使用 `/opt/nyauth`。把仓库中与目标镜像版本匹配的 `docker-compose.prod.yml`、`docker/postgres/init-runtime-role.sh` 和可选 SMTP override 放入该目录；不要混用不同版本的 Compose 文件和镜像。
+以下示例使用 `/opt/nyauth`。把仓库中与目标镜像版本匹配的 `docker-compose.prod.yml`、`docker/postgres/init-runtime-role.sh`、可选 `docker-compose.media-s3.yml` 和可选 SMTP override 放入该目录；不要混用不同版本的 Compose 文件和镜像。
 
 ```bash
 sudo install -d -m 0750 /opt/nyauth/docker/postgres
@@ -84,6 +85,8 @@ NYAUTH_REDIS_PASSWORD_FILE=/opt/nyauth/secrets/redis-password
 NYAUTH_AUTH_MASTER_KEY_FILE=/opt/nyauth/secrets/auth-master-key
 POSTGRES_PASSWORD_FILE=/opt/nyauth/secrets/postgres-password
 NYAUTH_REDIS_ADDR=redis:6379
+NYAUTH_MEDIA_BACKEND=local
+NYAUTH_MEDIA_LOCAL_DIRECTORY=/var/lib/nyauth/media
 NYAUTH_BOOTSTRAP_ADMIN_USERNAME=admin
 NYAUTH_BOOTSTRAP_ADMIN_EMAIL=admin@example.com
 ```
@@ -93,6 +96,64 @@ chmod 0600 .env.production
 ```
 
 不要把 secret 值写进 `.env.production`、Compose 文件、shell history 或工单。默认不配置 bootstrap 密码：空用户库会生成一次性管理员密码，并只写入首次启动日志。需要预置时应使用受控的环境注入或单独的 Compose secret override，而不是提交明文。
+
+## 头像媒体后端
+
+### 默认：本地 media volume
+
+不加载 S3 override 时，`docker-compose.prod.yml` 使用 `NYAUTH_MEDIA_BACKEND=local`，并把逻辑命名 volume `media` 挂载到 `nyauth` 和 maintenance 容器的 `/var/lib/nyauth/media`。应用根文件系统保持只读，头像只写入该 volume。
+
+Compose project 会影响实际 volume 名。首次启动前和每次恢复前都用展开结果确认，不要假设它固定叫 `media`：
+
+```bash
+docker compose --env-file .env.production -f docker-compose.prod.yml config --volumes
+docker compose --env-file .env.production -f docker-compose.prod.yml config --quiet
+```
+
+`docker compose down` 会保留 `pgdata` 和 `media`；`down -v` 会同时删除两者。本地媒体必须纳入与 PostgreSQL 恢复点配对的备份，具体流程见 [备份与恢复手册](backup-restore.md)。
+
+### 可选：私有 S3 override
+
+需要 AWS S3、Cloudflare R2、MinIO 或其他 S3 兼容实现时，应在首次允许用户上传头像前选择该模式。bucket 必须 private，凭据只授予目标 prefix 所需的读取、写入和删除权限。生产自定义 endpoint 必须使用 HTTPS。
+
+创建凭据文件：
+
+```bash
+umask 077
+printf '%s' '<media-s3-access-key-id>' > secrets/media-s3-access-key-id
+printf '%s' '<media-s3-secret-access-key>' > secrets/media-s3-secret-access-key
+chmod 0600 secrets/media-s3-access-key-id secrets/media-s3-secret-access-key
+```
+
+在 `.env.production` 中增加或替换以下非 secret 配置和宿主机 secret 路径：
+
+```dotenv
+NYAUTH_MEDIA_S3_ENDPOINT=https://s3.example.com
+NYAUTH_MEDIA_S3_REGION=auto
+NYAUTH_MEDIA_S3_BUCKET=nyauth-media
+NYAUTH_MEDIA_S3_PREFIX=nyauth
+NYAUTH_MEDIA_S3_PATH_STYLE=false
+NYAUTH_MEDIA_S3_ACCESS_KEY_ID_FILE=/opt/nyauth/secrets/media-s3-access-key-id
+NYAUTH_MEDIA_S3_SECRET_ACCESS_KEY_FILE=/opt/nyauth/secrets/media-s3-secret-access-key
+```
+
+AWS S3 可把 endpoint 留空并使用实际 region；R2、MinIO 等按供应商要求填写 endpoint、region 与 path-style。仓库 override 会把两个宿主机文件作为 Compose secret 挂到应用和 maintenance 容器，并固定 `NYAUTH_MEDIA_BACKEND=s3`。
+
+从此所有 Compose 命令必须同时包含基础文件和 S3 override，包括 `config`、`pull`、`up`、`run ... maintenance`、升级、停止与回滚：
+
+```bash
+docker compose --env-file .env.production \
+  -f docker-compose.prod.yml \
+  -f docker-compose.media-s3.yml \
+  config --quiet
+
+docker compose --env-file .env.production \
+  -f docker-compose.prod.yml \
+  -f docker-compose.media-s3.yml \
+  up -d
+```
+
+头像记录会保存创建时的存储后端。当前没有把既有 `local` 记录和对象转换为 `s3`、或反向转换的内置命令；只要 PostgreSQL 中仍有尚未完成物理清理的另一后端记录，`serve` 与 `maintenance` 都会明确拒绝启动。已有头像的部署不得只修改 `.env.production` 和 override 强行切换。若未来需要迁移，必须另行设计数据库与对象的一致迁移和回滚方案。
 
 ## 配置展开与首次启动
 
@@ -136,6 +197,7 @@ curl --fail --silent --show-error https://auth.example.com/.well-known/openid-co
 - 初始管理员可以登录、被强制修改密码，并可再次登录。
 - 日志中的客户端 IP 来自受信转发链，公网伪造 `X-Forwarded-For` 不会覆盖真实地址。
 - `/metrics` 无法从公网访问，PostgreSQL、Redis 和 `8080` 未出现在宿主机监听端口中。
+- 上传一张裁剪后的测试头像，确认用户 DTO 只返回 `/media/avatars/.../256.webp`，且 64/128/256/512 四种地址都返回 `image/webp`；S3 模式还应确认 bucket 没有公共读取权限。
 
 ## 动态 SMTP 与可选 bootstrap fallback
 
@@ -194,7 +256,18 @@ docker compose --env-file .env.production -f docker-compose.prod.yml logs --tail
 docker compose --env-file .env.production -f docker-compose.prod.yml run --rm migrate maintenance
 ```
 
+S3 模式使用相同维护逻辑，但必须追加 media override，确保 maintenance 能读取同一 bucket、prefix 和 secret：
+
+```bash
+docker compose --env-file .env.production \
+  -f docker-compose.prod.yml \
+  -f docker-compose.media-s3.yml \
+  run --rm migrate maintenance
+```
+
 持续监控 `/readyz`、登录失败率、PostgreSQL/Redis 容量、最老审计 outbox、磁盘空间和证书到期时间。SMTP 不属于 `/readyz`；邮件故障通过 `/api/admin/system/status` 的 `services.mail`、邮件设置中的熔断状态和受控指标观察。熔断期间注册会返回 `503`，但登录与 OAuth/OIDC 保持在线。日志不得泄露地址、凭据、验证 Token 或邮件内容。
+
+头像媒体同样不属于 `/readyz`。通过 `/api/admin/system/status` 的 `services.media`、头像操作/存储错误/待清理指标，以及本地 media volume 容量或 S3 bucket 告警观察。媒体故障使头像上传或读取返回 `503`；删除会先解除数据库引用并返回成功，对象删除失败由后台清理重试。它不应触发整个认证服务下线。
 
 正常停止而保留 PostgreSQL 数据：
 
@@ -202,11 +275,11 @@ docker compose --env-file .env.production -f docker-compose.prod.yml run --rm mi
 docker compose --env-file .env.production -f docker-compose.prod.yml down
 ```
 
-不要执行 `docker compose down -v`；`-v` 会删除 PostgreSQL volume。任何数据删除都必须先核对 Compose project、volume 名称和备份，并经过独立批准。
+不要执行 `docker compose down -v`；`-v` 会删除 PostgreSQL volume 和本地 media volume。任何数据删除都必须先核对 Compose project、准确 volume 名称或 S3 prefix、备份和恢复证据，并经过独立批准。
 
 ## 升级
 
-当前开发基线不承诺不同数据库契约的版本可以滚动混跑。升级前保存旧 digest、备份 PostgreSQL 和 master key，并阅读目标版本的迁移说明：
+当前开发基线不承诺不同数据库契约的版本可以滚动混跑。升级前保存旧 digest，备份 PostgreSQL、头像媒体和 master key，并阅读目标版本的迁移说明：
 
 1. 把匹配目标版本的 Compose 和初始化脚本放入部署目录。
 2. 在临时副本中把 `.env.production` 的 `NYAUTH_IMAGE` 更新为已验证的新 digest，执行 `config --quiet`，确认后再原子替换正式文件。
@@ -221,10 +294,10 @@ docker compose --env-file .env.production -f docker-compose.prod.yml run --rm mi
 docker compose --env-file .env.production -f docker-compose.prod.yml up -d --no-deps --force-recreate nyauth
 ```
 
-保留 SMTP bootstrap override 的部署必须在上述每条 Compose 命令中追加相同的 override 文件。数据库模式已经是 `active` 或 `disabled` 时，该环境 fallback 不会覆盖数据库状态；是否移除 override 应作为一次独立、经 `config --quiet` 验证的部署配置变更处理。
+保留 SMTP bootstrap override 或使用 S3 media override 的部署，必须在上述每条 Compose 命令中追加各自相同的 override 文件，顺序保持一致。数据库邮件模式已经是 `active` 或 `disabled` 时，该环境 fallback 不会覆盖数据库状态；是否移除 SMTP override 应作为一次独立、经 `config --quiet` 验证的部署配置变更处理。S3 override 则不能在已有头像时直接移除或替换为 local。
 
 ## 回滚
 
-只在旧镜像明确兼容当前 schema 时，才可以直接把 `NYAUTH_IMAGE` 改回旧 digest 并重建应用。若新版本已经执行不兼容迁移，单独回退镜像会导致启动失败或数据损坏；必须停止应用，按备份手册恢复升级前 PostgreSQL 恢复点，重新启动空 Redis 使旧会话和 Token 全部失效，再使用旧 digest 启动并验证。
+只在旧镜像明确兼容当前 schema 与头像存储契约时，才可以直接把 `NYAUTH_IMAGE` 改回旧 digest 并重建应用。若新版本已经执行不兼容迁移，单独回退镜像会导致启动失败或数据损坏；必须停止应用，按备份手册恢复升级前 PostgreSQL 恢复点和匹配的 local media/S3 对象状态，重新启动空 Redis 使旧会话和 Token 全部失效，再使用旧 digest 启动并验证。
 
 回滚过程中不得运行 `down -v`。保留失败版本日志、迁移输出、digest 和恢复证据，待根因确认后再安排下一次升级。
