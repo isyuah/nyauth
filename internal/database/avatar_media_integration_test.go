@@ -153,7 +153,7 @@ func TestAvatarCleanupReleasesFailedClaimForRetry(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	userID := uuid.New()
-	if _, err := schema.pool.Exec(ctx, `INSERT INTO users (id,username) VALUES ($1,'avatar_cleanup_retry')`, userID); err != nil {
+	if _, err := schema.pool.Exec(ctx, `INSERT INTO users (id,username,creation_source) VALUES ($1,'avatar_cleanup_retry','legacy')`, userID); err != nil {
 		t.Fatalf("insert user: %v", err)
 	}
 	repository := avatar.NewRepository(schema.pool)
@@ -200,7 +200,7 @@ func TestAvatarDeleteCommitsLogicalRemovalWhenObjectCleanupIsDeferred(t *testing
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	userID := uuid.New()
-	if _, err := schema.pool.Exec(ctx, `INSERT INTO users (id,username) VALUES ($1,'avatar_delete_deferred')`, userID); err != nil {
+	if _, err := schema.pool.Exec(ctx, `INSERT INTO users (id,username,creation_source) VALUES ($1,'avatar_delete_deferred','legacy')`, userID); err != nil {
 		t.Fatalf("insert user: %v", err)
 	}
 	repository := avatar.NewRepository(schema.pool)
@@ -255,7 +255,7 @@ func TestAvatarCleanupClaimLeaseIsIndependentOfObjectAge(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	userID := uuid.New()
-	if _, err := schema.pool.Exec(ctx, `INSERT INTO users (id,username) VALUES ($1,'avatar_cleanup_lease')`, userID); err != nil {
+	if _, err := schema.pool.Exec(ctx, `INSERT INTO users (id,username,creation_source) VALUES ($1,'avatar_cleanup_lease','legacy')`, userID); err != nil {
 		t.Fatalf("insert user: %v", err)
 	}
 	repository := avatar.NewRepository(schema.pool)
@@ -293,7 +293,7 @@ func TestAvatarStorageBackendSwitchRequiresNoRemainingObjects(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	userID := uuid.New()
-	if _, err := schema.pool.Exec(ctx, `INSERT INTO users (id,username) VALUES ($1,'avatar_backend_switch')`, userID); err != nil {
+	if _, err := schema.pool.Exec(ctx, `INSERT INTO users (id,username,creation_source) VALUES ($1,'avatar_backend_switch','legacy')`, userID); err != nil {
 		t.Fatalf("insert user: %v", err)
 	}
 	repository := avatar.NewRepository(schema.pool)
@@ -333,7 +333,7 @@ func TestAvatarActivationFailurePersistsFailedStagingRecord(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	userID := uuid.New()
-	if _, err := schema.pool.Exec(ctx, `INSERT INTO users (id,username) VALUES ($1,'avatar_activation_failure')`, userID); err != nil {
+	if _, err := schema.pool.Exec(ctx, `INSERT INTO users (id,username,creation_source) VALUES ($1,'avatar_activation_failure','legacy')`, userID); err != nil {
 		t.Fatalf("insert user: %v", err)
 	}
 	repository := avatar.NewRepository(schema.pool)
@@ -373,7 +373,7 @@ func TestProviderAvatarImportCannotOverwriteUserAvatar(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 	userID := uuid.New()
-	if _, err := schema.pool.Exec(ctx, `INSERT INTO users (id,username) VALUES ($1,'avatar_import_race')`, userID); err != nil {
+	if _, err := schema.pool.Exec(ctx, `INSERT INTO users (id,username,creation_source) VALUES ($1,'avatar_import_race','legacy')`, userID); err != nil {
 		t.Fatalf("insert user: %v", err)
 	}
 	store, err := avatar.NewLocalStore(t.TempDir())

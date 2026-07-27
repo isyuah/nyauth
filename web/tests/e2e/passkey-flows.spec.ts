@@ -460,7 +460,7 @@ async function installPasskeyMocks(page: Page, state: PasskeyMockState) {
 }
 
 async function registerPasskey(page: Page, state: PasskeyMockState) {
-  await page.goto(`${webAuthnOrigin}/profile`);
+  await page.goto(`${webAuthnOrigin}/profile/security`);
   await expect(page.getByRole('heading', { name: 'Passkey', exact: true })).toBeVisible();
   await page.getByRole('button', { name: '注册 Passkey' }).click();
   const dialog = page.getByRole('dialog', { name: '注册 Passkey' });
@@ -532,7 +532,7 @@ test('MFA method switching stays locked while a code verification is pending', a
     await fulfillJSON(route, 200, sessionResponse(state));
   });
 
-  await page.goto(`${webAuthnOrigin}/login/mfa?return_to=/profile`);
+  await page.goto(`${webAuthnOrigin}/login/mfa?return_to=/profile/security`);
   await page.getByLabel('6 位动态验证码').fill('123456');
   await page.getByRole('button', { name: '验证并登录' }).click();
   await started;
@@ -542,7 +542,7 @@ test('MFA method switching stays locked while a code verification is pending', a
   await expect(page.getByRole('button', { name: '取消并返回登录' })).toBeDisabled();
 
   releaseVerification();
-  await expect(page).toHaveURL(/\/profile$/);
+  await expect(page).toHaveURL(/\/profile\/security$/);
 });
 
 test('a discoverable Passkey can be registered and used for passwordless login', async ({ page }) => {
@@ -554,10 +554,10 @@ test('a discoverable Passkey can be registered and used for passwordless login',
     await registerPasskey(page, state);
 
     state.authenticated = false;
-    await page.goto(`${webAuthnOrigin}/login?return_to=/profile`);
+    await page.goto(`${webAuthnOrigin}/login?return_to=/profile/security`);
     await page.getByRole('button', { name: '使用 Passkey 登录' }).click();
 
-    await expect(page).toHaveURL(/\/profile$/);
+    await expect(page).toHaveURL(/\/profile\/security$/);
     await expect(page.getByText('Work laptop', { exact: true })).toBeVisible();
     expect(state.directLoginRequests).toBe(1);
     expect(state.loginCredentialRawID).toBe(state.credentialRawID);
@@ -576,14 +576,14 @@ test('a registered Passkey completes the password login MFA challenge', async ({
 
     state.authenticated = false;
     state.passwordStartsMFA = true;
-    await page.goto(`${webAuthnOrigin}/login?return_to=/profile`);
+    await page.goto(`${webAuthnOrigin}/login?return_to=/profile/security`);
     await page.getByLabel('用户名').fill(user.username);
     await page.getByLabel('密码').fill('password-for-e2e');
     await page.getByRole('button', { name: '登录', exact: true }).click();
     await expect(page).toHaveURL(/\/login\/mfa/);
     await page.getByRole('button', { name: '使用 Passkey 验证' }).click();
 
-    await expect(page).toHaveURL(/\/profile$/);
+    await expect(page).toHaveURL(/\/profile\/security$/);
     expect(state.mfaOptionsCSRF).toBe('csrf-mfa-pending');
     expect(state.mfaVerifyCSRF).toBe('csrf-mfa-pending');
     expect(state.mfaCredentialRawID).toBe(state.credentialRawID);
@@ -706,7 +706,8 @@ test('administrators can hot-update the Passkey enrollment switch after reauthen
   const state = newState({ authenticated: true, role: 'admin' });
   await installPasskeyMocks(page, state);
 
-  await page.goto('/admin/system');
+  await page.goto('/admin/settings/security');
+  await expect(page.getByRole('link', { name: '登录安全', exact: true })).toHaveAttribute('aria-current', 'page');
   const securitySection = page.getByRole('heading', { name: '登录安全策略' }).locator('..').locator('..');
   await expect(securitySection.getByRole('switch', { name: '允许 Passkey 注册' })).toHaveAttribute('aria-checked', 'true');
   await securitySection.getByRole('switch', { name: '允许 Passkey 注册' }).click();

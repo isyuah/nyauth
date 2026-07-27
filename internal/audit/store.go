@@ -6,19 +6,21 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
 
 type ListFilter struct {
-	Event       string
-	Result      string
-	RiskLevel   string
-	Actor       string
-	Target      string
-	IPAddress   string
-	CreatedFrom *time.Time
-	CreatedTo   *time.Time
+	Event         string
+	Result        string
+	RiskLevel     string
+	Actor         string
+	Target        string
+	IPAddress     string
+	SubjectUserID *uuid.UUID
+	CreatedFrom   *time.Time
+	CreatedTo     *time.Time
 }
 
 // Store handles audit log persistence.
@@ -166,6 +168,14 @@ func buildListFilter(filter ListFilter) (string, []any) {
 	}
 	if value := strings.TrimSpace(filter.IPAddress); value != "" {
 		add("ip_address = $%d", value)
+	}
+	if filter.SubjectUserID != nil {
+		args = append(args, *filter.SubjectUserID)
+		index := len(args)
+		conditions = append(conditions, fmt.Sprintf(
+			"(actor_id = $%d OR (target_type = 'user' AND target_id = $%d::text))",
+			index, index,
+		))
 	}
 	if filter.CreatedFrom != nil {
 		add("created_at >= $%d", *filter.CreatedFrom)

@@ -24,6 +24,13 @@ var (
 	ErrAdminMFARequired = errors.New("the user must enroll MFA before becoming an active administrator")
 )
 
+const (
+	creationSourceBootstrap        = "bootstrap"
+	creationSourceAdmin            = "admin"
+	creationSourceSelfRegistration = "self_registration"
+	creationSourceLegacy           = "legacy"
+)
+
 // Store handles user persistence.
 type Store struct {
 	db                  *pgxpool.Pool
@@ -55,15 +62,19 @@ type userExecer interface {
 
 func scanUser(row rowScanner) (*models.User, error) {
 	u := &models.User{}
-	if err := row.Scan(
+	if err := row.Scan(userScanDestinations(u)...); err != nil {
+		return nil, err
+	}
+	return u, nil
+}
+
+func userScanDestinations(u *models.User) []any {
+	return []any{
 		&u.ID, &u.Username, &u.Email, &u.EmailVerifiedAt, &u.PasswordHash, &u.PasswordChangedAt,
 		&u.DisplayName, &u.AvatarURL, &u.Status, &u.Role, &u.AuthVersion, &u.SessionVersion,
 		&u.MustChangePassword, &u.LastAuthenticatedAt, &u.LastLoginAt,
 		&u.LastLoginIP, &u.Metadata, &u.CreatedAt, &u.UpdatedAt,
-	); err != nil {
-		return nil, err
 	}
-	return u, nil
 }
 
 func (s *Store) enqueueSecurityNotification(ctx context.Context, tx pgx.Tx, user *models.User, notice account.SecurityNotice) error {
@@ -81,17 +92,44 @@ func (s *Store) enqueueSecurityNotification(ctx context.Context, tx pgx.Tx, user
 }
 
 func (s *Store) Create(ctx context.Context, u *models.User) error {
-	return insertUser(ctx, s.db, u)
+	return insertUser(ctx, s.db, u, creationSourceLegacy, nil)
 }
 
-func insertUser(ctx context.Context, execer userExecer, u *models.User) error {
+func (s *Store) CreateAdmin(ctx context.Context, u *models.User, mutation audit.MutationAudit) error {
+	if err := mutation.ValidateEvent(models.AuditUserCreated); err != nil {
+		return fmt.Errorf("invalid user creation audit context: %w", err)
+	}
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return fmt.Errorf("starting administrator user creation: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	createdBy := mutation.ActorID
+	if err := insertUser(ctx, tx, u, creationSourceAdmin, &createdBy); err != nil {
+		return err
+	}
+	if err := audit.EnqueueMutationTx(
+		ctx, tx,
+		mutation.WithTarget("user", u.ID.String()).WithDetails(map[string]any{"creation_source": creationSourceAdmin}),
+	); err != nil {
+		return fmt.Errorf("auditing user creation: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("committing administrator user creation: %w", err)
+	}
+	return nil
+}
+
+func insertUser(ctx context.Context, execer userExecer, u *models.User, creationSource string, createdBy *uuid.UUID) error {
 	_, err := execer.Exec(ctx, `
 		INSERT INTO users (
 			id, username, email, password_hash, password_changed_at, display_name,
-			status, role, auth_version, session_version, must_change_password, metadata
-		) VALUES ($1,$2,$3,$4,NOW(),$5,$6,$7,$8,$9,$10,$11)
+			status, role, auth_version, session_version, must_change_password, metadata,
+			creation_source, created_by
+		) VALUES ($1,$2,$3,$4,NOW(),$5,$6,$7,$8,$9,$10,$11,$12,$13)
 	`, u.ID, u.Username, u.Email, u.PasswordHash, u.DisplayName,
-		u.Status, u.Role, u.AuthVersion, u.SessionVersion, u.MustChangePassword, u.Metadata)
+		u.Status, u.Role, u.AuthVersion, u.SessionVersion, u.MustChangePassword, u.Metadata,
+		creationSource, createdBy)
 	if err != nil {
 		return fmt.Errorf("inserting user: %w", err)
 	}
@@ -130,7 +168,7 @@ func (s *Store) CreateRegistration(ctx context.Context, u *models.User, options 
 			return nil, err
 		}
 	}
-	if err := insertUser(ctx, tx, u); err != nil {
+	if err := insertUser(ctx, tx, u, creationSourceSelfRegistration, nil); err != nil {
 		return nil, err
 	}
 	registrationID := uuid.New()
@@ -538,9 +576,12 @@ func (s *Store) BootstrapAdmin(ctx context.Context, u *models.User) (bool, error
 		return false, tx.Commit(ctx)
 	}
 	_, err = tx.Exec(ctx, `
-		INSERT INTO users (id,username,email,password_hash,password_changed_at,display_name,status,role,auth_version,must_change_password,metadata)
-		VALUES ($1,$2,$3,$4,NOW(),$5,'active','admin',1,TRUE,$6)
-	`, u.ID, u.Username, u.Email, u.PasswordHash, u.DisplayName, u.Metadata)
+		INSERT INTO users (
+			id,username,email,password_hash,password_changed_at,display_name,status,role,
+			auth_version,must_change_password,metadata,creation_source,created_by
+		)
+		VALUES ($1,$2,$3,$4,NOW(),$5,'active','admin',1,TRUE,$6,$7,NULL)
+	`, u.ID, u.Username, u.Email, u.PasswordHash, u.DisplayName, u.Metadata, creationSourceBootstrap)
 	if err != nil {
 		return false, err
 	}

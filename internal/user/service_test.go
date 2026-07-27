@@ -224,6 +224,40 @@ func TestCreateDefaultsOmittedMetadataToEmptyObject(t *testing.T) {
 	}
 }
 
+type adminCreateRecordingStore struct {
+	bootstrapStore
+	created  *models.User
+	mutation audit.MutationAudit
+}
+
+func (s *adminCreateRecordingStore) CreateAdmin(_ context.Context, u *models.User, mutation audit.MutationAudit) error {
+	s.created = u
+	s.mutation = mutation
+	return nil
+}
+
+func TestCreateAdminForwardsTrustedActorAndDefaultsMetadata(t *testing.T) {
+	store := &adminCreateRecordingStore{}
+	service := &Service{store: store}
+	actorID := uuid.New()
+	mutation := audit.MutationAudit{
+		Event: models.AuditUserCreated, ActorID: actorID, ActorName: "admin",
+		Result: "success", RiskLevel: "low",
+	}
+	created, err := service.CreateAdmin(context.Background(), models.CreateUserRequest{
+		Username: "managed-user", Password: "a-valid-password-123",
+	}, mutation)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if store.created == nil || created.ID != store.created.ID || store.created.Metadata == nil {
+		t.Fatalf("administrator-created user = %#v stored=%#v", created, store.created)
+	}
+	if store.mutation.ActorID != actorID || store.mutation.Event != models.AuditUserCreated {
+		t.Fatalf("administrator creation mutation = %#v", store.mutation)
+	}
+}
+
 type registrationRecordingStore struct {
 	bootstrapStore
 	created  *models.User

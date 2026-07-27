@@ -1,6 +1,10 @@
 import { expect, test, type Locator, type Page, type Route } from '@playwright/test';
 import { readFile } from 'node:fs/promises';
 import type {
+  AdminUserClientSummary,
+  AdminUserOverview,
+  AdminUserSecurity,
+  AuditLog,
   DashboardStats,
   LoginTrend,
   MailConfig,
@@ -8,6 +12,7 @@ import type {
   MailTrend,
   RegistrationTrend,
   StatsTrendDays,
+  User,
 } from '../../src/lib/api';
 
 type Role = 'admin' | 'user';
@@ -66,9 +71,21 @@ interface MockState {
   avatarUploadCSRF?: string | null;
   avatarUploadContentType?: string | null;
   avatarDeleteCSRF?: string | null;
+  meRequests?: number;
+  mfaStatusRequests?: number;
+  passkeyListRequests?: number;
+  sessionListRequests?: number;
+  authorizationListRequests?: number;
+  adminUserOverviewRequests?: Record<string, number>;
+  adminUserSecurityRequests?: Record<string, number>;
+  adminUserSessionRequests?: Record<string, number>;
+  adminUserIdentityRequests?: Record<string, number>;
+  adminUserAuthorizationRequests?: Record<string, number>;
+  adminUserClientRequests?: Record<string, number>;
+  adminUserActivityRequests?: Record<string, number>;
 }
 
-const user = {
+const user: User = {
   id: '11111111-1111-1111-1111-111111111111',
   username: 'alice',
   email: 'alice@example.com',
@@ -81,7 +98,7 @@ const user = {
   last_login_at: '2026-01-02T00:00:00Z',
 };
 
-const ownerUser = {
+const ownerUser: User = {
   ...user,
   id: '55555555-5555-5555-5555-555555555555',
   username: 'bob',
@@ -89,7 +106,7 @@ const ownerUser = {
   display_name: 'Bob',
 };
 
-const suspendedOwnerUser = {
+const suspendedOwnerUser: User = {
   ...user,
   id: '66666666-6666-6666-6666-666666666666',
   username: 'suspended-owner',
@@ -315,6 +332,86 @@ const githubIdentity = {
   updated_at: '2026-01-01T00:00:00Z',
 };
 
+const adminUserActivity: AuditLog = {
+  id: '99999999-9999-9999-9999-999999999999',
+  event: 'user.profile_updated',
+  actor_id: user.id,
+  actor_name: user.username,
+  target_type: 'user',
+  target_id: user.id,
+  ip_address: '192.0.2.10',
+  user_agent: 'Mozilla/5.0 (Windows NT 10.0) Chrome/126.0',
+  result: 'success',
+  risk_level: 'low',
+  details: { fields: ['display_name'] },
+  created_at: '2026-01-03T00:00:00Z',
+};
+
+type AdminUserRequestCounterKey =
+  | 'adminUserOverviewRequests'
+  | 'adminUserSecurityRequests'
+  | 'adminUserSessionRequests'
+  | 'adminUserIdentityRequests'
+  | 'adminUserAuthorizationRequests'
+  | 'adminUserClientRequests'
+  | 'adminUserActivityRequests';
+
+function incrementRequestCounter(state: MockState, key: AdminUserRequestCounterKey, id: string) {
+  const counterState = state as Record<AdminUserRequestCounterKey, Record<string, number> | undefined>;
+  const counters = (counterState[key] ||= {});
+  counters[id] = (counters[id] || 0) + 1;
+}
+
+function adminUserOverviewFor(candidate: typeof user): AdminUserOverview {
+  return {
+    user: {
+      ...candidate,
+      email_verified_at: candidate.status === 'active' ? '2026-01-01T00:10:00Z' : null,
+      last_login_ip: candidate.last_login_at ? '192.0.2.10' : null,
+      updated_at: '2026-01-03T00:00:00Z',
+    },
+    creation_source: candidate.id === user.id ? 'bootstrap' : 'admin',
+    created_by: candidate.id === user.id ? null : {
+      id: user.id,
+      username: user.username,
+      display_name: user.display_name,
+    },
+    self_registration: null,
+  };
+}
+
+function adminUserSecurityFor(candidate: typeof user): AdminUserSecurity {
+  return {
+    has_password: true,
+    password_changed_at: '2026-01-01T00:30:00Z',
+    must_change_password: false,
+    totp_available: true,
+    totp_enrolled: candidate.role === 'admin',
+    recovery_codes_remaining: candidate.role === 'admin' ? 8 : 0,
+    passkeys_available: true,
+    passkeys_enrolled: candidate.role === 'admin' ? 1 : 0,
+    passkey_clone_warnings: 0,
+    last_passkey_used_at: candidate.role === 'admin' ? '2026-01-02T00:00:00Z' : null,
+    mfa_required_for_admin: true,
+    mfa_requirement_satisfied: true,
+  };
+}
+
+function adminClientSummaryFor(client: typeof oauthClient): AdminUserClientSummary {
+  return {
+    id: client.id,
+    name: client.name,
+    is_public: client.is_public,
+    access_policy: 'open',
+    grants: client.grants,
+    scopes: client.scopes,
+    secret_hint: client.secret_hint,
+    secret_last_used_at: null,
+    created_at: client.created_at,
+    updated_at: client.updated_at,
+  };
+}
+
 function sessionResponse(state: MockState) {
   return {
     user: { ...user, role: state.role },
@@ -461,6 +558,7 @@ async function installAPIMocks(page: Page, state: MockState) {
     }
 
     if (path === '/api/me/mfa' && request.method() === 'GET') {
+      state.mfaStatusRequests = (state.mfaStatusRequests || 0) + 1;
       await fulfillJSON(route, 200, {
         totp_available: true,
         totp_enrolled: false,
@@ -475,6 +573,7 @@ async function installAPIMocks(page: Page, state: MockState) {
     }
 
     if (path === '/api/me/passkeys' && request.method() === 'GET') {
+      state.passkeyListRequests = (state.passkeyListRequests || 0) + 1;
       await fulfillJSON(route, 200, { passkeys: [] });
       return;
     }
@@ -488,6 +587,7 @@ async function installAPIMocks(page: Page, state: MockState) {
     }
 
     if (path === '/api/me/sessions' && request.method() === 'GET') {
+      state.sessionListRequests = (state.sessionListRequests || 0) + 1;
       await fulfillJSON(route, 200, browserSessions);
       return;
     }
@@ -499,6 +599,7 @@ async function installAPIMocks(page: Page, state: MockState) {
     }
 
     if (path === '/api/me/authorizations' && request.method() === 'GET') {
+      state.authorizationListRequests = (state.authorizationListRequests || 0) + 1;
       await fulfillJSON(route, 200, [oauthAuthorization]);
       return;
     }
@@ -532,6 +633,7 @@ async function installAPIMocks(page: Page, state: MockState) {
     }
 
     if (path === '/api/me') {
+      state.meRequests = (state.meRequests || 0) + 1;
       await fulfillJSON(route, 200, { ...user, role: state.role, avatar_url: state.avatarURL ?? user.avatar_url });
       return;
     }
@@ -627,58 +729,129 @@ async function installAPIMocks(page: Page, state: MockState) {
       return;
     }
 
-    if (path === `/api/admin/users/${user.id}` && request.method() === 'PUT' && state.adminUsers) {
-      state.adminUserUpdateCSRF = await request.headerValue('x-csrf-token');
-      state.adminUserUpdateBody = request.postDataJSON();
-      await fulfillJSON(route, 200, {
-        ...state.adminUsers[0],
-        ...(state.adminUserUpdateBody as object),
-        updated_at: '2026-01-03T00:00:00Z',
-      });
-      return;
-    }
-
-    if (path === `/api/admin/users/${user.id}/avatar` && request.method() === 'POST' && state.adminUsers) {
-      const updated = { ...state.adminUsers[0], avatar_url: '/media/avatars/88888888-8888-8888-8888-888888888888/256.webp' };
-      state.adminUsers = [updated];
-      await fulfillJSON(route, 200, updated);
-      return;
-    }
-
-    if (path === `/api/admin/users/${user.id}/avatar` && request.method() === 'DELETE' && state.adminUsers) {
-      const updated = { ...state.adminUsers[0], avatar_url: null };
-      state.adminUsers = [updated];
-      await fulfillJSON(route, 200, updated);
-      return;
-    }
-
-    if (path === `/api/admin/users/${user.id}/role` && request.method() === 'PUT' && state.adminUsers) {
-      if (state.adminUserRoleUpdateError) {
-        await fulfillJSON(route, 409, { error: state.adminUserRoleUpdateError });
+    const adminUserMatch = path.match(/^\/api\/admin\/users\/([^/]+)(?:\/(.*))?$/);
+    if (adminUserMatch && state.adminUsers) {
+      const userID = decodeURIComponent(adminUserMatch[1]);
+      const endpoint = adminUserMatch[2] || '';
+      const userIndex = state.adminUsers.findIndex((candidate) => candidate.id === userID);
+      if (userIndex < 0) {
+        await fulfillJSON(route, 404, { error: 'user not found' });
         return;
       }
-      const body = request.postDataJSON() as { role: Role };
-      const updated = { ...state.adminUsers[0], role: body.role };
-      state.adminUsers = [updated];
-      await fulfillJSON(route, 200, updated);
-      return;
-    }
+      const candidate = state.adminUsers[userIndex];
 
-    if (path === `/api/admin/users/${user.id}/identities` && request.method() === 'GET' && state.adminUserIdentities) {
-      await fulfillJSON(route, 200, state.adminUserIdentities);
-      return;
-    }
-
-    if (path === `/api/admin/users/${user.id}/identities/${githubIdentity.id}` && request.method() === 'DELETE' && state.adminUserIdentities) {
-      state.adminUserIdentityDeleteCSRF = await request.headerValue('x-csrf-token');
-      state.adminUserIdentities = state.adminUserIdentities.filter((identity) => identity.id !== githubIdentity.id);
-      await route.fulfill({ status: 204 });
-      return;
-    }
-
-    if (path === `/api/admin/users/${user.id}/sessions` && request.method() === 'GET' && state.adminUsers) {
-      await fulfillJSON(route, 200, []);
-      return;
+      if (endpoint === 'overview' && request.method() === 'GET') {
+        incrementRequestCounter(state, 'adminUserOverviewRequests', userID);
+        await fulfillJSON(route, 200, adminUserOverviewFor(candidate));
+        return;
+      }
+      if (endpoint === 'security' && request.method() === 'GET') {
+        incrementRequestCounter(state, 'adminUserSecurityRequests', userID);
+        await fulfillJSON(route, 200, adminUserSecurityFor(candidate));
+        return;
+      }
+      if (endpoint === 'authorizations' && request.method() === 'GET') {
+        incrementRequestCounter(state, 'adminUserAuthorizationRequests', userID);
+        await fulfillJSON(route, 200, [{
+          id: oauthAuthorization.id,
+          client_id: oauthAuthorization.client_id,
+          client_name: oauthAuthorization.client_name,
+          scopes: oauthAuthorization.scopes,
+          granted_at: oauthAuthorization.granted_at,
+          last_used_at: oauthAuthorization.last_used_at,
+        }]);
+        return;
+      }
+      if (endpoint === 'clients' && request.method() === 'GET') {
+        incrementRequestCounter(state, 'adminUserClientRequests', userID);
+        const pageNumber = Math.max(1, Number(requestURL.searchParams.get('page')) || 1);
+        const pageSize = Math.max(1, Number(requestURL.searchParams.get('page_size')) || 20);
+        const ownedClients = (state.adminClients || [oauthClient])
+          .filter((client) => client.owner_id === userID)
+          .map(adminClientSummaryFor);
+        const start = (pageNumber - 1) * pageSize;
+        await fulfillJSON(route, 200, {
+          items: ownedClients.slice(start, start + pageSize),
+          total: ownedClients.length,
+          page: pageNumber,
+          page_size: pageSize,
+          total_pages: Math.ceil(ownedClients.length / pageSize),
+        });
+        return;
+      }
+      if (endpoint === 'activity' && request.method() === 'GET') {
+        incrementRequestCounter(state, 'adminUserActivityRequests', userID);
+        const pageNumber = Math.max(1, Number(requestURL.searchParams.get('page')) || 1);
+        const pageSize = Math.max(1, Number(requestURL.searchParams.get('page_size')) || 20);
+        const activity = [{ ...adminUserActivity, actor_id: userID, actor_name: candidate.username, target_id: userID }];
+        await fulfillJSON(route, 200, {
+          items: activity,
+          total: activity.length,
+          page: pageNumber,
+          page_size: pageSize,
+          total_pages: 1,
+        });
+        return;
+      }
+      if (endpoint === 'identities' && request.method() === 'GET') {
+        incrementRequestCounter(state, 'adminUserIdentityRequests', userID);
+        await fulfillJSON(route, 200, (state.adminUserIdentities || []).map((identity) => ({ ...identity, user_id: userID })));
+        return;
+      }
+      if (endpoint.startsWith('identities/') && request.method() === 'DELETE') {
+        state.adminUserIdentityDeleteCSRF = await request.headerValue('x-csrf-token');
+        const identityID = decodeURIComponent(endpoint.slice('identities/'.length));
+        state.adminUserIdentities = (state.adminUserIdentities || []).filter((identity) => identity.id !== identityID);
+        await route.fulfill({ status: 204 });
+        return;
+      }
+      if (endpoint === 'sessions' && request.method() === 'GET') {
+        incrementRequestCounter(state, 'adminUserSessionRequests', userID);
+        await fulfillJSON(route, 200, browserSessions.map((session) => ({ ...session, current: false })));
+        return;
+      }
+      if (endpoint === 'sessions' && request.method() === 'DELETE') {
+        await fulfillJSON(route, 200, { revoked: browserSessions.length });
+        return;
+      }
+      if (endpoint === 'reset-password' && request.method() === 'POST') {
+        await route.fulfill({ status: 204 });
+        return;
+      }
+      if (endpoint === 'avatar' && (request.method() === 'POST' || request.method() === 'DELETE')) {
+        const updated = {
+          ...candidate,
+          avatar_url: request.method() === 'POST'
+            ? '/media/avatars/88888888-8888-8888-8888-888888888888/256.webp'
+            : null,
+        };
+        state.adminUsers = state.adminUsers.map((item, index) => index === userIndex ? updated : item);
+        await fulfillJSON(route, 200, updated);
+        return;
+      }
+      if (endpoint === 'role' && request.method() === 'PUT') {
+        if (state.adminUserRoleUpdateError) {
+          await fulfillJSON(route, 409, { error: state.adminUserRoleUpdateError });
+          return;
+        }
+        const body = request.postDataJSON() as { role: Role };
+        const updated = { ...candidate, role: body.role };
+        state.adminUsers = state.adminUsers.map((item, index) => index === userIndex ? updated : item);
+        await fulfillJSON(route, 200, updated);
+        return;
+      }
+      if (!endpoint && request.method() === 'PUT') {
+        state.adminUserUpdateCSRF = await request.headerValue('x-csrf-token');
+        state.adminUserUpdateBody = request.postDataJSON();
+        const updated = {
+          ...candidate,
+          ...(state.adminUserUpdateBody as object),
+          updated_at: '2026-01-03T00:00:00Z',
+        };
+        state.adminUsers = state.adminUsers.map((item, index) => index === userIndex ? updated : item);
+        await fulfillJSON(route, 200, updated);
+        return;
+      }
     }
 
     if (path === `/api/admin/clients/${oauthClient.id}` && request.method() === 'PUT' && state.adminClients) {
@@ -931,7 +1104,7 @@ test('the desktop sidebar recovers after the window shrinks below the mobile bre
   await expect(sidebar).toHaveCSS('width', '248px');
 });
 
-test('administrator profile stays in the user center and marks the profile tab active', async ({ page }) => {
+test('administrator profile deep links stay in the user center and mark profile navigation active', async ({ page }) => {
   await installAPIMocks(page, {
     authenticated: true,
     mustChangePassword: false,
@@ -939,13 +1112,85 @@ test('administrator profile stays in the user center and marks the profile tab a
     csrfToken: 'csrf-admin-profile',
   });
 
-  await page.goto('/profile');
+  await page.goto('/profile/security');
 
   const sidebar = page.getByRole('complementary', { name: '用户中心导航' });
   await expect(sidebar).toBeVisible();
   await expect(page.getByRole('complementary', { name: '管理后台导航' })).toHaveCount(0);
   await expect(sidebar.getByRole('link', { name: '个人资料', exact: true })).toHaveAttribute('aria-current', 'page');
   await expect(sidebar.getByRole('link', { name: '管理后台', exact: true })).toBeVisible();
+  await expect(page.getByRole('link', { name: '安全', exact: true })).toHaveAttribute('aria-current', 'page');
+});
+
+test('all profile deep links load only their own account data', async ({ page }) => {
+  const state: MockState = {
+    authenticated: true,
+    mustChangePassword: false,
+    role: 'user',
+    csrfToken: 'csrf-profile-routes',
+    identities: [githubIdentity],
+  };
+  await installAPIMocks(page, state);
+
+  function resetRequestCounts() {
+    state.meRequests = 0;
+    state.mfaStatusRequests = 0;
+    state.passkeyListRequests = 0;
+    state.sessionListRequests = 0;
+    state.authorizationListRequests = 0;
+    state.identityLoadRequests = 0;
+    state.providerListRequests = 0;
+  }
+
+  await page.goto('/profile');
+  await expect(page.getByRole('heading', { name: '个人资料', exact: true })).toBeVisible();
+  await expect(page.getByRole('link', { name: '基本资料', exact: true })).toHaveAttribute('aria-current', 'page');
+  await expect.poll(() => state.meRequests || 0).toBeGreaterThan(0);
+  expect(state.sessionListRequests || 0).toBe(0);
+  expect(state.authorizationListRequests || 0).toBe(0);
+  expect(state.identityLoadRequests || 0).toBe(0);
+
+  resetRequestCounts();
+  await page.goto('/profile/security');
+  await expect(page.getByRole('heading', { name: '账户安全', exact: true })).toBeVisible();
+  await expect(page.getByRole('link', { name: '安全', exact: true })).toHaveAttribute('aria-current', 'page');
+  await expect.poll(() => state.mfaStatusRequests || 0).toBeGreaterThan(0);
+  await expect.poll(() => state.passkeyListRequests || 0).toBeGreaterThan(0);
+  await expect.poll(() => state.identityLoadRequests || 0).toBeGreaterThan(0);
+  expect(state.meRequests || 0).toBe(0);
+  expect(state.sessionListRequests || 0).toBe(0);
+  expect(state.authorizationListRequests || 0).toBe(0);
+
+  resetRequestCounts();
+  await page.goto('/profile/sessions');
+  await expect(page.getByRole('heading', { name: '设备会话', exact: true }).first()).toBeVisible();
+  await expect(page.getByRole('link', { name: '设备会话', exact: true })).toHaveAttribute('aria-current', 'page');
+  await expect.poll(() => state.sessionListRequests || 0).toBeGreaterThan(0);
+  expect(state.meRequests || 0).toBe(0);
+  expect(state.mfaStatusRequests || 0).toBe(0);
+  expect(state.authorizationListRequests || 0).toBe(0);
+  expect(state.identityLoadRequests || 0).toBe(0);
+
+  resetRequestCounts();
+  await page.goto('/profile/authorizations');
+  await expect(page.getByRole('heading', { name: 'OAuth 应用授权', exact: true, level: 1 })).toBeVisible();
+  await expect(page.getByRole('link', { name: '应用授权', exact: true })).toHaveAttribute('aria-current', 'page');
+  await expect.poll(() => state.authorizationListRequests || 0).toBeGreaterThan(0);
+  expect(state.meRequests || 0).toBe(0);
+  expect(state.mfaStatusRequests || 0).toBe(0);
+  expect(state.sessionListRequests || 0).toBe(0);
+  expect(state.identityLoadRequests || 0).toBe(0);
+
+  resetRequestCounts();
+  await page.goto('/profile/identities');
+  await expect(page.getByRole('heading', { name: '外部身份', exact: true }).first()).toBeVisible();
+  await expect(page.getByRole('link', { name: '外部身份', exact: true })).toHaveAttribute('aria-current', 'page');
+  await expect.poll(() => state.identityLoadRequests || 0).toBeGreaterThan(0);
+  await expect.poll(() => state.providerListRequests || 0).toBeGreaterThan(0);
+  expect(state.meRequests || 0).toBe(0);
+  expect(state.mfaStatusRequests || 0).toBe(0);
+  expect(state.sessionListRequests || 0).toBe(0);
+  expect(state.authorizationListRequests || 0).toBe(0);
 });
 
 test('users crop, upload, and remove a managed avatar with CSRF', async ({ page }) => {
@@ -1027,13 +1272,13 @@ test('identity binding starts from the current session with CSRF', async ({ page
   await installAPIMocks(page, state);
   await page.route('https://provider.example/**', (route) => route.fulfill({ status: 200, body: 'provider' }));
 
-  await page.goto('/profile');
+  await page.goto('/profile/identities');
   const bindRequest = page.waitForRequest((request) => new URL(request.url()).pathname === '/api/me/identities/github/bind');
   await page.getByRole('button', { name: /github/i }).click();
   await bindRequest;
 
   expect(state.bindCSRF).toBe('csrf-user');
-  expect(state.bindBody).toEqual({ return_to: '/profile' });
+  expect(state.bindBody).toEqual({ return_to: '/profile/identities' });
 });
 
 test('revoking other device sessions sends CSRF and preserves the current session', async ({ page }) => {
@@ -1045,7 +1290,7 @@ test('revoking other device sessions sends CSRF and preserves the current sessio
   };
   await installAPIMocks(page, state);
 
-  await page.goto('/profile');
+  await page.goto('/profile/sessions');
   await page.getByRole('button', { name: '退出其他设备' }).click();
   const dialog = page.getByRole('dialog');
   await dialog.getByRole('button', { name: '退出其他设备' }).click();
@@ -1065,7 +1310,7 @@ test('revoking an OAuth authorization sends CSRF and removes the grant', async (
   };
   await installAPIMocks(page, state);
 
-  await page.goto('/profile');
+  await page.goto('/profile/authorizations');
   await page.getByRole('button', { name: '撤销授权' }).click();
   const dialog = page.getByRole('dialog');
   await dialog.getByRole('button', { name: '撤销授权' }).click();
@@ -1105,7 +1350,7 @@ test('password reauthentication refreshes the session and CSRF token', async ({ 
   };
   await installAPIMocks(page, state);
 
-  await page.goto('/profile');
+  await page.goto('/profile/security');
   await page.getByRole('button', { name: '选择认证方式' }).click();
   const dialog = page.getByRole('dialog');
   await dialog.getByLabel(/^当前密码/).fill('current-password');
@@ -1161,7 +1406,7 @@ test('password reauthentication completes MFA inline and promotes the formal CSR
     await route.fallback();
   });
 
-  await page.goto('/profile');
+  await page.goto('/profile/security');
   await page.getByRole('button', { name: '选择认证方式' }).click();
   const dialog = page.getByRole('dialog');
   await dialog.getByLabel(/^当前密码/).fill('current-password');
@@ -1173,6 +1418,7 @@ test('password reauthentication completes MFA inline and promotes the formal CSR
 
   await expect(dialog).toBeHidden();
   await expect(page.getByText('认证有效')).toBeVisible();
+  await page.goto('/profile/sessions');
   await page.getByRole('button', { name: '退出其他设备' }).click();
   const revokeDialog = page.getByRole('dialog');
   await revokeDialog.getByRole('button', { name: '退出其他设备' }).click();
@@ -1219,7 +1465,7 @@ test('cancelling reauthentication MFA preserves the existing formal-session CSRF
     await route.fallback();
   });
 
-  await page.goto('/profile');
+  await page.goto('/profile/security');
   await page.getByRole('button', { name: '选择认证方式' }).click();
   const dialog = page.getByRole('dialog');
   await dialog.getByLabel(/^当前密码/).fill('current-password');
@@ -1228,6 +1474,7 @@ test('cancelling reauthentication MFA preserves the existing formal-session CSRF
   await dialog.getByRole('button', { name: '取消', exact: true }).click();
   await expect(dialog).toBeHidden();
 
+  await page.goto('/profile/sessions');
   await page.getByRole('button', { name: '退出其他设备' }).click();
   const revokeDialog = page.getByRole('dialog');
   await revokeDialog.getByRole('button', { name: '退出其他设备' }).click();
@@ -1301,7 +1548,7 @@ test('users can enroll TOTP, replace recovery codes, and disable the factor', as
     await route.fallback();
   });
 
-  await page.goto('/profile');
+  await page.goto('/profile/security');
   await page.getByRole('button', { name: '启用动态验证码' }).click();
   const enrollmentDialog = page.getByRole('dialog', { name: '启用动态验证码' });
   await expect(enrollmentDialog.getByText('JBSWY3DPEHPK3PXP')).toBeVisible();
@@ -1349,7 +1596,7 @@ test('provider reauthentication denial does not replay a pending TOTP action', a
     await fulfillJSON(route, 403, { error: 'recent authentication is required' });
   });
 
-  await page.goto('/profile');
+  await page.goto('/profile/security');
   await page.getByRole('button', { name: '启用动态验证码' }).click();
   const reauthentication = page.getByRole('dialog', { name: '重新验证身份' });
   await expect(reauthentication).toBeVisible();
@@ -1357,6 +1604,7 @@ test('provider reauthentication denial does not replay a pending TOTP action', a
 
   await expect(page.getByText('你取消了外部身份提供商的授权。')).toBeVisible();
   expect(enrollmentAttempts).toBe(1);
+  expect(state.providerReauthBody).toEqual({ return_to: '/profile/security' });
   expect(await page.evaluate(() => sessionStorage.getItem('nyauth:reauth:mfa-action'))).toBeNull();
 });
 
@@ -1380,6 +1628,7 @@ test('provider reauthentication completes MFA before replaying a pending TOTP ac
   };
   const enrollmentCSRFs: Array<string | null> = [];
   let providerCSRF: string | null = null;
+  let providerBody: unknown;
   let verificationCSRF: string | null = null;
   await page.route('**/api/**', async (route) => {
     const request = route.request();
@@ -1398,8 +1647,9 @@ test('provider reauthentication completes MFA before replaying a pending TOTP ac
     }
     if (path === '/api/me/reauth/github' && request.method() === 'POST') {
       providerCSRF = await request.headerValue('x-csrf-token');
+      providerBody = request.postDataJSON();
       await fulfillJSON(route, 200, {
-        redirect_url: new URL('/login/mfa?purpose=reauthentication&return_to=%2Fprofile', request.url()).toString(),
+        redirect_url: new URL('/login/mfa?purpose=reauthentication&return_to=%2Fprofile%2Fsecurity', request.url()).toString(),
       });
       return;
     }
@@ -1417,7 +1667,7 @@ test('provider reauthentication completes MFA before replaying a pending TOTP ac
     await route.fallback();
   });
 
-  await page.goto('/profile');
+  await page.goto('/profile/security');
   await page.getByRole('button', { name: '启用动态验证码' }).click();
   const reauthentication = page.getByRole('dialog', { name: '重新验证身份' });
   await reauthentication.getByRole('button', { name: '使用 github 验证' }).click();
@@ -1426,9 +1676,10 @@ test('provider reauthentication completes MFA before replaying a pending TOTP ac
   await page.getByLabel('6 位动态验证码').fill('123456');
   await page.getByRole('button', { name: '验证并返回' }).click();
 
-  await expect(page).toHaveURL(/\/profile$/);
+  await expect(page).toHaveURL(/\/profile\/security$/);
   await expect(page.getByRole('dialog', { name: '启用动态验证码' })).toBeVisible();
   expect(providerCSRF).toBe('csrf-provider-mfa-before');
+  expect(providerBody).toEqual({ return_to: '/profile/security' });
   expect(verificationCSRF).toBe('csrf-provider-mfa-pending');
   expect(enrollmentCSRFs).toEqual(['csrf-provider-mfa-before', 'csrf-provider-mfa-after']);
   expect(await page.evaluate(() => sessionStorage.getItem('nyauth:reauth:mfa-action'))).toBeNull();
@@ -1446,7 +1697,7 @@ test('an external-only account can set a local password after recent authenticat
   };
   await installAPIMocks(page, state);
 
-  await page.goto('/profile');
+  await page.goto('/profile/security');
   await page.getByRole('button', { name: '设置本地密码' }).click();
   const dialog = page.getByRole('dialog');
   await dialog.getByLabel(/^新密码/).fill('a-new-password-123');
@@ -1470,7 +1721,7 @@ test('recent authentication status expires while the profile page remains open',
   };
   await installAPIMocks(page, state);
 
-  await page.goto('/profile');
+  await page.goto('/profile/security');
   await expect(page.getByText('认证有效', { exact: true })).toBeVisible();
   await page.clock.fastForward(11 * 60 * 1000);
 
@@ -1488,7 +1739,7 @@ test('identity removal requires recent authentication and name confirmation', as
   };
   await installAPIMocks(page, state);
 
-  await page.goto('/profile');
+  await page.goto('/profile/identities');
   await page.getByRole('button', { name: '解绑' }).click();
   const dialog = page.getByRole('dialog');
   await dialog.getByLabel(/输入“github”以确认/).fill('github');
@@ -1510,13 +1761,12 @@ test('profile identity failures are isolated and independently retryable', async
   };
   await installAPIMocks(page, state);
 
-  await page.goto('/profile');
+  await page.goto('/profile/identities');
   const identitySection = page.locator('section').filter({
     has: page.getByRole('heading', { name: '外部身份' }),
   });
   await expect(identitySection.getByText('外部身份服务暂时不可用')).toBeVisible();
-  await expect(page.getByText('Chrome · Windows')).toBeVisible();
-  await expect(page.getByText('Example App', { exact: true })).toBeVisible();
+  await expect(page.getByText('可绑定的提供商')).toBeVisible();
 
   await identitySection.getByRole('button', { name: '重试' }).click();
   await expect(identitySection.getByText('alice-gh')).toBeVisible();
@@ -2178,7 +2428,7 @@ test('client owner transfer and removal require exact client-name confirmation',
   expect(state.adminClientOwnerUpdateCSRFs).toEqual(['csrf-admin', 'csrf-admin']);
 });
 
-test('user role update errors remain visible inside the user drawer', async ({ page }) => {
+test('user role update errors remain visible on the user detail route', async ({ page }) => {
   const state: MockState = {
     authenticated: true,
     mustChangePassword: false,
@@ -2190,18 +2440,16 @@ test('user role update errors remain visible inside the user drawer', async ({ p
   };
   await installAPIMocks(page, state);
 
-  await page.goto('/admin/users');
-  await page.getByRole('button', { name: 'alice', exact: true }).click();
-  const drawer = page.getByRole('dialog', { name: /用户详情/ });
-  await drawer.getByLabel('角色').click();
+  await page.goto(`/admin/users/${user.id}?return_to=%2Fadmin%2Fusers`);
+  await page.getByLabel('角色').click();
   await page.getByRole('option', { name: '管理员' }).click();
-  await drawer.getByRole('button', { name: '保存角色' }).click();
+  await page.getByRole('button', { name: '保存', exact: true }).click();
 
-  await expect(drawer.getByRole('alert')).toContainText('不能降级最后一个有效管理员');
-  await expect(drawer).toBeVisible();
+  await expect(page.getByRole('alert')).toContainText('不能降级最后一个有效管理员');
+  await expect(page).toHaveURL(new RegExp(`/admin/users/${user.id}`));
 });
 
-test('administrators can update user profiles and remove a confirmed external identity', async ({ page }) => {
+test('administrators can update user profiles and remove a confirmed identity from the access route', async ({ page }) => {
   const state: MockState = {
     authenticated: true,
     mustChangePassword: false,
@@ -2212,18 +2460,16 @@ test('administrators can update user profiles and remove a confirmed external id
   };
   await installAPIMocks(page, state);
 
-  await page.goto('/admin/users');
-  await page.getByRole('button', { name: 'alice', exact: true }).click();
-  const drawer = page.getByRole('dialog', { name: /用户详情/ });
-  await drawer.getByLabel('邮箱', { exact: true }).fill('alice.updated@example.com');
-  await drawer.getByLabel('显示名称', { exact: true }).fill('Alice Updated');
-  await drawer.getByLabel('Metadata（JSON 字符串键值）').fill(JSON.stringify({
+  await page.goto(`/admin/users/${user.id}?return_to=%2Fadmin%2Fusers`);
+  await page.getByLabel('邮箱', { exact: true }).fill('alice.updated@example.com');
+  await page.getByLabel('显示名称', { exact: true }).fill('Alice Updated');
+  await page.getByLabel('Metadata（JSON 字符串键值）').fill(JSON.stringify({
     department: 'security',
     region: 'apac',
   }));
-  await drawer.getByRole('button', { name: '保存资料' }).click();
+  await page.getByRole('button', { name: '保存资料' }).click();
 
-  await expect(drawer.getByText('用户资料已更新。')).toBeVisible();
+  await expect(page.getByText('用户资料已更新。')).toBeVisible();
   expect(state.adminUserUpdateCSRF).toBe('csrf-admin');
   expect(state.adminUserUpdateBody).toEqual({
     email: 'alice.updated@example.com',
@@ -2231,7 +2477,8 @@ test('administrators can update user profiles and remove a confirmed external id
     metadata: { department: 'security', region: 'apac' },
   });
 
-  await drawer.getByRole('button', { name: '解绑 github 身份' }).click();
+  await page.getByRole('link', { name: '访问', exact: true }).click();
+  await page.getByRole('button', { name: '解绑 github 身份' }).click();
   const confirmation = page.getByRole('dialog', { name: '解绑外部身份' });
   const confirmButton = confirmation.getByRole('button', { name: '确认解绑' });
   await expect(confirmButton).toBeDisabled();
@@ -2242,9 +2489,74 @@ test('administrators can update user profiles and remove a confirmed external id
   await confirmButton.click();
 
   await expect(confirmation).toBeHidden();
-  await expect(drawer.getByText('已解绑 github 身份。')).toBeVisible();
-  await expect(drawer.getByText('未绑定外部身份')).toBeVisible();
+  await expect(page.getByText('已解绑 github 身份。')).toBeVisible();
+  await expect(page.getByText('未绑定外部身份')).toBeVisible();
   expect(state.adminUserIdentityDeleteCSRF).toBe('csrf-admin');
+});
+
+test('admin user details preserve the filtered list return path across every deep-link tab', async ({ page }) => {
+  const adminUsers: User[] = Array.from({ length: 21 }, (_, index) => ({
+    ...user,
+    id: `70000000-0000-0000-0000-${String(index + 1).padStart(12, '0')}`,
+    username: `member-${index + 1}`,
+    email: `member-${index + 1}@example.com`,
+    display_name: `Member ${index + 1}`,
+    role: 'user',
+    status: 'active',
+  }));
+  const target = adminUsers[20];
+  const state: MockState = {
+    authenticated: true,
+    mustChangePassword: false,
+    role: 'admin',
+    csrfToken: 'csrf-admin-detail-routes',
+    adminUsers,
+    adminUserIdentities: [githubIdentity],
+    adminClients: [{ ...oauthClient, owner_id: target.id }],
+  };
+  await installAPIMocks(page, state);
+
+  await page.goto('/admin/users?q=member&page=2');
+  await page.getByRole('link', { name: `查看用户 ${target.username}` }).click();
+
+  async function expectReturnToPreserved(pathname: string) {
+    await expect.poll(() => {
+      const current = new URL(page.url());
+      return `${current.pathname}|${current.searchParams.get('return_to')}`;
+    }).toBe(`${pathname}|/admin/users?q=member&page=2`);
+  }
+
+  await expectReturnToPreserved(`/admin/users/${target.id}`);
+  await expect(page.getByRole('heading', { name: target.display_name || target.username })).toBeVisible();
+  await expect(page.getByRole('link', { name: '资料', exact: true })).toHaveAttribute('aria-current', 'page');
+
+  await page.getByRole('link', { name: '安全', exact: true }).click();
+  await expectReturnToPreserved(`/admin/users/${target.id}/security`);
+  await expect(page.getByRole('heading', { name: '安全摘要' })).toBeVisible();
+
+  await page.getByRole('link', { name: '会话', exact: true }).click();
+  await expectReturnToPreserved(`/admin/users/${target.id}/sessions`);
+  await expect(page.getByRole('heading', { name: '设备会话' })).toBeVisible();
+
+  await page.getByRole('link', { name: '访问', exact: true }).click();
+  await expectReturnToPreserved(`/admin/users/${target.id}/access`);
+  await expect(page.getByRole('heading', { name: 'OAuth 授权' })).toBeVisible();
+
+  await page.getByRole('link', { name: '活动', exact: true }).click();
+  await expectReturnToPreserved(`/admin/users/${target.id}/activity`);
+  await expect(page.getByRole('heading', { name: '审计活动' })).toBeVisible();
+
+  expect(state.adminUserOverviewRequests?.[target.id]).toBeGreaterThan(0);
+  expect(state.adminUserSecurityRequests?.[target.id]).toBe(1);
+  expect(state.adminUserSessionRequests?.[target.id]).toBe(1);
+  expect(state.adminUserIdentityRequests?.[target.id]).toBe(1);
+  expect(state.adminUserAuthorizationRequests?.[target.id]).toBe(1);
+  expect(state.adminUserClientRequests?.[target.id]).toBe(1);
+  expect(state.adminUserActivityRequests?.[target.id]).toBe(1);
+  expect(state.adminUserOverviewRequests?.[user.id]).toBeUndefined();
+
+  await page.getByRole('link', { name: '返回用户列表' }).click();
+  await expect(page).toHaveURL(/\/admin\/users\?q=member&page=2$/);
 });
 
 test('provider edits preserve the stored secret when the secret input is empty', async ({ page }) => {
@@ -2396,9 +2708,12 @@ test('runtime branding propagates to the sidebar and saves with CSRF', async ({ 
     await fulfillJSON(route, 200, { title: 'Acme SSO', logo_url: 'https://cdn.example.com/logo.png' });
   });
 
-  await page.goto('/admin/system');
+  await page.goto('/admin/settings/branding');
   const sidebar = page.getByRole('complementary', { name: '管理后台导航' });
   await expect(sidebar.getByText('Acme ID')).toBeVisible();
+  await expect(sidebar.getByRole('link', { name: '系统设置' })).toHaveAttribute('aria-current', 'page');
+  await expect(sidebar.getByRole('link', { name: '系统状态' })).not.toHaveAttribute('aria-current', 'page');
+  await expect(page.getByRole('link', { name: '品牌', exact: true })).toHaveAttribute('aria-current', 'page');
 
   await page.getByLabel('站点名称').fill('Acme SSO');
   await page.getByLabel(/Logo URL/).fill('https://cdn.example.com/logo.png');
@@ -2526,8 +2841,9 @@ test('registration settings save with CSRF and open mode forces verification', a
     });
   });
 
-  await page.goto('/admin/system');
-  await expect(page.getByRole('heading', { name: '注册设置' })).toBeVisible();
+  await page.goto('/admin/settings/registration');
+  await expect(page.getByRole('heading', { name: '注册设置', level: 1 })).toBeVisible();
+  await expect(page.getByRole('link', { name: '注册', exact: true })).toHaveAttribute('aria-current', 'page');
 
   await page.getByRole('radio', { name: /开放/ }).check();
   await expect(page.getByRole('checkbox', { name: /要求邮箱验证/ })).toBeDisabled();
@@ -2578,7 +2894,7 @@ test('provider reauthentication restores registration settings and retries the s
     await fulfillJSON(route, 200, putBody);
   });
 
-  await page.goto('/admin/system');
+  await page.goto('/admin/settings/registration');
   await page.getByRole('radio', { name: /开放/ }).check();
   await page.getByLabel('允许的邮箱域名（每行一个，留空不限制）').fill('corp.example.com');
   await page.getByLabel('待验证注册有效期').fill('48h');
@@ -2598,7 +2914,7 @@ test('provider reauthentication restores registration settings and retries the s
     invite_default_max_uses: 1,
   });
   expect(putCSRFs).toEqual(['csrf-provider-settings', 'csrf-provider-reauthenticated']);
-  expect(state.providerReauthBody).toEqual({ return_to: '/admin/system' });
+  expect(state.providerReauthBody).toEqual({ return_to: '/admin/settings/registration' });
   expect(state.providerReauthCSRF).toBe('csrf-provider-settings');
   expect(await page.evaluate(() => sessionStorage.getItem('nyauth:reauth:registration-settings'))).toBeNull();
 });
@@ -2628,7 +2944,7 @@ test('provider reauthentication denial restores the unsaved registration form', 
     await fulfillJSON(route, 403, { error: 'recent authentication is required' });
   });
 
-  await page.goto('/admin/system');
+  await page.goto('/admin/settings/registration');
   await page.getByRole('radio', { name: /开放/ }).check();
   await page.getByLabel('允许的邮箱域名（每行一个，留空不限制）').fill('lab.example.org');
   await page.getByLabel('待验证注册有效期').fill('24h');
@@ -2639,7 +2955,7 @@ test('provider reauthentication denial restores the unsaved registration form', 
   await expect(page.getByRole('radio', { name: /开放/ })).toBeChecked();
   await expect(page.getByLabel('允许的邮箱域名（每行一个，留空不限制）')).toHaveValue('lab.example.org');
   await expect(page.getByLabel('待验证注册有效期')).toHaveValue('24h');
-  await expect(page).toHaveURL(/\/admin\/system$/);
+  await expect(page).toHaveURL(/\/admin\/settings\/registration$/);
   expect(putAttempts).toBe(1);
   expect(await page.evaluate(() => sessionStorage.getItem('nyauth:reauth:registration-settings'))).toBeNull();
 });
@@ -2751,8 +3067,9 @@ test('SMTP candidate is saved, tested, activated, rolled back and disabled with 
     await fulfillJSON(route, 404, { error: `unmocked mail endpoint: ${path}` });
   });
 
-  await page.goto('/admin/system');
+  await page.goto('/admin/settings/mail');
   await expect(page.getByRole('heading', { name: 'SMTP 动态配置' })).toBeVisible();
+  await expect(page.getByRole('link', { name: '邮件', exact: true })).toHaveAttribute('aria-current', 'page');
   await page.getByLabel('SMTP 主机').fill('smtp.dynamic.example.com');
   await page.getByLabel('端口').fill('2525');
   await page.getByLabel('SMTP 密码（留空继承）').fill('smtp-runtime-secret');
@@ -2846,7 +3163,7 @@ test('SMTP rate limiting disables only the affected operation and shows a retry 
     await fulfillJSON(route, 404, { error: `unmocked mail endpoint: ${path}` });
   });
 
-  await page.goto('/admin/system');
+  await page.goto('/admin/settings/mail');
   await page.getByLabel('测试邮件收件地址').fill('operator@example.com');
   const testButton = page.getByRole('button', { name: /发送真实测试/ });
   await testButton.click();
@@ -2907,7 +3224,7 @@ test('provider reauthentication restores SMTP fields once without retaining or r
     await fulfillJSON(route, 404, { error: `unmocked mail endpoint: ${path}` });
   });
 
-  await page.goto('/admin/system');
+  await page.goto('/admin/settings/mail');
   await page.getByLabel('SMTP 主机').fill('smtp.provider.example.com');
   await page.getByLabel('SMTP 密码（留空继承）').fill('must-not-enter-session-storage');
   await page.getByRole('button', { name: '保存候选配置' }).click();
@@ -2925,7 +3242,7 @@ test('provider reauthentication restores SMTP fields once without retaining or r
   expect(saveAttempts).toBe(2);
   expect(saveBodies[0].password).toBe('must-not-enter-session-storage');
   expect(saveBodies[1].password).toBe('reentered-after-provider');
-  expect(state.providerReauthBody).toEqual({ return_to: '/admin/system' });
+  expect(state.providerReauthBody).toEqual({ return_to: '/admin/settings/mail' });
   expect(state.providerReauthCSRF).toBe('csrf-mail-provider');
 });
 
@@ -2943,6 +3260,7 @@ test('the system status page renders the backend status DTO and admin navigation
 
   await expect(page.getByRole('heading', { name: '系统状态', exact: true })).toBeVisible();
   await expect(page.getByRole('link', { name: '系统状态' })).toHaveAttribute('aria-current', 'page');
+  await expect(page.getByRole('link', { name: '系统设置' })).not.toHaveAttribute('aria-current', 'page');
   await expect(page.getByText('0.3.0-test')).toBeVisible();
   await expect(page.getByRole('heading', { name: 'PostgreSQL' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Redis' })).toBeVisible();

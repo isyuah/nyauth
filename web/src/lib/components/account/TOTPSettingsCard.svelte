@@ -24,9 +24,11 @@
   let {
     onsessionupdated,
     providerReauthenticationFailed = false,
+    returnTo = '/profile',
   }: {
     onsessionupdated?: (session: SessionInfo) => void;
     providerReauthenticationFailed?: boolean;
+    returnTo?: string;
   } = $props();
 
   const pendingActionStorageKey = 'nyauth:reauth:mfa-action';
@@ -336,7 +338,7 @@
 
 <ReauthenticationDialog
   bind:open={reauthOpen}
-  returnTo="/profile"
+  {returnTo}
   description="启用、重置或停用多因素验证前，需要验证最近 10 分钟内的身份"
   onauthenticated={retryProtectedAction}
   onbeforeprovider={persistPendingAction}

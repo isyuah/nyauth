@@ -72,8 +72,8 @@ func TestEnsureRuntimePrivilegesRestrictsRuntimeRole(t *testing.T) {
 
 	userID := uuid.New()
 	if err := runtimePool.QueryRow(ctx, `
-		INSERT INTO users (id, username, email, status, role)
-		VALUES ($1, $2, $3, 'active', 'user')
+		INSERT INTO users (id, username, email, status, role, creation_source)
+		VALUES ($1, $2, $3, 'active', 'user', 'legacy')
 		RETURNING id
 	`, userID, "runtime-user-"+uuid.NewString(), "runtime-"+uuid.NewString()+"@example.test").Scan(&userID); err != nil {
 		t.Fatalf("runtime role cannot insert business row: %v", err)

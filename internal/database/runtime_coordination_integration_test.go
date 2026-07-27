@@ -127,7 +127,7 @@ func insertCoordinationOutbox(
 	outboxID := uuid.New()
 	username := "coord-" + userID.String()
 	if _, err := schema.pool.Exec(context.Background(), `
-		INSERT INTO users (id,username,status,role) VALUES ($1,$2,'active','user')
+		INSERT INTO users (id,username,status,role,creation_source) VALUES ($1,$2,'active','user','legacy')
 	`, userID, username); err != nil {
 		t.Fatalf("insert coordination outbox user: %v", err)
 	}
@@ -386,7 +386,7 @@ func TestEmailArtifactExpiryAndPermanentRejectionClearSensitivePayloads(t *testi
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	userID := uuid.New()
 	if _, err := schema.pool.Exec(context.Background(), `
-		INSERT INTO users (id,username,status,role) VALUES ($1,$2,'active','user')
+		INSERT INTO users (id,username,status,role,creation_source) VALUES ($1,$2,'active','user','legacy')
 	`, userID, "artifact-cleanup-"+uuid.NewString()[:8]); err != nil {
 		t.Fatalf("insert artifact cleanup user: %v", err)
 	}
@@ -461,7 +461,7 @@ func TestEmailArtifactExpiryUsesBoundedPerTableBatches(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	userID := uuid.New()
 	if _, err := schema.pool.Exec(context.Background(), `
-		INSERT INTO users (id,username,status,role) VALUES ($1,$2,'active','user')
+		INSERT INTO users (id,username,status,role,creation_source) VALUES ($1,$2,'active','user','legacy')
 	`, userID, "bounded-expiry-"+uuid.NewString()[:8]); err != nil {
 		t.Fatalf("insert bounded expiry user: %v", err)
 	}
@@ -530,7 +530,7 @@ func TestRuntimeMailDownMigrationSafelyMapsRejectedMessages(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Microsecond)
 	userID := uuid.New()
 	if _, err := schema.pool.Exec(context.Background(), `
-		INSERT INTO users (id,username,status,role) VALUES ($1,$2,'active','user')
+		INSERT INTO users (id,username,status,role,creation_source) VALUES ($1,$2,'active','user','legacy')
 	`, userID, "down-migration-"+uuid.NewString()[:8]); err != nil {
 		t.Fatalf("insert down migration user: %v", err)
 	}

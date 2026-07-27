@@ -9,6 +9,7 @@ export interface User {
   id: string;
   username: string;
   email?: string | null;
+  email_verified_at?: string | null;
   display_name?: string | null;
   avatar_url?: string | null;
   role: UserRole;
@@ -19,6 +20,66 @@ export interface User {
   metadata?: Record<string, string>;
   created_at: string;
   updated_at?: string;
+}
+
+export type UserCreationSource = 'bootstrap' | 'admin' | 'self_registration' | 'provider' | 'legacy';
+
+export interface AdminUserReference {
+  id: string;
+  username: string;
+  display_name?: string | null;
+}
+
+export interface AdminUserRegistrationSummary {
+  status: 'pending' | 'completed' | 'released';
+  invite_id?: string | null;
+  expires_at: string;
+  completed_at?: string | null;
+  released_at?: string | null;
+}
+
+export interface AdminUserOverview {
+  user: User;
+  creation_source: UserCreationSource;
+  created_by?: AdminUserReference | null;
+  self_registration?: AdminUserRegistrationSummary | null;
+}
+
+export interface AdminUserSecurity {
+  has_password: boolean;
+  password_changed_at?: string | null;
+  must_change_password: boolean;
+  totp_available: boolean;
+  totp_enrolled: boolean;
+  recovery_codes_remaining: number;
+  passkeys_available: boolean;
+  passkeys_enrolled: number;
+  passkey_clone_warnings: number;
+  last_passkey_used_at?: string | null;
+  mfa_required_for_admin: boolean;
+  mfa_requirement_satisfied: boolean;
+}
+
+export interface AdminUserAuthorization {
+  id: string;
+  client_id: string;
+  client_name: string;
+  scopes: string[];
+  granted_at: string;
+  last_used_at?: string | null;
+}
+
+export interface AdminUserClientSummary {
+  id: string;
+  name: string;
+  is_public: boolean;
+  access_policy: string;
+  grants: string[];
+  scopes: string[];
+  secret_hint?: string | null;
+  secret_last_used_at?: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export type SessionUser = User;
@@ -344,6 +405,7 @@ export interface AuditLog {
   target_type?: string | null;
   target_id?: string | null;
   ip_address?: string | null;
+  user_agent?: string | null;
   result: string;
   risk_level: string;
   details?: Record<string, unknown>;
@@ -950,21 +1012,28 @@ export const api = {
       return req<PaginatedResponse<User>>(`/api/admin/users?${params}`);
     },
     createUser: (data: CreateUserInput) => req<User>('/api/admin/users', { method: 'POST', body: JSON.stringify(data) }),
-    updateUser: (id: string, data: UpdateUserInput) => req<User>(`/api/admin/users/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+    getUserOverview: (id: string) => req<AdminUserOverview>(`/api/admin/users/${encodeURIComponent(id)}/overview`),
+    getUserSecurity: (id: string) => req<AdminUserSecurity>(`/api/admin/users/${encodeURIComponent(id)}/security`),
+    getUserAuthorizations: (id: string) => req<AdminUserAuthorization[]>(`/api/admin/users/${encodeURIComponent(id)}/authorizations`),
+    getUserClients: (id: string, page = 1, pageSize = 20) =>
+      req<PaginatedResponse<AdminUserClientSummary>>(`/api/admin/users/${encodeURIComponent(id)}/clients?page=${page}&page_size=${pageSize}`),
+    getUserActivity: (id: string, page = 1, pageSize = 20) =>
+      req<PaginatedResponse<AuditLog>>(`/api/admin/users/${encodeURIComponent(id)}/activity?page=${page}&page_size=${pageSize}`),
+    updateUser: (id: string, data: UpdateUserInput) => req<User>(`/api/admin/users/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(data) }),
     uploadUserAvatar: (id: string, blob: Blob) => {
       const body = new FormData();
       body.append('avatar', blob, blob.type === 'image/png' ? 'avatar.png' : 'avatar.webp');
-      return req<User>(`/api/admin/users/${id}/avatar`, { method: 'POST', body });
+      return req<User>(`/api/admin/users/${encodeURIComponent(id)}/avatar`, { method: 'POST', body });
     },
-    removeUserAvatar: (id: string) => req<User>(`/api/admin/users/${id}/avatar`, { method: 'DELETE' }),
-    deleteUser: (id: string) => req<void>(`/api/admin/users/${id}`, { method: 'DELETE' }),
+    removeUserAvatar: (id: string) => req<User>(`/api/admin/users/${encodeURIComponent(id)}/avatar`, { method: 'DELETE' }),
+    deleteUser: (id: string) => req<void>(`/api/admin/users/${encodeURIComponent(id)}`, { method: 'DELETE' }),
     resetPassword: (id: string, password: string) =>
-      req<void>(`/api/admin/users/${id}/reset-password`, { method: 'POST', body: JSON.stringify({ password }) }),
-    suspendUser: (id: string) => req<User>(`/api/admin/users/${id}/suspend`, { method: 'POST' }),
-    activateUser: (id: string) => req<User>(`/api/admin/users/${id}/activate`, { method: 'POST' }),
+      req<void>(`/api/admin/users/${encodeURIComponent(id)}/reset-password`, { method: 'POST', body: JSON.stringify({ password }) }),
+    suspendUser: (id: string) => req<User>(`/api/admin/users/${encodeURIComponent(id)}/suspend`, { method: 'POST' }),
+    activateUser: (id: string) => req<User>(`/api/admin/users/${encodeURIComponent(id)}/activate`, { method: 'POST' }),
     updateUserRole: (id: string, role: UserRole) =>
-      req<User>(`/api/admin/users/${id}/role`, { method: 'PUT', body: JSON.stringify({ role }) }),
-    getUserIdentities: (id: string) => req<ExternalIdentity[]>(`/api/admin/users/${id}/identities`),
+      req<User>(`/api/admin/users/${encodeURIComponent(id)}/role`, { method: 'PUT', body: JSON.stringify({ role }) }),
+    getUserIdentities: (id: string) => req<ExternalIdentity[]>(`/api/admin/users/${encodeURIComponent(id)}/identities`),
     deleteUserIdentity: (userID: string, identityID: string) =>
       req<void>(`/api/admin/users/${encodeURIComponent(userID)}/identities/${encodeURIComponent(identityID)}`, { method: 'DELETE' }),
     getUserSessions: (id: string) => req<BrowserSession[]>(`/api/admin/users/${encodeURIComponent(id)}/sessions`),

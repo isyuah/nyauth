@@ -29,8 +29,8 @@ func TestRecoveryVerifierAuthenticatesRestoredEnvelopes(t *testing.T) {
 	email := "recovery@example.test"
 	verifiedAt := time.Now().UTC()
 	if _, err := schema.pool.Exec(ctx, `
-		INSERT INTO users (id,username,email,email_verified_at,status,role)
-		VALUES ($1,$2,$3,$4,'active','admin')
+		INSERT INTO users (id,username,email,email_verified_at,status,role,creation_source)
+		VALUES ($1,$2,$3,$4,'active','admin','legacy')
 	`, userID, "recovery-admin", email, verifiedAt); err != nil {
 		t.Fatalf("insert recovery user: %v", err)
 	}

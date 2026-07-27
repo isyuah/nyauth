@@ -196,8 +196,8 @@ func TestMailSettingsHandlersRequireReauthenticationRedactSecretsAndEnforceLifec
 		Role: "admin", AuthVersion: 1, SessionVersion: 1, Metadata: map[string]string{},
 	}
 	if _, err := testApp.pool.Exec(context.Background(), `
-		INSERT INTO users (id,username,status,role,auth_version,session_version,metadata)
-		VALUES ($1,$2,'active','admin',1,1,'{}'::jsonb)
+		INSERT INTO users (id,username,status,role,auth_version,session_version,metadata,creation_source)
+		VALUES ($1,$2,'active','admin',1,1,'{}'::jsonb,'legacy')
 	`, admin.ID, admin.Username); err != nil {
 		t.Fatalf("insert mail settings administrator: %v", err)
 	}

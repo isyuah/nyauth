@@ -332,8 +332,8 @@ func TestClientConfigurationUpdateAndAuditAreAtomic(t *testing.T) {
 func insertClientOwnerUser(t *testing.T, ctx context.Context, pool *pgxpool.Pool, id uuid.UUID, status string) {
 	t.Helper()
 	if _, err := pool.Exec(ctx, `
-		INSERT INTO users (id,username,status,role,auth_version,must_change_password,metadata)
-		VALUES ($1,$2,$3,'user',1,FALSE,'{}'::jsonb)
+		INSERT INTO users (id,username,status,role,auth_version,must_change_password,metadata,creation_source)
+		VALUES ($1,$2,$3,'user',1,FALSE,'{}'::jsonb,'legacy')
 	`, id, "client-owner-"+id.String(), status); err != nil {
 		t.Fatalf("insert %s owner: %v", status, err)
 	}

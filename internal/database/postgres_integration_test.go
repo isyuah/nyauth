@@ -215,8 +215,8 @@ func TestDashboardStatisticsAreServedFromRefreshedAggregates(t *testing.T) {
 
 	userID := uuid.New()
 	if _, err := schema.pool.Exec(ctx, `
-		INSERT INTO users (id, username, status, role)
-		VALUES ($1, $2, 'active', 'user')
+		INSERT INTO users (id, username, status, role, creation_source)
+		VALUES ($1, $2, 'active', 'user', 'legacy')
 	`, userID, "stats-user-"+uuid.NewString()); err != nil {
 		t.Fatalf("insert aggregate test user: %v", err)
 	}
@@ -270,7 +270,7 @@ func TestDashboardStatisticsAreServedFromRefreshedAggregates(t *testing.T) {
 		t.Fatalf("unexpected statistics snapshot: %#v", snapshot)
 	}
 
-	if _, err := schema.pool.Exec(ctx, `INSERT INTO users (username, status, role) VALUES ($1, 'active', 'user')`, "unrefreshed-user-"+uuid.NewString()); err != nil {
+	if _, err := schema.pool.Exec(ctx, `INSERT INTO users (username, status, role, creation_source) VALUES ($1, 'active', 'user', 'legacy')`, "unrefreshed-user-"+uuid.NewString()); err != nil {
 		t.Fatalf("insert unrefreshed user: %v", err)
 	}
 	recorder = httptest.NewRecorder()
@@ -328,8 +328,8 @@ func TestPasswordResetTokenIsConsumedOnceAcrossConcurrentRequests(t *testing.T) 
 	if _, err := schema.pool.Exec(ctx, `
 		INSERT INTO users (
 			id,username,email,email_verified_at,password_hash,password_changed_at,status,role,
-			auth_version,must_change_password,metadata
-		) VALUES ($1,$2,$3,NOW(),$4,NOW(),'active','user',1,FALSE,'{}'::jsonb)
+			auth_version,must_change_password,metadata,creation_source
+		) VALUES ($1,$2,$3,NOW(),$4,NOW(),'active','user',1,FALSE,'{}'::jsonb,'legacy')
 	`, userID, "recovery-"+userID.String(), email, initialHash); err != nil {
 		t.Fatalf("insert recovery user: %v", err)
 	}
@@ -422,8 +422,8 @@ func TestUserListFiltersStatusBeforePagination(t *testing.T) {
 		}
 		id := uuid.New()
 		if _, err := schema.pool.Exec(ctx, `
-			INSERT INTO users (id,username,status,role,auth_version,session_version,must_change_password,metadata)
-			VALUES ($1,$2,$3,'user',1,1,FALSE,'{}'::jsonb)
+			INSERT INTO users (id,username,status,role,auth_version,session_version,must_change_password,metadata,creation_source)
+			VALUES ($1,$2,$3,'user',1,1,FALSE,'{}'::jsonb,'legacy')
 		`, id, fmt.Sprintf("status-filter-%d-%s", index, id.String()), status); err != nil {
 			t.Fatal(err)
 		}
@@ -452,8 +452,8 @@ func TestRoleChangeIncrementsAuthVersion(t *testing.T) {
 	defer cancel()
 	userID := uuid.New()
 	if _, err := schema.pool.Exec(ctx, `
-		INSERT INTO users (id,username,status,role,auth_version,must_change_password,metadata)
-		VALUES ($1,$2,'active','user',1,FALSE,'{}'::jsonb)
+		INSERT INTO users (id,username,status,role,auth_version,must_change_password,metadata,creation_source)
+		VALUES ($1,$2,'active','user',1,FALSE,'{}'::jsonb,'legacy')
 	`, userID, "role-change-"+userID.String()); err != nil {
 		t.Fatal(err)
 	}
@@ -502,8 +502,8 @@ func TestManagementMutationRollsBackWhenAuditEnqueueFails(t *testing.T) {
 	defer cancel()
 	userID := uuid.New()
 	if _, err := schema.pool.Exec(ctx, `
-		INSERT INTO users (id,username,status,role,auth_version,must_change_password,metadata)
-		VALUES ($1,$2,'active','user',1,FALSE,'{}'::jsonb)
+		INSERT INTO users (id,username,status,role,auth_version,must_change_password,metadata,creation_source)
+		VALUES ($1,$2,'active','user',1,FALSE,'{}'::jsonb,'legacy')
 	`, userID, "audit-rollback-"+userID.String()); err != nil {
 		t.Fatal(err)
 	}
@@ -555,8 +555,8 @@ func TestSessionRevocationGenerationAndAuditCommitAtomically(t *testing.T) {
 	defer cancel()
 	userID := uuid.New()
 	if _, err := schema.pool.Exec(ctx, `
-		INSERT INTO users (id,username,status,role,auth_version,session_version,must_change_password,metadata)
-		VALUES ($1,$2,'active','user',11,7,FALSE,'{}'::jsonb)
+		INSERT INTO users (id,username,status,role,auth_version,session_version,must_change_password,metadata,creation_source)
+		VALUES ($1,$2,'active','user',11,7,FALSE,'{}'::jsonb,'legacy')
 	`, userID, "session-revoke-"+userID.String()); err != nil {
 		t.Fatal(err)
 	}
@@ -620,8 +620,8 @@ func TestClientQuotaIsAtomicAcrossConcurrentCreates(t *testing.T) {
 	defer cancel()
 	ownerID := uuid.New()
 	if _, err := schema.pool.Exec(ctx, `
-		INSERT INTO users (id,username,status,role,auth_version,must_change_password,metadata)
-		VALUES ($1,$2,'active','user',1,FALSE,'{}'::jsonb)
+		INSERT INTO users (id,username,status,role,auth_version,must_change_password,metadata,creation_source)
+		VALUES ($1,$2,'active','user',1,FALSE,'{}'::jsonb,'legacy')
 	`, ownerID, "quota-owner-"+ownerID.String()); err != nil {
 		t.Fatalf("insert owner: %v", err)
 	}
@@ -682,8 +682,8 @@ func TestClientSecretRotationImmediatelyReplacesCredential(t *testing.T) {
 	defer cancel()
 	ownerID := uuid.New()
 	if _, err := schema.pool.Exec(ctx, `
-		INSERT INTO users (id,username,status,role,auth_version,must_change_password,metadata)
-		VALUES ($1,$2,'active','user',1,FALSE,'{}'::jsonb)
+		INSERT INTO users (id,username,status,role,auth_version,must_change_password,metadata,creation_source)
+		VALUES ($1,$2,'active','user',1,FALSE,'{}'::jsonb,'legacy')
 	`, ownerID, "secret-owner-"+ownerID.String()); err != nil {
 		t.Fatalf("insert owner: %v", err)
 	}
@@ -907,10 +907,10 @@ func TestSecurityNotificationsShareUserAndIdentityMutationTransactions(t *testin
 	verifiedAt := time.Now().UTC().Add(-time.Hour)
 	primaryUserID, passwordlessUserID := uuid.New(), uuid.New()
 	if _, err := schema.pool.Exec(ctx, `
-		INSERT INTO users (id,username,email,email_verified_at,password_hash,password_changed_at,status,role,auth_version,must_change_password,metadata)
+		INSERT INTO users (id,username,email,email_verified_at,password_hash,password_changed_at,status,role,auth_version,must_change_password,metadata,creation_source)
 		VALUES
-		($1,$2,$3,$4,'initial-hash',$4,'active','user',1,FALSE,'{}'::jsonb),
-		($5,$6,$7,$4,NULL,NULL,'active','admin',1,FALSE,'{}'::jsonb)
+		($1,$2,$3,$4,'initial-hash',$4,'active','user',1,FALSE,'{}'::jsonb,'legacy'),
+		($5,$6,$7,$4,NULL,NULL,'active','admin',1,FALSE,'{}'::jsonb,'legacy')
 	`, primaryUserID, "notice-primary-"+primaryUserID.String(), "primary@example.test", verifiedAt,
 		passwordlessUserID, "notice-passwordless-"+passwordlessUserID.String(), "passwordless@example.test"); err != nil {
 		t.Fatalf("insert notification users: %v", err)
@@ -930,8 +930,8 @@ func TestSecurityNotificationsShareUserAndIdentityMutationTransactions(t *testin
 	}
 	unverifiedUserID := uuid.New()
 	if _, err := schema.pool.Exec(ctx, `
-		INSERT INTO users (id,username,email,status,role,auth_version,must_change_password,metadata)
-		VALUES ($1,$2,$3,'active','user',1,FALSE,'{}'::jsonb)
+		INSERT INTO users (id,username,email,status,role,auth_version,must_change_password,metadata,creation_source)
+		VALUES ($1,$2,$3,'active','user',1,FALSE,'{}'::jsonb,'legacy')
 	`, unverifiedUserID, "notice-unverified-"+unverifiedUserID.String(), "unverified@example.test"); err != nil {
 		t.Fatal(err)
 	}
@@ -1044,8 +1044,8 @@ func TestOAuthAuthorizationStoreUpsertListRevokeAndReauthorize(t *testing.T) {
 	defer cancel()
 	userID := uuid.New()
 	if _, err := schema.pool.Exec(ctx, `
-		INSERT INTO users (id,username,status,role,auth_version,must_change_password,metadata)
-		VALUES ($1,$2,'active','user',1,FALSE,'{}'::jsonb)
+		INSERT INTO users (id,username,status,role,auth_version,must_change_password,metadata,creation_source)
+		VALUES ($1,$2,'active','user',1,FALSE,'{}'::jsonb,'legacy')
 	`, userID, "authorization-user-"+userID.String()); err != nil {
 		t.Fatalf("insert user: %v", err)
 	}
@@ -1126,8 +1126,8 @@ func TestConsentPersistsAuthorizationAndBindsIssuedTimeToCode(t *testing.T) {
 	defer cancel()
 	userID := uuid.New()
 	if _, err := schema.pool.Exec(ctx, `
-		INSERT INTO users (id,username,status,role,auth_version,must_change_password,metadata)
-		VALUES ($1,$2,'active','user',1,FALSE,'{}'::jsonb)
+		INSERT INTO users (id,username,status,role,auth_version,must_change_password,metadata,creation_source)
+		VALUES ($1,$2,'active','user',1,FALSE,'{}'::jsonb,'legacy')
 	`, userID, "consent-user-"+userID.String()); err != nil {
 		t.Fatalf("insert user: %v", err)
 	}

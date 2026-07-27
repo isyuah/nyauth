@@ -14,9 +14,11 @@ import (
 )
 
 type fakeUserHandlerService struct {
-	createErr  error
-	listStatus models.UserStatus
-	listCalled bool
+	createErr       error
+	createMutation  audit.MutationAudit
+	createAdminCall bool
+	listStatus      models.UserStatus
+	listCalled      bool
 }
 
 func (f *fakeUserHandlerService) List(_ context.Context, _, _ int, _ string, status models.UserStatus) (*models.PaginatedResponse[models.User], error) {
@@ -25,6 +27,11 @@ func (f *fakeUserHandlerService) List(_ context.Context, _, _ int, _ string, sta
 	return &models.PaginatedResponse[models.User]{}, nil
 }
 func (f *fakeUserHandlerService) Create(context.Context, models.CreateUserRequest) (*models.User, error) {
+	return nil, f.createErr
+}
+func (f *fakeUserHandlerService) CreateAdmin(_ context.Context, _ models.CreateUserRequest, mutation audit.MutationAudit) (*models.User, error) {
+	f.createAdminCall = true
+	f.createMutation = mutation
 	return nil, f.createErr
 }
 func (f *fakeUserHandlerService) GetByID(context.Context, uuid.UUID) (*models.User, error) {
@@ -42,8 +49,11 @@ func (f *fakeUserHandlerService) ResetPassword(context.Context, uuid.UUID, strin
 
 func TestCreateDoesNotExposeInternalErrors(t *testing.T) {
 	t.Parallel()
-	handler := &Handler{service: &fakeUserHandlerService{createErr: errors.New("INSERT INTO users: database password leaked")}}
+	service := &fakeUserHandlerService{createErr: errors.New("INSERT INTO users: database password leaked")}
+	handler := &Handler{service: service}
 	request := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"username":"alice","password":"long-enough-password"}`))
+	mutation := audit.MutationAudit{Event: models.AuditUserCreated, ActorID: uuid.New(), ActorName: "admin"}
+	request = request.WithContext(audit.WithMutationAudit(request.Context(), mutation))
 	response := httptest.NewRecorder()
 	handler.Create(response, request)
 	if response.Code != http.StatusInternalServerError {
@@ -51,6 +61,9 @@ func TestCreateDoesNotExposeInternalErrors(t *testing.T) {
 	}
 	if body := response.Body.String(); strings.Contains(body, "INSERT") || strings.Contains(body, "password leaked") {
 		t.Fatalf("internal error leaked in response: %s", body)
+	}
+	if !service.createAdminCall || service.createMutation.ActorID != mutation.ActorID {
+		t.Fatalf("administrator mutation was not forwarded: %#v", service.createMutation)
 	}
 }
 
