@@ -12,6 +12,8 @@
   import Switch from '$lib/components/ui/Switch.svelte';
   import { ShieldCheck } from 'lucide-svelte';
 
+  let { returnTo = '/admin/settings/security' }: { returnTo?: string } = $props();
+
   const pendingSettingsStorageKey = 'nyauth:reauth:security-settings';
 
   let totpEnabled = $state(true);
@@ -190,7 +192,7 @@
 
 <ReauthenticationDialog
   bind:open={reauthOpen}
-  returnTo="/admin/system"
+  {returnTo}
   description="修改登录安全策略前需要验证最近 10 分钟内的身份"
   onauthenticated={retrySave}
   onbeforeprovider={persistPendingSettings}

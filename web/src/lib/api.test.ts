@@ -325,3 +325,30 @@ describe('avatar API contract', () => {
     }
   });
 });
+
+describe('admin user insights API contract', () => {
+  afterEach(() => vi.unstubAllGlobals());
+
+  it('uses the dedicated, encoded detail endpoints and preserves pagination', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, _init?: RequestInit) => new Response(JSON.stringify({ items: [], total: 0, page: 2, page_size: 10, total_pages: 0 }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    const id = 'user id/with separators';
+
+    await api.admin.getUserOverview(id);
+    await api.admin.getUserSecurity(id);
+    await api.admin.getUserAuthorizations(id);
+    await api.admin.getUserClients(id, 2, 10);
+    await api.admin.getUserActivity(id, 3, 25);
+
+    expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
+      '/api/admin/users/user%20id%2Fwith%20separators/overview',
+      '/api/admin/users/user%20id%2Fwith%20separators/security',
+      '/api/admin/users/user%20id%2Fwith%20separators/authorizations',
+      '/api/admin/users/user%20id%2Fwith%20separators/clients?page=2&page_size=10',
+      '/api/admin/users/user%20id%2Fwith%20separators/activity?page=3&page_size=25',
+    ]);
+  });
+});

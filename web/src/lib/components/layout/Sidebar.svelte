@@ -12,6 +12,7 @@
     LogOut,
     ScrollText,
     Server,
+    Settings,
     ShieldCheck,
     Ticket,
     UserRound,
@@ -39,6 +40,7 @@
     { href: '/admin/providers', icon: KeyRound, label: '身份提供者' },
     { href: '/admin/invites', icon: Ticket, label: '邀请管理' },
     { href: '/admin/audit', icon: ScrollText, label: '审计日志' },
+    { href: '/admin/settings/branding', activePrefix: '/admin/settings', icon: Settings, label: '系统设置' },
     { href: '/admin/system', icon: Server, label: '系统状态' },
   ];
 
@@ -56,8 +58,9 @@
   let user = $derived($sessionStore.session?.user ?? null);
   let initials = $derived((user?.display_name || user?.username || '?').slice(0, 1).toUpperCase());
 
-  function isActive(href: string): boolean {
-    return $page.url.pathname === href || (href !== '/admin' && href !== '/dashboard' && $page.url.pathname.startsWith(`${href}/`));
+  function isActive(item: { href: string; activePrefix?: string }): boolean {
+    const href = item.activePrefix || item.href;
+    return $page.url.pathname === item.href || $page.url.pathname === href || (href !== '/admin' && href !== '/dashboard' && $page.url.pathname.startsWith(`${href}/`));
   }
 
   async function handleLogout() {
@@ -94,8 +97,8 @@
         <a
           href={item.href}
           onclick={onNavigate}
-          aria-current={isActive(item.href) ? 'page' : undefined}
-          class="mb-0.5 flex h-11 items-center gap-3 rounded-nya-md px-3.5 text-left text-body-medium transition-colors {isActive(item.href) ? 'bg-nya-primary-soft text-nya-primary' : 'text-nya-text-secondary hover:bg-nya-surface-muted hover:text-nya-text-primary'}"
+          aria-current={isActive(item) ? 'page' : undefined}
+          class="mb-0.5 flex h-11 items-center gap-3 rounded-nya-md px-3.5 text-left text-body-medium transition-colors {isActive(item) ? 'bg-nya-primary-soft text-nya-primary' : 'text-nya-text-secondary hover:bg-nya-surface-muted hover:text-nya-text-primary'}"
           title={!showLabels ? item.label : undefined}
         >
           <item.icon size={18} class="shrink-0" />

@@ -21,7 +21,7 @@ func TestDescribeMutation(t *testing.T) {
 		{http.MethodPut, "/api/me", "/api/me", "", models.AuditUserProfileUpdated, "user", false},
 		{http.MethodPost, "/api/me/password/set", "/api/me/password/set", "", models.AuditUserPasswordSet, "user", true},
 		{http.MethodDelete, "/api/me/identities/identity-1", "/api/me/identities/{id}", "identity-1", models.AuditIdentityUnbound, "identity", true},
-		{http.MethodPost, "/api/admin/users", "/api/admin/users", "", models.AuditUserCreated, "user", false},
+		{http.MethodPost, "/api/admin/users", "/api/admin/users", "", models.AuditUserCreated, "user", true},
 		{http.MethodPost, "/api/admin/users/target/suspend", "/api/admin/users/{id}/suspend", "target", models.AuditUserSuspended, "user", true},
 		{http.MethodPost, "/api/admin/users/target/reset-password", "/api/admin/users/{id}/reset-password", "target", models.AuditUserPasswordReset, "user", true},
 		{http.MethodDelete, "/api/admin/users/target/sessions", "/api/admin/users/{id}/sessions", "target", models.AuditUserSessionsRevoked, "user", true},

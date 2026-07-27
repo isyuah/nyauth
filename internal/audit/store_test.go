@@ -4,23 +4,32 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
 )
 
 func TestBuildListFilterUsesBoundParameters(t *testing.T) {
 	from := time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)
 	to := from.Add(24 * time.Hour)
+	subjectUserID := uuid.New()
 	where, args := buildListFilter(ListFilter{
 		Event: "user.login", Result: "success", RiskLevel: "low",
 		Actor: "alice", Target: "client", IPAddress: "192.0.2.1",
-		CreatedFrom: &from, CreatedTo: &to,
+		SubjectUserID: &subjectUserID,
+		CreatedFrom:   &from, CreatedTo: &to,
 	})
-	for _, fragment := range []string{"event = $1", "result = $2", "risk_level = $3", "actor_name ILIKE", "actor_id::text = $4", "target_id ILIKE", "target_type ILIKE", "ip_address = $6", "created_at >= $7", "created_at <= $8"} {
+	for _, fragment := range []string{
+		"event = $1", "result = $2", "risk_level = $3", "actor_name ILIKE",
+		"actor_id::text = $4", "target_id ILIKE", "target_type ILIKE", "ip_address = $6",
+		"actor_id = $7", "target_type = 'user'", "target_id = $7::text",
+		"created_at >= $8", "created_at <= $9",
+	} {
 		if !strings.Contains(where, fragment) {
 			t.Fatalf("filter %q missing from %q", fragment, where)
 		}
 	}
-	if len(args) != 8 {
-		t.Fatalf("argument count = %d, want 8", len(args))
+	if len(args) != 9 || args[6] != subjectUserID {
+		t.Fatalf("arguments = %#v, want subject user at position 7", args)
 	}
 }
 

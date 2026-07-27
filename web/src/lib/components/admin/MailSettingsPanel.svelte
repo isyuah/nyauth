@@ -28,11 +28,12 @@
   interface Props {
     registrationMode: RegistrationMode | null;
     onchanged?: () => void | Promise<void>;
+    returnTo?: string;
   }
 
   type MailMutationAction = Exclude<MailReauthenticationAction, 'load'>;
 
-  let { registrationMode, onchanged }: Props = $props();
+  let { registrationMode, onchanged, returnTo = '/admin/settings/mail' }: Props = $props();
 
   const reauthenticationStorageKey = 'nyauth:reauth:mail-settings';
 
@@ -632,7 +633,7 @@
 
 <ReauthenticationDialog
   bind:open={reauthenticationOpen}
-  returnTo="/admin/system"
+  {returnTo}
   description={reauthenticationDescription()}
   onauthenticated={retryPendingAfterPassword}
   onbeforeprovider={persistPendingReauthentication}

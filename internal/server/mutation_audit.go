@@ -172,7 +172,7 @@ func describeMutation(r *http.Request, actor *models.User) (mutationAuditDescrip
 		return mutationAuditDescriptor{event: models.AuditAuthorizationRevoked, targetType: "client", targetID: param("client_id"), successAlreadyAudited: true}, true
 
 	case r.Method == http.MethodPost && path == "/api/admin/users":
-		return mutationAuditDescriptor{event: models.AuditUserCreated, targetType: "user"}, true
+		return mutationAuditDescriptor{event: models.AuditUserCreated, targetType: "user", successAlreadyAudited: true}, true
 	case r.Method == http.MethodPut && strings.HasSuffix(path, "/role") && strings.HasPrefix(path, "/api/admin/users/"):
 		return mutationAuditDescriptor{event: models.AuditUserRoleChanged, targetType: "user", targetID: param("id"), riskLevel: "high", successAlreadyAudited: true}, true
 	case r.Method == http.MethodPost && strings.HasSuffix(path, "/suspend") && strings.HasPrefix(path, "/api/admin/users/"):

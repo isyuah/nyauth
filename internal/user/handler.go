@@ -39,6 +39,7 @@ func isUniqueViolation(err error) bool {
 type handlerService interface {
 	List(ctx context.Context, page, pageSize int, search string, status models.UserStatus) (*models.PaginatedResponse[models.User], error)
 	Create(ctx context.Context, req models.CreateUserRequest) (*models.User, error)
+	CreateAdmin(ctx context.Context, req models.CreateUserRequest, mutation audit.MutationAudit) (*models.User, error)
 	GetByID(ctx context.Context, id uuid.UUID) (*models.User, error)
 	AdminUpdate(ctx context.Context, id uuid.UUID, req models.AdminUpdateUserRequest, mutation audit.MutationAudit) (*models.User, error)
 	Delete(ctx context.Context, id uuid.UUID, mutation audit.MutationAudit) error
@@ -94,7 +95,12 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	user, err := h.service.Create(r.Context(), req)
+	mutation, ok := audit.MutationAuditFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "audit context unavailable")
+		return
+	}
+	user, err := h.service.CreateAdmin(r.Context(), req, mutation)
 	if err != nil {
 		if IsInvalidInput(err) {
 			writeError(w, http.StatusBadRequest, err.Error())

@@ -27,7 +27,7 @@ func newRuntimeMailStore(t *testing.T) (*postgresTestSchema, *mailruntime.Store,
 	}
 	actorID := uuid.New()
 	if _, err := schema.pool.Exec(context.Background(), `
-		INSERT INTO users (id,username,status,role) VALUES ($1,$2,'active','admin')
+		INSERT INTO users (id,username,status,role,creation_source) VALUES ($1,$2,'active','admin','legacy')
 	`, actorID, "mail-admin-"+strings.ReplaceAll(actorID.String(), "-", "")); err != nil {
 		t.Fatalf("insert runtime mail actor: %v", err)
 	}

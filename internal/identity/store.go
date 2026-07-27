@@ -124,8 +124,9 @@ func (s *Store) CreateUserAndIdentity(ctx context.Context, u *models.User, i *mo
 	_, err = tx.Exec(ctx, `
 		INSERT INTO users (
 			id,username,email,email_verified_at,password_hash,display_name,
-			status,role,auth_version,session_version,must_change_password,metadata
-		) VALUES ($1,$2,$3::text,CASE WHEN $3::text IS NULL THEN NULL ELSE NOW() END,NULL,$4,$5,$6,$7,$8,FALSE,$9)
+			status,role,auth_version,session_version,must_change_password,metadata,
+			creation_source,created_by
+		) VALUES ($1,$2,$3::text,CASE WHEN $3::text IS NULL THEN NULL ELSE NOW() END,NULL,$4,$5,$6,$7,$8,FALSE,$9,'provider',NULL)
 	`, u.ID, u.Username, u.Email, u.DisplayName, u.Status, u.Role, u.AuthVersion, u.SessionVersion, u.Metadata)
 	if err != nil {
 		return fmt.Errorf("creating external user: %w", err)

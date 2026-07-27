@@ -30,9 +30,11 @@
   let {
     onsessionupdated,
     providerReauthenticationFailed = false,
+    returnTo = '/profile',
   }: {
     onsessionupdated?: (session: SessionInfo) => void;
     providerReauthenticationFailed?: boolean;
+    returnTo?: string;
   } = $props();
 
   const pendingActionStorageKey = 'nyauth:reauth:passkey-action';
@@ -380,7 +382,7 @@
 
 <ReauthenticationDialog
   bind:open={reauthOpen}
-  returnTo="/profile"
+  {returnTo}
   description="注册或删除 Passkey 前，需要验证最近 10 分钟内的身份"
   onauthenticated={retryProtectedAction}
   onbeforeprovider={persistPendingAction}

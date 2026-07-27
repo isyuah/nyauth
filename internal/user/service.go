@@ -107,6 +107,39 @@ func validatePassword(password string) error {
 }
 
 func (s *Service) Create(ctx context.Context, req models.CreateUserRequest) (*models.User, error) {
+	u, err := buildLocalUser(req)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.store.Create(ctx, u); err != nil {
+		return nil, err
+	}
+	return u, nil
+}
+
+type adminCreateStore interface {
+	CreateAdmin(ctx context.Context, u *models.User, mutation audit.MutationAudit) error
+}
+
+func (s *Service) CreateAdmin(ctx context.Context, req models.CreateUserRequest, mutation audit.MutationAudit) (*models.User, error) {
+	if err := mutation.ValidateEvent(models.AuditUserCreated); err != nil {
+		return nil, fmt.Errorf("%w: invalid user creation audit context", ErrInvalidInput)
+	}
+	u, err := buildLocalUser(req)
+	if err != nil {
+		return nil, err
+	}
+	store, ok := s.store.(adminCreateStore)
+	if !ok {
+		return nil, fmt.Errorf("administrator user creation is unavailable")
+	}
+	if err := store.CreateAdmin(ctx, u, mutation); err != nil {
+		return nil, err
+	}
+	return u, nil
+}
+
+func buildLocalUser(req models.CreateUserRequest) (*models.User, error) {
 	req.Username = strings.TrimSpace(req.Username)
 	req.Email = strings.TrimSpace(req.Email)
 	if err := validateUsername(req.Username); err != nil {
@@ -137,9 +170,6 @@ func (s *Service) Create(ctx context.Context, req models.CreateUserRequest) (*mo
 	}
 	if req.DisplayName != "" {
 		u.DisplayName = &req.DisplayName
-	}
-	if err := s.store.Create(ctx, u); err != nil {
-		return nil, err
 	}
 	return u, nil
 }
