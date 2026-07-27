@@ -103,3 +103,29 @@ func TestMailSettingsLimiterRejectsUnknownOperation(t *testing.T) {
 		t.Fatalf("unknown operation created Redis keys: %v", mini.Keys())
 	}
 }
+
+func TestAvatarLimiterUsesIndependentReasonableBuckets(t *testing.T) {
+	t.Parallel()
+	mini := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mini.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+	limiter := NewAvatarLimiter(rdb)
+	ctx := context.Background()
+	for attempt := 1; attempt <= 30; attempt++ {
+		allowed, _, err := limiter.Reserve(ctx, "upload", "192.0.2.50", "user-1")
+		if err != nil || !allowed {
+			t.Fatalf("upload attempt %d allowed=%v err=%v", attempt, allowed, err)
+		}
+	}
+	allowed, retry, err := limiter.Reserve(ctx, "upload", "192.0.2.50", "user-1")
+	if err != nil || allowed || retry <= 0 {
+		t.Fatalf("upload limit allowed=%v retry=%v err=%v", allowed, retry, err)
+	}
+	allowed, _, err = limiter.Reserve(ctx, "delete", "192.0.2.50", "user-1")
+	if err != nil || !allowed {
+		t.Fatalf("independent delete bucket allowed=%v err=%v", allowed, err)
+	}
+	if allowed, _, err := limiter.Reserve(ctx, "unknown", "192.0.2.50", "user-1"); err == nil || allowed {
+		t.Fatalf("unknown avatar action allowed=%v err=%v", allowed, err)
+	}
+}

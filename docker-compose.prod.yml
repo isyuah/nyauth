@@ -27,6 +27,8 @@ x-nyauth-environment: &nyauth-environment
   NYAUTH_MAIL_SMTP_TLS_MODE: "${NYAUTH_MAIL_SMTP_TLS_MODE:-starttls}"
   NYAUTH_MAIL_SMTP_CONNECT_TIMEOUT: "${NYAUTH_MAIL_SMTP_CONNECT_TIMEOUT:-10s}"
   NYAUTH_MAIL_SMTP_SEND_TIMEOUT: "${NYAUTH_MAIL_SMTP_SEND_TIMEOUT:-30s}"
+  NYAUTH_MEDIA_BACKEND: "${NYAUTH_MEDIA_BACKEND:-local}"
+  NYAUTH_MEDIA_LOCAL_DIRECTORY: "${NYAUTH_MEDIA_LOCAL_DIRECTORY:-/var/lib/nyauth/media}"
   NYAUTH_AUDIT_RETENTION: "${NYAUTH_AUDIT_RETENTION:-8760h}"
   NYAUTH_TELEMETRY_OTLP_ENABLED: "${NYAUTH_TELEMETRY_OTLP_ENABLED:-false}"
   NYAUTH_TELEMETRY_OTLP_ENDPOINT: "${NYAUTH_TELEMETRY_OTLP_ENDPOINT:-}"
@@ -53,6 +55,8 @@ x-nyauth-maintenance-environment: &nyauth-maintenance-environment
   NYAUTH_DATABASE_TLS_CLIENT_KEY_FILE: "${NYAUTH_DATABASE_TLS_CLIENT_KEY_FILE:-}"
   NYAUTH_DATABASE_TLS_SERVER_NAME: "${NYAUTH_DATABASE_TLS_SERVER_NAME:-}"
   NYAUTH_AUDIT_RETENTION: "${NYAUTH_AUDIT_RETENTION:-8760h}"
+  NYAUTH_MEDIA_BACKEND: "${NYAUTH_MEDIA_BACKEND:-local}"
+  NYAUTH_MEDIA_LOCAL_DIRECTORY: "${NYAUTH_MEDIA_LOCAL_DIRECTORY:-/var/lib/nyauth/media}"
 
 x-hardened-nyauth: &hardened-nyauth
   image: "${NYAUTH_IMAGE:?set NYAUTH_IMAGE to an immutable image tag or digest}"
@@ -141,6 +145,8 @@ services:
       <<: *nyauth-maintenance-environment
     secrets:
       - database_migration_dsn
+    volumes:
+      - media:/var/lib/nyauth/media
     networks:
       - backend
     depends_on:
@@ -164,6 +170,8 @@ services:
       - database_runtime_dsn
       - redis_password
       - auth_master_key
+    volumes:
+      - media:/var/lib/nyauth/media
     expose:
       - "8080"
     healthcheck:
@@ -195,6 +203,7 @@ networks:
 
 volumes:
   pgdata:
+  media:
 
 secrets:
   database_runtime_dsn:

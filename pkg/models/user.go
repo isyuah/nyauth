@@ -51,14 +51,12 @@ type CreateUserRequest struct {
 type UpdateUserRequest struct {
 	Email       *string `json:"email,omitempty"`
 	DisplayName *string `json:"display_name,omitempty"`
-	AvatarURL   *string `json:"avatar_url,omitempty"`
 }
 
 // AdminUpdateUserRequest contains fields that only administrators may change.
 type AdminUpdateUserRequest struct {
 	Email       *string           `json:"email,omitempty"`
 	DisplayName *string           `json:"display_name,omitempty"`
-	AvatarURL   *string           `json:"avatar_url,omitempty"`
 	Status      *UserStatus       `json:"status,omitempty"`
 	Role        *string           `json:"role,omitempty"`
 	Metadata    map[string]string `json:"metadata,omitempty"`

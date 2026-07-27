@@ -13,7 +13,11 @@ import (
 	"encoding/hex"
 	"encoding/json"
 	"fmt"
+	"image"
+	"image/color"
+	"image/png"
 	"io"
+	"mime/multipart"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
@@ -667,6 +671,96 @@ func TestHAHTTPServersRotateRefreshTokenOnceAndRevokeReusedFamily(t *testing.T) 
 	}
 }
 
+func TestHAAvatarUploadReadAndDelete(t *testing.T) {
+	cluster := newHAHTTPTestCluster(t)
+	ctx, cancel := context.WithTimeout(context.Background(), haIntegrationTimeout)
+	defer cancel()
+	username := "avatar_http_" + strings.ReplaceAll(uuid.NewString()[:8], "-", "")
+	created, err := cluster.apps[0].userService.Create(ctx, models.CreateUserRequest{
+		Username: username, Password: "Avatar-http-test-123!", DisplayName: "Avatar HTTP",
+	})
+	if err != nil {
+		t.Fatalf("create avatar HTTP user: %v", err)
+	}
+	for _, action := range []string{"upload", "delete"} {
+		cluster.trackRedisKey("nyauth:avatar-limit:subject:" + action + ":" + limitDigest("198.51.100.81\x00"+created.ID.String()))
+		cluster.trackRedisKey("nyauth:avatar-limit:ip:" + action + ":" + limitDigest("198.51.100.81"))
+	}
+	login := cluster.login(t, 0, created.Username, "Avatar-http-test-123!", "198.51.100.81")
+
+	var uploadBody bytes.Buffer
+	writer := multipart.NewWriter(&uploadBody)
+	part, err := writer.CreateFormFile("avatar", "avatar.png")
+	if err != nil {
+		t.Fatal(err)
+	}
+	img := image.NewRGBA(image.Rect(0, 0, 96, 96))
+	for y := 0; y < 96; y++ {
+		for x := 0; x < 96; x++ {
+			img.Set(x, y, color.RGBA{R: 0x7a, G: 0x5a, B: 0xff, A: 0xff})
+		}
+	}
+	if err := png.Encode(part, img); err != nil {
+		t.Fatal(err)
+	}
+	if err := writer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	request, err := http.NewRequest(http.MethodPost, cluster.httpServers[0].URL+"/api/me/avatar", &uploadBody)
+	if err != nil {
+		t.Fatal(err)
+	}
+	request.AddCookie(login.cookie)
+	request.Header.Set("Content-Type", writer.FormDataContentType())
+	request.Header.Set("X-CSRF-Token", login.session.CSRFToken)
+	request.Header.Set("X-Forwarded-For", "198.51.100.81")
+	response, err := cluster.httpServers[0].Client().Do(request)
+	if err != nil {
+		t.Fatalf("upload avatar: %v", err)
+	}
+	if response.StatusCode != http.StatusOK {
+		body := readHAResponse(t, response)
+		t.Fatalf("upload avatar status=%d body=%s", response.StatusCode, body)
+	}
+	var updated models.User
+	if err := json.NewDecoder(response.Body).Decode(&updated); err != nil {
+		_ = response.Body.Close()
+		t.Fatalf("decode upload response: %v", err)
+	}
+	_ = response.Body.Close()
+	if updated.AvatarURL == nil || !strings.HasSuffix(*updated.AvatarURL, "/256.webp") {
+		t.Fatalf("avatar URL = %v", updated.AvatarURL)
+	}
+
+	mediaResponse := cluster.request(t, 1, http.MethodGet, *updated.AvatarURL, nil, nil, "", "198.51.100.82")
+	if mediaResponse.StatusCode != http.StatusOK || mediaResponse.Header.Get("Content-Type") != "image/webp" || mediaResponse.Header.Get("X-Content-Type-Options") != "nosniff" {
+		body := readHAResponse(t, mediaResponse)
+		t.Fatalf("media response status=%d headers=%v body=%s", mediaResponse.StatusCode, mediaResponse.Header, body)
+	}
+	_ = readHAResponse(t, mediaResponse)
+
+	deleteResponse := cluster.request(t, 1, http.MethodDelete, "/api/me/avatar", nil, login.cookie, login.session.CSRFToken, "198.51.100.81")
+	if deleteResponse.StatusCode != http.StatusOK {
+		body := readHAResponse(t, deleteResponse)
+		t.Fatalf("delete avatar status=%d body=%s", deleteResponse.StatusCode, body)
+	}
+	var removed models.User
+	if err := json.NewDecoder(deleteResponse.Body).Decode(&removed); err != nil {
+		_ = deleteResponse.Body.Close()
+		t.Fatalf("decode delete avatar response: %v", err)
+	}
+	_ = deleteResponse.Body.Close()
+	if removed.AvatarURL != nil {
+		t.Fatalf("removed avatar URL = %v", removed.AvatarURL)
+	}
+	missingResponse := cluster.request(t, 0, http.MethodGet, *updated.AvatarURL, nil, nil, "", "198.51.100.82")
+	if missingResponse.StatusCode != http.StatusNotFound {
+		body := readHAResponse(t, missingResponse)
+		t.Fatalf("deleted media status=%d body=%s", missingResponse.StatusCode, body)
+	}
+	_ = missingResponse.Body.Close()
+}
+
 func newHAHTTPTestCluster(t *testing.T) *haHTTPTestCluster {
 	t.Helper()
 	baseDSN := strings.TrimSpace(os.Getenv("NYAUTH_TEST_DATABASE_DSN"))
@@ -788,7 +882,7 @@ func newHAHTTPTestCluster(t *testing.T) *haHTTPTestCluster {
 	if err != nil {
 		t.Fatalf("create HA integration telemetry: %v", err)
 	}
-	cfg := haTestConfig()
+	cfg := haTestConfig(t)
 	for index := range 2 {
 		app, err := New(cfg, pools[index], redisClients[index], embed.FS{}, telemetryRuntime)
 		if err != nil {
@@ -807,7 +901,8 @@ func newHAHTTPTestCluster(t *testing.T) *haHTTPTestCluster {
 	return cluster
 }
 
-func haTestConfig() *config.Config {
+func haTestConfig(t *testing.T) *config.Config {
+	t.Helper()
 	return &config.Config{
 		Environment: "test",
 		Server: config.ServerConfig{
@@ -820,6 +915,7 @@ func haTestConfig() *config.Config {
 			AuthorizationCodeTTL: time.Minute,
 			JWK:                  config.JWKConfig{Algorithm: "RS256", KeySize: 2048, RotationInterval: 24 * time.Hour},
 		},
+		Media: config.MediaConfig{Backend: "local", Local: config.LocalMediaConfig{Directory: t.TempDir()}},
 	}
 }
 

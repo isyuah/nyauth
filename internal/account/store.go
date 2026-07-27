@@ -15,8 +15,8 @@ import (
 	"github.com/nyasharp/nyauth/pkg/models"
 )
 
-const accountUserSelectCols = `id, username, email, email_verified_at, password_hash, password_changed_at, display_name, avatar_url, status, role, auth_version, session_version, must_change_password, last_authenticated_at, last_login_at, last_login_ip, metadata, created_at, updated_at`
-const qualifiedAccountUserSelectCols = `users.id, users.username, users.email, users.email_verified_at, users.password_hash, users.password_changed_at, users.display_name, users.avatar_url, users.status, users.role, users.auth_version, users.session_version, users.must_change_password, users.last_authenticated_at, users.last_login_at, users.last_login_ip, users.metadata, users.created_at, users.updated_at`
+const accountUserSelectCols = `id, username, email, email_verified_at, password_hash, password_changed_at, display_name, CASE WHEN current_avatar_id IS NULL THEN NULL ELSE '/media/avatars/' || current_avatar_id::text || '/256.webp' END AS avatar_url, status, role, auth_version, session_version, must_change_password, last_authenticated_at, last_login_at, last_login_ip, metadata, created_at, updated_at`
+const qualifiedAccountUserSelectCols = `users.id, users.username, users.email, users.email_verified_at, users.password_hash, users.password_changed_at, users.display_name, CASE WHEN users.current_avatar_id IS NULL THEN NULL ELSE '/media/avatars/' || users.current_avatar_id::text || '/256.webp' END AS avatar_url, users.status, users.role, users.auth_version, users.session_version, users.must_change_password, users.last_authenticated_at, users.last_login_at, users.last_login_ip, users.metadata, users.created_at, users.updated_at`
 
 type Store struct {
 	db *pgxpool.Pool

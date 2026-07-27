@@ -112,6 +112,7 @@ func newRegistrationHTTPTestApp(t *testing.T) *registrationHTTPTestApp {
 				ConnectTimeout: time.Second, SendTimeout: time.Second,
 			},
 		},
+		Media: config.MediaConfig{Backend: "local", Local: config.LocalMediaConfig{Directory: t.TempDir()}},
 	}
 	app, err := New(cfg, pool, rdb, embed.FS{}, telemetryRuntime)
 	if err != nil {

@@ -1,109 +1,118 @@
-# 受控头像存储与对象存储设计
+# 安全头像媒体契约
 
-> 状态：规划中（2026-07-27），尚未实现。该能力建议在公开生产部署允许用户修改头像前完成。
+> 状态：已实现（2026-07-27）。当前开发迁移为 `000009_avatar_media`，开发 schema 为 9；发布 `0.3.0` 前迁移仍会按项目计划压缩为新的单一基线。
 
-## 1. 背景与结论
+## 1. 结论与边界
 
-当前用户资料直接保存并渲染 `avatar_url`。任意外部 URL 不适合作为长期生产契约：远端内容可以在保存后被替换，第三方主机可以追踪访问者 IP、User-Agent 和访问时间，恶意地址还会扩大内容审核、协议绕过、超大图片和上游可用性风险。
+Nyauth 不再接受、保存或直接渲染用户提供的任意头像 URL。用户和管理员只能上传图片内容，服务端校验并重新编码后，将头像保存到受控的本地目录或私有 S3 兼容对象存储。用户 DTO 中的 `avatar_url` 是只读字段，只会返回 Nyauth 生成的 `/media/avatars/{avatar_id}/256.webp`；OIDC `picture` 基于 issuer 生成对应的绝对地址。
 
-目标方案不是建立任意图片代理，而是建立一条受控媒体管线：
+这条媒体管线解决以下可达风险：
 
-- 默认使用服务器本地持久化目录，适合单机部署。
-- 可切换到 S3 兼容对象存储，覆盖 AWS S3、Cloudflare R2、MinIO 等实现。
-- 用户只能上传图片内容，不再提交任意展示 URL。
-- 服务端解码、校验并重新编码图片；浏览器永远只加载 Nyauth 管理的稳定地址。
-- PostgreSQL 只保存对象元数据和当前引用，不保存原始外部 URL 或图片二进制。
+- 外部图片主机追踪访问者 IP、User-Agent 和访问时间。
+- URL 保存后内容被替换，展示结果与最初检查不一致。
+- SVG、HTML、多态文件、错误 MIME 和内容嗅探造成主动内容风险。
+- 超大尺寸、解压炸弹、畸形图片或动画耗尽 CPU、内存和存储。
+- EXIF、GPS、ICC 和注释等元数据泄露。
+- 可预测路径、路径穿越、跨用户覆盖和高频上传滥用。
+- Provider 头像导入形成 SSRF、DNS 重绑定或云元数据探测。
 
-头像不是秘密数据，但仍属于用户内容。存储实现必须保证来源受控、内容不可动态替换、旧对象可回收，并且不会把对象存储凭据暴露给浏览器。
+头像不是认证秘密，但属于用户内容。对象存储凭据、内部 object key、Provider 上游完整 URL 和原始图片都不会返回给浏览器，也不得进入日志或普通审计详情。
 
-## 2. 威胁模型与安全约束
+## 2. 图片处理契约
 
-必须处理以下可达风险：
+用户和管理员上传使用 `multipart/form-data`，字段名固定为 `avatar`，请求必须恰好包含一个非空文件。当前限制为：
 
-- 外部头像主机通过图片请求追踪用户或管理员。
-- 保存后的 URL 指向内容发生变化，展示与审核结果不一致。
-- SVG、HTML、多态文件或错误 MIME 类型造成脚本/内容嗅探风险。
-- 超大尺寸、解压炸弹和畸形图片消耗 CPU 或内存。
-- GIF/WebP 动画造成资源消耗或不适宜动态内容。
-- EXIF、GPS、相机信息等元数据泄露。
-- 对象 key 可预测、被覆盖或跨用户引用。
-- 上传频率过高造成存储滥用。
-- 通过“导入 URL”功能形成 SSRF、DNS 重绑定或内网探测。
+- 图片内容上限 8 MiB；HTTP 层另外只预留 1 MiB multipart 开销。
+- 只接受真实签名为 JPEG、PNG 或静态 WebP 的内容。
+- 拒绝 SVG、GIF、动画 WebP 和其他格式；WebP 解码后也必须只有一帧。
+- 原图宽高都不得超过 4096，像素总数不得超过 16,777,216。
+- 用户和管理员上传的图片必须已经是正方形；Provider 图片由服务端居中裁成正方形。
+- 服务端解码后统一生成 64、128、256、512 四种静态 WebP，质量为 85。
+- 不保存原图；重新编码会移除 EXIF、ICC、注释及其他非必要元数据。
 
-首版因此采用以下硬约束：
+浏览器提供固定 1:1 裁剪组件，支持拖动、缩放、90° 旋转、重置和圆形预览，输出最大 1024×1024 的正方形结果。原始选择文件只停留在浏览器内存，上传或取消后释放 Object URL、Canvas 和位图资源。浏览器裁剪是交互辅助，不能替代上述服务端校验。
 
-- 不提供任意 URL 导入接口。
-- 只接受 JPEG、PNG 和静态 WebP；首版拒绝 SVG、GIF、动画 WebP 和其他格式。
-- 先检查请求体上限和真实文件签名，再完整解码。
-- 限制宽高、总像素数和解码后内存预算。
-- 服务端统一重新编码为静态 WebP，删除 EXIF、ICC 注释及其他非必要元数据。
-- 生成 64、128、256 和 512 像素固定变体；不在读取请求中动态缩放。
-- 对象 key 由服务端随机值或内容摘要生成，客户端不能指定路径。
-- 所有上传、删除和管理员代操作均要求认证、CSRF、限流和审计。
+头像上传和删除要求已认证会话、CSRF 与 Redis 限流。上传和删除分别按目标用户与请求 IP 计数：每个目标用户 15 分钟最多 30 次，每个 IP 15 分钟最多 200 次。管理员代操作仍以目标用户作为限流 subject，并保留管理员 actor。
 
-## 3. 存储抽象
+为限制 4096×4096 解码、缩放和 WebP 编码的峰值内存，每个应用实例同时只接受一个用户或管理员头像处理任务；繁忙时在读取 multipart 内容前返回 `503` 和 `Retry-After: 2`。Provider 导入 worker 本身按单任务顺序处理，因此单实例不会被认证用户用并发大图突破既定内存边界。
 
-后端提供统一的 `AvatarStore` 接口，业务层不直接依赖文件系统或 S3 SDK：
+## 3. 存储配置
 
-```text
-Put(ctx, objectKey, contentType, bytes)
-Open(ctx, objectKey)
-Delete(ctx, objectKey)
-Health(ctx)
+后端通过统一的 `BlobStore` 使用 `Backend`、`Put`、`Get` 和 `Delete` 操作。存储选择属于静态部署配置，修改后必须重启对应应用和 maintenance 容器。
+
+### 3.1 本地存储
+
+原生二进制默认使用：
+
+```yaml
+media:
+  backend: local
+  local:
+    directory: data/media
 ```
 
-### 3.1 本地存储（默认）
+开发和生产 Compose 将目录显式设置为 `/var/lib/nyauth/media`，并挂载独立的命名 volume `media`。实际 Docker volume 名通常带 Compose project 前缀，应以 `docker compose config --volumes` 和 `docker volume inspect` 的结果为准。
 
-- 使用显式配置的持久化目录，例如 `/var/lib/nyauth/avatars`。
-- Docker Compose 挂载独立命名 volume；不得写入只读容器根文件系统。
-- 先写入同目录临时文件，校验完成后原子重命名。
-- 文件权限遵循最小权限，运行用户之外不可写。
-- 备份手册必须把头像目录与 PostgreSQL 引用放入同一次恢复证据。
+本地写入在目标目录内创建临时文件，完成写入、`fsync` 和关闭后再原子重命名。目录权限为 `0750`，路径解析会拒绝绝对路径、空路径、NUL 和逃逸存储根目录的 key。只读根文件系统不会承载头像数据。
 
-本地模式适合单实例。HA 部署不得让两个实例各自使用不共享的本地目录；应使用共享对象存储或明确受支持的共享文件系统。
+本地模式只适合单应用主机。`docker compose down` 会保留 `media` volume；`docker compose down -v` 会连同 PostgreSQL 和头像 volume 一起删除，因此不得作为普通停止命令。
 
-### 3.2 S3 兼容对象存储
+### 3.2 私有 S3 兼容存储
 
-- 支持 endpoint、region、bucket、path-style、TLS 和凭据文件。
-- 默认 bucket 为 private，服务端使用最小权限凭据，只允许指定 prefix 的读写删除。
-- 凭据属于部署级 secret，使用环境变量或 `*_FILE` 注入，不进入运行时设置数据库和管理 API。
-- endpoint、bucket 和凭据变更要求重启；图片尺寸、上传上限等运营策略以后可作为运行时设置。
-- 上传完成后记录 ETag/版本信息；不允许覆盖其他用户当前引用的对象。
+S3 配置字段与当前实现一致：
 
-首版不让浏览器直接使用对象存储上传凭据。若未来引入预签名直传，仍必须经过服务端签发、短 TTL、固定 key、内容长度限制，并在完成后由可信处理任务重新解码和转码，未经处理的对象不得展示。
-
-## 4. 数据模型
-
-新增独立头像记录，不再把任意地址写入 `users.avatar_url`：
-
-```text
-user_avatars
-  id
-  user_id
-  source (upload / provider)
-  storage_backend
-  object_prefix
-  content_digest
-  width
-  height
-  status (staging / active / replaced / failed)
-  created_at
-  replaced_at / deleted_at
+```yaml
+media:
+  backend: s3
+  s3:
+    endpoint: ""
+    region: ""
+    bucket: ""
+    prefix: "nyauth"
+    path_style: false
 ```
 
-用户表只保存当前 `avatar_id`。每次替换先创建 staging 记录并写入新对象，再在 PostgreSQL 事务中切换当前引用；事务成功后异步回收旧对象。这样对象存储失败不会破坏现有头像，数据库失败也不会提前删除旧内容。
+- `endpoint` 为空时使用 AWS SDK 的默认 S3 endpoint；自定义 endpoint 必须是无凭据、query 和 fragment 的绝对 HTTP(S) URL，生产环境强制 HTTPS。
+- `region`、`bucket`、access key ID 和 secret access key 必填；`prefix` 可为空；MinIO 等实现需要时可启用 `path_style`。
+- 凭据只能通过 `NYAUTH_MEDIA_S3_ACCESS_KEY_ID[_FILE]`、`NYAUTH_MEDIA_S3_SECRET_ACCESS_KEY[_FILE]` 和可选的 `NYAUTH_MEDIA_S3_SESSION_TOKEN[_FILE]` 注入，不能写进配置文件。
+- bucket 必须保持 private。浏览器不取得 S3 凭据或预签名上传地址，Nyauth 通过同源 `/media` 路由读取对象。
+- 凭据应只允许目标 bucket 中配置 prefix 下的读取、写入和删除；bucket 的默认加密、versioning、生命周期和恢复策略由对象存储平台配置。
 
-Provider 首次建号导入使用独立的持久化任务表。上游图片 URL 以 master key envelope encryption 保存，任务完成或最终失败后删除，日志和审计不得记录完整 URL。
+仓库中的 `docker-compose.media-s3.yml` 为单机生产 Compose 提供 S3 override；`docker-compose.ha.yml` 则直接强制 `NYAUTH_MEDIA_BACKEND=s3`。当前 Compose override 为 access key ID 和 secret access key 提供 secret 文件挂载；需要 session token 的平台应通过部署环境自己的受控 override 挂载并设置对应 `*_FILE`。
 
-对象存储与 PostgreSQL 无法组成分布式事务，因此需要有界的 orphan cleanup：
+存储后端不是已填充环境的在线迁移开关。每条头像记录都保存创建时的 `storage_backend`，运行实例只读取与自身已配置后端一致的对象；当前没有把既有本地头像自动迁移到 S3、或把 S3 头像迁回本地的工具。`serve` 和 `maintenance` 启动时会检查尚未完成物理清理的记录，只要仍有对象属于另一后端就明确拒绝启动。生产环境应在允许首次头像上传前确定后端，已有头像时不得只改配置强行切换。
 
-- 上传完成但数据库未引用的对象，在宽限期后删除。
-- 已解除引用的旧对象进入待删除队列并重试。
-- 清理任务使用 advisory lock，确保多实例每轮只有一个执行者。
+## 4. 数据与事务生命周期
 
-## 5. API 与展示地址
+`user_avatars` 保存头像元数据和对象变体，不保存图片二进制。记录包含用户、来源、状态、存储后端、对象前缀、四种变体、原始媒体类型与尺寸、内容 SHA-256，以及激活、替换、删除、失败和存储清理时间。
 
-建议契约：
+状态固定为：
+
+- `staging`：数据库已记录，变体仍在写入或等待激活。
+- `active`：当前用户正在使用；每个用户最多一条 active 记录。
+- `replaced`：已被新头像替换，等待或已经完成对象清理。
+- `deleted`：用户或管理员已移除，等待或已经完成对象清理。
+- `failed`：处理、写入或激活失败，等待清理可能已写入的对象。
+
+`users.current_avatar_id` 是当前头像引用，外键可延迟检查；用户删除后头像记录的 `user_id` 会变为 `NULL`，保留为可回收 orphan。历史 `users.avatar_url` 列已删除，不会抓取或迁移旧外部 URL。
+
+上传顺序为：
+
+1. 在 PostgreSQL 中提交 staging 记录。
+2. 写入四个不可变变体对象；部分写入失败时记录 failed，并尽力删除已写对象。
+3. 在新事务中锁定用户、激活新头像并把旧 active 记录标记为 replaced。
+4. 激活失败时独立保留 failed 状态，旧头像引用不受影响。
+
+PostgreSQL 与文件系统/S3 不能组成分布式事务，因此清理采用宽限期和可重试状态：
+
+- staging、failed、replaced、deleted 或失去用户引用的对象超过 15 分钟后才有资格清理。
+- `serve` 启动后立即执行一轮，之后每小时执行；`nyauth maintenance` 复用相同服务作为运维兜底。
+- PostgreSQL advisory lock 保证多实例每轮只有一个清理者；有界批次和 claim 防止重复处理。
+- 清理只处理与当前配置 `storage_backend` 相同的记录。对象删除成功后才写 `storage_deleted_at`；删除失败会释放 claim，留待下次重试。
+
+## 5. HTTP API 与缓存
+
+当前接口为：
 
 ```text
 POST   /api/me/avatar
@@ -113,58 +122,66 @@ DELETE /api/admin/users/{id}/avatar
 GET    /media/avatars/{avatar_id}/{size}.webp
 ```
 
-- 上传使用 `multipart/form-data`，首版单文件且有严格大小上限。
-- 用户和管理员接口返回受控的相对媒体地址或 avatar ID，不返回对象存储 endpoint、bucket 或 key。
-- 管理员代替用户更新头像属于中风险 mutation，应写明 actor 和目标用户。
-- 媒体响应固定 `Content-Type: image/webp`，附带 `X-Content-Type-Options: nosniff`。
-- 对象不可变并使用内容版本化路径，但考虑删除与隐私语义，首版缓存最长 24 小时。
-- 删除或替换头像后，用户资料返回新版本地址；旧缓存不影响当前引用。
+上传和删除成功都返回更新后的用户 DTO。用户资料中的 `avatar_url` 默认指向 256 像素变体；调用方不能指定 avatar ID、object key、bucket、endpoint 或展示 URL。
 
-本地模式由应用直接提供 `/media`。对象存储模式可以由应用流式读取，也可以重定向到配置中受信任的固定 CDN 基址；无论哪种方式，主机和路径前缀都由管理员配置，用户不能影响。
+媒体读取只接受 64、128、256、512 四种尺寸，只提供状态仍为 active 的头像。无效 ID、尺寸、非 active 记录或缺失对象返回 404；存储后端故障返回 503，但不影响登录、OAuth/OIDC 和全局 `/readyz`。
 
-## 6. 外部身份头像与旧数据
+成功响应固定为：
 
-Provider 返回的头像 URL 不能直接成为展示地址。每个 Provider 提供 `import_avatar` 开关，默认关闭；开启后只在该 Provider 首次创建本地账号时由后台任务导入，后续登录不持续同步，也绝不覆盖用户主动上传的头像。导入必须满足：
+```text
+Content-Type: image/webp
+X-Content-Type-Options: nosniff
+Cache-Control: public, max-age=86400, immutable
+```
 
-- GitHub 和 Google 只允许代码内置的受信图片主机；通用 OIDC 必须显式配置图片主机 allowlist。
-- 每次请求重新解析 DNS，拒绝 loopback、link-local、私网和云元数据地址。
-- 限制重定向次数，并对每次跳转重复校验目标。
-- 限制下载字节数、超时和响应类型。
-- 下载后仍走同一解码、重编码和元数据清理管线。
+对象地址包含随机 avatar ID，替换后用户 DTO 会返回新地址。最长 24 小时的公共缓存不会让旧对象重新成为当前引用；删除后的旧 URL 不再由数据库作为 active 媒体提供，但浏览器或中间缓存已经保存的副本最多可能继续存在 24 小时。
 
-现有任意 `avatar_url` 不由后台抓取迁移，因为这会把历史用户输入转换成 SSRF 来源。升级后全部停止展示并清空引用，用户需要重新上传。
+## 6. Provider 首次头像导入
 
-## 7. 浏览器裁剪
+每个 Provider 有 `import_avatar` 开关，默认关闭。开启后只在该外部身份第一次创建本地用户时异步导入；绑定到已有用户、后续登录和 Provider 资料变化都不会持续同步，也不会覆盖用户主动上传的头像。
 
-裁剪属于首版必需能力，而不是后续视觉增强：
+允许主机规则固定为：
 
-- 固定 1:1 选区，支持拖动、缩放、90 度旋转、重置和圆形预览。
-- 原图只存在于浏览器内存；上传或取消后释放 Object URL 与 Canvas。
-- 浏览器输出最大 1024×1024 的正方形结果，服务端仍重新校验、解码和编码。
-- 服务端拒绝绕过页面直接提交的非正方形用户头像；Provider 图片可由可信处理管线居中裁切。
-- 不提供滤镜、美颜、人脸识别、背景移除或其他内容生成能力。
+- GitHub：代码内置 `avatars.githubusercontent.com`，管理配置不得另传 allowlist。
+- Google：代码内置 `lh3.googleusercontent.com`，管理配置不得另传 allowlist。
+- 通用 OIDC：必须配置至少一个精确的公共 ASCII DNS 主机名；拒绝 IP、localhost、通配符、端口、URL、单标签名称和包含路径的值。
 
-## 8. 审计、限流与可观测性
+Provider 返回的完整上游 URL 使用 master key envelope encryption 保存，AAD 绑定 job、Provider 和用户。任务完成或最终失败后立即清空密文；日志、审计和 `last_error` 只保留有界错误类别，不记录完整 URL。
 
-新增审计事件：
+异步 worker 在多实例中使用 PostgreSQL `FOR UPDATE SKIP LOCKED` 和 processing lease 领取任务。单任务超时 20 秒，最多尝试 4 次，临时错误按 1 分钟、5 分钟、30 分钟退避。最终失败只保留首字母头像，不阻塞建号或登录。
+
+远程获取的安全边界为：
+
+- 仅 HTTPS，端口只能省略或为 443，不允许 URL credentials 和 fragment。
+- 主机必须精确匹配 allowlist；每次跳转都重新执行 URL、主机和 DNS 检查，最多 5 次重定向。
+- DNS 返回的全部地址都必须是公网地址；拒绝 loopback、私网、link-local、云元数据、文档和保留地址。
+- 实际 TCP 连接固定到已经校验的 IP，TLS ServerName 仍使用原主机，阻断解析后换址的 DNS rebinding。
+- 下载仍受 8 MiB、超时和同一图片处理管线限制。
+- 如果任务完成前用户已有头像，Provider 结果会被拒绝激活并清理，不覆盖用户选择。
+
+## 7. 审计与可观测性
+
+已实现审计事件：
 
 - `user.avatar_updated`
 - `user.avatar_removed`
 - `admin.user_avatar_updated`
 - `admin.user_avatar_removed`
+- `provider.avatar_imported`
+- `provider.avatar_import_failed`
 
-审计只记录用户、actor、结果、处理后的尺寸和存储后端类别，不记录原始文件内容、对象存储凭据或完整内部 key。
+用户和管理员上传/删除事件由 mutation audit 记录 actor、目标用户、结果与风险；Provider 导入事件另外记录 Provider ID 和有界原因。所有事件都不会记录图片内容、凭据、完整 object key 或 Provider 上游 URL。
 
-建议指标保持低基数：上传结果、拒绝原因类别、处理耗时、存储错误、待清理对象数量和总存储字节数。标签不得包含用户 ID、文件名、对象 key 或内容摘要。
+低基数指标包括头像操作结果、处理耗时、按后端和操作分类的存储错误，以及等待清理的记录数。标签不会包含用户 ID、文件名、object key、内容摘要或上游主机。管理员系统状态通过 `services.media` 返回 `backend`、`configured`、`status` 和最近错误时间。
 
-## 9. 实施顺序与验收
+媒体存储故障会让管理系统状态变为 degraded，并使头像上传或读取返回 503。删除以 PostgreSQL 中解除当前引用为成功边界；若同步对象删除失败，API 仍返回更新后的无头像用户，存储错误进入指标并由后台清理重试。媒体故障不会进入 `/readyz`，因此不会因为非核心头像依赖而下线登录与 OAuth/OIDC 服务。
 
-1. 新增安全图片处理器和本地 `AvatarStore`，关闭任意 URL 写入。
-2. 增加用户上传/删除、管理员代操作、同源媒体读取和旧对象清理。
-3. 增加 S3 兼容实现、私有 bucket 配置与 HA 测试。
-4. 更新个人资料和用户管理 UI，并交付首版裁剪、预览和上传流程。
-5. 更新备份恢复、单机部署、HA 和生产安全文档。
+## 8. 运维要求
 
-验收至少覆盖：伪造 MIME、SVG/动画拒绝、超大像素、畸形图片、EXIF 清理、并发替换、数据库回滚、对象存储失败、孤儿回收、跨用户对象隔离、S3 丢失通知/重试，以及浏览器不会请求用户提供的外部主机。
+- 本地模式必须备份 Compose `media` volume，并与 PostgreSQL 恢复点共同验证。
+- S3 bucket 必须私有，建议启用 versioning；生命周期只能清理 noncurrent 版本和 delete marker，不得按对象年龄删除仍可能被数据库引用的当前版本。
+- 恢复期间应先恢复 PostgreSQL 与匹配的本地目录或 S3 prefix，再启动 `serve`，避免后台清理在恢复尚未完成时处理对象。
+- 恢复抽查必须从数据库选择 active avatar ID，并验证 64、128、256、512 四种同源地址都返回有效静态 WebP。
+- HA 部署必须使用所有实例共享的同一私有 S3 bucket、prefix 和凭据边界；不得为每个实例配置独立本地目录。
 
-在该能力完成前，生产部署应把头像字段留空，或只允许管理员填写自身控制域名下的静态不可变资源；不应向普通用户开放任意头像 URL。
+具体命令、versioning/lifecycle 边界和恢复证据见 [备份与恢复手册](operations/backup-restore.md)、[单机远程部署手册](operations/single-host-deployment.md) 与 [高可用部署](operations/high-availability.md)。

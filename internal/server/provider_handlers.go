@@ -14,6 +14,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/nyasharp/nyauth/internal/audit"
+	"github.com/nyasharp/nyauth/internal/avatar"
 	"github.com/nyasharp/nyauth/internal/crypto"
 	"github.com/nyasharp/nyauth/internal/identity"
 	"github.com/nyasharp/nyauth/internal/provider"
@@ -395,20 +396,26 @@ func (s *Server) finishExternalLogin(w http.ResponseWriter, r *http.Request, pro
 			display = providerName + " user"
 		}
 		current = &models.User{ID: uuid.New(), Username: externalUsername(providerName, external), DisplayName: &display, Status: models.UserStatusActive, Role: "user", AuthVersion: 1, SessionVersion: 1, Metadata: map[string]string{}}
-		if external.AvatarURL != "" {
-			current.AvatarURL = &external.AvatarURL
-		}
 		if external.EmailVerified && external.Email != "" {
 			current.Email = &external.Email
 		}
 		binding = identityFromExternal(providerName, current.ID, external)
-		err = s.identityStore.CreateUserAndIdentity(r.Context(), current, binding)
+		var createOptions []identity.CreateUserAndIdentityOptions
+		if policy, ok := s.providerMgr.AvatarPolicy(providerName); ok && policy.Enabled && strings.TrimSpace(external.AvatarURL) != "" {
+			job, jobErr := avatar.NewProviderImportJob(s.cfg.Auth.MasterKey, "primary", policy.ProviderID, current.ID, external.AvatarURL, time.Now().UTC())
+			if jobErr != nil {
+				s.telemetry.RecordProviderEvent(r.Context(), "avatar_import", "enqueue", "failure", "encryption_failed", -1)
+			} else {
+				createOptions = append(createOptions, identity.CreateUserAndIdentityOptions{AvatarImportJob: job})
+			}
+		}
+		err = s.identityStore.CreateUserAndIdentity(r.Context(), current, binding, createOptions...)
 		if identity.IsUserEmailConflict(err) {
 			// A verified upstream email is identity evidence, not authority to
 			// merge with an existing local account. Keep it on the identity and
 			// retry the independent local account with no users.email value.
 			current.Email = nil
-			err = s.identityStore.CreateUserAndIdentity(r.Context(), current, binding)
+			err = s.identityStore.CreateUserAndIdentity(r.Context(), current, binding, createOptions...)
 		}
 		if err != nil {
 			binding, err = s.identityStore.FindByExternal(r.Context(), providerName, external.ID)
@@ -449,7 +456,7 @@ func (s *Server) finishExternalLogin(w http.ResponseWriter, r *http.Request, pro
 }
 
 func (s *Server) handleAdminListProviders(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.db.Query(r.Context(), `SELECT id,name,type,client_id,scopes,discovery_url,authorization_url,token_url,userinfo_url,enabled,revision,metadata,created_at,updated_at FROM oauth_providers ORDER BY name`)
+	rows, err := s.db.Query(r.Context(), `SELECT id,name,type,client_id,scopes,discovery_url,authorization_url,token_url,userinfo_url,enabled,import_avatar,avatar_allowed_hosts,revision,metadata,created_at,updated_at FROM oauth_providers ORDER BY name`)
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "failed to list providers")
 		return
@@ -458,7 +465,7 @@ func (s *Server) handleAdminListProviders(w http.ResponseWriter, r *http.Request
 	items := make([]models.ExternalProvider, 0)
 	for rows.Next() {
 		var item models.ExternalProvider
-		if err := rows.Scan(&item.ID, &item.Name, &item.Type, &item.ClientID, &item.Scopes, &item.DiscoveryURL, &item.AuthorizationURL, &item.TokenURL, &item.UserinfoURL, &item.Enabled, &item.Revision, &item.Metadata, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.Name, &item.Type, &item.ClientID, &item.Scopes, &item.DiscoveryURL, &item.AuthorizationURL, &item.TokenURL, &item.UserinfoURL, &item.Enabled, &item.ImportAvatar, &item.AvatarAllowedHosts, &item.Revision, &item.Metadata, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			writeAPIError(w, http.StatusInternalServerError, "failed to list providers")
 			return
 		}
@@ -476,6 +483,9 @@ func validateProviderRequest(request models.CreateProviderRequest) error {
 	}
 	if request.Enabled == nil {
 		return errors.New("enabled must be explicitly set")
+	}
+	if _, err := provider.NormalizeAvatarPolicy(request.Type, request.ImportAvatar, request.AvatarAllowedHosts); err != nil {
+		return err
 	}
 	if strings.TrimSpace(request.ClientID) == "" || request.ClientSecret == "" {
 		return errors.New("client_id and client_secret are required")
@@ -496,7 +506,7 @@ func validateProviderRequest(request models.CreateProviderRequest) error {
 func emptyProviderUpdate(request models.UpdateProviderRequest) bool {
 	return request.ClientID == nil && request.ClientSecret == nil && request.Scopes == nil &&
 		request.DiscoveryURL == nil && request.AuthorizationURL == nil && request.TokenURL == nil &&
-		request.UserinfoURL == nil && request.Enabled == nil
+		request.UserinfoURL == nil && request.Enabled == nil && request.ImportAvatar == nil && request.AvatarAllowedHosts == nil
 }
 
 func (s *Server) handleAdminCreateProvider(w http.ResponseWriter, r *http.Request) {
@@ -516,7 +526,11 @@ func (s *Server) handleAdminCreateProvider(w http.ResponseWriter, r *http.Reques
 	}
 	created, err := s.providerMgr.CreateProvider(r.Context(), request, mutation)
 	if err != nil {
-		writeAPIError(w, http.StatusConflict, "failed to create provider")
+		if errors.Is(err, provider.ErrInvalidAvatarPolicy) {
+			writeAPIError(w, http.StatusBadRequest, err.Error())
+		} else {
+			writeAPIError(w, http.StatusConflict, "failed to create provider")
+		}
 		return
 	}
 	writeJSON(w, http.StatusCreated, created)
@@ -563,6 +577,8 @@ func (s *Server) handleAdminUpdateProvider(w http.ResponseWriter, r *http.Reques
 	if err != nil {
 		if errors.Is(err, provider.ErrProviderNotFound) {
 			writeAPIError(w, http.StatusNotFound, "provider not found")
+		} else if errors.Is(err, provider.ErrInvalidAvatarPolicy) {
+			writeAPIError(w, http.StatusBadRequest, err.Error())
 		} else {
 			writeAPIError(w, http.StatusConflict, "provider configuration could not be updated")
 		}

@@ -257,7 +257,7 @@ func (s *Service) AdminUpdate(ctx context.Context, id uuid.UUID, req models.Admi
 }
 
 func validateAdminUpdateAudit(req models.AdminUpdateUserRequest, mutation audit.MutationAudit) error {
-	profileFieldsPresent := req.Email != nil || req.DisplayName != nil || req.AvatarURL != nil || req.Metadata != nil
+	profileFieldsPresent := req.Email != nil || req.DisplayName != nil || req.Metadata != nil
 	switch mutation.Event {
 	case models.AuditUserUpdated:
 		if req.Role != nil || req.Status != nil {

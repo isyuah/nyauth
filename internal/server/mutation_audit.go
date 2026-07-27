@@ -134,6 +134,10 @@ func describeMutation(r *http.Request, actor *models.User) (mutationAuditDescrip
 		return userMutation(models.AuditUserLogout, actor, false), true
 	case r.Method == http.MethodPut && path == "/api/me":
 		return userMutation(models.AuditUserProfileUpdated, actor, false), true
+	case r.Method == http.MethodPost && path == "/api/me/avatar":
+		return userMutation(models.AuditUserAvatarUpdated, actor, false), true
+	case r.Method == http.MethodDelete && path == "/api/me/avatar":
+		return userMutation(models.AuditUserAvatarRemoved, actor, false), true
 	case r.Method == http.MethodPost && path == "/api/me/password":
 		return highRiskUserMutation(models.AuditUserPasswordChanged, actor), true
 	case r.Method == http.MethodPost && path == "/api/me/password/set":
@@ -179,6 +183,10 @@ func describeMutation(r *http.Request, actor *models.User) (mutationAuditDescrip
 		return mutationAuditDescriptor{event: models.AuditUserPasswordReset, targetType: "user", targetID: param("id"), riskLevel: "high", successAlreadyAudited: true}, true
 	case r.Method == http.MethodDelete && strings.HasSuffix(path, "/sessions") && strings.HasPrefix(path, "/api/admin/users/"):
 		return mutationAuditDescriptor{event: models.AuditUserSessionsRevoked, targetType: "user", targetID: param("id"), riskLevel: "high", successAlreadyAudited: true}, true
+	case r.Method == http.MethodPost && strings.HasSuffix(path, "/avatar") && strings.HasPrefix(path, "/api/admin/users/"):
+		return mutationAuditDescriptor{event: models.AuditAdminUserAvatarUpdated, targetType: "user", targetID: param("id"), riskLevel: "medium"}, true
+	case r.Method == http.MethodDelete && strings.HasSuffix(path, "/avatar") && strings.HasPrefix(path, "/api/admin/users/"):
+		return mutationAuditDescriptor{event: models.AuditAdminUserAvatarRemoved, targetType: "user", targetID: param("id"), riskLevel: "medium"}, true
 	case r.Method == http.MethodPut && strings.HasPrefix(path, "/api/admin/users/"):
 		return mutationAuditDescriptor{event: models.AuditUserUpdated, targetType: "user", targetID: param("id"), riskLevel: "high", successAlreadyAudited: true}, true
 	case r.Method == http.MethodDelete && param("identity_id") != "" && strings.Contains(path, "/identities/") && strings.HasPrefix(path, "/api/admin/users/"):

@@ -31,6 +31,8 @@
     token_url: string;
     userinfo_url: string;
     enabled: boolean;
+    import_avatar: boolean;
+    avatar_allowed_hosts: string;
   };
   type ProviderEditForm = Omit<ProviderForm, 'name' | 'type'>;
 
@@ -65,8 +67,8 @@
   let showEdit = $state(false);
   let editingProvider = $state<ExternalProvider | null>(null);
   let editing = $state(false);
-  let editForm = $state<ProviderEditForm>({ client_id: '', client_secret: '', scopes: '', discovery_url: '', authorization_url: '', token_url: '', userinfo_url: '', enabled: true });
-  let newProvider = $state<ProviderForm>({ name: '', type: 'github', client_id: '', client_secret: '', scopes: '', discovery_url: '', authorization_url: '', token_url: '', userinfo_url: '', enabled: true });
+  let editForm = $state<ProviderEditForm>({ client_id: '', client_secret: '', scopes: '', discovery_url: '', authorization_url: '', token_url: '', userinfo_url: '', enabled: true, import_avatar: false, avatar_allowed_hosts: '' });
+  let newProvider = $state<ProviderForm>({ name: '', type: 'github', client_id: '', client_secret: '', scopes: '', discovery_url: '', authorization_url: '', token_url: '', userinfo_url: '', enabled: true, import_avatar: false, avatar_allowed_hosts: '' });
   let createError = $state('');
   let editError = $state('');
   let testResults = $state<Record<string, ProviderTestState>>({});
@@ -133,14 +135,20 @@
         authorization_url: newProvider.authorization_url.trim() || undefined,
         token_url: newProvider.token_url.trim() || undefined,
         userinfo_url: newProvider.userinfo_url.trim() || undefined,
+        import_avatar: newProvider.import_avatar,
+        avatar_allowed_hosts: newProvider.type === 'generic' ? parseTokenList(newProvider.avatar_allowed_hosts) : [],
       };
       if (newProvider.type === 'generic' && !payload.discovery_url) {
         createError = '通用 OIDC Provider 必须填写 HTTPS Discovery URL。';
         return;
       }
+      if (newProvider.type === 'generic' && newProvider.import_avatar && payload.avatar_allowed_hosts?.length === 0) {
+        createError = '通用 OIDC 开启头像导入时必须填写至少一个精确图片主机。';
+        return;
+      }
       await api.admin.createProvider(payload);
       showCreate = false;
-      newProvider = { name: '', type: 'github', client_id: '', client_secret: '', scopes: '', discovery_url: '', authorization_url: '', token_url: '', userinfo_url: '', enabled: true };
+      newProvider = { name: '', type: 'github', client_id: '', client_secret: '', scopes: '', discovery_url: '', authorization_url: '', token_url: '', userinfo_url: '', enabled: true, import_avatar: false, avatar_allowed_hosts: '' };
       await loadProviders();
     } catch (cause) {
       createError = cause instanceof Error ? cause.message : '创建失败';
@@ -175,6 +183,8 @@
       token_url: provider.token_url || '',
       userinfo_url: provider.userinfo_url || '',
       enabled: provider.enabled,
+      import_avatar: provider.import_avatar,
+      avatar_allowed_hosts: provider.avatar_allowed_hosts.join('\n'),
     };
     editError = '';
     showEdit = true;
@@ -204,8 +214,14 @@
       token_url: editForm.token_url.trim(),
       userinfo_url: editForm.userinfo_url.trim(),
       enabled: editForm.enabled,
+      import_avatar: editForm.import_avatar,
+      avatar_allowed_hosts: editingProvider.type === 'generic' ? parseTokenList(editForm.avatar_allowed_hosts) : [],
     };
     if (discoveryURL) payload.discovery_url = discoveryURL;
+    if (editingProvider.type === 'generic' && editForm.import_avatar && payload.avatar_allowed_hosts?.length === 0) {
+      editError = '通用 OIDC 开启头像导入时必须填写至少一个精确图片主机。';
+      return;
+    }
     if (editForm.client_secret) payload.client_secret = editForm.client_secret;
     editing = true;
     editError = '';
@@ -292,7 +308,7 @@
           <div class="flex flex-col justify-between gap-4 lg:flex-row lg:items-start">
             <div class="flex items-center gap-3">
               <span class="flex h-11 w-11 items-center justify-center rounded-nya-md bg-nya-surface-muted"><KeyRound size={20} color={typeColors[provider.type] || 'var(--nya-text-secondary)'} /></span>
-              <div><h2 class="text-card-title text-nya-text-primary">{provider.name}</h2><div class="mt-1 flex flex-wrap items-center gap-2"><Badge variant="info">{typeLabels[provider.type] || provider.type}</Badge><Badge variant={provider.enabled ? 'success' : 'default'}>{provider.enabled ? '已启用' : '已禁用'}</Badge><span class="text-micro text-nya-text-tertiary">配置修订 #{provider.revision}</span></div></div>
+              <div><h2 class="text-card-title text-nya-text-primary">{provider.name}</h2><div class="mt-1 flex flex-wrap items-center gap-2"><Badge variant="info">{typeLabels[provider.type] || provider.type}</Badge><Badge variant={provider.enabled ? 'success' : 'default'}>{provider.enabled ? '已启用' : '已禁用'}</Badge>{#if provider.import_avatar}<Badge variant="warning">首次导入头像</Badge>{/if}<span class="text-micro text-nya-text-tertiary">配置修订 #{provider.revision}</span></div></div>
             </div>
             <div class="flex flex-wrap items-center gap-2">
               <Button variant="ghost" size="sm" onclick={() => openEdit(provider)}>编辑配置</Button>
@@ -309,6 +325,7 @@
             <div><dt class="text-nya-text-tertiary">Authorization URL</dt><dd class="break-all font-mono text-nya-text-primary">{provider.authorization_url || '由 Provider 默认或 Discovery 决定'}</dd></div>
             <div><dt class="text-nya-text-tertiary">Token URL</dt><dd class="break-all font-mono text-nya-text-primary">{provider.token_url || '由 Provider 默认或 Discovery 决定'}</dd></div>
             <div class="md:col-span-2"><dt class="text-nya-text-tertiary">Userinfo URL</dt><dd class="break-all font-mono text-nya-text-primary">{provider.userinfo_url || '由 Provider 默认或 Discovery 决定'}</dd></div>
+            <div class="md:col-span-2"><dt class="text-nya-text-tertiary">首次头像导入</dt><dd class="text-nya-text-primary">{provider.import_avatar ? (provider.type === 'generic' ? `已启用 · ${provider.avatar_allowed_hosts.join(', ')}` : '已启用 · 使用内置安全主机') : '关闭（默认）'}</dd></div>
           </dl>
 
           {#if test && !test.loading}
@@ -348,6 +365,8 @@
     <Input id="provider-discovery" label="Discovery URL" bind:value={newProvider.discovery_url} required={newProvider.type === 'generic'} placeholder="https://idp.example.com/.well-known/openid-configuration" />
     <div class="grid gap-4 sm:grid-cols-2"><Input id="provider-authorization-url" label="Authorization URL" bind:value={newProvider.authorization_url} placeholder="可选，自定义授权端点" /><Input id="provider-token-url" label="Token URL" bind:value={newProvider.token_url} placeholder="可选，自定义 Token 端点" /></div>
     <Input id="provider-userinfo-url" label="Userinfo URL" bind:value={newProvider.userinfo_url} placeholder="可选，自定义 Userinfo 端点" />
+    <label class="flex items-start gap-2 rounded-nya-sm bg-nya-surface-muted px-3 py-2"><input type="checkbox" bind:checked={newProvider.import_avatar} class="mt-0.5" /><span><span class="block text-body text-nya-text-primary">首次建号时导入上游头像</span><span class="block text-small text-nya-text-tertiary">默认关闭；仅首次创建本地账号时异步转存，之后不会同步或覆盖用户头像。</span></span></label>
+    {#if newProvider.import_avatar && newProvider.type === 'generic'}<Input id="provider-avatar-hosts" label="允许的图片主机" bind:value={newProvider.avatar_allowed_hosts} mono placeholder="images.example.com（每行一个精确主机）" />{:else if newProvider.import_avatar}<p class="rounded-nya-sm bg-nya-info-soft px-3 py-2 text-small text-nya-info">GitHub / Google 使用内置图片主机 allowlist，不接受自定义地址。</p>{/if}
     <label class="flex items-start gap-2 rounded-nya-sm bg-nya-surface-muted px-3 py-2"><input type="checkbox" bind:checked={newProvider.enabled} class="mt-0.5" /><span><span class="block text-body text-nya-text-primary">创建后立即启用</span><span class="block text-small text-nya-text-tertiary">关闭时，配置会以禁用状态一次性保存，不会进入登录运行时。</span></span></label>
     {#if callbackURL(newProvider.name)}<div class="rounded-nya-sm bg-nya-info-soft px-3 py-2 text-small text-nya-info">在上游设置 Callback URL：<code class="mt-1 block break-all">{callbackURL(newProvider.name)}</code></div>{/if}
     <div class="flex justify-end gap-2 pt-2"><Button variant="secondary" onclick={() => (showCreate = false)} disabled={creating}>取消</Button><Button type="submit" variant="primary" loading={creating}>添加</Button></div>
@@ -364,6 +383,8 @@
     <Input id="edit-provider-discovery" label="Discovery URL" bind:value={editForm.discovery_url} required={editingProvider?.type === 'generic'} />
     <div class="grid gap-4 sm:grid-cols-2"><Input id="edit-provider-authorization-url" label="Authorization URL" bind:value={editForm.authorization_url} placeholder="留空以使用默认值" /><Input id="edit-provider-token-url" label="Token URL" bind:value={editForm.token_url} placeholder="留空以使用默认值" /></div>
     <Input id="edit-provider-userinfo-url" label="Userinfo URL" bind:value={editForm.userinfo_url} placeholder="留空以使用默认值" />
+    <label class="flex items-start gap-2 rounded-nya-sm bg-nya-surface-muted px-3 py-2"><input type="checkbox" bind:checked={editForm.import_avatar} class="mt-0.5" /><span><span class="block text-body text-nya-text-primary">首次建号时导入上游头像</span><span class="block text-small text-nya-text-tertiary">只影响以后首次通过此 Provider 创建的账号。</span></span></label>
+    {#if editForm.import_avatar && editingProvider?.type === 'generic'}<Input id="edit-provider-avatar-hosts" label="允许的图片主机" bind:value={editForm.avatar_allowed_hosts} mono placeholder="images.example.com（每行一个精确主机）" />{:else if editForm.import_avatar}<p class="rounded-nya-sm bg-nya-info-soft px-3 py-2 text-small text-nya-info">此 Provider 使用内置图片主机 allowlist。</p>{/if}
     <label class="flex items-start gap-2 rounded-nya-sm bg-nya-surface-muted px-3 py-2"><input type="checkbox" bind:checked={editForm.enabled} class="mt-0.5" /><span><span class="block text-body text-nya-text-primary">启用 Provider</span><span class="block text-small text-nya-text-tertiary">禁用后会立即从运行时 Provider 快照移除。</span></span></label>
     <div class="flex justify-end gap-2 pt-2"><Button variant="secondary" onclick={() => (showEdit = false)} disabled={editing}>取消</Button><Button type="submit" variant="primary" loading={editing}>保存</Button></div>
   </form>

@@ -19,11 +19,13 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nyasharp/nyauth/internal/account"
 	"github.com/nyasharp/nyauth/internal/audit"
 	"github.com/nyasharp/nyauth/internal/auth"
 	"github.com/nyasharp/nyauth/internal/authorization"
+	"github.com/nyasharp/nyauth/internal/avatar"
 	"github.com/nyasharp/nyauth/internal/client"
 	"github.com/nyasharp/nyauth/internal/config"
 	"github.com/nyasharp/nyauth/internal/crypto"
@@ -38,6 +40,7 @@ import (
 	"github.com/nyasharp/nyauth/internal/stats"
 	"github.com/nyasharp/nyauth/internal/telemetry"
 	"github.com/nyasharp/nyauth/internal/user"
+	"github.com/nyasharp/nyauth/pkg/models"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -70,8 +73,14 @@ type Server struct {
 	accountService      accountActionService
 	accountLimiter      *AccountActionLimiter
 	mailSettingsLimiter *MailSettingsLimiter
+	avatarLimiter       *AvatarLimiter
 	mailManager         *mailruntime.Manager
 	mfaService          *mfa.Service
+	avatarService       *avatar.Service
+	avatarRepository    *avatar.Repository
+	avatarStore         avatar.BlobStore
+	avatarImportWorker  *avatar.ImportWorker
+	avatarProcessing    chan struct{}
 	emailDispatcher     *account.Dispatcher
 	readiness           readinessState
 }
@@ -94,6 +103,28 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 	jwkManager := auth.NewJWKManager(db, cfg.Auth.JWK.KeySize, cfg.Auth.JWK.RotationInterval)
 	tokenService := auth.NewTokenService(jwkManager, sessionStore, cfg.Auth.Issuer, cfg.Auth.AccessTokenTTL, cfg.Auth.RefreshTokenTTL)
 	providerMgr := provider.NewManager(db, cfg.Auth.MasterKey, cfg.IsProduction())
+	avatarRepository := avatar.NewRepository(db)
+	var avatarStore avatar.BlobStore
+	mediaInitCtx, cancelMediaInit := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancelMediaInit()
+	switch cfg.Media.Backend {
+	case "local":
+		avatarStore, err = avatar.NewLocalStore(cfg.Media.Local.Directory)
+	case "s3":
+		avatarStore, err = avatar.NewS3Store(mediaInitCtx, cfg.Media.S3)
+	default:
+		err = fmt.Errorf("unsupported media backend %q", cfg.Media.Backend)
+	}
+	if err != nil {
+		return nil, fmt.Errorf("configuring avatar media storage: %w", err)
+	}
+	if err := avatarRepository.EnsureStorageBackendCompatible(mediaInitCtx, avatarStore.Backend()); err != nil {
+		return nil, fmt.Errorf("validating avatar media storage: %w", err)
+	}
+	avatarService, err := avatar.NewService(avatarRepository, avatarStore, avatar.NewProcessor())
+	if err != nil {
+		return nil, fmt.Errorf("configuring avatar media service: %w", err)
+	}
 	authHandler := auth.NewHandler(tokenService, jwkManager, userService, clientStore, sessionStore, cfg)
 	consentHandler := auth.NewConsentHandler(sessionStore, tokenService, clientStore, authorizationStore, cfg)
 	mfaService, err := mfa.NewService(db, mfa.Options{
@@ -106,7 +137,7 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 	if err != nil {
 		return nil, fmt.Errorf("configuring MFA service: %w", err)
 	}
-	s := &Server{cfg: cfg, db: db, rdb: rdb, webFS: webFS, trustedProxies: parseTrustedProxyCIDRs(cfg.Server.TrustedProxyCIDRs), userService: userService, clientService: clientService, providerMgr: providerMgr, identityStore: identityStore, sessionStore: sessionStore, tokenService: tokenService, jwkManager: jwkManager, authHandler: authHandler, consentHandler: consentHandler, sessionMiddleware: NewSessionMiddleware(sessionStore, cfg.Server.SecureCookie), loginLimiter: NewLoginLimiter(rdb), accountLimiter: NewAccountActionLimiter(rdb), mailSettingsLimiter: NewMailSettingsLimiter(rdb), auditStore: audit.NewStore(db), authorizationStore: authorizationStore, statsHandler: stats.NewHandler(db, rdb), settingsMgr: settings.NewManagerForRP(db, settings.Branding{Title: cfg.Web.Title, LogoURL: cfg.Web.LogoURL}, passkeyRPID), inviteStore: invite.NewStore(db), registrationStore: registration.NewStore(db), telemetry: telemetryRuntime, mfaService: mfaService}
+	s := &Server{cfg: cfg, db: db, rdb: rdb, webFS: webFS, trustedProxies: parseTrustedProxyCIDRs(cfg.Server.TrustedProxyCIDRs), userService: userService, clientService: clientService, providerMgr: providerMgr, identityStore: identityStore, sessionStore: sessionStore, tokenService: tokenService, jwkManager: jwkManager, authHandler: authHandler, consentHandler: consentHandler, sessionMiddleware: NewSessionMiddleware(sessionStore, cfg.Server.SecureCookie), loginLimiter: NewLoginLimiter(rdb), accountLimiter: NewAccountActionLimiter(rdb), mailSettingsLimiter: NewMailSettingsLimiter(rdb), avatarLimiter: NewAvatarLimiter(rdb), auditStore: audit.NewStore(db), authorizationStore: authorizationStore, statsHandler: stats.NewHandler(db, rdb), settingsMgr: settings.NewManagerForRP(db, settings.Branding{Title: cfg.Web.Title, LogoURL: cfg.Web.LogoURL}, passkeyRPID), inviteStore: invite.NewStore(db), registrationStore: registration.NewStore(db), telemetry: telemetryRuntime, mfaService: mfaService, avatarService: avatarService, avatarRepository: avatarRepository, avatarStore: avatarStore, avatarProcessing: make(chan struct{}, 1)}
 	if err := telemetryRuntime.BindPoolObservers(db, rdb); err != nil {
 		return nil, fmt.Errorf("configuring dependency pool metrics: %w", err)
 	}
@@ -129,6 +160,33 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 		hostname = "nyauth"
 	}
 	workerPrefix := fmt.Sprintf("%s-%d", hostname, os.Getpid())
+	avatarImportWorker, err := avatar.NewImportWorker(avatarRepository, avatarService, avatar.ImportWorkerOptions{
+		WorkerID:   workerPrefix + "-avatar-import",
+		MasterKeys: map[string][]byte{"primary": cfg.Auth.MasterKey},
+		Policy: func(providerID uuid.UUID) (avatar.ImportPolicy, bool) {
+			policy, ok := providerMgr.AvatarPolicyByID(providerID)
+			return avatar.ImportPolicy{Enabled: policy.Enabled, AllowedHosts: policy.AllowedHosts}, ok
+		},
+		OnResult: func(ctx context.Context, job models.ProviderAvatarImportJob, result, reason string, duration time.Duration) {
+			telemetryRuntime.RecordAvatarOperation(ctx, "provider_import", result, reason, duration)
+			if result != "success" && result != "failure" {
+				return
+			}
+			event := models.AuditProviderAvatarImported
+			risk := "low"
+			if result == "failure" {
+				event = models.AuditProviderAvatarFailed
+				risk = "medium"
+			}
+			s.enqueueAuditTargetResult(ctx, event, nil, "", "user", job.UserID.String(), result, risk, "", "", map[string]any{
+				"provider_id": job.ProviderID.String(), "reason": reason,
+			})
+		},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("configuring provider avatar import worker: %w", err)
+	}
+	s.avatarImportWorker = avatarImportWorker
 	auditDispatcher, err := audit.NewDispatcher(s.auditStore, audit.DispatcherOptions{
 		WorkerID: workerPrefix + "-audit",
 		OnError: func(ctx context.Context, event string, err error) {
@@ -228,6 +286,7 @@ func (s *Server) buildRouter() *chi.Mux {
 	r.Use(cors.Handler(cors.Options{AllowedOrigins: []string{allowedOrigin}, AllowedMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"}, AllowedHeaders: []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token", "X-WebAuthn-Ceremony"}, ExposedHeaders: []string{"Retry-After"}, AllowCredentials: true, MaxAge: 300}))
 	r.Get("/livez", s.handleLiveness)
 	r.Get("/readyz", s.handleReadiness)
+	r.Get("/media/avatars/{avatar_id}/{size}.webp", s.handleAvatarMedia)
 	if s.telemetry != nil {
 		r.With(s.requireInternalMetricsClient).Handle("/metrics", s.telemetry.PrometheusHandler())
 	}
@@ -263,6 +322,8 @@ func (s *Server) buildRouter() *chi.Mux {
 			r.Post("/logout", s.handleLogout)
 			r.Get("/me", s.handleMe)
 			r.Put("/me", s.handleUpdateMe)
+			r.Post("/me/avatar", s.handleUploadMyAvatar)
+			r.Delete("/me/avatar", s.handleDeleteMyAvatar)
 			r.Post("/me/password", s.handleChangePassword)
 			r.Post("/me/password/set", s.handleSetPassword)
 			r.Post("/me/reauth/password", s.handlePasswordReauthentication)
@@ -330,6 +391,8 @@ func (s *Server) buildRouter() *chi.Mux {
 			r.Get("/admin/users/{id}", userHandler.Get)
 			r.Put("/admin/users/{id}", s.handleAdminUpdateUser)
 			r.Delete("/admin/users/{id}", userHandler.Delete)
+			r.Post("/admin/users/{id}/avatar", s.handleUploadUserAvatar)
+			r.Delete("/admin/users/{id}/avatar", s.handleDeleteUserAvatar)
 			r.Post("/admin/users/{id}/reset-password", s.handleAdminResetPassword)
 			r.Get("/admin/users/{id}/identities", s.handleUserIdentities)
 			r.Delete("/admin/users/{id}/identities/{identity_id}", s.handleAdminDeleteUserIdentity)
@@ -366,7 +429,7 @@ func (s *Server) mountWeb(r *chi.Mux) {
 	}
 	fileServer := http.FileServer(http.FS(webRoot))
 	r.NotFound(func(w http.ResponseWriter, r *http.Request) {
-		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/auth/") || strings.HasPrefix(r.URL.Path, "/.well-known/") || r.URL.Path == "/authorize" || r.URL.Path == "/token" || r.URL.Path == "/userinfo" || r.URL.Path == "/revoke" || r.URL.Path == "/introspect" || r.URL.Path == "/end_session" || r.URL.Path == "/livez" || r.URL.Path == "/readyz" || r.URL.Path == "/metrics" {
+		if strings.HasPrefix(r.URL.Path, "/api/") || strings.HasPrefix(r.URL.Path, "/auth/") || strings.HasPrefix(r.URL.Path, "/media/") || strings.HasPrefix(r.URL.Path, "/.well-known/") || r.URL.Path == "/authorize" || r.URL.Path == "/token" || r.URL.Path == "/userinfo" || r.URL.Path == "/revoke" || r.URL.Path == "/introspect" || r.URL.Path == "/end_session" || r.URL.Path == "/livez" || r.URL.Path == "/readyz" || r.URL.Path == "/metrics" {
 			http.NotFound(w, r)
 			return
 		}
@@ -436,9 +499,17 @@ func (s *Server) Run(ctx context.Context) error {
 			}
 		}()
 	}
+	if s.avatarImportWorker != nil {
+		go func() {
+			if importErr := s.avatarImportWorker.Run(runCtx); importErr != nil && !errors.Is(importErr, context.Canceled) {
+				slog.ErrorContext(runCtx, "provider avatar import worker stopped", "error", importErr)
+			}
+		}()
+	}
 	go s.rotateJWKs(runCtx)
 	go s.statsHandler.Run(runCtx, time.Minute)
 	go s.runRegistrationCleanup(runCtx)
+	go s.runAvatarCleanup(runCtx)
 	go func() {
 		<-runCtx.Done()
 		s.readiness.accepting.Store(false)
@@ -458,6 +529,41 @@ func (s *Server) Run(ctx context.Context) error {
 		return nil
 	}
 	return err
+}
+
+func (s *Server) runAvatarCleanup(ctx context.Context) {
+	run := func() {
+		started := time.Now()
+		cleanupCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
+		defer cancel()
+		result, err := s.avatarService.Cleanup(cleanupCtx, time.Now().UTC(), 15*time.Minute, 100, 10)
+		if err != nil {
+			s.telemetry.RecordAvatarOperation(ctx, "cleanup", "failure", "storage_unavailable", time.Since(started))
+			s.telemetry.RecordAvatarStorageError(ctx, string(s.avatarStore.Backend()), "delete")
+			if !errors.Is(err, context.Canceled) {
+				slog.ErrorContext(ctx, "avatar media cleanup failed", "error", err)
+			}
+			return
+		}
+		s.telemetry.RecordAvatarOperation(ctx, "cleanup", "success", "none", time.Since(started))
+		if pending, countErr := s.avatarRepository.CountCleanupPending(ctx, s.avatarStore.Backend()); countErr == nil {
+			s.telemetry.RecordAvatarCleanupPending(ctx, pending)
+		}
+		if result.LockAcquired && result.Rows > 0 {
+			slog.InfoContext(ctx, "avatar media cleaned", "rows", result.Rows, "batches", result.Batches)
+		}
+	}
+	run()
+	ticker := time.NewTicker(time.Hour)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-ticker.C:
+			run()
+		}
+	}
 }
 
 func (s *Server) runRegistrationCleanup(ctx context.Context) {

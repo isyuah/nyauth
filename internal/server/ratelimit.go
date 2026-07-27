@@ -60,6 +60,13 @@ type MailSettingsLimiter struct {
 	subjectLimits map[string]int
 }
 
+type AvatarLimiter struct {
+	rdb          *redis.Client
+	window       time.Duration
+	subjectLimit int
+	ipLimit      int
+}
+
 const (
 	mailSettingsActionCandidateSave = "candidate-save"
 	mailSettingsActionCandidateTest = "candidate-test"
@@ -89,6 +96,10 @@ func NewMailSettingsLimiter(rdb *redis.Client) *MailSettingsLimiter {
 			mailSettingsActionDisable:       30,
 		},
 	}
+}
+
+func NewAvatarLimiter(rdb *redis.Client) *AvatarLimiter {
+	return &AvatarLimiter{rdb: rdb, window: 15 * time.Minute, subjectLimit: 30, ipLimit: 200}
 }
 
 func limitDigest(value string) string {
@@ -177,6 +188,16 @@ func (l *MailSettingsLimiter) Reserve(ctx context.Context, action, ip, subject s
 	return reserveSubjectIPLimit(
 		ctx, l.rdb, "nyauth:mail-settings-limit", action, ip, subject,
 		subjectLimit, l.ipLimit, l.window,
+	)
+}
+
+func (l *AvatarLimiter) Reserve(ctx context.Context, action, ip, subject string) (bool, time.Duration, error) {
+	if action != "upload" && action != "delete" {
+		return false, 0, fmt.Errorf("unsupported avatar rate limit action %q", action)
+	}
+	return reserveSubjectIPLimit(
+		ctx, l.rdb, "nyauth:avatar-limit", action, ip, subject,
+		l.subjectLimit, l.ipLimit, l.window,
 	)
 }
 

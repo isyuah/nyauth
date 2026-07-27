@@ -15,6 +15,7 @@
   import { PASSWORD_REQUIREMENT, passwordPolicyError } from '$lib/password-policy';
   import AppShell from '$lib/components/layout/AppShell.svelte';
   import ReauthenticationDialog from '$lib/components/account/ReauthenticationDialog.svelte';
+  import AvatarCropper from '$lib/components/account/AvatarCropper.svelte';
   import PasskeySettingsCard from '$lib/components/account/PasskeySettingsCard.svelte';
   import TOTPSettingsCard from '$lib/components/account/TOTPSettingsCard.svelte';
   import PageHeader from '$lib/components/layout/PageHeader.svelte';
@@ -37,7 +38,6 @@
   let browserSessions = $state<BrowserSession[]>([]);
   let authorizations = $state<OAuthAuthorization[]>([]);
   let displayName = $state('');
-  let avatarUrl = $state('');
   let newEmail = $state('');
   let saving = $state(false);
   let saved = $state(false);
@@ -188,7 +188,6 @@
       const user = await api.getMe();
       me = user;
       displayName = user.display_name || '';
-      avatarUrl = user.avatar_url || '';
       void loadIdentities();
       void loadProviders();
       void loadSessions();
@@ -214,7 +213,6 @@
     try {
       me = await api.updateMe({
         display_name: displayName || null,
-        avatar_url: avatarUrl || null,
       });
       session = { ...session, user: me };
       sessionStore.setSession(session);
@@ -225,6 +223,22 @@
     } finally {
       saving = false;
     }
+  }
+
+  function applyAvatarUser(updated: User) {
+    me = updated;
+    if (session) {
+      session = { ...session, user: updated };
+      sessionStore.setSession(session);
+    }
+  }
+
+  async function uploadAvatar(blob: Blob) {
+    applyAvatarUser(await api.uploadAvatar(blob));
+  }
+
+  async function removeAvatar() {
+    applyAvatarUser(await api.removeAvatar());
   }
 
   async function requestEmailVerification() {
@@ -432,7 +446,7 @@
 
               <section class="rounded-nya-card border border-nya-border bg-nya-surface shadow-nya-card">
                 <div class="border-b border-nya-divider px-7 py-5"><h2 class="text-card-title text-nya-text-primary">编辑资料</h2></div>
-                <div class="space-y-5 px-7 py-6">{#if saved}<div class="flex items-center gap-2 rounded-nya-sm bg-nya-success-soft px-4 py-3 text-small text-nya-success" role="status"><CheckCircle size={16} /> 保存成功</div>{/if}<Input id="profile-display-name" label="显示名称" bind:value={displayName} placeholder="给自己取个名字" /><Input id="profile-avatar" label="头像 URL" bind:value={avatarUrl} placeholder="https://example.com/avatar.png" /><div class="flex justify-end"><Button variant="primary" onclick={handleSave} loading={saving}><Save size={16} /> 保存更改</Button></div></div>
+                <div class="space-y-5 px-7 py-6">{#if saved}<div class="flex items-center gap-2 rounded-nya-sm bg-nya-success-soft px-4 py-3 text-small text-nya-success" role="status"><CheckCircle size={16} /> 保存成功</div>{/if}<Input id="profile-display-name" label="显示名称" bind:value={displayName} placeholder="给自己取个名字" /><div><p class="mb-2 text-body-medium text-nya-text-primary">头像</p><AvatarCropper currentUrl={me.avatar_url} onupload={uploadAvatar} onremove={removeAvatar} /></div><div class="flex justify-end"><Button variant="primary" onclick={handleSave} loading={saving}><Save size={16} /> 保存更改</Button></div></div>
               </section>
 
               <section class="rounded-nya-card border border-nya-border bg-nya-surface shadow-nya-card">

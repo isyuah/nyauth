@@ -123,7 +123,7 @@ describe('MFA API contract', () => {
     const result = await api.reauthenticateWithPassword('current password');
     expect(isMFARequiredResponse(result)).toBe(true);
     await api.cancelLoginMFA(challenge.csrf_token);
-    await api.updateMe({ display_name: 'Alice', avatar_url: '' });
+    await api.updateMe({ display_name: 'Alice' });
 
     const [, reauthInit] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     expect(new Headers(reauthInit.headers).get('X-CSRF-Token')).toBe('formal-session-csrf');
@@ -274,5 +274,54 @@ describe('MFA API contract', () => {
 
     const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     expect(JSON.parse(String(init.body))).toEqual({ password: 'current password' });
+  });
+});
+
+describe('avatar API contract', () => {
+  const user = {
+    id: '11111111-1111-1111-1111-111111111111',
+    username: 'alice',
+    role: 'user' as const,
+    status: 'active' as const,
+    created_at: '2026-01-01T00:00:00Z',
+  };
+
+  afterEach(() => {
+    setCsrfToken('');
+    vi.unstubAllGlobals();
+  });
+
+  it('uses multipart without overriding the boundary and returns updated users for deletion', async () => {
+    const responses = Array.from({ length: 4 }, () => new Response(JSON.stringify(user), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    const fetchMock = vi.fn(async () => responses.shift()!);
+    vi.stubGlobal('fetch', fetchMock);
+    setCsrfToken('avatar-csrf');
+    const blob = new Blob(['webp'], { type: 'image/webp' });
+
+    await api.uploadAvatar(blob);
+    await api.removeAvatar();
+    await api.admin.uploadUserAvatar(user.id, blob);
+    await api.admin.removeUserAvatar(user.id);
+
+    const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit]>;
+    expect(calls.map(([url]) => url)).toEqual([
+      '/api/me/avatar',
+      '/api/me/avatar',
+      `/api/admin/users/${user.id}/avatar`,
+      `/api/admin/users/${user.id}/avatar`,
+    ]);
+    expect(calls.map(([, init]) => init.method)).toEqual(['POST', 'DELETE', 'POST', 'DELETE']);
+    for (const index of [0, 2]) {
+      const init = calls[index][1];
+      expect(init.body).toBeInstanceOf(FormData);
+      expect((init.body as FormData).get('avatar')).toBeInstanceOf(Blob);
+      expect(new Headers(init.headers).get('Content-Type')).toBeNull();
+    }
+    for (const [, init] of calls) {
+      expect(new Headers(init.headers).get('X-CSRF-Token')).toBe('avatar-csrf');
+    }
   });
 });

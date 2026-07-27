@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/nyasharp/nyauth/internal/avatar"
 	"github.com/nyasharp/nyauth/internal/buildinfo"
 	"github.com/nyasharp/nyauth/internal/database"
 	"github.com/nyasharp/nyauth/internal/mailruntime"
@@ -30,6 +31,13 @@ type systemMailStatus struct {
 	CircuitState string `json:"circuit_state"`
 }
 
+type systemMediaStatus struct {
+	Status      string     `json:"status"`
+	Backend     string     `json:"backend"`
+	Configured  bool       `json:"configured"`
+	LastErrorAt *time.Time `json:"last_error_at,omitempty"`
+}
+
 type systemSchemaStatus struct {
 	Status          string `json:"status"`
 	Version         int64  `json:"version"`
@@ -53,6 +61,7 @@ type systemStatusResponse struct {
 		Providers  systemProviderStatus   `json:"providers"`
 		JWK        systemDependencyStatus `json:"jwk"`
 		Mail       systemMailStatus       `json:"mail"`
+		Media      systemMediaStatus      `json:"media"`
 	} `json:"services"`
 	ActiveSigningKey *systemSigningKeyStatus `json:"active_signing_key,omitempty"`
 }
@@ -70,6 +79,7 @@ type systemStatusSources struct {
 	readSigningKey func(context.Context) (*models.JWK, error)
 	providerState  func() (bool, uint64)
 	mailState      func() mailruntime.RuntimeStatus
+	mediaState     func() avatar.RuntimeStatus
 }
 
 func (s *Server) handleSystemStatus(w http.ResponseWriter, r *http.Request) {
@@ -93,7 +103,8 @@ func (s *Server) handleSystemStatus(w http.ResponseWriter, r *http.Request) {
 		providerState: func() (bool, uint64) {
 			return s.providerMgr.Ready(), s.providerMgr.SnapshotRevision()
 		},
-		mailState: s.mailRuntimeStatus,
+		mailState:  s.mailRuntimeStatus,
+		mediaState: s.avatarService.RuntimeStatus,
 	})
 	writeJSON(w, http.StatusOK, response)
 }
@@ -174,6 +185,17 @@ func collectSystemStatus(ctx context.Context, rotationInterval time.Duration, so
 	response.Services.Mail = systemMailStatus{
 		Status: componentStatus, Mode: mailStatus.Mode, Configured: mailStatus.Configured,
 		Available: mailStatus.Available, CircuitState: mailStatus.CircuitState,
+	}
+	mediaStatus := avatar.RuntimeStatus{Status: "not_configured"}
+	if sources.mediaState != nil {
+		mediaStatus = sources.mediaState()
+	}
+	response.Services.Media = systemMediaStatus{
+		Status: mediaStatus.Status, Backend: string(mediaStatus.Backend), Configured: mediaStatus.Configured,
+		LastErrorAt: mediaStatus.LastErrorAt,
+	}
+	if mediaStatus.Status == "degraded" {
+		response.Status = "degraded"
 	}
 	return response
 }

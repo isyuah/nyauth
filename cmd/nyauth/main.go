@@ -15,6 +15,7 @@ import (
 
 	nyauthroot "github.com/nyasharp/nyauth"
 	"github.com/nyasharp/nyauth/internal/audit"
+	"github.com/nyasharp/nyauth/internal/avatar"
 	"github.com/nyasharp/nyauth/internal/config"
 	"github.com/nyasharp/nyauth/internal/database"
 	"github.com/nyasharp/nyauth/internal/recovery"
@@ -73,13 +74,13 @@ func main() {
 			fatal("granting runtime database privileges", err)
 		}
 		slog.Info("migrations applied successfully")
-		if err := runAuditMaintenance(cfg); err != nil {
+		if err := runAuditMaintenance(cfg, false); err != nil {
 			fatal("maintaining audit storage", err)
 		}
 		return
 	}
 	if command == commandMaintenance {
-		if err := runAuditMaintenance(cfg); err != nil {
+		if err := runAuditMaintenance(cfg, true); err != nil {
 			fatal("maintaining audit storage", err)
 		}
 		return
@@ -152,8 +153,11 @@ func ensureRuntimePrivileges(cfg *config.Config) error {
 }
 
 func loadCommandConfig(command, path string) (*config.Config, error) {
-	if command == commandMigrate || command == commandMaintenance {
+	if command == commandMigrate {
 		return config.LoadDatabaseMaintenance(path)
+	}
+	if command == commandMaintenance {
+		return config.LoadMaintenance(path)
 	}
 	return config.Load(path)
 }
@@ -163,7 +167,7 @@ func fatal(message string, err error) {
 	os.Exit(1)
 }
 
-func runAuditMaintenance(cfg *config.Config) error {
+func runAuditMaintenance(cfg *config.Config, includeAvatarMedia bool) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 	defer cancel()
 	db, err := database.NewPostgresPool(ctx, cfg.Database)
@@ -191,12 +195,39 @@ func runAuditMaintenance(cfg *config.Config) error {
 	if err != nil {
 		return err
 	}
+	var cleanedAvatarRows int64
+	if includeAvatarMedia {
+		var mediaStore avatar.BlobStore
+		switch cfg.Media.Backend {
+		case "local":
+			mediaStore, err = avatar.NewLocalStore(cfg.Media.Local.Directory)
+		case "s3":
+			mediaStore, err = avatar.NewS3Store(ctx, cfg.Media.S3)
+		}
+		if err != nil {
+			return fmt.Errorf("configuring avatar media maintenance: %w", err)
+		}
+		avatarRepository := avatar.NewRepository(db)
+		if err := avatarRepository.EnsureStorageBackendCompatible(ctx, mediaStore.Backend()); err != nil {
+			return fmt.Errorf("validating avatar media maintenance storage: %w", err)
+		}
+		avatarService, serviceErr := avatar.NewService(avatarRepository, mediaStore, avatar.NewProcessor())
+		if serviceErr != nil {
+			return serviceErr
+		}
+		avatarCleanup, cleanupErr := avatarService.Cleanup(ctx, now, 15*time.Minute, 500, 100)
+		if cleanupErr != nil {
+			return cleanupErr
+		}
+		cleanedAvatarRows = avatarCleanup.Rows
+	}
 	slog.Info("audit storage maintenance completed",
 		"dropped_partitions", retention.DroppedPartitions,
 		"deleted_boundary_rows", retention.DeletedRows,
 		"deleted_processed_outbox_rows", cleanedOutbox,
 		"released_pending_registrations", registrationCleanup.Released,
 		"deleted_pending_users", registrationCleanup.DeletedUsers,
+		"cleaned_avatar_rows", cleanedAvatarRows,
 	)
 	return nil
 }

@@ -10,7 +10,7 @@
   import StatusBadge from '$lib/components/data-display/StatusBadge.svelte';
   import Button from '$lib/components/ui/Button.svelte';
   import Input from '$lib/components/ui/Input.svelte';
-  import { Database, KeyRound, Mail, Network, Palette, Server, UserPlus } from 'lucide-svelte';
+  import { Database, HardDrive, KeyRound, Mail, Network, Palette, Server, UserPlus } from 'lucide-svelte';
 
   let systemStatus = $state<SystemStatus | null>(null);
   let loading = $state(true);
@@ -382,6 +382,29 @@
                   <dd class="mt-1 text-nya-text-primary">{systemStatus.services.mail.circuit_state === 'open' ? '已打开' : '正常'}</dd>
                 </div>
               </dl>
+            </article>
+
+            <article class="rounded-nya-md border border-nya-border p-4">
+              <div class="flex items-center justify-between gap-3">
+                <div class="flex items-center gap-2">
+                  <HardDrive size={16} class="text-nya-primary" />
+                  <h3 class="text-body-medium font-semibold text-nya-text-primary">头像媒体</h3>
+                </div>
+                <StatusBadge status={systemStatus.services.media.status} />
+              </div>
+              <dl class="mt-3 grid grid-cols-2 gap-3 text-small">
+                <div>
+                  <dt class="text-nya-text-tertiary">存储后端</dt>
+                  <dd class="mt-1 text-nya-text-primary">{systemStatus.services.media.backend === 's3' ? '私有 S3' : '本地目录'}</dd>
+                </div>
+                <div>
+                  <dt class="text-nya-text-tertiary">配置状态</dt>
+                  <dd class="mt-1 text-nya-text-primary">{systemStatus.services.media.configured ? '已配置' : '未配置'}</dd>
+                </div>
+              </dl>
+              {#if systemStatus.services.media.last_error_at}
+                <p class="mt-3 text-small text-nya-text-tertiary">最近存储错误：{formatDateTime(systemStatus.services.media.last_error_at)}</p>
+              {/if}
             </article>
           </div>
         </section>

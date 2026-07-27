@@ -164,13 +164,12 @@ func (s *Server) handleUpdateMe(w http.ResponseWriter, r *http.Request) {
 	}
 	var request struct {
 		DisplayName *string `json:"display_name,omitempty"`
-		AvatarURL   *string `json:"avatar_url,omitempty"`
 	}
 	if err := decodeJSON(w, r, &request); err != nil {
 		writeAPIError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	updated, err := s.userService.Update(r.Context(), current.ID, models.UpdateUserRequest{DisplayName: request.DisplayName, AvatarURL: request.AvatarURL})
+	updated, err := s.userService.Update(r.Context(), current.ID, models.UpdateUserRequest{DisplayName: request.DisplayName})
 	if err != nil {
 		if user.IsInvalidInput(err) {
 			writeAPIError(w, http.StatusBadRequest, err.Error())
