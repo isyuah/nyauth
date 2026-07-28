@@ -2,9 +2,9 @@
 
 本文件记录 nyauth 的重要变更，格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased] — 0.3.0-rc.1
+## [Unreleased]
 
-> 本地 RC 候选；尚未 push、打 Tag 或发布镜像。
+## [0.3.0] — 2026-07-28
 
 > [!CAUTION]
 > 0.3.0 是破坏性开发基线，不提供旧数据库、配置、接口或 SDK 的兼容层。升级前请备份需要保留的数据。
@@ -26,7 +26,7 @@
 - 恢复验证覆盖活动 JWK、Provider、TOTP、Passkey 与邮件密文，并要求备份 manifest 独立核对 Passkey 行数
 - 安全头像媒体：浏览器 1:1 裁剪，服务端签名、尺寸、像素和动画校验后重编码四种 WebP；支持本地持久 volume、私有 S3、Provider 首次异步导入、SSRF 防护和 HA 安全清理
 - 路由化个人中心与管理员用户详情：资料、安全、会话、授权、身份、客户端和精确用户活动分离为可深链页面；品牌、注册、邮件和安全设置拆页
-- 审计体验：静态筛选目录、快捷时间范围、URL 同步、精确 subject/target 筛选、筛选 chips、详情抽屉、User-Agent、递归脱敏和筛选一致的 NDJSON/CEF 导出
+- 审计体验：静态筛选目录、单一日期时间范围选择器、1/7/14/30 天快捷范围、URL 同步、精确 subject/target 筛选、筛选 chips、详情抽屉、User-Agent、递归脱敏和筛选一致的 NDJSON/CEF 导出
 - 高可用与备份恢复文档、OAuth/OIDC 集成指南（`docs/`）
 
 ### 变更（破坏性）
@@ -34,7 +34,7 @@
 - 第一方后台仅使用 `HttpOnly + SameSite=Lax` 会话 Cookie，修改请求强制 CSRF 校验
 - OAuth 授权码客户端强制 PKCE S256；不支持 plain、implicit、hybrid
 - JWT 固定 RS256；refresh token 采用 family 轮换与重复使用检测
-- 数据库迁移压缩为嵌入式单一 `000001` 基线；`serve` 启动只校验 schema 版本
+- 数据库迁移以嵌入式 `000001` 建立破坏性基线，并通过兼容的 `000002_provider_presentation`、`000003_security_revocation_outbox` 演进到 schema version 3；`serve` 启动只校验 schema 版本
 - 配置严格解码：未知字段导致启动失败；敏感项统一支持 `*_FILE` 注入
 - 环境变量统一 `NYAUTH_` 前缀与下划线层级
 
@@ -47,6 +47,8 @@
 
 - 登录趋势图表因 Svelte 5 `$state` 代理与 Chart.js 不兼容而从不渲染
 - 窗口从移动断点拖宽后桌面侧边栏无法恢复展开
+- 审计筛选中的主体用户 ID、目标 ID 和 IP 地址误用等宽字体，并以两个原生时间输入拆散范围选择
+- Redis 暂时不可用时，用户安全世代变更对应的会话与 refresh family 撤销任务可能缺少持久重试；现由 PostgreSQL outbox、lease、revision 和有界退避保证恢复后完成
 - 审计详情允许安全的 MFA 布尔/计数元数据，同时拒绝并脱敏精确的 credential、恢复码、TOTP seed 和密钥字段
 - 升级 `google.golang.org/grpc` 至 `v1.82.1`，修复 `govulncheck` 确认可达的 `GO-2026-6061`
 - 仓库行尾统一为 LF（CRLF 曾导致 postgres init 脚本在容器内失败）

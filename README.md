@@ -1,4 +1,4 @@
-# nyauth 0.3.0-rc.1
+# nyauth 0.3.0
 
 统一认证与用户系统，提供 OAuth 2.0 Authorization Server、OpenID Connect Provider 和第一方管理后台。
 
@@ -9,7 +9,7 @@
 - 第一方后台仅使用 `HttpOnly + SameSite=Lax` 会话 Cookie，并对修改请求强制校验 CSRF。
 - OAuth 授权码客户端强制使用 PKCE S256；不支持 plain、implicit 或 hybrid 流程。
 - JWT 固定使用 RS256，refresh token 采用 family 轮换与重复使用检测。
-- 数据库使用嵌入二进制的单一 `000001_baseline`，schema version 为 1。服务启动只校验 schema，不再隐式迁移。
+- 数据库以嵌入二进制的 `000001_baseline` 建立破坏性发布基线，并通过兼容的 `000002`、`000003` 加法迁移演进；`0.3.0` 当前要求 schema version 3。服务启动只校验 schema，不再隐式迁移。
 - 旧数据库、session、token、JWK、Provider 凭据和 OAuth 客户端注册均不兼容。
 - 旧 Go/TypeScript SDK 已删除；OAuth/OIDC 集成以标准协议和成熟语言库为准。
 
@@ -61,6 +61,8 @@ docker compose logs --follow nyauth
 ```
 
 开发 Compose 将应用、PostgreSQL 和 Redis 分别绑定到 `127.0.0.1:8080`、`127.0.0.1:5432` 和 `127.0.0.1:6379`，并通过一次性 `migrate` service 初始化空数据库。头像使用 `media` 命名 volume 挂载到 `/var/lib/nyauth/media`，与 PostgreSQL 的 `pgdata` 分开持久化。正常停止使用 `docker compose down`，两个 volume 都会保留。不要使用 `docker compose down -v`；`-v` 会同时删除本地 PostgreSQL 和头像数据。
+
+更新已有开发栈时也必须使用完整的 `docker compose up -d --build`，让新镜像中的一次性 `migrate` 先完成 schema 升级，再由 Compose 启动应用。不要使用 `--no-deps` 单独替换 `nyauth`；`serve` 按设计只校验 schema，不执行 DDL。如果最初使用了 `docker compose -p <name>` 创建栈，后续所有构建、迁移和启动命令必须继续使用同一个 `-p <name>`；可先用 `docker compose ls` 核对项目名，避免误建第二套数据库和端口冲突。
 
 ### 使用本机服务
 

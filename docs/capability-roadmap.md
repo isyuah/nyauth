@@ -69,7 +69,7 @@ OAuth 客户端已支持 `open`、`admins_only` 和 `allowlist`。策略在用�
 ## 实施顺序建议
 
 ```
-当前 0.3.0-rc.1: Phase R/S/T/P、受控头像、账户/后台信息架构和审计体验已完成
-RC 验证: 全新 baseline、生产/HA Compose、恢复文档与跨架构镜像门禁
-RC 之后: 自动更新评估；/api/v1、用户组和事件 Webhook 继续推迟
+当前 0.3.0: Phase R/S/T/P、受控头像、账户/后台信息架构和审计体验已完成
+正式版门禁: schema 3、生产/HA Compose、恢复文档与跨架构镜像验证
+0.3.0 之后: 自动更新评估；/api/v1、用户组和事件 Webhook 继续推迟
 ```
