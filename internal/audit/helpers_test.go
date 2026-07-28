@@ -34,7 +34,11 @@ func TestOutboxEventFromAuditLogUsesTargetAndSafeDetails(t *testing.T) {
 }
 
 func TestOutboxEventFromAuditLogRejectsSensitiveDetails(t *testing.T) {
-	for _, key := range []string{"refresh_token", "authorization_code", "provider_secret", "csrf_value", "nonce"} {
+	for _, key := range []string{
+		"refresh_token", "authorization_code", "provider_secret", "csrf_value", "nonce",
+		"passphrase", "credential", "credential_id", "recovery_code", "private_key", "api_key",
+		"ciphertext", "totp_seed", "totp_secret",
+	} {
 		t.Run(key, func(t *testing.T) {
 			_, err := outboxEventFromAuditLog(&models.AuditLog{
 				ID: uuid.New(), Event: "token.issue_failed", Result: "failure", RiskLevel: "high",
@@ -54,6 +58,7 @@ func TestRedactDetailsProtectsLegacyAndNestedSensitiveKeys(t *testing.T) {
 		"recovery_code": "legacy-recovery-code",
 		"nested": map[string]interface{}{
 			"client_secret": "legacy-secret",
+			"credential_id": "legacy-credential-id",
 			"totp_seed":     "legacy-totp-seed",
 			"safe":          "visible",
 		},
@@ -64,7 +69,7 @@ func TestRedactDetailsProtectsLegacyAndNestedSensitiveKeys(t *testing.T) {
 		t.Fatalf("top-level redaction = %#v", redacted)
 	}
 	nested := redacted["nested"].(map[string]interface{})
-	if nested["client_secret"] != "[REDACTED]" || nested["totp_seed"] != "[REDACTED]" || nested["safe"] != "visible" {
+	if nested["client_secret"] != "[REDACTED]" || nested["credential_id"] != "[REDACTED]" || nested["totp_seed"] != "[REDACTED]" || nested["safe"] != "visible" {
 		t.Fatalf("nested redaction = %#v", nested)
 	}
 	items := redacted["items"].([]interface{})
@@ -79,5 +84,19 @@ func TestRedactDetailsProtectsLegacyAndNestedSensitiveKeys(t *testing.T) {
 	redactedEmpty["safe"] = "detached"
 	if len(empty) != 0 {
 		t.Fatalf("empty input map was not detached: %#v", empty)
+	}
+}
+
+func TestOutboxEventFromAuditLogAllowsSafeSecurityStateMetadata(t *testing.T) {
+	_, err := outboxEventFromAuditLog(&models.AuditLog{
+		ID: uuid.New(), Event: "settings.updated", Result: "success", RiskLevel: "high",
+		Details: map[string]interface{}{
+			"totp_enabled":          true,
+			"recovery_codes":        10,
+			"credential_configured": true,
+		},
+	})
+	if err != nil {
+		t.Fatalf("safe security state metadata was rejected: %v", err)
 	}
 }

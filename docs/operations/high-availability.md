@@ -117,7 +117,7 @@ docker compose -f docker-compose.ha.yml ps
 
 ## 发布顺序
 
-当前开发版本不承诺滚动升级兼容。部署新破坏性基线时应停止旧实例、运行一次性迁移、启动单个新实例完成 smoke test，再扩容第二实例。不得让不同数据库契约的应用版本同时处理流量。
+`0.3.0-rc.1` 是 schema version 1 的破坏性 release baseline，不支持从早期开发数据库滚动升级。首次部署必须使用全新 PostgreSQL/Redis；启动单个新实例完成 smoke test 后再扩容第二实例。后续版本只有在发布说明明确承诺兼容时才可滚动升级，不得让不同数据库契约的应用版本同时处理流量。
 
 ## 故障验证
 

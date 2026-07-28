@@ -1,4 +1,4 @@
-# nyauth 0.3.0-dev
+# nyauth 0.3.0-rc.1
 
 统一认证与用户系统，提供 OAuth 2.0 Authorization Server、OpenID Connect Provider 和第一方管理后台。
 
@@ -9,7 +9,7 @@
 - 第一方后台仅使用 `HttpOnly + SameSite=Lax` 会话 Cookie，并对修改请求强制校验 CSRF。
 - OAuth 授权码客户端强制使用 PKCE S256；不支持 plain、implicit 或 hybrid 流程。
 - JWT 固定使用 RS256，refresh token 采用 family 轮换与重复使用检测。
-- 数据库以嵌入二进制的迁移序列管理；当前开发 schema 为 9，发布 0.3.0 前会重新压缩基线。服务启动只校验 schema，不再隐式迁移。
+- 数据库使用嵌入二进制的单一 `000001_baseline`，schema version 为 1。服务启动只校验 schema，不再隐式迁移。
 - 旧数据库、session、token、JWK、Provider 凭据和 OAuth 客户端注册均不兼容。
 - 旧 Go/TypeScript SDK 已删除；OAuth/OIDC 集成以标准协议和成熟语言库为准。
 
@@ -307,8 +307,9 @@ Provider 不再从 YAML 或环境变量静态加载，只能由管理员写入�
 - `GET /api/admin/system/status`：版本、schema、PostgreSQL/Redis/JWK/Provider、SMTP 与头像媒体状态。
 - `GET /api/admin/stats`：快照化的用户、会话、注册、邮件 backlog、24 小时失败尝试和 SMTP 熔断摘要。
 - `GET /api/admin/stats/login-trend`、`registration-trend`、`mail-trend`：按 UTC 返回 7–90 天的补零趋势；注册趋势含邀请预占/消费/释放，邮件趋势区分其他失败尝试（不含永久拒收）、永久拒收与过期。
-- `GET /api/admin/audit-logs`：按事件、结果、风险、Actor、Target、IP 和时间筛选。
-- `GET /api/admin/audit-logs/export`：按最多 31 天、50,000 条流式导出 NDJSON 或 CEF；CEF 可导入常见 SIEM。
+- `GET /api/admin/audit-logs/options`：返回有界、静态的事件、结果、风险和目标类型筛选目录，不扫描审计分区。
+- `GET /api/admin/audit-logs`：按事件、结果、风险、Actor、模糊 Target、精确 subject user/target、IP 和时间筛选；管理员 DTO 包含 User-Agent，details 会在服务端递归脱敏。
+- `GET /api/admin/audit-logs/export`：复用列表的全部筛选语义，按最多 31 天、50,000 条流式导出 NDJSON 或 CEF；CEF 可导入常见 SIEM。
 - `POST /api/admin/clients/{id}/rotate-secret`：立即轮换客户端 Secret，新值仅展示一次。
 - `GET /api/admin/users/{id}/sessions`、`DELETE /api/admin/users/{id}/sessions`：查看或撤销用户会话。
 - `POST /api/admin/users/{id}/avatar`、`DELETE /api/admin/users/{id}/avatar`：管理员上传或删除用户头像，受 CSRF、限流与审计保护。
@@ -317,7 +318,7 @@ Provider 不再从 YAML 或环境变量静态加载，只能由管理员写入�
 - `GET/POST /api/admin/invites`、`DELETE /api/admin/invites/{id}`：邀请码管理；明文 code 仅创建响应返回一次，库中只存哈希；列表分别返回已使用与待验证预占数。创建要求近期重新认证，紧急吊销不要求。
 - `GET /api/admin/settings/mail`、`PUT /api/admin/settings/mail/candidate`，以及邮件设置下的 `candidate/test`、`activate`、`rollback`、`disable` POST：数据库动态 SMTP；候选必须实际测试成功并在十分钟内激活，所有读取和变更均要求近期重新认证，写操作还受 CSRF、限流和审计保护。
 
-注册与邮件趋势使用业务事务内的低基数日聚合，后台快照每分钟在 PostgreSQL advisory lock 下刷新。30 日注册完成率按“最近 30 天创建的注册 cohort 中已完成的比例”计算，分母为空时返回 `null`。Schema 5 无法还原已重试成功或随用户删除的历史邮件投递事件，因此 schema 6 的响应通过 `mail_stats_available_from` / `available_from` 明确邮件统计起点，不把迁移前未知数据伪装成零。邮件成功投递不会逐封写审计日志；配置、熔断和现有注册/邀请生命周期事件仍按既定审计契约记录。
+注册与邮件趋势使用业务事务内的低基数日聚合，后台快照每分钟在 PostgreSQL advisory lock 下刷新。30 日注册完成率按“最近 30 天创建的注册 cohort 中已完成的比例”计算，分母为空时返回 `null`。全新 baseline 会把 `mail_stats_available_from` / `available_from` 初始化为该数据库开始观测邮件投递的时间，不能把此前不存在的数据解释为零。邮件成功投递不会逐封写审计日志；配置、熔断和现有注册/邀请生命周期事件仍按既定审计契约记录。
 
 未来只有版本化 `/api/v1` 会作为自动化管理契约；在 Service Account、细粒度 scope、audience、幂等键和 OpenAPI 稳定前不发布专有 Management SDK。
 

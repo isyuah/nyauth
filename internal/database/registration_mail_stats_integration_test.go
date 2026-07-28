@@ -10,122 +10,14 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
-	migrate "github.com/golang-migrate/migrate/v4"
-	"github.com/golang-migrate/migrate/v4/source/iofs"
 	"github.com/google/uuid"
 	"github.com/nyasharp/nyauth/internal/account"
 	"github.com/nyasharp/nyauth/internal/registration"
 	"github.com/nyasharp/nyauth/internal/session"
 	dashboardstats "github.com/nyasharp/nyauth/internal/stats"
-	migrationfiles "github.com/nyasharp/nyauth/migrations"
 	"github.com/nyasharp/nyauth/pkg/models"
 	"github.com/redis/go-redis/v9"
 )
-
-func TestRegistrationStatsMigrationBackfillsLifecycleHistory(t *testing.T) {
-	schema := newMigratedRegistrationSchema(t)
-	source, err := iofs.New(migrationfiles.Files, ".")
-	if err != nil {
-		t.Fatalf("open migration source: %v", err)
-	}
-	runner, err := migrate.NewWithSourceInstance("iofs", source, schema.migrationDSN)
-	if err != nil {
-		_ = source.Close()
-		t.Fatalf("create migration runner: %v", err)
-	}
-	t.Cleanup(func() { _, _ = runner.Close() })
-	if err := runner.Migrate(5); err != nil {
-		t.Fatalf("migrate observability down: %v", err)
-	}
-
-	ctx := context.Background()
-	now := time.Now().UTC().Truncate(time.Microsecond)
-	inviteID := uuid.New()
-	if _, err := schema.pool.Exec(ctx, `
-		INSERT INTO invites (id,code_hash,max_uses,expires_at,created_at)
-		VALUES ($1,$2,10,$3,$4)
-	`, inviteID, "backfill-"+uuid.NewString(), now.Add(24*time.Hour), now.Add(-4*24*time.Hour)); err != nil {
-		t.Fatalf("insert backfill invite: %v", err)
-	}
-	pendingUserID := uuid.New()
-	if _, err := schema.pool.Exec(ctx, `
-		INSERT INTO users (id,username,status,role) VALUES ($1,$2,'pending','user')
-	`, pendingUserID, "stats-backfill-"+uuid.NewString()[:8]); err != nil {
-		t.Fatalf("insert backfill pending user: %v", err)
-	}
-	directCompletedAt := now.Add(-time.Hour)
-	expiredAt := now.Add(-2 * 24 * time.Hour)
-	expiredReleasedAt := now.Add(-24 * time.Hour)
-	adminReleasedAt := now.Add(-2 * time.Hour)
-	if _, err := schema.pool.Exec(ctx, `
-		INSERT INTO self_registrations (
-			id,user_id,invite_id,status,expires_at,completed_at,released_at,release_reason,created_at,updated_at
-		) VALUES
-			($1,$2,$3,'pending',$4,NULL,NULL,NULL,$5,$5),
-			($6,NULL,$3,'completed',$4,$7,NULL,NULL,$8,$7),
-			($9,NULL,NULL,'completed',$4,$10,NULL,NULL,$10,$10),
-			($11,NULL,$3,'released',$12,NULL,$13,'expired',$14,$13),
-			($15,NULL,$3,'released',$16,NULL,$17,'admin_deleted',$18,$17)
-	`,
-		uuid.New(), pendingUserID, inviteID, now.Add(24*time.Hour), now.Add(-24*time.Hour),
-		uuid.New(), now, now.Add(-24*time.Hour),
-		uuid.New(), directCompletedAt,
-		uuid.New(), expiredAt, expiredReleasedAt, now.Add(-3*24*time.Hour),
-		uuid.New(), now.Add(24*time.Hour), adminReleasedAt, now.Add(-4*24*time.Hour),
-	); err != nil {
-		t.Fatalf("insert registration backfill history: %v", err)
-	}
-	if err := runner.Migrate(6); err != nil {
-		t.Fatalf("migrate observability up: %v", err)
-	}
-
-	var started, completed, expired, reserved, consumed, released, cohortStarted, cohortCompleted int64
-	if err := schema.pool.QueryRow(ctx, `
-		SELECT
-			COALESCE(SUM(registrations_started),0),
-			COALESCE(SUM(registrations_completed),0),
-			COALESCE(SUM(registrations_expired),0),
-			COALESCE(SUM(invites_reserved),0),
-			COALESCE(SUM(invites_consumed),0),
-			COALESCE(SUM(invites_released),0),
-			COALESCE(SUM(cohort_started),0),
-			COALESCE(SUM(cohort_completed),0)
-		FROM registration_stats_daily
-	`).Scan(&started, &completed, &expired, &reserved, &consumed, &released, &cohortStarted, &cohortCompleted); err != nil {
-		t.Fatalf("read registration backfill totals: %v", err)
-	}
-	if started != 5 || completed != 2 || expired != 1 || reserved != 4 || consumed != 1 || released != 2 || cohortStarted != 5 || cohortCompleted != 2 {
-		t.Fatalf("registration backfill totals=%d/%d/%d/%d/%d/%d/%d/%d", started, completed, expired, reserved, consumed, released, cohortStarted, cohortCompleted)
-	}
-	var expiredOnExpiryDay, releasedOnExpiryDay int64
-	expiryDay := time.Date(expiredAt.Year(), expiredAt.Month(), expiredAt.Day(), 0, 0, 0, 0, time.UTC)
-	if err := schema.pool.QueryRow(ctx, `
-		SELECT registrations_expired,invites_released
-		FROM registration_stats_daily WHERE day=$1
-	`, expiryDay).Scan(&expiredOnExpiryDay, &releasedOnExpiryDay); err != nil {
-		t.Fatalf("read expiration-date backfill bucket: %v", err)
-	}
-	if expiredOnExpiryDay != 1 || releasedOnExpiryDay != 1 {
-		t.Fatalf("expiration-date bucket expired/released=%d/%d", expiredOnExpiryDay, releasedOnExpiryDay)
-	}
-	var releasedOnAdminDay int64
-	adminReleaseDay := time.Date(adminReleasedAt.Year(), adminReleasedAt.Month(), adminReleasedAt.Day(), 0, 0, 0, 0, time.UTC)
-	if err := schema.pool.QueryRow(ctx, `
-		SELECT invites_released FROM registration_stats_daily WHERE day=$1
-	`, adminReleaseDay).Scan(&releasedOnAdminDay); err != nil {
-		t.Fatalf("read active-release backfill bucket: %v", err)
-	}
-	if releasedOnAdminDay != 1 {
-		t.Fatalf("active-release bucket released=%d", releasedOnAdminDay)
-	}
-	var availableFrom time.Time
-	if err := schema.pool.QueryRow(ctx, `SELECT mail_stats_available_from FROM stats_observability_state WHERE singleton=TRUE`).Scan(&availableFrom); err != nil {
-		t.Fatalf("read mail observability boundary: %v", err)
-	}
-	if availableFrom.IsZero() {
-		t.Fatal("mail observability boundary was not initialized")
-	}
-}
 
 func TestRegistrationAndMailObservabilityAggregates(t *testing.T) {
 	schema := newMigratedRegistrationSchema(t)

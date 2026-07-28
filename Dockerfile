@@ -1,19 +1,21 @@
-FROM node:20-alpine AS web-builder
+FROM --platform=$BUILDPLATFORM node:20-alpine AS web-builder
 WORKDIR /app/web
 COPY web/package.json web/package-lock.json* ./
 RUN npm ci --prefer-offline
 COPY web/ .
 RUN npm run check && npm run build
 
-FROM golang:1.26.5-bookworm AS go-builder
+FROM --platform=$BUILDPLATFORM golang:1.26.5-bookworm AS go-builder
 WORKDIR /app
+ARG TARGETOS
+ARG TARGETARCH
 ARG VERSION=dev
 ARG VCS_REF=unknown
 COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 COPY --from=web-builder /app/web/build ./web/build
-RUN CGO_ENABLED=0 GOOS=linux go build -trimpath \
+RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -tags=nodynamic -trimpath \
     -ldflags="-s -w -X main.version=${VERSION} -X main.commit=${VCS_REF} -X github.com/nyasharp/nyauth/internal/buildinfo.Version=${VERSION} -X github.com/nyasharp/nyauth/internal/buildinfo.Commit=${VCS_REF}" \
     -o /nyauth ./cmd/nyauth
 

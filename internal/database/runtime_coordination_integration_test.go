@@ -4,13 +4,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	migrate "github.com/golang-migrate/migrate/v4"
-	"github.com/golang-migrate/migrate/v4/source/iofs"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nyasharp/nyauth/internal/account"
@@ -18,7 +15,6 @@ import (
 	"github.com/nyasharp/nyauth/internal/runtimecoord"
 	"github.com/nyasharp/nyauth/internal/settings"
 	"github.com/nyasharp/nyauth/internal/user"
-	migrationfiles "github.com/nyasharp/nyauth/migrations"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
 
@@ -522,84 +518,5 @@ func TestEmailArtifactExpiryUsesBoundedPerTableBatches(t *testing.T) {
 	}
 	if expired != 2 {
 		t.Fatalf("remaining bounded expiry count=%d", expired)
-	}
-}
-
-func TestRuntimeMailDownMigrationSafelyMapsRejectedMessages(t *testing.T) {
-	schema := newMigratedRegistrationSchema(t)
-	now := time.Now().UTC().Truncate(time.Microsecond)
-	userID := uuid.New()
-	if _, err := schema.pool.Exec(context.Background(), `
-		INSERT INTO users (id,username,status,role,creation_source) VALUES ($1,$2,'active','user','legacy')
-	`, userID, "down-migration-"+uuid.NewString()[:8]); err != nil {
-		t.Fatalf("insert down migration user: %v", err)
-	}
-	if _, err := schema.pool.Exec(context.Background(), `
-		INSERT INTO email_outbox (
-			id,user_id,message_type,recipient_hash,encrypted_message,status,available_at,expires_at,last_error,created_at,updated_at
-		) VALUES ($1,$2,'account.email_verification',$3,'','rejected',$4,$5,'550 rejected down-migration@example.test',$4,$4)
-	`, uuid.New(), userID, make([]byte, 32), now.Add(-time.Minute), now.Add(time.Hour)); err != nil {
-		t.Fatalf("insert rejected message before down migration: %v", err)
-	}
-
-	source, err := iofs.New(migrationfiles.Files, ".")
-	if err != nil {
-		t.Fatalf("open embedded migrations: %v", err)
-	}
-	runner, err := migrate.NewWithSourceInstance("iofs", source, schema.migrationDSN)
-	if err != nil {
-		_ = source.Close()
-		t.Fatalf("create migration runner: %v", err)
-	}
-	t.Cleanup(func() {
-		_, _ = runner.Close()
-	})
-	if err := runner.Migrate(4); err != nil {
-		t.Fatalf("migrate runtime mail down: %v", err)
-	}
-	var version int
-	var dirty bool
-	if err := schema.pool.QueryRow(context.Background(), `SELECT version,dirty FROM schema_migrations`).Scan(&version, &dirty); err != nil {
-		t.Fatalf("read schema version after down migration: %v", err)
-	}
-	var status, constraintDefinition string
-	var lastError *string
-	if err := schema.pool.QueryRow(context.Background(), `SELECT status,last_error FROM email_outbox WHERE user_id=$1`, userID).Scan(&status, &lastError); err != nil {
-		t.Fatalf("read message after down migration: %v", err)
-	}
-	if err := schema.pool.QueryRow(context.Background(), `
-		SELECT pg_get_constraintdef(oid) FROM pg_constraint
-		WHERE conname='email_outbox_status_valid' AND conrelid='email_outbox'::regclass
-	`).Scan(&constraintDefinition); err != nil {
-		t.Fatalf("read outbox constraint after down migration: %v", err)
-	}
-	var expiryIndex *string
-	if err := schema.pool.QueryRow(context.Background(), `SELECT to_regclass('idx_email_outbox_active_expiry')::text`).Scan(&expiryIndex); err != nil {
-		t.Fatalf("read outbox expiry index after down migration: %v", err)
-	}
-	if version != 4 || dirty || status != "expired" || lastError != nil || expiryIndex != nil || strings.Contains(constraintDefinition, "rejected") {
-		t.Fatalf("down migration version=%d dirty=%v status=%q last_error=%v index=%v constraint=%q", version, dirty, status, lastError, expiryIndex, constraintDefinition)
-	}
-	if _, err := schema.pool.Exec(context.Background(), `
-		UPDATE email_outbox
-		SET status='failed',last_error='550 mailbox unavailable for legacy-user@example.test'
-		WHERE user_id=$1
-	`, userID); err != nil {
-		t.Fatalf("seed schema 4 SMTP error text: %v", err)
-	}
-	if err := runner.Migrate(6); err != nil {
-		t.Fatalf("migrate runtime mail up again: %v", err)
-	}
-	if err := schema.pool.QueryRow(context.Background(), `SELECT to_regclass('idx_email_outbox_active_expiry')::text`).Scan(&expiryIndex); err != nil {
-		t.Fatalf("read outbox expiry index after up migration: %v", err)
-	}
-	if expiryIndex == nil {
-		t.Fatal("runtime mail up migration did not restore the active expiry index")
-	}
-	if err := schema.pool.QueryRow(context.Background(), `SELECT last_error FROM email_outbox WHERE user_id=$1`, userID).Scan(&lastError); err != nil {
-		t.Fatalf("read legacy SMTP error after up migration: %v", err)
-	}
-	if lastError != nil {
-		t.Fatalf("runtime mail up migration retained legacy SMTP error: %q", *lastError)
 	}
 }

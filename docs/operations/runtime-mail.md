@@ -6,7 +6,7 @@ Nyauth 只通过 SMTP 发送验证、密码恢复、邮箱变更和安全通知�
 
 ## 配置来源与状态
 
-迁移 `000005_runtime_mail` 创建不可变配置版本、测试记录和一个共享运行状态。运行状态有三种模式：
+`0.3.0-rc.1` 的单一 release baseline 创建不可变配置版本、测试记录和一个共享运行状态。运行状态有三种模式：
 
 | `mode` | 含义 |
 |---|---|
@@ -320,7 +320,7 @@ SMTP 不进入公开 `/readyz`，因此邮件服务故障不会让登录、OAuth
 - `GET /api/admin/settings/mail` 的 `configured`、`available`、`circuit.state`、错误类别、打开时间和下一探测时间。
 - `GET /api/admin/stats` 的 backlog、近 24 小时失败尝试和快照化熔断状态，以及 `GET /api/admin/stats/mail-trend?days=7..90` 的 UTC 入队、发送、其他失败尝试（不含永久拒收）、永久拒收和过期趋势。
 
-邮件趋势从 schema 6 开始采用事务内增量聚合。Schema 5 的最终 outbox 状态无法重建已经重试成功或随用户删除的历史失败，因此 API 会返回 `mail_stats_available_from` / `available_from`；该时间之前的零值不代表已经观测到零次事件。Prometheus 同时导出 `nyauth_smtp_outbox_failures_total`、`nyauth_smtp_circuit_open`、`nyauth_smtp_outbox_backlog` 和 `nyauth_smtp_outbox_oldest_pending_age_seconds`。这些指标不使用邮箱、用户、邀请码、配置版本、SMTP 主机或原始错误作为标签。
+邮件趋势从 release baseline 建库时开始采用事务内增量聚合。API 返回 `mail_stats_available_from` / `available_from` 作为该数据库的邮件观测起点；该时间之前没有可比较数据。Prometheus 同时导出 `nyauth_smtp_outbox_failures_total`、`nyauth_smtp_circuit_open`、`nyauth_smtp_outbox_backlog` 和 `nyauth_smtp_outbox_oldest_pending_age_seconds`。这些指标不使用邮箱、用户、邀请码、配置版本、SMTP 主机或原始错误作为标签。
 
 注册可用性遵循以下契约：
 

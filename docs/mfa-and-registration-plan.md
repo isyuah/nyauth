@@ -25,7 +25,7 @@
 
 约束校验：`mode != closed` 时要求动态邮件状态 `configured=true`（否则拒绝保存该设置并提示）；真正注册时还要求 `available=true`。SMTP 熔断打开时在创建用户前返回 `503` 和 `Retry-After: 60`。邮件配置来源与状态语义见 [动态 SMTP 配置与故障处理](operations/runtime-mail.md)。注册端点始终挂账号动作限流器（复用 `AccountActionLimiter`）。
 
-### 数据模型（迁移 000004）
+### 数据模型（开发期草图，现已折叠进 release baseline）
 
 ```sql
 CREATE TABLE invites (
@@ -62,7 +62,7 @@ CREATE TABLE invites (
 
 ### 已实现契约
 
-- 迁移 `000007_totp_mfa` 新增 `user_totp_credentials` 与 `user_recovery_codes`。TOTP secret 使用 master key envelope encryption，AAD 绑定用户 ID；恢复码以随机 selector 定位单行，再用 Argon2id 校验完整值。
+- release baseline 包含 `user_totp_credentials` 与 `user_recovery_codes`。TOTP secret 使用 master key envelope encryption，AAD 绑定用户 ID；恢复码以随机 selector 定位单行，再用 Argon2id 校验完整值。
 - 标准参数为 RFC 6238 / SHA-1 / 30 秒 / 6 位 / `±1` 窗口。最近成功 time-step 在 `FOR UPDATE` 事务内推进，相同或更旧 step 会作为重放拒绝。
 - 启用时生成 10 枚恢复码并只返回一次；恢复码原子消费，重新生成会让旧集合全部失效。
 - 密码和外部 Provider 登录都先建立独立 Redis `mfa_pending` 状态，而不是完整 session。Cookie 为 `nyauth_mfa_pending`，TTL 5 分钟，不进入用户 session set、设备列表或活跃会话统计。
@@ -90,7 +90,7 @@ CREATE TABLE invites (
 ### 数据与 ceremony
 
 - 使用 `github.com/go-webauthn/webauthn v0.17.4`。RP ID 固定取启动时已校验的 `auth.issuer` hostname，origin 固定取其协议与 host，不从请求 Host 或转发头动态派生。
-- 迁移 `000008_passkeys` 按 RP ID 保存独立 32 字节 user handle 和 credential。credential ID 保持可索引；完整 credential 使用 master key envelope encryption，AAD 绑定 RP ID、记录 ID、用户 ID 与 credential ID。
+- release baseline 按 RP ID 保存独立 32 字节 user handle 和 credential。credential ID 保持可索引；完整 credential 使用 master key envelope encryption，AAD 绑定 RP ID、记录 ID、用户 ID 与 credential ID。
 - 每次 assertion 都在 PostgreSQL 行锁事务中重加密完整 credential，并同步 sign count、clone warning、backup eligible/state、transport、AAGUID、attachment 与 last-used 时间。discoverable 登录按 user、handle、全部 credential 的固定顺序加锁，避免同一用户并发凭据更新丢失。
 - WebAuthn `SessionData` 以完整 MessagePack 保存在 Redis，不由客户端拆装。options 返回不透明 `ceremony_id`，完成请求通过 `X-WebAuthn-Ceremony` 携带，因此 Conditional UI、显式登录和多标签页可以并存。
 - Passkey MFA 用 Lua 原子核对并同时删除 WebAuthn ceremony 与父 `mfa_pending`；任一状态缺失或内容不匹配时都不消费另一项。

@@ -5,87 +5,14 @@ import (
 	"testing"
 	"time"
 
-	migrate "github.com/golang-migrate/migrate/v4"
-	"github.com/golang-migrate/migrate/v4/source/iofs"
 	"github.com/google/uuid"
 	"github.com/nyasharp/nyauth/internal/audit"
 	"github.com/nyasharp/nyauth/internal/database"
 	"github.com/nyasharp/nyauth/internal/identity"
 	"github.com/nyasharp/nyauth/internal/runtimecoord"
 	"github.com/nyasharp/nyauth/internal/user"
-	migrationfiles "github.com/nyasharp/nyauth/migrations"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
-
-func TestAdminUserInsightsMigrationBackfillsOnlyAuthoritativeRegistrations(t *testing.T) {
-	schema := newPostgresTestSchema(t)
-	source, err := iofs.New(migrationfiles.Files, ".")
-	if err != nil {
-		t.Fatalf("open embedded migrations: %v", err)
-	}
-	runner, err := migrate.NewWithSourceInstance("iofs", source, schema.migrationDSN)
-	if err != nil {
-		_ = source.Close()
-		t.Fatalf("create migration runner: %v", err)
-	}
-	t.Cleanup(func() { _, _ = runner.Close() })
-	if err := runner.Migrate(9); err != nil {
-		t.Fatalf("migrate to avatar schema: %v", err)
-	}
-
-	ctx := context.Background()
-	legacyID := uuid.New()
-	registeredID := uuid.New()
-	if _, err := schema.pool.Exec(ctx, `
-		INSERT INTO users (id,username,status,role,metadata)
-		VALUES ($1,$2,'active','user','{}'::jsonb),($3,$4,'active','user','{}'::jsonb)
-	`, legacyID, "legacy-before-insights", registeredID, "registered-before-insights"); err != nil {
-		t.Fatalf("seed pre-insights users: %v", err)
-	}
-	now := time.Now().UTC().Truncate(time.Microsecond)
-	if _, err := schema.pool.Exec(ctx, `
-		INSERT INTO self_registrations (
-			id,user_id,status,expires_at,completed_at,created_at,updated_at
-		) VALUES ($1,$2,'completed',$3,$4,$5,$4)
-	`, uuid.New(), registeredID, now.Add(time.Hour), now, now.Add(-time.Hour)); err != nil {
-		t.Fatalf("seed authoritative self-registration: %v", err)
-	}
-	if err := runner.Migrate(10); err != nil {
-		t.Fatalf("migrate to administrator insights schema: %v", err)
-	}
-	assertMigrationVersion(t, schema, 10)
-
-	for _, test := range []struct {
-		id   uuid.UUID
-		want string
-	}{{legacyID, "legacy"}, {registeredID, "self_registration"}} {
-		var sourceValue string
-		if err := schema.pool.QueryRow(ctx, `SELECT creation_source FROM users WHERE id=$1`, test.id).Scan(&sourceValue); err != nil {
-			t.Fatalf("load creation source for %s: %v", test.id, err)
-		}
-		if sourceValue != test.want {
-			t.Fatalf("creation source for %s = %q, want %q", test.id, sourceValue, test.want)
-		}
-	}
-	var columnDefault *string
-	if err := schema.pool.QueryRow(ctx, `
-		SELECT column_default FROM information_schema.columns
-		WHERE table_schema=$1 AND table_name='users' AND column_name='creation_source'
-	`, schema.name).Scan(&columnDefault); err != nil {
-		t.Fatalf("inspect creation_source default: %v", err)
-	}
-	if columnDefault != nil {
-		t.Fatalf("creation_source default = %q, want NULL", *columnDefault)
-	}
-	if _, err := schema.pool.Exec(ctx, `INSERT INTO users (id,username) VALUES ($1,$2)`, uuid.New(), "missing-source"); !isPostgresCode(err, "23502") {
-		t.Fatalf("missing creation_source error = %v, want not-null violation", err)
-	}
-	if _, err := schema.pool.Exec(ctx, `
-		INSERT INTO users (id,username,creation_source) VALUES ($1,$2,'guessed')
-	`, uuid.New(), "invalid-source"); !isPostgresCode(err, "23514") {
-		t.Fatalf("invalid creation_source error = %v, want check violation", err)
-	}
-}
 
 func TestAdminUserCreationSourcesInsightsAndExactActivity(t *testing.T) {
 	schema := newPostgresTestSchema(t)

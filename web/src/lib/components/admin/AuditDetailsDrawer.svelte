@@ -12,10 +12,26 @@
     log?: AuditLog | null;
   } = $props();
 
-  const sensitiveDetailKey = /(?:^|_)(?:password|passphrase|secret|token|credential|cookie|csrf|nonce|authorization|recovery_code|totp|private_key|api_key|code_verifier)(?:$|_)/i;
+  const sensitiveDetailFragment = /password|secret|token|cookie|csrf|nonce|authorization_code|code_verifier/i;
+  const exactSensitiveDetailKeys = new Set([
+    'passphrase',
+    'credential',
+    'credential_id',
+    'recovery_code',
+    'private_key',
+    'api_key',
+    'ciphertext',
+    'totp_seed',
+    'totp_secret'
+  ]);
+
+  function isSensitiveDetailKey(key: string): boolean {
+    const normalized = key.trim().toLowerCase();
+    return sensitiveDetailFragment.test(normalized) || exactSensitiveDetailKeys.has(normalized);
+  }
 
   function redactDetails(value: unknown, key = ''): unknown {
-    if (key && sensitiveDetailKey.test(key)) return '[已脱敏]';
+    if (key && isSensitiveDetailKey(key)) return '[已脱敏]';
     if (Array.isArray(value)) return value.map((item) => redactDetails(item));
     if (value && typeof value === 'object') {
       return Object.fromEntries(Object.entries(value).map(([childKey, childValue]) => [childKey, redactDetails(childValue, childKey)]));

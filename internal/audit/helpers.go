@@ -150,15 +150,17 @@ func outboxEventFromAuditLog(entry *models.AuditLog) (OutboxEvent, error) {
 
 func sensitiveAuditDetailKey(key string) bool {
 	normalized := strings.ToLower(strings.TrimSpace(key))
-	for _, fragment := range []string{
-		"password", "passphrase", "secret", "token", "credential", "cookie", "csrf", "nonce",
-		"authorization_code", "code_verifier", "recovery_code", "totp", "private_key", "api_key",
-	} {
+	for _, fragment := range []string{"password", "secret", "token", "cookie", "csrf", "nonce", "authorization_code", "code_verifier"} {
 		if strings.Contains(normalized, fragment) {
 			return true
 		}
 	}
-	return false
+	switch normalized {
+	case "passphrase", "credential", "credential_id", "recovery_code", "private_key", "api_key", "ciphertext", "totp_seed", "totp_secret":
+		return true
+	default:
+		return false
+	}
 }
 
 // RedactDetails returns a detached copy safe for administrator-facing JSON and

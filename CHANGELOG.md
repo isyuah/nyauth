@@ -2,7 +2,9 @@
 
 本文件记录 nyauth 的重要变更，格式基于 [Keep a Changelog](https://keepachangelog.com/zh-CN/1.1.0/)，版本号遵循 [语义化版本](https://semver.org/lang/zh-CN/)。
 
-## [Unreleased] — 0.3.0-dev
+## [Unreleased] — 0.3.0-rc.1
+
+> 本地 RC 候选；尚未 push、打 Tag 或发布镜像。
 
 > [!CAUTION]
 > 0.3.0 是破坏性开发基线，不提供旧数据库、配置、接口或 SDK 的兼容层。升级前请备份需要保留的数据。
@@ -22,6 +24,9 @@
 - TOTP 多因素认证：支持恢复码、登录与近期重新认证 challenge、重放防护、管理员强制 MFA 策略，以及认证状态变化后的会话轮换和撤销
 - Passkey / WebAuthn：支持 discoverable 与 Conditional UI 登录、作为第二因素及近期重新认证、凭据注册和管理、跨实例 ceremony 单次消费，以及管理员 Passkey/MFA 策略
 - 恢复验证覆盖活动 JWK、Provider、TOTP、Passkey 与邮件密文，并要求备份 manifest 独立核对 Passkey 行数
+- 安全头像媒体：浏览器 1:1 裁剪，服务端签名、尺寸、像素和动画校验后重编码四种 WebP；支持本地持久 volume、私有 S3、Provider 首次异步导入、SSRF 防护和 HA 安全清理
+- 路由化个人中心与管理员用户详情：资料、安全、会话、授权、身份、客户端和精确用户活动分离为可深链页面；品牌、注册、邮件和安全设置拆页
+- 审计体验：静态筛选目录、快捷时间范围、URL 同步、精确 subject/target 筛选、筛选 chips、详情抽屉、User-Agent、递归脱敏和筛选一致的 NDJSON/CEF 导出
 - 高可用与备份恢复文档、OAuth/OIDC 集成指南（`docs/`）
 
 ### 变更（破坏性）
@@ -36,12 +41,14 @@
 ### 移除
 
 - Go / TypeScript SDK（`sdk/`）：集成方式改为标准 OAuth/OIDC Discovery、成熟语言库与 BFF 会话模式
-- 旧多文件迁移序列（000001–000008）与 `/health` 路由（由 `/livez`、`/readyz` 取代）
+- 旧多文件开发迁移序列（000001–000010）与 `/health` 路由（由 `/livez`、`/readyz` 取代）
 
 ### 修复
 
 - 登录趋势图表因 Svelte 5 `$state` 代理与 Chart.js 不兼容而从不渲染
 - 窗口从移动断点拖宽后桌面侧边栏无法恢复展开
+- 审计详情允许安全的 MFA 布尔/计数元数据，同时拒绝并脱敏精确的 credential、恢复码、TOTP seed 和密钥字段
+- 升级 `google.golang.org/grpc` 至 `v1.82.1`，修复 `govulncheck` 确认可达的 `GO-2026-6061`
 - 仓库行尾统一为 LF（CRLF 曾导致 postgres init 脚本在容器内失败）
 
 ## [0.2.0] — 2026-07

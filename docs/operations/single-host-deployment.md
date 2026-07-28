@@ -279,7 +279,7 @@ docker compose --env-file .env.production -f docker-compose.prod.yml down
 
 ## 升级
 
-当前开发基线不承诺不同数据库契约的版本可以滚动混跑。升级前保存旧 digest，备份 PostgreSQL、头像媒体和 master key，并阅读目标版本的迁移说明：
+`0.3.0-rc.1` 本身是 schema version 1 的破坏性 release baseline，只能部署到全新 PostgreSQL/Redis，不能对早期开发数据库执行以下升级流程。对未来发布，只有目标版本说明明确兼容当前 baseline 时才可继续；升级前保存旧 digest，备份 PostgreSQL、头像媒体和 master key，并阅读目标版本的迁移说明：
 
 1. 把匹配目标版本的 Compose 和初始化脚本放入部署目录。
 2. 在临时副本中把 `.env.production` 的 `NYAUTH_IMAGE` 更新为已验证的新 digest，执行 `config --quiet`，确认后再原子替换正式文件。
