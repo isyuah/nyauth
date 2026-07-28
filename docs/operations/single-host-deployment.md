@@ -297,6 +297,26 @@ docker compose --env-file .env.production \
 
 头像媒体同样不属于 `/readyz`。通过 `/api/admin/system/status` 的 `services.media`、头像操作/存储错误/待清理指标，以及本地 media volume 容量或 S3 bucket 告警观察。媒体故障使头像上传或读取返回 `503`；删除会先解除数据库引用并返回成功，对象删除失败由后台清理重试。它不应触发整个认证服务下线。
 
+### 运行时维护与紧急解锁
+
+管理员可在 `/admin/settings/operations` 按能力暂停注册、账户写入、管理写入、认证签发、邮件领取或媒体写入。主动维护通过独立运行状态和全站横幅展示，`/readyz` 仍只表示真实依赖健康。设置到期后实例会立即在进程内恢复，一个 PostgreSQL leader 随后以 CAS 清理持久状态并写一次审计。
+
+如果无限期暂停、错误组合或前端故障使管理入口不可用，使用应用的 runtime DSN 执行 break-glass reset。首选在现有容器内执行：
+
+```bash
+docker compose --env-file .env.production -f docker-compose.prod.yml exec nyauth \
+  nyauth service-control reset -reason "incident resolved by operator"
+```
+
+1Panel 使用 `docker-compose.external.yml` 时，将 `-f docker-compose.prod.yml` 替换为 `-f docker-compose.external.yml`；可以在 1Panel 容器终端运行同一条容器内命令。若应用容器无法启动但 PostgreSQL 可用，可从同一部署目录临时运行镜像中的 CLI：
+
+```bash
+docker compose --env-file .env.production -f docker-compose.external.yml run --rm --no-deps nyauth \
+  service-control reset -reason "break-glass recovery while app is offline"
+```
+
+命令默认等待在线实例最多 30 秒并输出 JSON。`application_status=applying` 表示数据库 reset 已提交，但仍有活动实例尚未确认；不要重复执行 reset，应先检查实例心跳、数据库连通性和应用日志。每次执行都会写 `service_control.cli_reset` 审计，`-reason` 不得包含密码、Token、DSN 或其他 secret。
+
 正常停止而保留 PostgreSQL 数据：
 
 ```bash
@@ -307,7 +327,7 @@ docker compose --env-file .env.production -f docker-compose.prod.yml down
 
 ## 升级
 
-`0.3.0-rc.1` 建立了 schema version 1 的破坏性 release baseline，不能从更早的开发数据库升级。正式 `0.3.0` 在该 baseline 上提供兼容的 `000002_provider_presentation` 和 `000003_security_revocation_outbox` 加法迁移，并要求 schema version 3；从 RC1 升级可按以下流程执行。升级前保存旧 digest，备份 PostgreSQL、头像媒体和 master key，并阅读目标版本的迁移说明：
+`0.3.0-rc.1` 建立了 schema version 1 的破坏性 release baseline，不能从更早的开发数据库升级。正式 `0.3.0` 通过兼容的 `000002_provider_presentation` 和 `000003_security_revocation_outbox` 演进到 schema version 3；`0.4.0-dev` 再通过兼容的 `000004_runtime_service_control` 演进到 schema version 4。升级前保存旧 digest，备份 PostgreSQL、头像媒体和 master key，并阅读目标版本的迁移说明：
 
 1. 把匹配目标版本的 Compose 和初始化脚本放入部署目录。
 2. 在临时副本中把 `.env.production` 的 `NYAUTH_IMAGE` 更新为已验证的新 digest，执行 `config --quiet`，确认后再原子替换正式文件。

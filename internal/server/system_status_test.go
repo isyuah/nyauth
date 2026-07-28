@@ -45,6 +45,25 @@ func TestCollectSystemStatusReportsHealthyRuntime(t *testing.T) {
 	}
 }
 
+func TestCollectSystemStatusKeepsIntentionalMaintenanceSeparateFromHealth(t *testing.T) {
+	started := time.Now().UTC()
+	response := collectSystemStatus(context.Background(), time.Hour, systemStatusSources{
+		pingPostgreSQL: func(context.Context) error { return nil },
+		pingRedis:      func(context.Context) error { return nil },
+		readSchema: func(context.Context) (systemSchemaSnapshot, error) {
+			return systemSchemaSnapshot{version: database.SchemaVersion, rows: 1}, nil
+		},
+		readSigningKey: func(context.Context) (*models.JWK, error) {
+			return &models.JWK{Kid: "kid", Status: models.JWKStatusSigning, SigningStartedAt: started}, nil
+		},
+		providerState:  func() (bool, uint64) { return true, 1 },
+		operatingState: func() string { return "full_pause" },
+	})
+	if response.Status != "ok" || response.OperatingState != "full_pause" {
+		t.Fatalf("status=%q operating_state=%q", response.Status, response.OperatingState)
+	}
+}
+
 func TestCollectSystemStatusReportsDegradedProviderSnapshot(t *testing.T) {
 	response := collectSystemStatus(context.Background(), time.Hour, systemStatusSources{
 		pingPostgreSQL: func(context.Context) error { return nil },

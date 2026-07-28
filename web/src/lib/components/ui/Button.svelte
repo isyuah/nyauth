@@ -1,5 +1,7 @@
 <script lang="ts">
   import type { Snippet } from 'svelte';
+  import type { ServiceCapability } from '$lib/api';
+  import { capabilityPauseReason, isCapabilityPaused, serviceStatusStore } from '$lib/service-control';
 
   let {
     variant = 'primary',
@@ -10,6 +12,7 @@
     onclick,
     ariaLabel,
     title,
+    requiredCapability,
     fullWidth = false,
     children,
   }: {
@@ -21,9 +24,17 @@
     onclick?: (e: MouseEvent) => void;
     ariaLabel?: string;
     title?: string;
+    requiredCapability?: ServiceCapability;
     fullWidth?: boolean;
     children: Snippet;
   } = $props();
+
+  let capabilityBlocked = $derived(requiredCapability
+    ? isCapabilityPaused($serviceStatusStore.value, requiredCapability)
+    : false);
+  let disabledReason = $derived(requiredCapability
+    ? capabilityPauseReason($serviceStatusStore.value, requiredCapability)
+    : '');
 
   const styles: Record<string, string> = {
     primary: 'background: var(--nya-primary); color: #fff; box-shadow: 0 5px 12px rgba(124, 92, 255, 0.20);',
@@ -40,13 +51,13 @@
 
 <button
   {type}
-  disabled={disabled || loading}
+  disabled={disabled || loading || capabilityBlocked}
   {onclick}
   aria-label={ariaLabel}
   aria-busy={loading}
-  {title}
+  title={capabilityBlocked ? disabledReason : title}
   class:w-full={fullWidth}
-  style="{styles[variant]}; height: {heights[size]}; padding: {paddings[size]}; font-size: {fontSizes[size]}; font-weight: 550; border-radius: 9px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; cursor: {disabled || loading ? 'not-allowed' : 'pointer'}; opacity: {disabled || loading ? 0.5 : 1}; transition: all 0.15s;"
+  style="{styles[variant]}; height: {heights[size]}; padding: {paddings[size]}; font-size: {fontSizes[size]}; font-weight: 550; border-radius: 9px; display: inline-flex; align-items: center; justify-content: center; gap: 8px; cursor: {disabled || loading || capabilityBlocked ? 'not-allowed' : 'pointer'}; opacity: {disabled || loading || capabilityBlocked ? 0.5 : 1}; transition: all 0.15s;"
 >
   {#if loading}
     <svg class="animate-spin" style="width: 16px; height: 16px;" viewBox="0 0 24 24" fill="none">

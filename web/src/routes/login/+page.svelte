@@ -2,6 +2,7 @@
   import { page } from '$app/stores';
   import { api, ApiError, isAPIErrorCode, isMFARequiredResponse } from '$lib/api';
   import { brandingStore, consumeProviderAuthError, safeReturnPath, sessionStore } from '$lib/stores';
+  import { capabilityPauseReason, isCapabilityPaused, serviceStatusStore } from '$lib/service-control';
   import { goto } from '$app/navigation';
   import { onMount } from 'svelte';
   import Button from '$lib/components/ui/Button.svelte';
@@ -26,6 +27,7 @@
   let providersError = $state('');
   let cleanedReturnTo = $state<string | null>(null);
   let returnTo = $derived(cleanedReturnTo ?? safeReturnPath($page.url.searchParams.get('return_to'), '/dashboard'));
+  let authPaused = $derived(isCapabilityPaused($serviceStatusStore.value, 'auth_issuance'));
 
   let registrationOpen = $state(false);
   let pendingVerification = $state(false);
@@ -155,6 +157,7 @@
   }
 
   async function startConditionalLogin() {
+    if (authPaused) return;
     abortConditional();
     const controller = new AbortController();
     const generation = ++conditionalGeneration;
@@ -184,6 +187,10 @@
   }
 
   async function handlePasskeyLogin() {
+    if (authPaused) {
+      error = capabilityPauseReason($serviceStatusStore.value, 'auth_issuance');
+      return;
+    }
     abortConditional();
     abortExplicitPasskey();
     error = '';
@@ -224,6 +231,10 @@
 
   async function handleLogin(e: Event) {
     e.preventDefault();
+    if (authPaused) {
+      error = capabilityPauseReason($serviceStatusStore.value, 'auth_issuance');
+      return;
+    }
     abortConditional();
     abortExplicitPasskey();
     error = '';
@@ -256,6 +267,10 @@
   }
 
   function handleOAuth(name: string) {
+    if (authPaused) {
+      error = capabilityPauseReason($serviceStatusStore.value, 'auth_issuance');
+      return;
+    }
     abortConditional();
     abortExplicitPasskey();
     window.location.href = `/auth/${encodeURIComponent(name)}/authorize?return_to=${encodeURIComponent(returnTo)}`;
@@ -291,14 +306,14 @@
           <a href="/forgot-password" class="text-small text-nya-primary hover:underline">忘记密码？</a>
         </div>
 
-        <Button type="submit" {loading} disabled={passkeyLoading} size="lg" variant="primary" fullWidth>
+        <Button type="submit" {loading} disabled={passkeyLoading} requiredCapability="auth_issuance" size="lg" variant="primary" fullWidth>
           {loading ? '登录中...' : '登录'}
         </Button>
       </form>
 
       {#if passkeySupported}
         <div class="mt-4">
-          <Button variant="secondary" size="lg" fullWidth loading={passkeyLoading} disabled={loading} onclick={handlePasskeyLogin}>
+          <Button variant="secondary" size="lg" fullWidth loading={passkeyLoading} disabled={loading} requiredCapability="auth_issuance" onclick={handlePasskeyLogin}>
             <Fingerprint size={18} /> 使用 Passkey 登录
           </Button>
         </div>
@@ -320,8 +335,11 @@
           <div class="space-y-2">
             {#each providers as p}
               <button
+                type="button"
+                disabled={authPaused}
+                title={authPaused ? capabilityPauseReason($serviceStatusStore.value, 'auth_issuance') : undefined}
                 onclick={() => handleOAuth(p.name)}
-                class="w-full h-10 flex items-center justify-center gap-2 border border-nya-border rounded-nya-sm text-body-medium text-nya-text-primary hover:bg-nya-surface-hover transition-colors duration-fast"
+                class="w-full h-10 flex items-center justify-center gap-2 border border-nya-border rounded-nya-sm text-body-medium text-nya-text-primary hover:bg-nya-surface-hover transition-colors duration-fast disabled:cursor-not-allowed disabled:opacity-50"
               >
                 <span class="capitalize">{p.name}</span>
               </button>

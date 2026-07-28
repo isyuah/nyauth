@@ -890,7 +890,9 @@ func newHAHTTPTestCluster(t *testing.T) *haHTTPTestCluster {
 	var testServers []*httptest.Server
 	var redisClients []*redis.Client
 	var telemetryRuntime *telemetry.Runtime
+	var stopServiceControl context.CancelFunc = func() {}
 	t.Cleanup(func() {
+		stopServiceControl()
 		for _, testServer := range testServers {
 			testServer.Close()
 		}
@@ -979,6 +981,14 @@ func newHAHTTPTestCluster(t *testing.T) *haHTTPTestCluster {
 			t.Fatalf("create HTTP server instance %d: %v", index, err)
 		}
 		cluster.apps[index] = app
+	}
+	serviceControlCtx, cancelServiceControl := context.WithCancel(context.Background())
+	stopServiceControl = cancelServiceControl
+	for index := range 2 {
+		if err := cluster.apps[index].serviceControl.Start(serviceControlCtx); err != nil {
+			cancelServiceControl()
+			t.Fatalf("start HA service control instance %d: %v", index, err)
+		}
 	}
 	if err := cluster.apps[0].jwkManager.EnsureActiveKey(ctx); err != nil {
 		t.Fatalf("initialize shared signing key: %v", err)

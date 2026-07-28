@@ -131,7 +131,7 @@
   {#snippet action()}
     <div class="flex items-center gap-3">
       <span title="已创建应用 / 配额上限"><Badge variant={quotaReached ? 'warning' : 'default'}>{clientTotal === null ? `—/${clientLimit}` : `${clientTotal}/${clientLimit}`}</Badge></span>
-      <Button variant="primary" disabled={quotaReached} onclick={() => { createdSecret = ''; showCreate = true; }}><Plus size={16} /> 创建应用</Button>
+      <Button variant="primary" requiredCapability="account_mutations" disabled={quotaReached} onclick={() => { createdSecret = ''; showCreate = true; }}><Plus size={16} /> 创建应用</Button>
     </div>
   {/snippet}
 </PageHeader>
@@ -140,14 +140,14 @@
 {#if rotatedSecret}<div class="mb-4 rounded-nya-md border border-nya-warning/20 bg-nya-warning-soft px-5 py-4"><p class="mb-2 text-body-medium text-nya-warning">“{rotatedClientName}”的旧 Secret 已立即失效。新 Secret 仅在当前页面显示，请现在保存。</p><SecretReveal value={rotatedSecret} label="新 Client Secret" /></div>{/if}
 
 <ResourceState {loading} error={pageError} empty={clients.length === 0} emptyTitle="还没有创建应用" emptyDescription="创建第一个 OAuth / OIDC 客户端后即可接入项目。" onretry={loadApps}>
-  {#snippet emptyAction()}<Button variant="primary" onclick={() => (showCreate = true)}>创建应用</Button>{/snippet}
+  {#snippet emptyAction()}<Button variant="primary" requiredCapability="account_mutations" onclick={() => (showCreate = true)}>创建应用</Button>{/snippet}
   {#snippet children()}
     <div class="space-y-3">
       {#each clients as client}
         <section class="rounded-nya-card border border-nya-border bg-nya-surface p-5 shadow-nya-card">
           <div class="flex flex-col justify-between gap-4 md:flex-row md:items-start">
             <div class="flex min-w-0 items-center gap-3"><span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-nya-md bg-nya-blue-soft"><AppWindow size={20} class="text-nya-blue" /></span><div class="min-w-0"><h2 class="truncate text-card-title text-nya-text-primary">{client.name}</h2><CopyField value={client.id} /></div></div>
-            <div class="flex flex-wrap items-center gap-2">{#if client.is_public}<Badge variant="warning">Public</Badge>{:else}<Button variant="secondary" size="sm" onclick={() => requestRotation(client)}><RefreshCw size={14} /> 轮换 Secret</Button>{/if}<Button variant="ghost" size="sm" onclick={() => requestDelete(client)}>删除</Button></div>
+            <div class="flex flex-wrap items-center gap-2">{#if client.is_public}<Badge variant="warning">Public</Badge>{:else}<Button variant="secondary" size="sm" requiredCapability="account_mutations" onclick={() => requestRotation(client)}><RefreshCw size={14} /> 轮换 Secret</Button>{/if}<Button variant="ghost" size="sm" requiredCapability="account_mutations" onclick={() => requestDelete(client)}>删除</Button></div>
           </div>
           {#if !client.is_public}<p class="mt-3 text-small text-nya-text-tertiary">Secret 版本 {client.secret_version}{#if client.secret_hint} · 尾号 {client.secret_hint}{/if}{#if client.secret_rotated_at} · 最近轮换 {new Date(client.secret_rotated_at).toLocaleString()}{/if}</p>{/if}
           <div class="mt-4 flex flex-wrap gap-1.5">{#each client.redirect_uris as uri}<code class="break-all rounded-nya-xs bg-nya-surface-muted px-2 py-1 text-micro text-nya-text-secondary">{uri}</code>{/each}</div>
@@ -165,7 +165,7 @@
     <div><label for="my-client-redirects" class="mb-1.5 block text-body-medium text-nya-text-primary">Redirect URI <span class="text-small text-nya-text-tertiary">（每行一个）</span></label><textarea id="my-client-redirects" bind:value={newApp.redirect_uris} required rows="3" placeholder="https://app.example.com/callback" class="w-full rounded-nya-sm border border-nya-border bg-nya-surface px-3 py-2 font-mono text-small focus:border-nya-primary focus:outline-none focus:ring-2 focus:ring-nya-primary/24"></textarea></div>
     <div><label for="my-client-logouts" class="mb-1.5 block text-body-medium text-nya-text-primary">Post-logout Redirect URI <span class="text-small text-nya-text-tertiary">（每行一个）</span></label><textarea id="my-client-logouts" bind:value={newApp.post_logout_redirect_uris} rows="2" placeholder="https://app.example.com/signed-out" class="w-full rounded-nya-sm border border-nya-border bg-nya-surface px-3 py-2 font-mono text-small focus:border-nya-primary focus:outline-none focus:ring-2 focus:ring-nya-primary/24"></textarea></div>
     <label class="flex cursor-pointer items-start gap-2"><input type="checkbox" bind:checked={newApp.is_public} class="mt-0.5 rounded" /><span><span class="block text-body text-nya-text-primary">公共客户端</span><span class="block text-small text-nya-text-tertiary">仅用于无法安全保存 Secret 的原生应用；浏览器 SPA 暂不作为正式支持模式。</span></span></label>
-    <div class="flex justify-end gap-2 pt-2"><Button variant="secondary" onclick={() => (showCreate = false)} disabled={creating}>取消</Button><Button type="submit" variant="primary" loading={creating}>创建</Button></div>
+    <div class="flex justify-end gap-2 pt-2"><Button variant="secondary" onclick={() => (showCreate = false)} disabled={creating}>取消</Button><Button type="submit" variant="primary" requiredCapability="account_mutations" loading={creating}>创建</Button></div>
   </form>
 </Modal>
 

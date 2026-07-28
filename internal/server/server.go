@@ -13,6 +13,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync/atomic"
 	"syscall"
 	"time"
 
@@ -26,6 +27,7 @@ import (
 	"github.com/nyasharp/nyauth/internal/auth"
 	"github.com/nyasharp/nyauth/internal/authorization"
 	"github.com/nyasharp/nyauth/internal/avatar"
+	"github.com/nyasharp/nyauth/internal/buildinfo"
 	"github.com/nyasharp/nyauth/internal/client"
 	"github.com/nyasharp/nyauth/internal/config"
 	"github.com/nyasharp/nyauth/internal/crypto"
@@ -36,6 +38,7 @@ import (
 	"github.com/nyasharp/nyauth/internal/provider"
 	"github.com/nyasharp/nyauth/internal/registration"
 	"github.com/nyasharp/nyauth/internal/securityrevocation"
+	"github.com/nyasharp/nyauth/internal/servicecontrol"
 	"github.com/nyasharp/nyauth/internal/session"
 	"github.com/nyasharp/nyauth/internal/settings"
 	"github.com/nyasharp/nyauth/internal/stats"
@@ -46,46 +49,49 @@ import (
 )
 
 type Server struct {
-	cfg                 *config.Config
-	db                  *pgxpool.Pool
-	rdb                 *redis.Client
-	webFS               embed.FS
-	router              *chi.Mux
-	trustedProxies      []*net.IPNet
-	userService         *user.Service
-	clientService       *client.Service
-	providerMgr         *provider.Manager
-	identityStore       *identity.Store
-	sessionStore        *session.Store
-	tokenService        *auth.TokenService
-	jwkManager          *auth.JWKManager
-	authHandler         *auth.Handler
-	consentHandler      *auth.ConsentHandler
-	sessionMiddleware   *SessionMiddleware
-	loginLimiter        *LoginLimiter
-	auditStore          *audit.Store
-	auditDispatcher     *audit.Dispatcher
-	authorizationStore  *authorization.Store
-	statsHandler        *stats.Handler
-	settingsMgr         *settings.Manager
-	inviteStore         *invite.Store
-	registrationStore   *registration.Store
-	telemetry           *telemetry.Runtime
-	accountService      accountActionService
-	accountLimiter      *AccountActionLimiter
-	mailSettingsLimiter *MailSettingsLimiter
-	avatarLimiter       *AvatarLimiter
-	mailManager         *mailruntime.Manager
-	mfaService          *mfa.Service
-	avatarService       *avatar.Service
-	avatarRepository    *avatar.Repository
-	avatarStore         avatar.BlobStore
-	avatarImportWorker  *avatar.ImportWorker
-	avatarProcessing    chan struct{}
-	emailDispatcher     *account.Dispatcher
-	revocationWorker    *securityrevocation.Dispatcher
-	securityVersions    func(context.Context, uuid.UUID) (int64, int64, error)
-	readiness           readinessState
+	cfg                       *config.Config
+	db                        *pgxpool.Pool
+	rdb                       *redis.Client
+	webFS                     embed.FS
+	router                    *chi.Mux
+	trustedProxies            []*net.IPNet
+	userService               *user.Service
+	clientService             *client.Service
+	providerMgr               *provider.Manager
+	identityStore             *identity.Store
+	sessionStore              *session.Store
+	tokenService              *auth.TokenService
+	jwkManager                *auth.JWKManager
+	authHandler               *auth.Handler
+	consentHandler            *auth.ConsentHandler
+	sessionMiddleware         *SessionMiddleware
+	loginLimiter              *LoginLimiter
+	auditStore                *audit.Store
+	auditDispatcher           *audit.Dispatcher
+	authorizationStore        *authorization.Store
+	statsHandler              *stats.Handler
+	settingsMgr               *settings.Manager
+	inviteStore               *invite.Store
+	registrationStore         *registration.Store
+	telemetry                 *telemetry.Runtime
+	accountService            accountActionService
+	accountLimiter            *AccountActionLimiter
+	mailSettingsLimiter       *MailSettingsLimiter
+	operationsSettingsLimiter *OperationsSettingsLimiter
+	avatarLimiter             *AvatarLimiter
+	mailManager               *mailruntime.Manager
+	mfaService                *mfa.Service
+	avatarService             *avatar.Service
+	avatarRepository          *avatar.Repository
+	avatarStore               avatar.BlobStore
+	avatarImportWorker        *avatar.ImportWorker
+	avatarProcessing          chan struct{}
+	emailDispatcher           *account.Dispatcher
+	revocationWorker          *securityrevocation.Dispatcher
+	serviceControl            serviceControlRuntime
+	serviceStatusStreams      atomic.Int64
+	securityVersions          func(context.Context, uuid.UUID) (int64, int64, error)
+	readiness                 readinessState
 }
 
 func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS, telemetryRuntime *telemetry.Runtime) (*Server, error) {
@@ -140,7 +146,20 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 	if err != nil {
 		return nil, fmt.Errorf("configuring MFA service: %w", err)
 	}
-	s := &Server{cfg: cfg, db: db, rdb: rdb, webFS: webFS, trustedProxies: parseTrustedProxyCIDRs(cfg.Server.TrustedProxyCIDRs), userService: userService, clientService: clientService, providerMgr: providerMgr, identityStore: identityStore, sessionStore: sessionStore, tokenService: tokenService, jwkManager: jwkManager, authHandler: authHandler, consentHandler: consentHandler, sessionMiddleware: NewSessionMiddleware(sessionStore, cfg.Server.SecureCookie), loginLimiter: NewLoginLimiter(rdb), accountLimiter: NewAccountActionLimiter(rdb), mailSettingsLimiter: NewMailSettingsLimiter(rdb), avatarLimiter: NewAvatarLimiter(rdb), auditStore: audit.NewStore(db), authorizationStore: authorizationStore, statsHandler: stats.NewHandler(db, rdb), settingsMgr: settings.NewManagerForRP(db, settings.Branding{Title: cfg.Web.Title, LogoURL: cfg.Web.LogoURL}, passkeyRPID), inviteStore: invite.NewStore(db), registrationStore: registration.NewStore(db), telemetry: telemetryRuntime, mfaService: mfaService, avatarService: avatarService, avatarRepository: avatarRepository, avatarStore: avatarStore, avatarProcessing: make(chan struct{}, 1)}
+	s := &Server{cfg: cfg, db: db, rdb: rdb, webFS: webFS, trustedProxies: parseTrustedProxyCIDRs(cfg.Server.TrustedProxyCIDRs), userService: userService, clientService: clientService, providerMgr: providerMgr, identityStore: identityStore, sessionStore: sessionStore, tokenService: tokenService, jwkManager: jwkManager, authHandler: authHandler, consentHandler: consentHandler, sessionMiddleware: NewSessionMiddleware(sessionStore, cfg.Server.SecureCookie), loginLimiter: NewLoginLimiter(rdb), accountLimiter: NewAccountActionLimiter(rdb), mailSettingsLimiter: NewMailSettingsLimiter(rdb), operationsSettingsLimiter: NewOperationsSettingsLimiter(rdb), avatarLimiter: NewAvatarLimiter(rdb), auditStore: audit.NewStore(db), authorizationStore: authorizationStore, statsHandler: stats.NewHandler(db, rdb), settingsMgr: settings.NewManagerForRP(db, settings.Branding{Title: cfg.Web.Title, LogoURL: cfg.Web.LogoURL}, passkeyRPID), inviteStore: invite.NewStore(db), registrationStore: registration.NewStore(db), telemetry: telemetryRuntime, mfaService: mfaService, avatarService: avatarService, avatarRepository: avatarRepository, avatarStore: avatarStore, avatarProcessing: make(chan struct{}, 1)}
+	serviceControlStore, err := servicecontrol.NewStore(db)
+	if err != nil {
+		return nil, fmt.Errorf("configuring runtime service control storage: %w", err)
+	}
+	serviceControlManager, err := servicecontrol.NewManager(serviceControlStore, nil, servicecontrol.ManagerOptions{
+		InstanceID: uuid.New(), Version: buildinfo.Version, StartedAt: time.Now().UTC(),
+		OnError: func(err error) { slog.Error("runtime service control synchronization failed", "error", err) },
+	})
+	if err != nil {
+		return nil, fmt.Errorf("configuring runtime service control: %w", err)
+	}
+	s.serviceControl = serviceControlManager
+	authHandler.SetIssuanceMiddleware(s.capabilityMiddleware(servicecontrol.CapabilityAuthIssuance))
 	s.securityVersions = func(ctx context.Context, userID uuid.UUID) (int64, int64, error) {
 		var authVersion, sessionVersion int64
 		err := db.QueryRow(ctx, `
@@ -192,6 +211,7 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 				"provider_id": job.ProviderID.String(), "reason": reason,
 			})
 		},
+		AcquireWork: s.acquireWorkerCapability(servicecontrol.CapabilityMediaWrites),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("configuring provider avatar import worker: %w", err)
@@ -284,7 +304,8 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 		OnSMTPError: func(ctx context.Context, category account.SMTPErrorCategory) {
 			telemetryRuntime.RecordSMTPError(ctx, string(category))
 		},
-		OnBacklog: telemetryRuntime.RecordSMTPBacklog,
+		OnBacklog:       telemetryRuntime.RecordSMTPBacklog,
+		AcquireDelivery: s.acquireWorkerCapability(servicecontrol.CapabilityMailDelivery),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("configuring email dispatcher: %w", err)
@@ -299,6 +320,12 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 
 func (s *Server) buildRouter() *chi.Mux {
 	r := chi.NewRouter()
+	authIssuance := s.capabilityMiddleware(servicecontrol.CapabilityAuthIssuance)
+	selfRegistration := s.capabilityMiddleware(servicecontrol.CapabilitySelfRegistration)
+	accountMutations := s.capabilityMiddleware(servicecontrol.CapabilityAccountMutations)
+	adminMutations := s.capabilityMiddleware(servicecontrol.CapabilityAdminMutations)
+	accountMediaWrites := s.capabilityMiddleware(servicecontrol.CapabilityAccountMutations, servicecontrol.CapabilityMediaWrites)
+	adminMediaWrites := s.capabilityMiddleware(servicecontrol.CapabilityAdminMutations, servicecontrol.CapabilityMediaWrites)
 	r.Use(middleware.RequestID)
 	r.Use(securityHeadersMiddleware)
 	r.Use(s.clientIPMiddleware)
@@ -307,7 +334,7 @@ func (s *Server) buildRouter() *chi.Mux {
 	}
 	r.Use(redactedRequestLogger)
 	r.Use(structuredRecoverer)
-	r.Use(middleware.Timeout(30 * time.Second))
+	r.Use(timeoutExcept(30*time.Second, serviceStatusEventsPath))
 	issuer, _ := url.Parse(s.cfg.Auth.Issuer)
 	allowedOrigin := issuer.Scheme + "://" + issuer.Host
 	r.Use(cors.Handler(cors.Options{AllowedOrigins: []string{allowedOrigin}, AllowedMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"}, AllowedHeaders: []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token", "X-WebAuthn-Ceremony"}, ExposedHeaders: []string{"Retry-After"}, AllowCredentials: true, MaxAge: 300}))
@@ -319,13 +346,15 @@ func (s *Server) buildRouter() *chi.Mux {
 	}
 	r.Mount("/", s.authHandler.Routes())
 	r.Route("/auth", func(r chi.Router) {
-		r.Get("/{provider}/authorize", s.handleProviderAuthorize)
+		r.With(authIssuance).Get("/{provider}/authorize", s.handleProviderAuthorize)
 		r.Get("/{provider}/callback", s.handleProviderCallback)
 	})
 	r.Route("/api", func(r chi.Router) {
-		r.Post("/login", s.handleLogin)
-		r.Post("/login/passkey/options", s.handleBeginPasskeyLogin)
-		r.Post("/login/passkey/verify", s.handleFinishPasskeyLogin)
+		r.Get("/service-status", s.handleServiceStatus)
+		r.Get("/service-status/events", s.handleServiceStatusEvents)
+		r.With(authIssuance).Post("/login", s.handleLogin)
+		r.With(authIssuance).Post("/login/passkey/options", s.handleBeginPasskeyLogin)
+		r.With(authIssuance).Post("/login/passkey/verify", s.handleFinishPasskeyLogin)
 		r.Get("/login/mfa", s.handleGetMFAChallenge)
 		r.Post("/login/mfa", s.handleVerifyMFAChallenge)
 		r.Post("/login/mfa/passkey/options", s.handleBeginMFAPasskey)
@@ -333,13 +362,13 @@ func (s *Server) buildRouter() *chi.Mux {
 		r.Delete("/login/mfa", s.handleCancelMFAChallenge)
 		r.Get("/branding", s.handleGetBranding)
 		r.Get("/registration", s.handleRegistrationOptions)
-		r.Post("/register", s.handleRegister)
+		r.With(selfRegistration).Post("/register", s.handleRegister)
 		r.Get("/providers", s.handleListProviders)
-		r.Post("/password/forgot", s.handleRequestPasswordReset)
-		r.Post("/password/reset", s.handleConfirmPasswordReset)
-		r.Post("/email/verify", s.handleConfirmEmailVerification)
-		r.Post("/email/verification/resend", s.handleResendPendingEmailVerification)
-		r.Post("/email/change/confirm", s.handleConfirmEmailChange)
+		r.With(accountMutations).Post("/password/forgot", s.handleRequestPasswordReset)
+		r.With(accountMutations).Post("/password/reset", s.handleConfirmPasswordReset)
+		r.With(accountMutations).Post("/email/verify", s.handleConfirmEmailVerification)
+		r.With(accountMutations).Post("/email/verification/resend", s.handleResendPendingEmailVerification)
+		r.With(accountMutations).Post("/email/change/confirm", s.handleConfirmEmailChange)
 		r.Group(func(r chi.Router) {
 			r.Use(s.userAuthMiddleware)
 			r.Use(s.mutationAuditMiddleware)
@@ -348,42 +377,42 @@ func (s *Server) buildRouter() *chi.Mux {
 			r.Get("/session", s.handleSession)
 			r.Post("/logout", s.handleLogout)
 			r.Get("/me", s.handleMe)
-			r.Put("/me", s.handleUpdateMe)
-			r.Post("/me/avatar", s.handleUploadMyAvatar)
-			r.Delete("/me/avatar", s.handleDeleteMyAvatar)
-			r.Post("/me/password", s.handleChangePassword)
-			r.Post("/me/password/set", s.handleSetPassword)
+			r.With(accountMutations).Put("/me", s.handleUpdateMe)
+			r.With(accountMediaWrites).Post("/me/avatar", s.handleUploadMyAvatar)
+			r.With(accountMediaWrites).Delete("/me/avatar", s.handleDeleteMyAvatar)
+			r.With(accountMutations).Post("/me/password", s.handleChangePassword)
+			r.With(accountMutations).Post("/me/password/set", s.handleSetPassword)
 			r.Post("/me/reauth/password", s.handlePasswordReauthentication)
 			r.Post("/me/reauth/{provider}", s.handleProviderReauthentication)
 			r.Post("/me/reauth/passkey/options", s.handleBeginPasskeyReauthentication)
 			r.Post("/me/reauth/passkey/verify", s.handleFinishPasskeyReauthentication)
 			r.Get("/me/mfa", s.handleGetMyMFA)
-			r.Post("/me/mfa/totp/enroll", s.handleBeginTOTPEnrollment)
-			r.Post("/me/mfa/totp/enroll/confirm", s.handleConfirmTOTPEnrollment)
-			r.Post("/me/mfa/recovery-codes", s.handleRegenerateRecoveryCodes)
-			r.Delete("/me/mfa/totp", s.handleDisableTOTP)
+			r.With(accountMutations).Post("/me/mfa/totp/enroll", s.handleBeginTOTPEnrollment)
+			r.With(accountMutations).Post("/me/mfa/totp/enroll/confirm", s.handleConfirmTOTPEnrollment)
+			r.With(accountMutations).Post("/me/mfa/recovery-codes", s.handleRegenerateRecoveryCodes)
+			r.With(accountMutations).Delete("/me/mfa/totp", s.handleDisableTOTP)
 			r.Get("/me/passkeys", s.handleListPasskeys)
-			r.Post("/me/passkeys/registration/options", s.handleBeginPasskeyRegistration)
-			r.Post("/me/passkeys/registration/verify", s.handleFinishPasskeyRegistration)
-			r.Put("/me/passkeys/{id}", s.handleRenamePasskey)
-			r.Delete("/me/passkeys/{id}", s.handleDeletePasskey)
-			r.Post("/me/email/verification", s.handleRequestEmailVerification)
-			r.Post("/me/email/change", s.handleRequestEmailChange)
+			r.With(accountMutations).Post("/me/passkeys/registration/options", s.handleBeginPasskeyRegistration)
+			r.With(accountMutations).Post("/me/passkeys/registration/verify", s.handleFinishPasskeyRegistration)
+			r.With(accountMutations).Put("/me/passkeys/{id}", s.handleRenamePasskey)
+			r.With(accountMutations).Delete("/me/passkeys/{id}", s.handleDeletePasskey)
+			r.With(accountMutations).Post("/me/email/verification", s.handleRequestEmailVerification)
+			r.With(accountMutations).Post("/me/email/change", s.handleRequestEmailChange)
 			r.Get("/me/sessions", s.handleListMySessions)
 			r.Delete("/me/sessions/{id}", s.handleDeleteMySession)
 			r.Post("/me/sessions/revoke-others", s.handleRevokeOtherSessions)
 			r.Get("/me/authorizations", s.handleListMyAuthorizations)
 			r.Delete("/me/authorizations/{client_id}", s.handleRevokeMyAuthorization)
 			r.Get("/me/identities", s.handleMyIdentities)
-			r.Post("/me/identities/{provider}/bind", s.handleProviderBind)
-			r.Delete("/me/identities/{id}", s.handleDeleteMyIdentity)
+			r.With(accountMutations).Post("/me/identities/{provider}/bind", s.handleProviderBind)
+			r.With(accountMutations).Delete("/me/identities/{id}", s.handleDeleteMyIdentity)
 			r.Get("/consent", s.consentHandler.GetConsent)
-			r.Post("/consent/accept", s.consentHandler.AcceptConsent)
+			r.With(authIssuance).Post("/consent/accept", s.consentHandler.AcceptConsent)
 			r.Post("/consent/deny", s.consentHandler.DenyConsent)
 			r.Get("/my/clients", s.handleListMyClients)
-			r.Post("/my/clients", s.handleCreateMyClient)
-			r.Post("/my/clients/{id}/rotate-secret", s.handleRotateMyClientSecret)
-			r.Delete("/my/clients/{id}", s.handleDeleteMyClient)
+			r.With(accountMutations).Post("/my/clients", s.handleCreateMyClient)
+			r.With(accountMutations).Post("/my/clients/{id}/rotate-secret", s.handleRotateMyClientSecret)
+			r.With(accountMutations).Delete("/my/clients/{id}", s.handleDeleteMyClient)
 		})
 		r.Group(func(r chi.Router) {
 			r.Use(s.adminAuthMiddleware)
@@ -391,20 +420,22 @@ func (s *Server) buildRouter() *chi.Mux {
 			r.Use(s.requireCurrentPasswordChange)
 			r.Use(s.csrfMiddleware)
 			r.Get("/admin/system/status", s.handleSystemStatus)
-			r.Put("/admin/branding", s.handleUpdateBranding)
+			r.Get("/admin/settings/operations", s.handleGetOperationsSettings)
+			r.Put("/admin/settings/operations", s.handleUpdateOperationsSettings)
+			r.With(adminMutations).Put("/admin/branding", s.handleUpdateBranding)
 			r.Get("/admin/settings/registration", s.handleGetRegistrationSettings)
-			r.Put("/admin/settings/registration", s.handleUpdateRegistrationSettings)
+			r.With(adminMutations).Put("/admin/settings/registration", s.handleUpdateRegistrationSettings)
 			r.Get("/admin/settings/security", s.handleGetSecuritySettings)
-			r.Put("/admin/settings/security", s.handleUpdateSecuritySettings)
+			r.With(adminMutations).Put("/admin/settings/security", s.handleUpdateSecuritySettings)
 			r.Get("/admin/settings/mail", s.handleGetMailSettings)
-			r.Put("/admin/settings/mail/candidate", s.handleSaveMailCandidate)
-			r.Post("/admin/settings/mail/candidate/test", s.handleTestMailCandidate)
-			r.Post("/admin/settings/mail/activate", s.handleActivateMailCandidate)
-			r.Post("/admin/settings/mail/rollback", s.handleRollbackMailSettings)
-			r.Post("/admin/settings/mail/disable", s.handleDisableMail)
+			r.With(adminMutations).Put("/admin/settings/mail/candidate", s.handleSaveMailCandidate)
+			r.With(adminMutations).Post("/admin/settings/mail/candidate/test", s.handleTestMailCandidate)
+			r.With(adminMutations).Post("/admin/settings/mail/activate", s.handleActivateMailCandidate)
+			r.With(adminMutations).Post("/admin/settings/mail/rollback", s.handleRollbackMailSettings)
+			r.With(adminMutations).Post("/admin/settings/mail/disable", s.handleDisableMail)
 			r.Get("/admin/invites", s.handleListInvites)
-			r.Post("/admin/invites", s.handleCreateInvite)
-			r.Delete("/admin/invites/{id}", s.handleRevokeInvite)
+			r.With(adminMutations).Post("/admin/invites", s.handleCreateInvite)
+			r.With(adminMutations).Delete("/admin/invites/{id}", s.handleRevokeInvite)
 			r.Get("/admin/stats", s.statsHandler.GetStats)
 			r.Get("/admin/stats/login-trend", s.statsHandler.GetLoginTrend)
 			r.Get("/admin/stats/registration-trend", s.statsHandler.GetRegistrationTrend)
@@ -415,40 +446,40 @@ func (s *Server) buildRouter() *chi.Mux {
 			r.Get("/admin/audit-logs/export", s.handleExportAuditLogs)
 			userHandler := user.NewHandler(s.userService)
 			r.Get("/admin/users", userHandler.List)
-			r.Post("/admin/users", userHandler.Create)
+			r.With(adminMutations).Post("/admin/users", userHandler.Create)
 			r.Get("/admin/users/{id}", userHandler.Get)
 			r.Get("/admin/users/{id}/overview", s.handleAdminUserOverview)
 			r.Get("/admin/users/{id}/security", s.handleAdminUserSecurity)
 			r.Get("/admin/users/{id}/authorizations", s.handleAdminUserAuthorizations)
 			r.Get("/admin/users/{id}/clients", s.handleAdminUserClients)
 			r.Get("/admin/users/{id}/activity", s.handleAdminUserActivity)
-			r.Put("/admin/users/{id}", s.handleAdminUpdateUser)
-			r.Delete("/admin/users/{id}", userHandler.Delete)
-			r.Post("/admin/users/{id}/avatar", s.handleUploadUserAvatar)
-			r.Delete("/admin/users/{id}/avatar", s.handleDeleteUserAvatar)
-			r.Post("/admin/users/{id}/reset-password", s.handleAdminResetPassword)
+			r.With(adminMutations).Put("/admin/users/{id}", s.handleAdminUpdateUser)
+			r.With(adminMutations).Delete("/admin/users/{id}", userHandler.Delete)
+			r.With(adminMediaWrites).Post("/admin/users/{id}/avatar", s.handleUploadUserAvatar)
+			r.With(adminMediaWrites).Delete("/admin/users/{id}/avatar", s.handleDeleteUserAvatar)
+			r.With(adminMutations).Post("/admin/users/{id}/reset-password", s.handleAdminResetPassword)
 			r.Get("/admin/users/{id}/identities", s.handleUserIdentities)
-			r.Delete("/admin/users/{id}/identities/{identity_id}", s.handleAdminDeleteUserIdentity)
+			r.With(adminMutations).Delete("/admin/users/{id}/identities/{identity_id}", s.handleAdminDeleteUserIdentity)
 			r.Get("/admin/users/{id}/sessions", s.handleAdminListUserSessions)
 			r.Delete("/admin/users/{id}/sessions/{session_id}", s.handleAdminDeleteUserSession)
 			r.Delete("/admin/users/{id}/sessions", s.handleAdminRevokeUserSessions)
 			r.Post("/admin/users/{id}/suspend", s.handleSuspendUser)
-			r.Post("/admin/users/{id}/activate", s.handleActivateUser)
-			r.Put("/admin/users/{id}/role", s.handleUpdateUserRole)
+			r.With(adminMutations).Post("/admin/users/{id}/activate", s.handleActivateUser)
+			r.With(adminMutations).Put("/admin/users/{id}/role", s.handleUpdateUserRole)
 			clientHandler := client.NewHandler(s.clientService)
 			r.Get("/admin/clients", clientHandler.List)
-			r.Post("/admin/clients", clientHandler.Create)
+			r.With(adminMutations).Post("/admin/clients", clientHandler.Create)
 			r.Get("/admin/clients/{id}", clientHandler.Get)
-			r.Put("/admin/clients/{id}", clientHandler.Update)
-			r.Put("/admin/clients/{id}/owner", clientHandler.UpdateOwner)
+			r.With(adminMutations).Put("/admin/clients/{id}", clientHandler.Update)
+			r.With(adminMutations).Put("/admin/clients/{id}/owner", clientHandler.UpdateOwner)
 			r.Get("/admin/clients/{id}/access-users", clientHandler.ListAccessUsers)
-			r.Put("/admin/clients/{id}/access-users", clientHandler.ReplaceAccessUsers)
-			r.Post("/admin/clients/{id}/rotate-secret", clientHandler.RotateSecret)
-			r.Delete("/admin/clients/{id}", clientHandler.Delete)
+			r.With(adminMutations).Put("/admin/clients/{id}/access-users", clientHandler.ReplaceAccessUsers)
+			r.With(adminMutations).Post("/admin/clients/{id}/rotate-secret", clientHandler.RotateSecret)
+			r.With(adminMutations).Delete("/admin/clients/{id}", clientHandler.Delete)
 			r.Get("/admin/providers", s.handleAdminListProviders)
-			r.Post("/admin/providers", s.handleAdminCreateProvider)
-			r.Put("/admin/providers/{id}", s.handleAdminUpdateProvider)
-			r.Delete("/admin/providers/{id}", s.handleAdminDeleteProvider)
+			r.With(adminMutations).Post("/admin/providers", s.handleAdminCreateProvider)
+			r.With(adminMutations).Put("/admin/providers/{id}", s.handleAdminUpdateProvider)
+			r.With(adminMutations).Delete("/admin/providers/{id}", s.handleAdminDeleteProvider)
 			r.Post("/admin/providers/{id}/test", s.handleTestProvider)
 		})
 	})
@@ -507,7 +538,6 @@ func (s *Server) Run(ctx context.Context) error {
 	if err := s.statsHandler.Refresh(ctx); err != nil {
 		slog.WarnContext(ctx, "initial statistics refresh failed", "error_class", "dependency_unavailable")
 	}
-	s.readiness.accepting.Store(true)
 	server := &http.Server{Addr: fmt.Sprintf("%s:%d", s.cfg.Server.Host, s.cfg.Server.Port), Handler: s.router, ErrorLog: slog.NewLogLogger(slog.Default().Handler(), slog.LevelError), ReadHeaderTimeout: 10 * time.Second, ReadTimeout: 15 * time.Second, WriteTimeout: 15 * time.Second, IdleTimeout: 60 * time.Second, MaxHeaderBytes: 1 << 20}
 	runCtx, stop := signal.NotifyContext(ctx, syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -516,6 +546,12 @@ func (s *Server) Run(ctx context.Context) error {
 		slog.WarnContext(runCtx, "initial runtime settings load failed", "error", err)
 	}
 	s.settingsMgr.StartSynchronization(runCtx)
+	if s.serviceControl == nil {
+		return errors.New("runtime service control is unavailable")
+	}
+	if err := s.serviceControl.Start(runCtx); err != nil {
+		return fmt.Errorf("starting runtime service control: %w", err)
+	}
 	if s.mailManager != nil {
 		s.mailManager.StartSynchronization(runCtx)
 	}
@@ -551,6 +587,7 @@ func (s *Server) Run(ctx context.Context) error {
 	go s.statsHandler.Run(runCtx, time.Minute)
 	go s.runRegistrationCleanup(runCtx)
 	go s.runAvatarCleanup(runCtx)
+	s.readiness.accepting.Store(true)
 	go func() {
 		<-runCtx.Done()
 		s.readiness.accepting.Store(false)

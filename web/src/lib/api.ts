@@ -510,6 +510,52 @@ export interface RegistrationOptions {
   allowed_email_domains: string[];
 }
 
+export type ServiceCapability =
+  | 'self_registration'
+  | 'account_mutations'
+  | 'admin_mutations'
+  | 'auth_issuance'
+  | 'mail_delivery'
+  | 'media_writes';
+
+export type ServiceOperatingState = 'normal' | 'restricted' | 'authentication_paused' | 'full_pause';
+
+export interface ServiceStatus {
+  status: ServiceOperatingState;
+  paused_capabilities: ServiceCapability[];
+  public_message: string;
+  expires_at: string | null;
+  retry_after_seconds: number;
+}
+
+export interface ServiceControlInstance {
+  instance_id: string;
+  version: string;
+  started_at: string;
+  heartbeat_at: string;
+  loaded_revision: number;
+  applied_revision: number;
+}
+
+export interface OperationsSettings extends ServiceStatus {
+  revision: number;
+  internal_reason: string;
+  updated_at: string;
+  updated_by: string | null;
+  application_status: 'applied' | 'applying';
+  active_instances: number;
+  applied_instances: number;
+  instances: ServiceControlInstance[];
+}
+
+export interface UpdateOperationsSettingsInput {
+  expected_revision: number;
+  paused_capabilities: ServiceCapability[];
+  public_message: string;
+  internal_reason: string;
+  expires_at: string | null;
+}
+
 export interface RegistrationSettings {
   mode: RegistrationMode;
   require_email_verification: boolean;
@@ -627,6 +673,7 @@ export type ComponentStatus = 'ok' | 'degraded' | 'unavailable' | string;
 
 export interface SystemStatus {
   status: ComponentStatus;
+  operating_state?: ServiceOperatingState;
   version: string;
   schema: {
     status: ComponentStatus;
@@ -793,6 +840,13 @@ const API_ERROR_TRANSLATIONS: Record<string, string> = {
   'too many avatar operations': '头像操作过于频繁，请稍后重试',
   'avatar operation is temporarily unavailable': '头像操作暂时不可用，请稍后重试',
   'avatar storage is temporarily unavailable': '头像存储暂时不可用，请稍后重试',
+  'service capability is paused': '该操作因服务维护而暂时停用',
+  'service control revision conflict': '运行状态已被其他管理员修改，请重新加载后再试',
+  'registration settings conflict with service control': '当前运行控制状态不允许启用该注册策略，请先调整注册或邮件投递能力',
+  'service control dependency violation': '所选能力组合不满足运行控制依赖，请检查注册、认证签发与邮件投递状态',
+  'invalid service control settings': '运行控制设置无效，请检查能力、原因和恢复时间',
+  'service control is temporarily unavailable': '运行控制暂时不可用，请稍后重试',
+  'too many service control operations': '运行控制操作过于频繁，请稍后重试',
 };
 
 const API_ERROR_MESSAGES_BY_CODE: Record<string, string> = {
@@ -874,6 +928,13 @@ const API_ERROR_MESSAGES_BY_CODE: Record<string, string> = {
   'avatar.rate_limited': 'too many avatar operations',
   'avatar.operation_unavailable': 'avatar operation is temporarily unavailable',
   'avatar.storage_unavailable': 'avatar storage is temporarily unavailable',
+  'service.capability_paused': 'service capability is paused',
+  'service_control.revision_conflict': 'service control revision conflict',
+  'service_control.registration_conflict': 'registration settings conflict with service control',
+  'service_control.dependency_violation': 'service control dependency violation',
+  'service_control.invalid_settings': 'invalid service control settings',
+  'service_control.unavailable': 'service control is temporarily unavailable',
+  'service_control.rate_limited': 'too many service control operations',
 };
 
 export function localizeAPIErrorMessage(message: string, code = ''): string {
@@ -996,6 +1057,7 @@ export const api = {
       body: JSON.stringify({ current_password: currentPassword, new_password: newPassword }),
     }, false),
   getBranding: () => req<Branding>('/api/branding', {}, false),
+  getServiceStatus: () => req<ServiceStatus>('/api/service-status', { cache: 'no-store' }, false),
   getRegistrationOptions: () => req<RegistrationOptions>('/api/registration', {}, false),
   register: (data: RegisterInput) =>
     req<RegisterResult>('/api/register', { method: 'POST', body: JSON.stringify(data) }, false),
@@ -1129,6 +1191,9 @@ export const api = {
       req<MailTrend>(`/api/admin/stats/mail-trend?days=${days}`),
     getRecentLogins: (limit = 5) => req<RecentLogin[]>(`/api/admin/stats/recent-logins?limit=${limit}`),
     getSystemStatus: () => req<SystemStatus>('/api/admin/system/status'),
+    getOperationsSettings: () => req<OperationsSettings>('/api/admin/settings/operations', { cache: 'no-store' }),
+    updateOperationsSettings: (settings: UpdateOperationsSettingsInput) =>
+      req<OperationsSettings>('/api/admin/settings/operations', { method: 'PUT', body: JSON.stringify(settings) }),
     updateBranding: (branding: Branding) =>
       req<Branding>('/api/admin/branding', { method: 'PUT', body: JSON.stringify(branding) }),
     getRegistrationSettings: () => req<RegistrationSettings>('/api/admin/settings/registration'),

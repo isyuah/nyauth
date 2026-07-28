@@ -54,14 +54,15 @@ type SecurityAuditSink func(context.Context, SecurityAuditEvent) error
 type GrantMetricSink func(context.Context, string, string, string)
 
 type Handler struct {
-	tokenService *TokenService
-	jwkManager   *JWKManager
-	userService  *user.Service
-	clientStore  *client.Store
-	sessionStore *session.Store
-	config       *config.Config
-	auditSink    SecurityAuditSink
-	metricSink   GrantMetricSink
+	tokenService       *TokenService
+	jwkManager         *JWKManager
+	userService        *user.Service
+	clientStore        *client.Store
+	sessionStore       *session.Store
+	config             *config.Config
+	auditSink          SecurityAuditSink
+	metricSink         GrantMetricSink
+	issuanceMiddleware func(http.Handler) http.Handler
 }
 
 func NewHandler(tokenService *TokenService, jwkManager *JWKManager, userService *user.Service, clientStore *client.Store, sessionStore *session.Store, cfg *config.Config) *Handler {
@@ -75,6 +76,9 @@ func NewHandler(tokenService *TokenService, jwkManager *JWKManager, userService 
 
 func (h *Handler) SetSecurityAuditSink(sink SecurityAuditSink) { h.auditSink = sink }
 func (h *Handler) SetGrantMetricSink(sink GrantMetricSink)     { h.metricSink = sink }
+func (h *Handler) SetIssuanceMiddleware(middleware func(http.Handler) http.Handler) {
+	h.issuanceMiddleware = middleware
+}
 
 func (h *Handler) absolutePictureURL(value string) string {
 	if strings.HasPrefix(value, "/") {
@@ -202,10 +206,14 @@ func normalizedGrantType(value string) string {
 
 func (h *Handler) Routes() chi.Router {
 	r := chi.NewRouter()
+	issuance := h.issuanceMiddleware
+	if issuance == nil {
+		issuance = func(next http.Handler) http.Handler { return next }
+	}
 	r.Get("/.well-known/openid-configuration", h.Discovery)
 	r.Get("/.well-known/jwks.json", h.JWKS)
-	r.Get("/authorize", h.Authorize)
-	r.Post("/token", h.Token)
+	r.With(issuance).Get("/authorize", h.Authorize)
+	r.With(issuance).Post("/token", h.Token)
 	r.Post("/revoke", h.Revoke)
 	r.Post("/introspect", h.Introspect)
 	r.Get("/userinfo", h.UserInfo)

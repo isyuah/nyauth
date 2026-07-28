@@ -330,8 +330,8 @@
                   <p class="mt-1 text-micro text-nya-text-tertiary">最近使用：{formatDate(passkey.last_used_at)}{passkey.transports.length > 0 ? ` · ${passkey.transports.join(' / ')}` : ''}</p>
                 </div>
                 <div class="flex shrink-0 gap-2">
-                  <Button variant="ghost" size="sm" ariaLabel={`重命名 ${passkey.name}`} disabled={actionLoading} onclick={() => openRename(passkey)}><Pencil size={14} /> 重命名</Button>
-                  <Button variant="ghost" size="sm" ariaLabel={`删除 ${passkey.name}`} disabled={actionLoading} onclick={() => openDelete(passkey)}><Trash2 size={14} /> 删除</Button>
+                  <Button variant="ghost" size="sm" requiredCapability="account_mutations" ariaLabel={`重命名 ${passkey.name}`} disabled={actionLoading} onclick={() => openRename(passkey)}><Pencil size={14} /> 重命名</Button>
+                  <Button variant="ghost" size="sm" requiredCapability="account_mutations" ariaLabel={`删除 ${passkey.name}`} disabled={actionLoading} onclick={() => openDelete(passkey)}><Trash2 size={14} /> 删除</Button>
                 </div>
               </div>
             </article>
@@ -341,7 +341,7 @@
 
       <div class="flex flex-wrap items-center justify-between gap-3">
         <p class="text-small text-nya-text-tertiary">注册和删除要求最近 10 分钟内完成身份验证。</p>
-        <Button variant="primary" disabled={!status?.passkeys_available || actionLoading} onclick={openRegistration}><Plus size={16} /> 注册 Passkey</Button>
+        <Button variant="primary" requiredCapability="account_mutations" disabled={!status?.passkeys_available || actionLoading} onclick={openRegistration}><Plus size={16} /> 注册 Passkey</Button>
       </div>
       {#if status && !status.passkeys_available}<p class="text-small text-nya-warning">管理员当前已关闭新的 Passkey 注册；已有凭据仍可正常使用。</p>{/if}
     {/if}
@@ -354,7 +354,7 @@
     <Input id="passkey-name" label="Passkey 名称" bind:value={registrationName} required maxlength={64} autocomplete="off" placeholder="例如：Windows Hello" />
     <div class="flex justify-end gap-2">
       <Button variant="secondary" disabled={actionLoading} onclick={() => (registrationOpen = false)}>取消</Button>
-      <Button type="submit" variant="primary" loading={actionLoading}><Fingerprint size={16} /> 继续注册</Button>
+      <Button type="submit" variant="primary" requiredCapability="account_mutations" loading={actionLoading}><Fingerprint size={16} /> 继续注册</Button>
     </div>
   </form>
 </Modal>
@@ -365,7 +365,7 @@
     <Input id="passkey-rename" label="Passkey 名称" bind:value={renameName} required maxlength={64} autocomplete="off" />
     <div class="flex justify-end gap-2">
       <Button variant="secondary" disabled={renameLoading} onclick={() => (renameOpen = false)}>取消</Button>
-      <Button type="submit" variant="primary" loading={renameLoading}>保存名称</Button>
+      <Button type="submit" variant="primary" requiredCapability="account_mutations" loading={renameLoading}>保存名称</Button>
     </div>
   </form>
 </Modal>

@@ -168,7 +168,7 @@
 
 <PageHeader title="邀请管理" description="创建、分发与吊销注册邀请码；邀请码明文只在创建时显示一次">
   {#snippet action()}
-    <Button variant="primary" onclick={() => { createdInvite = null; createError = ''; showCreate = true; }}><Plus size={16} /> 创建邀请</Button>
+    <Button variant="primary" requiredCapability="admin_mutations" onclick={() => { createdInvite = null; createError = ''; showCreate = true; }}><Plus size={16} /> 创建邀请</Button>
   {/snippet}
 </PageHeader>
 
@@ -210,7 +210,7 @@
             <div class="flex shrink-0 items-center gap-2">
               <Badge variant={statusMeta[invite.status]?.variant ?? 'default'}>{statusMeta[invite.status]?.label ?? invite.status}</Badge>
               {#if invite.status === 'active'}
-                <Button variant="ghost" size="sm" ariaLabel={`吊销邀请 ${invite.note || invite.id}`} onclick={() => requestRevoke(invite)}>吊销</Button>
+                <Button variant="ghost" size="sm" requiredCapability="admin_mutations" ariaLabel={`吊销邀请 ${invite.note || invite.id}`} onclick={() => requestRevoke(invite)}>吊销</Button>
               {/if}
             </div>
           </div>
@@ -228,7 +228,7 @@
       <Input id="invite-max-uses" label="可用次数（可选）" bind:value={createForm.max_uses} placeholder="默认按注册设置" />
       <Input id="invite-ttl" label="有效期（可选）" bind:value={createForm.ttl} placeholder="如 168h、24h" />
     </div>
-    <div class="flex justify-end gap-2 pt-2"><Button variant="secondary" onclick={() => (showCreate = false)} disabled={creating}>取消</Button><Button type="submit" variant="primary" loading={creating}>创建</Button></div>
+    <div class="flex justify-end gap-2 pt-2"><Button variant="secondary" onclick={() => (showCreate = false)} disabled={creating}>取消</Button><Button type="submit" variant="primary" requiredCapability="admin_mutations" loading={creating}>创建</Button></div>
   </form>
 </Modal>
 

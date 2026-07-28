@@ -94,7 +94,7 @@
         <Input id="current-password" label="当前密码" type="password" bind:value={currentPassword} required autocomplete="current-password" />
         <div><Input id="new-password" label="新密码" type="password" bind:value={newPassword} required autocomplete="new-password" /><p class="mt-1.5 text-small text-nya-text-tertiary">{PASSWORD_REQUIREMENT}</p></div>
         <Input id="confirm-password" label="确认新密码" type="password" bind:value={confirmation} required autocomplete="new-password" />
-        <Button type="submit" variant="primary" size="lg" {loading} fullWidth>确认修改</Button>
+        <Button type="submit" variant="primary" size="lg" requiredCapability="account_mutations" {loading} fullWidth>确认修改</Button>
       </form>
     </div>
   </div>

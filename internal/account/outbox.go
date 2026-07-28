@@ -339,22 +339,24 @@ type DispatcherOptions struct {
 	OnDelivery              func(context.Context, string, bool)
 	OnSMTPError             func(context.Context, SMTPErrorCategory)
 	OnBacklog               func(context.Context, int64, time.Duration)
+	AcquireDelivery         func() (release func(), allowed bool)
 }
 
 type Dispatcher struct {
-	store       emailOutboxStore
-	senders     EmailSenderProvider
-	workerID    string
-	masterKeys  map[string][]byte
-	batchSize   int
-	expiryBatch int
-	lease       time.Duration
-	interval    time.Duration
-	clock       func() time.Time
-	onError     func(error)
-	onDelivery  func(context.Context, string, bool)
-	onSMTPError func(context.Context, SMTPErrorCategory)
-	onBacklog   func(context.Context, int64, time.Duration)
+	store           emailOutboxStore
+	senders         EmailSenderProvider
+	workerID        string
+	masterKeys      map[string][]byte
+	batchSize       int
+	expiryBatch     int
+	lease           time.Duration
+	interval        time.Duration
+	clock           func() time.Time
+	onError         func(error)
+	onDelivery      func(context.Context, string, bool)
+	onSMTPError     func(context.Context, SMTPErrorCategory)
+	onBacklog       func(context.Context, int64, time.Duration)
+	acquireDelivery func() (func(), bool)
 }
 
 func NewDispatcher(store *Store, sender EmailSender, options DispatcherOptions) (*Dispatcher, error) {
@@ -415,6 +417,7 @@ func newDispatcherWithProvider(store emailOutboxStore, senders EmailSenderProvid
 		batchSize: options.BatchSize, expiryBatch: options.ArtifactExpiryBatchSize,
 		lease: options.Lease, interval: options.Interval, clock: options.Clock,
 		onError: options.OnError, onDelivery: options.OnDelivery, onSMTPError: options.OnSMTPError, onBacklog: options.OnBacklog,
+		acquireDelivery: options.AcquireDelivery,
 	}, nil
 }
 
@@ -423,6 +426,13 @@ func (d *Dispatcher) DispatchOnce(ctx context.Context) (int, error) {
 	now := d.clock().UTC()
 	if _, err := d.store.ExpireEmailArtifacts(ctx, now, d.expiryBatch); err != nil {
 		return 0, err
+	}
+	if d.acquireDelivery != nil {
+		release, allowed := d.acquireDelivery()
+		if !allowed {
+			return 0, nil
+		}
+		defer release()
 	}
 	sender, gate, available := d.senders.CurrentSender()
 	if !available {

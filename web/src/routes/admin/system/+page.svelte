@@ -1,14 +1,16 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { api, type SystemStatus } from '$lib/api';
+  import { operatingStateLabel, serviceStatusStore } from '$lib/service-control';
   import PageHeader from '$lib/components/layout/PageHeader.svelte';
   import ResourceState from '$lib/components/ui/ResourceState.svelte';
   import StatusBadge from '$lib/components/data-display/StatusBadge.svelte';
-  import { Database, HardDrive, KeyRound, Mail, Network, Server } from 'lucide-svelte';
+  import { Activity, Database, HardDrive, KeyRound, Mail, Network, Server } from 'lucide-svelte';
 
   let systemStatus = $state<SystemStatus | null>(null);
   let loading = $state(true);
   let error = $state('');
+  let operatingState = $derived(systemStatus?.operating_state ?? $serviceStatusStore.value.status);
 
   async function loadSystemStatus() {
     loading = true;
@@ -58,6 +60,17 @@
             </div>
             <div class="flex items-center gap-3"><span class="font-mono text-small text-nya-text-secondary">{systemStatus.version}</span><StatusBadge status={systemStatus.status} /></div>
           </div>
+        </section>
+
+        <section class="rounded-nya-card border border-nya-border bg-nya-surface p-5 shadow-nya-card">
+          <div class="flex flex-wrap items-start justify-between gap-4">
+            <div class="flex items-start gap-3">
+              <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-nya-info-soft text-nya-info"><Activity size={19} /></span>
+              <div><h2 class="text-card-title text-nya-text-primary">主动运行状态</h2><p class="mt-1 text-body text-nya-text-secondary">与依赖健康状态独立；主动维护不会让 readiness 失败。</p></div>
+            </div>
+            <StatusBadge status={operatingState === 'normal' ? 'ok' : 'degraded'} />
+          </div>
+          <p class="mt-3 text-body-medium font-semibold text-nya-text-primary">{operatingStateLabel(operatingState)}</p>
         </section>
 
         <section class="rounded-nya-card border border-nya-border bg-nya-surface p-5 shadow-nya-card">

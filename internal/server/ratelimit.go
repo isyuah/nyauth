@@ -67,6 +67,16 @@ type AvatarLimiter struct {
 	ipLimit      int
 }
 
+// OperationsSettingsLimiter bounds maintenance-control changes per
+// administrator and source address without making normal troubleshooting
+// impractical for trusted operators.
+type OperationsSettingsLimiter struct {
+	rdb          *redis.Client
+	window       time.Duration
+	subjectLimit int
+	ipLimit      int
+}
+
 const (
 	mailSettingsActionCandidateSave = "candidate-save"
 	mailSettingsActionCandidateTest = "candidate-test"
@@ -100,6 +110,10 @@ func NewMailSettingsLimiter(rdb *redis.Client) *MailSettingsLimiter {
 
 func NewAvatarLimiter(rdb *redis.Client) *AvatarLimiter {
 	return &AvatarLimiter{rdb: rdb, window: 15 * time.Minute, subjectLimit: 30, ipLimit: 200}
+}
+
+func NewOperationsSettingsLimiter(rdb *redis.Client) *OperationsSettingsLimiter {
+	return &OperationsSettingsLimiter{rdb: rdb, window: 15 * time.Minute, subjectLimit: 30, ipLimit: 100}
 }
 
 func limitDigest(value string) string {
@@ -197,6 +211,13 @@ func (l *AvatarLimiter) Reserve(ctx context.Context, action, ip, subject string)
 	}
 	return reserveSubjectIPLimit(
 		ctx, l.rdb, "nyauth:avatar-limit", action, ip, subject,
+		l.subjectLimit, l.ipLimit, l.window,
+	)
+}
+
+func (l *OperationsSettingsLimiter) Reserve(ctx context.Context, ip, subject string) (bool, time.Duration, error) {
+	return reserveSubjectIPLimit(
+		ctx, l.rdb, "nyauth:operations-settings-limit", "update", ip, subject,
 		l.subjectLimit, l.ipLimit, l.window,
 	)
 }

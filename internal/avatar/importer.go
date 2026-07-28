@@ -22,20 +22,22 @@ type ImportPolicy struct {
 }
 
 type ImportWorkerOptions struct {
-	WorkerID   string
-	MasterKeys map[string][]byte
-	Policy     func(uuid.UUID) (ImportPolicy, bool)
-	OnResult   func(context.Context, models.ProviderAvatarImportJob, string, string, time.Duration)
+	WorkerID    string
+	MasterKeys  map[string][]byte
+	Policy      func(uuid.UUID) (ImportPolicy, bool)
+	OnResult    func(context.Context, models.ProviderAvatarImportJob, string, string, time.Duration)
+	AcquireWork func() (release func(), allowed bool)
 }
 
 type ImportWorker struct {
-	repo       *Repository
-	service    *Service
-	fetcher    *RemoteFetcher
-	workerID   string
-	masterKeys map[string][]byte
-	policy     func(uuid.UUID) (ImportPolicy, bool)
-	onResult   func(context.Context, models.ProviderAvatarImportJob, string, string, time.Duration)
+	repo        *Repository
+	service     *Service
+	fetcher     *RemoteFetcher
+	workerID    string
+	masterKeys  map[string][]byte
+	policy      func(uuid.UUID) (ImportPolicy, bool)
+	onResult    func(context.Context, models.ProviderAvatarImportJob, string, string, time.Duration)
+	acquireWork func() (func(), bool)
 }
 
 func NewImportWorker(repo *Repository, service *Service, options ImportWorkerOptions) (*ImportWorker, error) {
@@ -49,6 +51,7 @@ func NewImportWorker(repo *Repository, service *Service, options ImportWorkerOpt
 	return &ImportWorker{
 		repo: repo, service: service, fetcher: NewRemoteFetcher(), workerID: options.WorkerID,
 		masterKeys: keys, policy: options.Policy, onResult: options.OnResult,
+		acquireWork: options.AcquireWork,
 	}, nil
 }
 
@@ -87,6 +90,13 @@ func (w *ImportWorker) Run(ctx context.Context) error {
 }
 
 func (w *ImportWorker) RunOnce(ctx context.Context) error {
+	if w.acquireWork != nil {
+		release, allowed := w.acquireWork()
+		if !allowed {
+			return nil
+		}
+		defer release()
+	}
 	jobs, err := w.repo.ClaimProviderImportJobs(ctx, w.workerID, time.Now().UTC(), time.Minute, 10)
 	if err != nil {
 		return err

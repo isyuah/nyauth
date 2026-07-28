@@ -8,12 +8,32 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"time"
 
+	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/google/uuid"
 	"github.com/nyasharp/nyauth/internal/session"
 	"github.com/nyasharp/nyauth/internal/user"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
+
+func timeoutExcept(timeout time.Duration, excludedPaths ...string) func(http.Handler) http.Handler {
+	excluded := make(map[string]struct{}, len(excludedPaths))
+	for _, path := range excludedPaths {
+		excluded[path] = struct{}{}
+	}
+	withTimeout := chimiddleware.Timeout(timeout)
+	return func(next http.Handler) http.Handler {
+		timed := withTimeout(next)
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if _, ok := excluded[r.URL.Path]; ok {
+				next.ServeHTTP(w, r)
+				return
+			}
+			timed.ServeHTTP(w, r)
+		})
+	}
+}
 
 func (s *Server) userAuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

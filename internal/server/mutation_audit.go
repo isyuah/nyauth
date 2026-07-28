@@ -242,6 +242,8 @@ func describeMutation(r *http.Request, actor *models.User) (mutationAuditDescrip
 		return mutationAuditDescriptor{event: models.AuditSettingsUpdated, targetType: "settings", targetID: "registration", riskLevel: "high"}, true
 	case r.Method == http.MethodPut && path == "/api/admin/settings/security":
 		return mutationAuditDescriptor{event: models.AuditSettingsUpdated, targetType: "settings", targetID: "security", riskLevel: "high", successAlreadyAudited: true}, true
+	case r.Method == http.MethodPut && path == "/api/admin/settings/operations":
+		return mutationAuditDescriptor{event: models.AuditServiceControlUpdated, targetType: "settings", targetID: "operations", riskLevel: "critical", successAlreadyAudited: true}, true
 	case r.Method == http.MethodPut && path == "/api/admin/settings/mail/candidate":
 		return mutationAuditDescriptor{event: models.AuditMailSettingsSaved, targetType: "mail_config", riskLevel: "high", successAlreadyAudited: true}, true
 	case r.Method == http.MethodPost && path == "/api/admin/settings/mail/candidate/test":

@@ -96,4 +96,57 @@ test('bootstrap admin changes password and completes Authorization Code + PKCE',
   const userInfo = JSON.parse(userInfoBody) as { sub?: string; preferred_username?: string };
   expect(userInfo.sub).toBeTruthy();
   expect(userInfo.preferred_username).toBe('admin');
+
+  const maintenanceResult = await page.evaluate(async () => {
+    const sessionResponse = await fetch('/api/session', { cache: 'no-store' });
+    const session = await sessionResponse.json() as { csrf_token?: string };
+    const settingsResponse = await fetch('/api/admin/settings/operations', { cache: 'no-store' });
+    const settings = await settingsResponse.json() as { revision?: number };
+    if (!session.csrf_token || !settings.revision) {
+      return { status: 0, body: JSON.stringify({ session, settings }) };
+    }
+    const response = await fetch('/api/admin/settings/operations', {
+      method: 'PUT',
+      headers: {
+        'Content-Type': 'application/json',
+        'X-CSRF-Token': session.csrf_token,
+      },
+      body: JSON.stringify({
+        expected_revision: settings.revision,
+        paused_capabilities: [
+          'self_registration',
+          'account_mutations',
+          'admin_mutations',
+          'media_writes',
+        ],
+        public_message: 'Real E2E maintenance',
+        internal_reason: 'real E2E runtime control verification',
+        expires_at: new Date(Date.now() + 60 * 60 * 1000).toISOString(),
+      }),
+    });
+    return { status: response.status, body: await response.text() };
+  });
+  expect(maintenanceResult.status, maintenanceResult.body).toBe(200);
+
+  const serviceStatusResponse = await request.get(`${baseURL}/api/service-status`);
+  const serviceStatusBody = await serviceStatusResponse.text();
+  expect(serviceStatusResponse.status(), serviceStatusBody).toBe(200);
+  const serviceStatus = JSON.parse(serviceStatusBody) as {
+    status?: string;
+    paused_capabilities?: string[];
+    public_message?: string;
+  };
+  expect(serviceStatus.status).toBe('restricted');
+  expect(serviceStatus.paused_capabilities).toEqual([
+    'self_registration',
+    'account_mutations',
+    'admin_mutations',
+    'media_writes',
+  ]);
+  expect(serviceStatus.public_message).toBe('Real E2E maintenance');
+
+  const readinessResponse = await request.get(`${baseURL}/readyz`);
+  expect(readinessResponse.status()).toBe(200);
+  const discoveryResponse = await request.get(`${baseURL}/.well-known/openid-configuration`);
+  expect(discoveryResponse.status()).toBe(200);
 });

@@ -18,6 +18,7 @@ import (
 	"github.com/nyasharp/nyauth/internal/crypto"
 	"github.com/nyasharp/nyauth/internal/identity"
 	"github.com/nyasharp/nyauth/internal/provider"
+	"github.com/nyasharp/nyauth/internal/servicecontrol"
 	"github.com/nyasharp/nyauth/internal/user"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
@@ -200,6 +201,23 @@ func (s *Server) handleProviderCallback(w http.ResponseWriter, r *http.Request) 
 		s.providerCallbackFailure(w, r, intent, returnTo, "invalid_state", http.StatusBadRequest)
 		return
 	}
+	var release func()
+	switch intent {
+	case "login":
+		release, err = s.acquireCapabilities(servicecontrol.CapabilityAuthIssuance)
+	case "bind":
+		release, err = s.acquireCapabilities(servicecontrol.CapabilityAccountMutations)
+	case "reauth":
+		release = func() {}
+	default:
+		s.providerCallbackFailure(w, r, intent, returnTo, "invalid_state", http.StatusBadRequest)
+		return
+	}
+	if err != nil {
+		s.providerCallbackFailure(w, r, intent, returnTo, "service_paused", http.StatusServiceUnavailable)
+		return
+	}
+	defer release()
 	if upstreamError := r.URL.Query().Get("error"); upstreamError != "" {
 		s.providerCallbackFailure(w, r, intent, returnTo, "provider_denied", http.StatusBadRequest)
 		return
@@ -391,6 +409,12 @@ func (s *Server) finishExternalLogin(w http.ResponseWriter, r *http.Request, pro
 	if err == nil {
 		current, err = s.userService.GetByID(r.Context(), binding.UserID)
 	} else if identity.IsNotFound(err) {
+		releaseRegistration, acquireErr := s.acquireCapabilities(servicecontrol.CapabilitySelfRegistration)
+		if acquireErr != nil {
+			s.providerCallbackFailure(w, r, "login", returnTo, "registration_paused", http.StatusServiceUnavailable)
+			return
+		}
+		defer releaseRegistration()
 		display := external.Username
 		if display == "" {
 			display = providerName + " user"

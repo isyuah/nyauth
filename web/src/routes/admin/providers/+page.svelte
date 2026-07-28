@@ -295,7 +295,7 @@
 <svelte:head><title>身份提供者 - Nya</title></svelte:head>
 
 <PageHeader title="身份提供者" description="管理外部 OAuth / OIDC 登录配置">
-  {#snippet action()}<Button variant="primary" onclick={() => (showCreate = true)}><Plus size={16} /> 添加身份提供者</Button>{/snippet}
+  {#snippet action()}<Button variant="primary" requiredCapability="admin_mutations" onclick={() => (showCreate = true)}><Plus size={16} /> 添加身份提供者</Button>{/snippet}
 </PageHeader>
 
 {#if issuer.startsWith('http://')}
@@ -315,7 +315,7 @@
   emptyDescription="添加 GitHub、Google 或其他 OIDC 提供商，让用户使用第三方账号登录。"
   onretry={loadProviders}
 >
-  {#snippet emptyAction()}<Button variant="primary" onclick={() => (showCreate = true)}>添加身份提供者</Button>{/snippet}
+  {#snippet emptyAction()}<Button variant="primary" requiredCapability="admin_mutations" onclick={() => (showCreate = true)}>添加身份提供者</Button>{/snippet}
   {#snippet children()}
     <div class="space-y-4">
       {#each providers as provider}
@@ -327,10 +327,10 @@
               <div><h2 class="text-card-title text-nya-text-primary">{provider.display_name}</h2><p class="mt-0.5 font-mono text-micro text-nya-text-tertiary">{provider.name}</p><div class="mt-1 flex flex-wrap items-center gap-2"><Badge variant="info">{typeLabels[provider.type] || provider.type}</Badge><Badge variant={provider.enabled ? 'success' : 'default'}>{provider.enabled ? '已启用' : '已禁用'}</Badge>{#if provider.import_avatar}<Badge variant="warning">首次导入头像</Badge>{/if}<span class="text-micro text-nya-text-tertiary">配置修订 #{provider.revision}</span></div></div>
             </div>
             <div class="flex flex-wrap items-center gap-2">
-              <Button variant="ghost" size="sm" onclick={() => openEdit(provider)}>编辑配置</Button>
-              <Button variant="ghost" size="sm" onclick={() => toggleProvider(provider)}>{provider.enabled ? '禁用' : '启用'}</Button>
+              <Button variant="ghost" size="sm" requiredCapability="admin_mutations" onclick={() => openEdit(provider)}>编辑配置</Button>
+              <Button variant="ghost" size="sm" requiredCapability="admin_mutations" onclick={() => toggleProvider(provider)}>{provider.enabled ? '禁用' : '启用'}</Button>
               <Button variant="soft" size="sm" onclick={() => handleTest(provider)} loading={test?.loading ?? false}>配置校验</Button>
-              <Button variant="ghost" size="sm" onclick={() => requestDelete(provider)}>删除</Button>
+              <Button variant="ghost" size="sm" requiredCapability="admin_mutations" onclick={() => requestDelete(provider)}>删除</Button>
             </div>
           </div>
 
@@ -387,7 +387,7 @@
     {#if newProvider.import_avatar && newProvider.type === 'generic'}<Input id="provider-avatar-hosts" label="允许的图片主机" bind:value={newProvider.avatar_allowed_hosts} mono placeholder="images.example.com（每行一个精确主机）" />{:else if newProvider.import_avatar}<p class="rounded-nya-sm bg-nya-info-soft px-3 py-2 text-small text-nya-info">GitHub / Google 使用内置图片主机 allowlist，不接受自定义地址。</p>{/if}
     <label class="flex items-start gap-2 rounded-nya-sm bg-nya-surface-muted px-3 py-2"><input type="checkbox" bind:checked={newProvider.enabled} class="mt-0.5" /><span><span class="block text-body text-nya-text-primary">创建后立即启用</span><span class="block text-small text-nya-text-tertiary">关闭时，配置会以禁用状态一次性保存，不会进入登录运行时。</span></span></label>
     {#if callbackURL(newProvider.name)}<div class="rounded-nya-sm bg-nya-info-soft px-3 py-2 text-small text-nya-info">在上游设置 Callback URL：<code class="mt-1 block break-all">{callbackURL(newProvider.name)}</code></div>{/if}
-    <div class="flex justify-end gap-2 pt-2"><Button variant="secondary" onclick={() => (showCreate = false)} disabled={creating}>取消</Button><Button type="submit" variant="primary" loading={creating}>添加</Button></div>
+    <div class="flex justify-end gap-2 pt-2"><Button variant="secondary" onclick={() => (showCreate = false)} disabled={creating}>取消</Button><Button type="submit" variant="primary" requiredCapability="admin_mutations" loading={creating}>添加</Button></div>
   </form>
 </Modal>
 
@@ -406,7 +406,7 @@
     <label class="flex items-start gap-2 rounded-nya-sm bg-nya-surface-muted px-3 py-2"><input type="checkbox" bind:checked={editForm.import_avatar} class="mt-0.5" /><span><span class="block text-body text-nya-text-primary">首次建号时导入上游头像</span><span class="block text-small text-nya-text-tertiary">只影响以后首次通过此 Provider 创建的账号。</span></span></label>
     {#if editForm.import_avatar && editingProvider?.type === 'generic'}<Input id="edit-provider-avatar-hosts" label="允许的图片主机" bind:value={editForm.avatar_allowed_hosts} mono placeholder="images.example.com（每行一个精确主机）" />{:else if editForm.import_avatar}<p class="rounded-nya-sm bg-nya-info-soft px-3 py-2 text-small text-nya-info">此 Provider 使用内置图片主机 allowlist。</p>{/if}
     <label class="flex items-start gap-2 rounded-nya-sm bg-nya-surface-muted px-3 py-2"><input type="checkbox" bind:checked={editForm.enabled} class="mt-0.5" /><span><span class="block text-body text-nya-text-primary">启用 Provider</span><span class="block text-small text-nya-text-tertiary">禁用后会立即从运行时 Provider 快照移除。</span></span></label>
-    <div class="flex justify-end gap-2 pt-2"><Button variant="secondary" onclick={() => (showEdit = false)} disabled={editing}>取消</Button><Button type="submit" variant="primary" loading={editing}>保存</Button></div>
+    <div class="flex justify-end gap-2 pt-2"><Button variant="secondary" onclick={() => (showEdit = false)} disabled={editing}>取消</Button><Button type="submit" variant="primary" requiredCapability="admin_mutations" loading={editing}>保存</Button></div>
   </form>
 </Modal>
 

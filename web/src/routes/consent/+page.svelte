@@ -111,7 +111,7 @@
 
           <div class="flex gap-3 pt-2">
             <Button variant="secondary" size="md" onclick={handleDeny} loading={action === 'deny'} disabled={action !== ''}>拒绝</Button>
-            <Button variant="primary" size="md" onclick={handleAccept} loading={action === 'accept'} disabled={action !== ''}>授权</Button>
+            <Button variant="primary" size="md" requiredCapability="auth_issuance" onclick={handleAccept} loading={action === 'accept'} disabled={action !== ''}>授权</Button>
           </div>
         </div>
       </Card>

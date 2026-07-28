@@ -51,6 +51,7 @@ describe('localizeAPIErrorMessage', () => {
   it('localizes by stable error code when backend wording changes', () => {
     expect(localizeAPIErrorMessage('wording changed', 'auth.recent_authentication_required')).toBe('请先完成近期身份验证');
     expect(localizeAPIErrorMessage('wording changed', 'account.password_change_required')).toBe('请先修改密码后再继续');
+    expect(localizeAPIErrorMessage('wording changed', 'service_control.registration_conflict')).toBe('当前运行控制状态不允许启用该注册策略，请先调整注册或邮件投递能力');
   });
 
   it('uses a Chinese fallback for an unknown coded backend error', () => {
@@ -440,6 +441,69 @@ describe('audit API contract', () => {
       to: '2026-07-02T00:00:00.000Z',
       format: 'cef',
       limit: '50000',
+    });
+  });
+});
+
+describe('service control API contract', () => {
+  afterEach(() => {
+    setCsrfToken('');
+    vi.unstubAllGlobals();
+  });
+
+  it('uses only the public and management operations endpoints and preserves the revision payload', async () => {
+    const publicStatus = {
+      status: 'restricted',
+      paused_capabilities: ['self_registration'],
+      public_message: 'Maintenance',
+      expires_at: '2026-07-28T12:00:00Z',
+      retry_after_seconds: 60,
+    };
+    const settings = {
+      ...publicStatus,
+      revision: 9,
+      internal_reason: 'Database maintenance',
+      updated_at: '2026-07-28T11:00:00Z',
+      updated_by: 'admin-id',
+      application_status: 'applied',
+      active_instances: 0,
+      applied_instances: 0,
+      instances: [],
+    };
+    const responses = [publicStatus, settings, { ...settings, revision: 10 }];
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    setCsrfToken('operations-csrf');
+
+    await api.getServiceStatus();
+    await api.admin.getOperationsSettings();
+    await api.admin.updateOperationsSettings({
+      expected_revision: 9,
+      paused_capabilities: ['self_registration'],
+      public_message: 'Maintenance',
+      internal_reason: 'Database maintenance',
+      expires_at: '2026-07-28T12:00:00Z',
+    });
+
+    const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit]>;
+    expect(calls.map(([url]) => url)).toEqual([
+      '/api/service-status',
+      '/api/admin/settings/operations',
+      '/api/admin/settings/operations',
+    ]);
+    expect(calls[0][1].cache).toBe('no-store');
+    expect(calls[1][1].cache).toBe('no-store');
+    expect(calls[2][1].method).toBe('PUT');
+    expect(new Headers(calls[2][1].headers).get('X-CSRF-Token')).toBe('operations-csrf');
+    expect(JSON.parse(String(calls[2][1].body))).toEqual({
+      expected_revision: 9,
+      paused_capabilities: ['self_registration'],
+      public_message: 'Maintenance',
+      internal_reason: 'Database maintenance',
+      expires_at: '2026-07-28T12:00:00Z',
     });
   });
 });

@@ -56,6 +56,6 @@
       <Input id="branding-title" label="站点名称" bind:value={brandingTitle} required placeholder="Nya" />
       <Input id="branding-logo-url" label="Logo URL（可选）" bind:value={brandingLogoURL} placeholder="https://example.com/logo.png" />
     </div>
-    <Button type="submit" variant="primary" loading={saving}>保存品牌设置</Button>
+    <Button type="submit" variant="primary" requiredCapability="admin_mutations" loading={saving}>保存品牌设置</Button>
   </form>
 </section>

@@ -121,8 +121,17 @@ func newRegistrationHTTPTestApp(t *testing.T) *registrationHTTPTestApp {
 		pool.Close()
 		t.Fatalf("create registration HTTP app: %v", err)
 	}
+	runtimeCtx, stopRuntime := context.WithCancel(context.Background())
+	if err := app.serviceControl.Start(runtimeCtx); err != nil {
+		stopRuntime()
+		_ = telemetryRuntime.Shutdown(context.Background())
+		_ = rdb.Close()
+		pool.Close()
+		t.Fatalf("start registration HTTP service control: %v", err)
+	}
 
 	t.Cleanup(func() {
+		stopRuntime()
 		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), 20*time.Second)
 		defer cleanupCancel()
 		if err := telemetryRuntime.Shutdown(cleanupCtx); err != nil {

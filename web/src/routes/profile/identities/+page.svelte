@@ -146,7 +146,7 @@
                 <span class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-nya-surface-muted text-nya-text-primary"><ProviderIcon type={identity.provider_type} iconKey={identity.provider_icon_key} size={18} /></span>
                 <div class="min-w-0"><p class="text-body-medium font-semibold text-nya-text-primary">{identity.provider_display_name || identity.provider}</p><p class="truncate text-small text-nya-text-secondary">{identity.external_username || identity.external_id}</p></div>
               </div>
-              <div class="flex items-center gap-2"><Badge variant="success">已绑定</Badge><Button variant="ghost" size="sm" onclick={() => requestIdentityRemoval(identity)}>解绑</Button></div>
+              <div class="flex items-center gap-2"><Badge variant="success">已绑定</Badge><Button variant="ghost" size="sm" requiredCapability="account_mutations" onclick={() => requestIdentityRemoval(identity)}>解绑</Button></div>
             </div>
           {/each}
         </div>
@@ -165,7 +165,7 @@
         <div class="flex flex-wrap gap-3">
           {#each availableProviders as provider}
             {@const alreadyBound = identities.some((identity) => identity.provider === provider.name)}
-            <Button variant="secondary" disabled={identitiesLoading || !!identitiesError || alreadyBound} loading={bindingProvider === provider.name} onclick={() => bindProvider(provider.name)}><ProviderIcon type={provider.type} iconKey={provider.icon_key} size={16} />{provider.display_name || provider.name}{#if alreadyBound}<CheckCircle size={14} />{:else}<Link2 size={14} />{/if}</Button>
+            <Button variant="secondary" requiredCapability="account_mutations" disabled={identitiesLoading || !!identitiesError || alreadyBound} loading={bindingProvider === provider.name} onclick={() => bindProvider(provider.name)}><ProviderIcon type={provider.type} iconKey={provider.icon_key} size={16} />{provider.display_name || provider.name}{#if alreadyBound}<CheckCircle size={14} />{:else}<Link2 size={14} />{/if}</Button>
           {/each}
         </div>
       {:else}

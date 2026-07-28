@@ -34,7 +34,7 @@
     <form onsubmit={submit} class="space-y-4">
       {#if error}<p class="rounded-nya-sm bg-nya-danger-soft px-3 py-2 text-small text-nya-danger" role="alert">{error}</p>{/if}
       <Input id="recovery-email" label="邮箱地址" type="email" bind:value={email} autocomplete="email" required placeholder="name@example.com" />
-      <Button type="submit" variant="primary" size="lg" loading={loading} fullWidth><Mail size={16} /> 发送重置邮件</Button>
+      <Button type="submit" variant="primary" size="lg" requiredCapability="account_mutations" loading={loading} fullWidth><Mail size={16} /> 发送重置邮件</Button>
       <p class="text-center"><a href="/login" class="text-small text-nya-primary hover:underline">返回登录</a></p>
     </form>
   {/if}

@@ -4,6 +4,17 @@
 
 ## [Unreleased]
 
+### 新增
+
+- Phase C1 运行时服务控制：六类固定 capability、四种维护预设、公开维护横幅、可选到期恢复、revision 冲突保护和独立 `operating_state`
+- 多实例安全排空：进程内 gate 与 in-flight 计数、PostgreSQL 心跳和应用进度、`LISTEN/NOTIFY`、5 秒 reconciliation、15 秒失联 fail-closed 以及单 leader 到期审计
+- `GET /api/service-status`、`GET/PUT /api/admin/settings/operations` 与 `nyauth service-control reset -reason <text>` 紧急解锁命令
+
+### 变更
+
+- 开发版本进入 `0.4.0-dev`；新增兼容迁移 `000004_runtime_service_control`，schema version 从 3 提升到 4，正式 `v0.3.0` Tag 保持不变
+- 受控请求在能力暂停时返回稳定错误码 `service.capability_paused`、HTTP 503 和 `Retry-After`；主动维护不改变 `/readyz`
+
 ## [0.3.0] — 2026-07-28
 
 > [!CAUTION]

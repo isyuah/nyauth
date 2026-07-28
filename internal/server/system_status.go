@@ -52,10 +52,11 @@ type systemSigningKeyStatus struct {
 }
 
 type systemStatusResponse struct {
-	Status   string             `json:"status"`
-	Version  string             `json:"version"`
-	Schema   systemSchemaStatus `json:"schema"`
-	Services struct {
+	Status         string             `json:"status"`
+	OperatingState string             `json:"operating_state"`
+	Version        string             `json:"version"`
+	Schema         systemSchemaStatus `json:"schema"`
+	Services       struct {
 		PostgreSQL systemDependencyStatus `json:"postgresql"`
 		Redis      systemDependencyStatus `json:"redis"`
 		Providers  systemProviderStatus   `json:"providers"`
@@ -81,6 +82,7 @@ type systemStatusSources struct {
 	providerDegraded func() bool
 	mailState        func() mailruntime.RuntimeStatus
 	mediaState       func() avatar.RuntimeStatus
+	operatingState   func() string
 }
 
 func (s *Server) handleSystemStatus(w http.ResponseWriter, r *http.Request) {
@@ -107,12 +109,21 @@ func (s *Server) handleSystemStatus(w http.ResponseWriter, r *http.Request) {
 		providerDegraded: s.providerMgr.Degraded,
 		mailState:        s.mailRuntimeStatus,
 		mediaState:       s.avatarService.RuntimeStatus,
+		operatingState: func() string {
+			if s.serviceControl == nil || s.serviceControl.FailClosed() {
+				return "full_pause"
+			}
+			return derivedOperatingState(s.serviceControl.Snapshot().PausedCapabilities)
+		},
 	})
 	writeJSON(w, http.StatusOK, response)
 }
 
 func collectSystemStatus(ctx context.Context, rotationInterval time.Duration, sources systemStatusSources) systemStatusResponse {
-	response := systemStatusResponse{Status: "ok", Version: buildinfo.Version}
+	response := systemStatusResponse{Status: "ok", OperatingState: "normal", Version: buildinfo.Version}
+	if sources.operatingState != nil {
+		response.OperatingState = sources.operatingState()
+	}
 	response.Schema = systemSchemaStatus{Status: "unavailable", RequiredVersion: database.SchemaVersion}
 
 	started := time.Now()

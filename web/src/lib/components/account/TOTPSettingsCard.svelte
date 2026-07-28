@@ -265,10 +265,10 @@
             {#if !status.can_disable_totp}<p class="mt-1 text-small text-nya-warning">管理员安全策略要求保留至少一种多因素验证方式；注册 Passkey 后可停用动态验证码。</p>{/if}
           </div>
           <div class="flex flex-wrap gap-2">
-            <Button variant="secondary" loading={actionLoading === 'regenerate'} disabled={actionLoading !== null} onclick={() => void runProtectedAction('regenerate', true).catch(() => {})}>
+            <Button variant="secondary" requiredCapability="account_mutations" loading={actionLoading === 'regenerate'} disabled={actionLoading !== null} onclick={() => void runProtectedAction('regenerate', true).catch(() => {})}>
               <RefreshCw size={15} /> 重新生成恢复码
             </Button>
-            <Button variant="ghost" disabled={!status.can_disable_totp || actionLoading !== null} onclick={() => { disableError = ''; disableConfirmOpen = true; }}>
+            <Button variant="ghost" requiredCapability="account_mutations" disabled={!status.can_disable_totp || actionLoading !== null} onclick={() => { disableError = ''; disableConfirmOpen = true; }}>
               <ShieldOff size={15} /> 停用
             </Button>
           </div>
@@ -280,7 +280,7 @@
             <p class="mt-1 text-small text-nya-text-secondary">启用后，密码或外部身份登录还需输入动态验证码或恢复码。</p>
             {#if !status.totp_available}<p class="mt-1 text-small text-nya-warning">管理员当前已关闭新的动态验证码注册。</p>{/if}
           </div>
-          <Button variant="primary" loading={actionLoading === 'enroll'} disabled={!status.totp_available || actionLoading !== null} onclick={() => void runProtectedAction('enroll', true).catch(() => {})}>
+          <Button variant="primary" requiredCapability="account_mutations" loading={actionLoading === 'enroll'} disabled={!status.totp_available || actionLoading !== null} onclick={() => void runProtectedAction('enroll', true).catch(() => {})}>
             <KeyRound size={16} /> 启用动态验证码
           </Button>
         </div>
@@ -306,7 +306,7 @@
       <Input id="totp-enrollment-code" label="6 位动态验证码" bind:value={confirmationCode} inputmode="numeric" autocomplete="one-time-code" maxlength={6} required placeholder="123456" />
       <div class="flex justify-end gap-2">
         <Button variant="secondary" disabled={confirmationLoading} onclick={() => (enrollmentOpen = false)}>取消</Button>
-        <Button type="submit" variant="primary" loading={confirmationLoading}>确认并启用</Button>
+        <Button type="submit" variant="primary" requiredCapability="account_mutations" loading={confirmationLoading}>确认并启用</Button>
       </div>
     </form>
   {/if}

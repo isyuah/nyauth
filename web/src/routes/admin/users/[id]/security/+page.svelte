@@ -88,7 +88,7 @@
           <form onsubmit={resetPassword} class="space-y-3">
             <div><Input id="admin-reset-password" label="新密码" type="password" bind:value={password} autocomplete="new-password" required /><p class="mt-1.5 text-small text-nya-text-tertiary">{PASSWORD_REQUIREMENT}</p></div>
             <Input id="admin-reset-password-confirmation" label="确认新密码" type="password" bind:value={confirmation} autocomplete="new-password" required />
-            <Button type="submit" variant="secondary" loading={resetting}>重置密码</Button>
+            <Button type="submit" variant="secondary" requiredCapability="admin_mutations" loading={resetting}>重置密码</Button>
           </form>
         </section>
       </div>

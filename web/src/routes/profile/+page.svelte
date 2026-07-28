@@ -2,6 +2,7 @@
   import { onMount } from 'svelte';
   import { api, isRecentAuthenticationError, type SessionInfo, type User } from '$lib/api';
   import { consumeProviderAuthError, sessionStore } from '$lib/stores';
+  import { isCapabilityPaused, serviceStatusStore } from '$lib/service-control';
   import AvatarCropper from '$lib/components/account/AvatarCropper.svelte';
   import ReauthenticationDialog from '$lib/components/account/ReauthenticationDialog.svelte';
   import Badge from '$lib/components/ui/Badge.svelte';
@@ -29,6 +30,10 @@
   let reauthOpen = $state(false);
 
   let emailVerified = $derived(session?.email_verified ?? false);
+  let avatarWritesPaused = $derived(
+    isCapabilityPaused($serviceStatusStore.value, 'account_mutations')
+      || isCapabilityPaused($serviceStatusStore.value, 'media_writes'),
+  );
 
   function hasRecentAuthentication(value?: string): boolean {
     if (!value) return false;
@@ -171,8 +176,8 @@
           <div class="space-y-5 px-7 py-6">
             {#if saved}<div class="flex items-center gap-2 rounded-nya-sm bg-nya-success-soft px-4 py-3 text-small text-nya-success" role="status"><CheckCircle size={16} /> 保存成功</div>{/if}
             <Input id="profile-display-name" label="显示名称" bind:value={displayName} placeholder="给自己取个名字" />
-            <div><p class="mb-2 text-body-medium text-nya-text-primary">头像</p><AvatarCropper currentUrl={me.avatar_url} onupload={uploadAvatar} onremove={removeAvatar} /></div>
-            <div class="flex justify-end"><Button variant="primary" onclick={handleSave} loading={saving}><Save size={16} /> 保存更改</Button></div>
+            <div><p class="mb-2 text-body-medium text-nya-text-primary">头像</p><AvatarCropper currentUrl={me.avatar_url} disabled={avatarWritesPaused} onupload={uploadAvatar} onremove={removeAvatar} /></div>
+            <div class="flex justify-end"><Button variant="primary" requiredCapability="account_mutations" onclick={handleSave} loading={saving}><Save size={16} /> 保存更改</Button></div>
           </div>
         </section>
 
@@ -189,7 +194,7 @@
               </div>
               <div class="flex items-center gap-2">
                 <Badge variant={emailVerified ? 'success' : 'warning'}>{emailVerified ? '已验证' : '未验证'}</Badge>
-                {#if me.email && !emailVerified}<Button variant="secondary" size="sm" onclick={requestEmailVerification} loading={verificationLoading}><Send size={14} /> {verificationSent ? '已发送' : '发送验证邮件'}</Button>{/if}
+                {#if me.email && !emailVerified}<Button variant="secondary" size="sm" requiredCapability="account_mutations" onclick={requestEmailVerification} loading={verificationLoading}><Send size={14} /> {verificationSent ? '已发送' : '发送验证邮件'}</Button>{/if}
               </div>
             </div>
             {#if verificationSent}<p class="rounded-nya-sm bg-nya-success-soft px-3 py-2 text-small text-nya-success" role="status">如果邮件服务可用，验证邮件会很快送达。</p>{/if}
@@ -197,7 +202,7 @@
               <Input id="new-email" label={me.email ? '更换邮箱' : '设置邮箱'} type="email" bind:value={newEmail} autocomplete="email" required placeholder="new@example.com" />
               <p class="text-small text-nya-text-tertiary">此操作要求近期登录。确认新邮箱后，现有会话和令牌会失效。</p>
               {#if emailChangeSent}<p class="rounded-nya-sm bg-nya-success-soft px-3 py-2 text-small text-nya-success" role="status">确认邮件已提交发送，请前往新邮箱完成操作。</p>{/if}
-              <div class="flex justify-end"><Button type="submit" variant="secondary" loading={emailChangeLoading}><Mail size={15} /> 发送确认邮件</Button></div>
+              <div class="flex justify-end"><Button type="submit" variant="secondary" requiredCapability="account_mutations" loading={emailChangeLoading}><Mail size={15} /> 发送确认邮件</Button></div>
             </form>
           </div>
         </section>

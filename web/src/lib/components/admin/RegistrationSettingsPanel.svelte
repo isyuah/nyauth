@@ -158,7 +158,7 @@
         <Input id="registration-invite-ttl" label="邀请默认有效期" bind:value={inviteTTL} placeholder="168h" />
         <Input id="registration-invite-max-uses" label="邀请默认可用次数" bind:value={inviteMaxUses} placeholder="1" />
       </div>
-      <Button type="submit" variant="primary" loading={saving}>保存注册设置</Button>
+      <Button type="submit" variant="primary" requiredCapability="admin_mutations" loading={saving}>保存注册设置</Button>
     </form>
   {/if}
 </section>

@@ -33,6 +33,7 @@ const (
 var (
 	ErrRegistrationChanged     = errors.New("registration settings changed")
 	ErrMailConfigurationNeeded = errors.New("mail configuration is required for self-registration")
+	ErrServiceControlConflict  = errors.New("registration settings conflict with service control")
 )
 
 // AdminsMissingMFAError identifies active administrators that prevent the
@@ -261,6 +262,9 @@ func (m *Manager) SetRegistration(
 			return ErrMailConfigurationNeeded
 		}
 	}
+	if err := validateRegistrationServiceControlTx(ctx, tx, registration.Mode); err != nil {
+		return err
+	}
 	if _, err := tx.Exec(ctx, `
 		INSERT INTO runtime_settings (key, value, updated_by, updated_at)
 		VALUES ($1, $2, $3, now())
@@ -276,6 +280,35 @@ func (m *Manager) SetRegistration(
 		return fmt.Errorf("committing registration settings: %w", err)
 	}
 	m.registration.Store(&registration)
+	return nil
+}
+
+func validateRegistrationServiceControlTx(ctx context.Context, tx pgx.Tx, mode string) error {
+	rows, err := tx.Query(ctx, `
+		SELECT capability FROM service_control_pauses
+		WHERE capability IN ('self_registration','auth_issuance','mail_delivery')
+	`)
+	if err != nil {
+		return fmt.Errorf("checking registration service control: %w", err)
+	}
+	defer rows.Close()
+	paused := make(map[string]bool, 3)
+	for rows.Next() {
+		var capability string
+		if err := rows.Scan(&capability); err != nil {
+			return fmt.Errorf("reading registration service control: %w", err)
+		}
+		paused[capability] = true
+	}
+	if err := rows.Err(); err != nil {
+		return fmt.Errorf("checking registration service control: %w", err)
+	}
+	if paused["auth_issuance"] && !paused["self_registration"] {
+		return ErrServiceControlConflict
+	}
+	if mode != RegistrationClosed && paused["mail_delivery"] && !paused["self_registration"] {
+		return ErrServiceControlConflict
+	}
 	return nil
 }
 

@@ -1,12 +1,13 @@
 # 能力路线图（0.4+ 展望）
 
-> 状态：更新于 2026-07-27。本文档记录"网站自身能力"的增强方向与取舍结论，按优先级排序。
+> 状态：更新于 2026-07-28。本文档记录"网站自身能力"的增强方向与取舍结论，按优先级排序。
 
 ## 结论摘要
 
 | 方向 | 结论 | 优先级 |
 |---|---|---|
-| 运行时设置（部分配置免重启） | 基础已落地；品牌、注册策略和数据库动态 SMTP 已免重启 | P0，持续扩展 |
+| 运行时服务控制 | Phase C1 已完成：六类能力暂停、维护预设、HA 排空、定时恢复与 CLI 紧急解锁 | 已完成 |
+| 运行时设置（部分配置免重启） | 品牌、注册策略和数据库动态 SMTP 已免重启；下一批配置待 Phase C1 验收后讨论 | P0，持续扩展 |
 | 受控头像存储 | 已完成——本地持久化 / 私有 S3、裁剪重编码、Provider 安全导入 | 已完成 |
 | 账户与后台信息架构 | 已完成——路由化个人中心、用户详情与设置拆分 | 已完成 |
 | 审计体验 | 已完成——精确筛选、URL 状态、详情与一致导出 | 已完成 |
@@ -18,7 +19,15 @@
 | 插件系统 | **不做进程内插件**；先观察 Webhook + /api/v1 能覆盖多少扩展需求 | 推迟 |
 | UI 国际化（中/英） | 视下游需求再做 | 推迟 |
 
-## 1. 运行时设置（P0）
+## 1. 运行时服务控制（Phase C1 已完成）
+
+- 固定控制 `self_registration`、`account_mutations`、`admin_mutations`、`auth_issuance`、`mail_delivery` 和 `media_writes` 六类能力，不以粗粒度的全站下线代替业务边界。
+- 管理界面提供正常运行、只读维护、认证维护和全面暂停四个预设，也可单独组合能力；预设名不持久化，数据库只保存事实状态。
+- 每个实例先关闭 gate，再排空旧 in-flight；PostgreSQL revision、心跳、`LISTEN/NOTIFY` 和 reconciliation 提供多实例一致性，失联实例 fail-closed。
+- 支持 1 分钟至 30 天的到期恢复或显式无限期；CLI `service-control reset` 是不依赖管理 UI 的审计化紧急解锁路径。
+- 主动维护不污染 `/readyz`。Discovery、JWKS、UserInfo、introspection、revoke、logout、安全撤销、审计和清理始终可用。
+
+## 2. 运行时设置（P0）
 
 **用户诉求**：改配置不想每次编辑文件 + 重启。
 
@@ -31,30 +40,30 @@
 - 多实例使用 PostgreSQL `LISTEN/NOTIFY` 和定时 reconciliation；静态邮件环境变量只作为首次 fallback/bootstrap。
 - 后续再按风险与收益迁入限流阈值、audit retention 等运营设置。
 
-## 2. 每客户端访问策略（已完成）
+## 3. 每客户端访问策略（已完成）
 
 OAuth 客户端已支持 `open`、`admins_only` 和 `allowlist`。策略在用户授权流程和后续用户 Token 使用时持续执行，白名单移除无需等待既有 access token 自然过期；`client_credentials` 机器流程不受用户访问策略影响。管理后台可维护策略和白名单，并对拒绝和名单变更写入审计。
 
-## 3. 受控头像存储（已完成）
+## 4. 受控头像存储（已完成）
 
 用户和管理员上传的图片会在浏览器完成 1:1 裁剪，再由服务端独立校验、解码、重编码并生成固定尺寸变体；默认使用本地持久化目录，HA/远程部署支持私有 S3 兼容对象存储。浏览器只加载 Nyauth 管理的稳定地址，Provider 头像只在首次创建账号时通过 SSRF 防护管线异步导入，不透传外部 URL。
 
 完整威胁模型、数据模型、API、对象回收和存储边界见 [受控头像存储与对象存储设计](avatar-storage-design.md)。
 
-## 4. MFA（Phase T/P 已完成）
+## 5. MFA（Phase T/P 已完成）
 
 - TOTP 已实现 RFC 6238、time-step 防重放、一次性恢复码、密码/Provider MFA 与 step-up、动态管理员强制策略和 HA 同步。
 - Passkey 已支持 discoverable 独立登录、Conditional UI、MFA 第二因素、近期重新认证与安全中心管理；RP ID 和 origin 从公开 `auth.issuer` 固定派生。
 - 完整 WebAuthn credential 加密存储，每次认证在事务中持久化 sign count、clone warning 与 backup state；Redis ceremony 使用不透明 ID，并与 MFA pending 原子消费。
 - 管理员强制 MFA 接受 TOTP 或当前 RP Passkey；两个注册开关都是运行时 enrollment 开关，不会停用已有因素。
 
-## 5. 自助注册 / 邀请（已完成）
+## 6. 自助注册 / 邀请（已完成）
 
 - 邀请码/邀请链接由管理员生成，支持限次、限期、预占、验证后消费和过期释放。
 - 支持关闭、邀请制和开放注册；开放注册强制邮箱验证，SMTP 不可用时注册在创建用户前返回 `503`。
 - 注册策略是运行时设置，并与动态 SMTP 的 configured/available 状态做跨依赖校验。
 
-## 6. 事件 Webhook（P2）——插件系统的替代品
+## 7. 事件 Webhook（P2）——插件系统的替代品
 
 **为什么不做进程内插件**：认证服务器的插件意味着第三方代码进入信任边界内——能触碰会话、密钥和用户数据，这与 0.3.0 整个安全加固方向相悖；Go 的 `plugin` 机制在 Windows 上不可用、跨版本脆弱；wasm/进程外插件的工程成本远超当前收益。
 
@@ -69,7 +78,7 @@ OAuth 客户端已支持 `open`、`admins_only` 和 `allowlist`。策略在用�
 ## 实施顺序建议
 
 ```
-当前 0.3.0: Phase R/S/T/P、受控头像、账户/后台信息架构和审计体验已完成
-正式版门禁: schema 3、生产/HA Compose、恢复文档与跨架构镜像验证
-0.3.0 之后: 自动更新评估；/api/v1、用户组和事件 Webhook 继续推迟
+当前 0.4.0-dev: Phase C1 运行时服务控制已完成，等待完整门禁与人工验收
+Phase C1 验收后: 单独讨论下一批值得动态化的运营配置
+后续: 自动更新暂缓；/api/v1、用户组和事件 Webhook 继续推迟
 ```

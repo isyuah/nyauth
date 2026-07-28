@@ -150,6 +150,11 @@ func (s *Server) handleBeginMFAPasskey(w http.ResponseWriter, r *http.Request) {
 		s.writeMFAChallengeUnavailable(w, r, err)
 		return
 	}
+	releaseIssuance, allowed := s.acquireMFAIssuance(w, pending.Data.Purpose)
+	if !allowed {
+		return
+	}
+	defer releaseIssuance()
 	if !validPendingCSRF(pending, r) {
 		writeAPIError(w, http.StatusForbidden, "invalid CSRF token")
 		return
@@ -194,6 +199,11 @@ func (s *Server) handleFinishMFAPasskey(w http.ResponseWriter, r *http.Request) 
 		s.writeMFAChallengeUnavailable(w, r, err)
 		return
 	}
+	releaseIssuance, allowed := s.acquireMFAIssuance(w, pending.Data.Purpose)
+	if !allowed {
+		return
+	}
+	defer releaseIssuance()
 	if !validPendingCSRF(pending, r) {
 		writeAPIError(w, http.StatusForbidden, "invalid CSRF token")
 		return

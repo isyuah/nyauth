@@ -112,12 +112,22 @@ docker compose -f docker-compose.ha.yml ps
 - Provider 变更通过 PostgreSQL `LISTEN/NOTIFY` 通知，并使用周期 reconciliation 修复丢失通知。
 - 头像元数据和当前引用存于 PostgreSQL，四种 WebP 变体存于共享 S3。两个实例可跨节点上传和读取；Provider 导入任务使用行锁/lease 分工，孤儿清理使用 PostgreSQL advisory lock 保证每轮单执行者。
 - 动态 SMTP 的活动版本、上一版本和熔断状态由 PostgreSQL 共享；变更通过 `LISTEN/NOTIFY` 同步，并每分钟 reconciliation。每 30 秒最多一个实例取得熔断探测权。
+- 运行时服务控制状态和 revision 存于 PostgreSQL；`LISTEN/NOTIFY` 提供即时同步，5 秒 reconciliation 修复丢失通知。实例先关闭对应 gate，再等待旧 in-flight 排空并确认 applied revision。15 秒未能刷新数据库状态的实例对六类受控能力 fail-closed，但健康检查、撤销、登出、审计与清理仍可用。
 - 管理员高风险变更与审计记录必须在同一数据库事务中完成。
 - 审计日志按 UTC 月分区；分区预创建和保留清理由独立迁移账号运行 `nyauth maintenance`，应用实例不执行 DDL。
 
 ## 发布顺序
 
-`0.3.0-rc.1` 是 schema version 1 的破坏性 release baseline，不支持从早期开发数据库滚动升级。正式 `0.3.0` 通过兼容的 `000002_provider_presentation` 和 `000003_security_revocation_outbox` 将要求提升到 schema version 3；必须先由迁移任务完成加法迁移，再逐个替换应用实例。首次部署仍必须使用全新 PostgreSQL/Redis；启动单个新实例完成 smoke test 后再扩容第二实例。后续版本只有在发布说明明确承诺兼容时才可滚动升级，不得让要求不同数据库契约的应用版本同时处理流量。
+`0.3.0-rc.1` 是 schema version 1 的破坏性 release baseline，不支持从早期开发数据库滚动升级。正式 `0.3.0` 通过兼容的 `000002_provider_presentation` 和 `000003_security_revocation_outbox` 演进到 schema version 3；`0.4.0-dev` 的 `000004_runtime_service_control` 再兼容升级到 schema version 4。必须先由迁移任务完成加法迁移，再逐个替换应用实例。首次部署仍必须使用全新 PostgreSQL/Redis；启动单个新实例完成 smoke test 后再扩容第二实例。后续版本只有在发布说明明确承诺兼容时才可滚动升级，不得让要求不同数据库契约的应用版本同时处理流量。
+
+运行时暂停变更后，管理 API 最多等待 5 秒收集所有活动实例的排空确认；返回 `202 applying` 时设置已经生效且不会自动回滚，应轮询管理状态直至所有活动实例 applied。无限期暂停的 HA 紧急解锁可从任一相同版本服务定义执行：
+
+```bash
+docker compose --env-file .env.production -f docker-compose.ha.yml run --rm --no-deps nyauth-a \
+  service-control reset -reason "HA break-glass recovery"
+```
+
+命令只需 runtime PostgreSQL DSN，不开放额外端口，默认等待在线实例 30 秒并输出 JSON 应用进度。不要在两个节点并发重复执行；revision CAS 会保持状态一致，但会制造无意义的额外审计和 revision。
 
 ## 故障验证
 
@@ -134,5 +144,7 @@ docker compose -f docker-compose.ha.yml ps
 - 在一个实例上传头像后，另一实例能立即读取四种尺寸；删除或替换后，旧 avatar ID 不再作为 active 媒体提供。
 - 模拟 S3 读取或写入失败时，对应头像 API 返回 `503`；模拟对象删除失败时，逻辑删除仍成功且进入待清理队列。两类故障都使 `services.media` 变为 degraded，但两个实例的 `/readyz`、登录和 OAuth/OIDC 仍保持可用。
 - 停止任一实例的 Provider 头像 worker 或清理任务后，另一实例能继续领取任务；并发清理不会把同一对象误确认删除两次。
+- 在一个实例设置四种维护预设和单独能力暂停后，两个实例都拒绝新工作、允许旧 in-flight 完成，并在 5 秒内确认相同 revision；模拟丢失通知时 reconciliation 最终收敛。
+- 模拟 PostgreSQL 状态刷新失败超过 15 秒时，失联实例对受控能力 fail-closed；恢复连接后按数据库 revision 恢复。到期恢复只能写一次 `service_control.expired` 审计，CLI reset 可在管理 UI 不可用时恢复全部能力。
 
 CI 的真实 PostgreSQL/Redis 集成测试使用两个独立 HTTP Server、连接池和 Redis client，覆盖 Cookie 跨实例使用、用户暂停后的跨实例失效、Passkey options 跨实例完成与单次消费，以及通过 `/token` 并发交换同一授权码时只有一个请求成功。组件级测试继续覆盖 Provider 通知与 reconciliation、JWK advisory lock 和 Refresh family 并发轮换。完整部署仍应在目标反向代理和托管依赖上重复上述故障验证。

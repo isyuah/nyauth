@@ -3,6 +3,7 @@
   import { api, type User, type UserCreationSource, type UserRole } from '$lib/api';
   import { useAdminUserDetailContext } from '$lib/admin-user-detail';
   import { formatStringMetadata, parseStringMetadata } from '$lib/admin-form-utils';
+  import { isCapabilityPaused, serviceStatusStore } from '$lib/service-control';
   import AvatarCropper from '$lib/components/account/AvatarCropper.svelte';
   import Badge from '$lib/components/ui/Badge.svelte';
   import Button from '$lib/components/ui/Button.svelte';
@@ -28,6 +29,10 @@
   let confirmAction = $state<'suspend' | 'activate' | 'delete' | null>(null);
   let confirmOpen = $state(false);
   let confirmError = $state('');
+  let avatarWritesPaused = $derived(
+    isCapabilityPaused($serviceStatusStore.value, 'admin_mutations')
+      || isCapabilityPaused($serviceStatusStore.value, 'media_writes'),
+  );
 
   $effect(() => {
     if (user && user.id !== syncedUserID) {
@@ -128,9 +133,9 @@
       {#if notice}<p class="mb-3 rounded-nya-sm bg-nya-success-soft px-3 py-2 text-small text-nya-success" role="status">{notice}</p>{/if}
       <form onsubmit={saveProfile} class="space-y-4">
         <div class="grid gap-4 md:grid-cols-2"><Input id="admin-user-email" label="邮箱" type="email" bind:value={profileForm.email} autocomplete="email" placeholder="可选" /><Input id="admin-user-display-name" label="显示名称" bind:value={profileForm.display_name} placeholder="可选" /></div>
-        <div><p class="mb-2 text-body-medium text-nya-text-primary">头像</p><AvatarCropper currentUrl={user.avatar_url} onupload={uploadAvatar} onremove={removeAvatar} /></div>
+        <div><p class="mb-2 text-body-medium text-nya-text-primary">头像</p><AvatarCropper currentUrl={user.avatar_url} disabled={avatarWritesPaused} onupload={uploadAvatar} onremove={removeAvatar} /></div>
         <div><label for="admin-user-metadata" class="mb-1.5 block text-body-medium text-nya-text-primary">高级扩展属性（JSON 字符串键值）</label><textarea id="admin-user-metadata" bind:value={profileForm.metadata} rows="5" spellcheck="false" class="w-full rounded-nya-sm border border-nya-border bg-nya-surface px-3 py-2 font-mono text-small focus:border-nya-primary focus:outline-none focus:ring-2 focus:ring-nya-primary/24"></textarea><p class="mt-1.5 text-small text-nya-text-tertiary">用于内部编号、同步来源等集成数据；不参与认证或授权，也不会自动写入 Access Token、ID Token 或 UserInfo。</p></div>
-        <Button type="submit" variant="primary" loading={saving}>保存资料</Button>
+        <Button type="submit" variant="primary" requiredCapability="admin_mutations" loading={saving}>保存资料</Button>
       </form>
     </section>
 
@@ -153,12 +158,12 @@
       <section class="rounded-nya-card border border-nya-border bg-nya-surface p-5 shadow-nya-card">
         <h2 class="text-card-title text-nya-text-primary">角色与状态</h2>
         {#if roleError}<p class="mt-3 rounded-nya-sm bg-nya-danger-soft px-3 py-2 text-small text-nya-danger" role="alert">{roleError}</p>{/if}
-        <div class="mt-4 flex items-end gap-3"><div class="min-w-0 flex-1"><Select id="user-role" label="角色" bind:value={selectedRole} options={[{ value: 'user', label: '用户' }, { value: 'admin', label: '管理员' }]} /></div><Button variant="secondary" size="sm" onclick={saveRole} loading={roleSaving} disabled={selectedRole === user.role}><Shield size={15} /> 保存</Button></div>
-        <div class="mt-4">{#if user.status === 'active'}<Button variant="secondary" onclick={() => requestAction('suspend')}><Ban size={15} /> 封禁账户</Button>{:else}<Button variant="secondary" onclick={() => requestAction('activate')}><CheckCircle size={15} /> 激活账户</Button>{/if}</div>
+        <div class="mt-4 flex items-end gap-3"><div class="min-w-0 flex-1"><Select id="user-role" label="角色" bind:value={selectedRole} options={[{ value: 'user', label: '用户' }, { value: 'admin', label: '管理员' }]} /></div><Button variant="secondary" size="sm" requiredCapability="admin_mutations" onclick={saveRole} loading={roleSaving} disabled={selectedRole === user.role}><Shield size={15} /> 保存</Button></div>
+        <div class="mt-4">{#if user.status === 'active'}<Button variant="secondary" onclick={() => requestAction('suspend')}><Ban size={15} /> 封禁账户</Button>{:else}<Button variant="secondary" requiredCapability="admin_mutations" onclick={() => requestAction('activate')}><CheckCircle size={15} /> 激活账户</Button>{/if}</div>
       </section>
 
       <DangerZone description="删除用户会立即使其会话和令牌失效，且无法恢复。">
-        {#snippet children()}<Button variant="danger" size="sm" onclick={() => requestAction('delete')}><Trash2 size={15} /> 删除此用户</Button>{/snippet}
+        {#snippet children()}<Button variant="danger" size="sm" requiredCapability="admin_mutations" onclick={() => requestAction('delete')}><Trash2 size={15} /> 删除此用户</Button>{/snippet}
       </DangerZone>
     </div>
   </div>

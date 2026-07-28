@@ -126,6 +126,28 @@ async function waitUntilReady(baseURL, signal) {
   throw new Error(`Nyauth did not become ready within 120 seconds (${lastFailure})`);
 }
 
+async function waitUntilServiceControlNormal(baseURL, signal) {
+  const deadline = Date.now() + 30_000;
+  let lastFailure = 'no response';
+  while (Date.now() < deadline) {
+    if (signal.aborted) throw signal.reason;
+    try {
+      const response = await fetch(`${baseURL}/api/service-status`, {
+        cache: 'no-store',
+        signal: AbortSignal.any([signal, AbortSignal.timeout(3_000)]),
+      });
+      const body = await response.json();
+      if (response.ok && body.status === 'normal') return;
+      lastFailure = `HTTP ${response.status}: ${JSON.stringify(body)}`;
+    } catch (error) {
+      if (signal.aborted) throw signal.reason;
+      lastFailure = error instanceof Error ? error.message : String(error);
+    }
+    await delay(250, signal);
+  }
+  throw new Error(`service control did not return to normal within 30 seconds (${lastFailure})`);
+}
+
 async function writeSecret(name, value) {
   await writeFile(path.join(secretDirectory, name), `${value}\n`, { mode: 0o600 });
 }
@@ -208,6 +230,13 @@ try {
       NYAUTH_REAL_E2E_CHANGED_PASSWORD: changedAdminPassword,
     },
   });
+
+  console.log('[real-e2e] resetting runtime service control through the break-glass CLI');
+  await compose(
+    'exec', '-T', 'nyauth', 'nyauth', 'service-control', 'reset',
+    '-reason', 'real E2E break-glass recovery', '-wait', '15s',
+  );
+  await waitUntilServiceControlNormal(baseURL, abortController.signal);
 } catch (error) {
   primaryFailure = error;
   if (composeStarted) {

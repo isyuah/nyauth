@@ -85,6 +85,13 @@ var apiErrorCodesByMessage = map[string]string{
 	"too many avatar operations":                                                         "avatar.rate_limited",
 	"avatar operation is temporarily unavailable":                                        "avatar.operation_unavailable",
 	"avatar storage is temporarily unavailable":                                          "avatar.storage_unavailable",
+	"service capability is paused":                                                       "service.capability_paused",
+	"service control revision conflict":                                                  "service_control.revision_conflict",
+	"registration settings conflict with service control":                                "service_control.registration_conflict",
+	"service control dependency violation":                                               "service_control.dependency_violation",
+	"invalid service control settings":                                                   "service_control.invalid_settings",
+	"service control is temporarily unavailable":                                         "service_control.unavailable",
+	"too many service control operations":                                                "service_control.rate_limited",
 }
 
 func apiErrorCodeForMessage(message string) string {

@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
@@ -21,6 +22,7 @@ import (
 	"github.com/nyasharp/nyauth/internal/recovery"
 	"github.com/nyasharp/nyauth/internal/registration"
 	"github.com/nyasharp/nyauth/internal/server"
+	"github.com/nyasharp/nyauth/internal/servicecontrol"
 	"github.com/nyasharp/nyauth/internal/telemetry"
 )
 
@@ -30,10 +32,11 @@ const (
 	commandMaintenance    = "maintenance"
 	commandHealthcheck    = "healthcheck"
 	commandVerifyRecovery = "verify-recovery"
+	commandServiceControl = "service-control"
 )
 
 var (
-	version = "dev"
+	version = "0.4.0-dev"
 	commit  = "unknown"
 )
 
@@ -51,6 +54,12 @@ func main() {
 	if command == commandHealthcheck {
 		if err := runHealthcheck(args); err != nil {
 			fatal("healthcheck failed", err)
+		}
+		return
+	}
+	if command == commandServiceControl {
+		if err := runServiceControl(args); err != nil {
+			fatal("service control failed", err)
 		}
 		return
 	}
@@ -284,14 +293,91 @@ func runHealthcheck(args []string) error {
 	return nil
 }
 
+type serviceControlResetReport struct {
+	Revision          int64                     `json:"revision"`
+	ApplicationStatus string                    `json:"application_status"`
+	ActiveInstances   int                       `json:"active_instances"`
+	AppliedInstances  int                       `json:"applied_instances"`
+	Instances         []servicecontrol.Instance `json:"instances"`
+}
+
+func runServiceControl(args []string) error {
+	if len(args) == 0 || args[0] != "reset" {
+		return fmt.Errorf("expected `service-control reset`")
+	}
+	flags := flag.NewFlagSet("nyauth service-control reset", flag.ContinueOnError)
+	configPath := flags.String("config", "", "path to config file (default: config.yaml)")
+	reason := flags.String("reason", "", "mandatory break-glass reset reason")
+	waitTimeout := flags.Duration("wait", 30*time.Second, "maximum time to wait for active instances")
+	if err := flags.Parse(args[1:]); err != nil {
+		return fmt.Errorf("parsing service control reset arguments: %w", err)
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("unexpected service control arguments: %s", strings.Join(flags.Args(), " "))
+	}
+	if strings.TrimSpace(*reason) == "" {
+		return fmt.Errorf("service-control reset requires -reason")
+	}
+	if *waitTimeout <= 0 || *waitTimeout > 5*time.Minute {
+		return fmt.Errorf("service-control reset wait must be greater than zero and no more than 5m")
+	}
+	cfg, err := config.LoadDatabaseMaintenance(*configPath)
+	if err != nil {
+		return fmt.Errorf("loading database configuration: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	db, err := database.NewPostgresPool(ctx, cfg.Database)
+	cancel()
+	if err != nil {
+		return fmt.Errorf("connecting to database: %w", err)
+	}
+	defer db.Close()
+	validationCtx, cancelValidation := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancelValidation()
+	if err := database.ValidateSchemaVersion(validationCtx, db); err != nil {
+		return fmt.Errorf("validating database schema: %w", err)
+	}
+	store, err := servicecontrol.NewStore(db)
+	if err != nil {
+		return err
+	}
+	resetCtx, cancelReset := context.WithTimeout(context.Background(), 30*time.Second)
+	snapshot, err := store.Reset(resetCtx, servicecontrol.ResetInput{
+		Reason: *reason, ActorName: "nyauth service-control CLI",
+	})
+	cancelReset()
+	if err != nil {
+		return err
+	}
+	waitCtx, cancelWait := context.WithTimeout(context.Background(), *waitTimeout)
+	status, waitErr := store.WaitForApplied(waitCtx, snapshot.Revision, servicecontrol.DefaultStaleAfter)
+	cancelWait()
+	if waitErr != nil && !errors.Is(waitErr, context.DeadlineExceeded) && !errors.Is(waitErr, context.Canceled) {
+		return fmt.Errorf("waiting for service control application: %w", waitErr)
+	}
+	applicationStatus := "applying"
+	if status.Applied {
+		applicationStatus = "applied"
+	}
+	report := serviceControlResetReport{
+		Revision: snapshot.Revision, ApplicationStatus: applicationStatus,
+		ActiveInstances: status.ActiveInstances, AppliedInstances: status.AppliedInstances,
+		Instances: status.Instances,
+	}
+	if err := json.NewEncoder(os.Stdout).Encode(report); err != nil {
+		return fmt.Errorf("encoding service control reset report: %w", err)
+	}
+	return nil
+}
+
 func parseCommand(args []string) (string, []string, error) {
 	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
 		return commandServe, args, nil
 	}
 	switch args[0] {
-	case commandServe, commandMigrate, commandMaintenance, commandHealthcheck, commandVerifyRecovery:
+	case commandServe, commandMigrate, commandMaintenance, commandHealthcheck, commandVerifyRecovery, commandServiceControl:
 		return args[0], args[1:], nil
 	default:
-		return "", nil, fmt.Errorf("unknown command %q (expected serve, migrate, maintenance, healthcheck, or verify-recovery)", args[0])
+		return "", nil, fmt.Errorf("unknown command %q (expected serve, migrate, maintenance, healthcheck, verify-recovery, or service-control)", args[0])
 	}
 }

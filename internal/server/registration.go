@@ -13,6 +13,7 @@ import (
 	"github.com/nyasharp/nyauth/internal/mailruntime"
 	"github.com/nyasharp/nyauth/internal/registration"
 	"github.com/nyasharp/nyauth/internal/runtimecoord"
+	"github.com/nyasharp/nyauth/internal/servicecontrol"
 	"github.com/nyasharp/nyauth/internal/settings"
 	"github.com/nyasharp/nyauth/internal/user"
 	"github.com/nyasharp/nyauth/pkg/models"
@@ -52,7 +53,7 @@ func (s *Server) handleRegistrationOptions(w http.ResponseWriter, r *http.Reques
 		domains = []string{}
 	}
 	writeJSON(w, http.StatusOK, registrationOptionsResponse{
-		Available:                reg.Mode != settings.RegistrationClosed && s.mailRuntimeStatus().Available,
+		Available:                reg.Mode != settings.RegistrationClosed && s.mailRuntimeStatus().Available && s.capabilityAvailable(servicecontrol.CapabilitySelfRegistration),
 		Mode:                     reg.Mode,
 		RequireEmailVerification: registrationVerificationRequired(reg),
 		AllowedEmailDomains:      domains,
@@ -255,6 +256,10 @@ func (s *Server) handleUpdateRegistrationSettings(w http.ResponseWriter, r *http
 	if err := s.settingsMgr.SetRegistration(r.Context(), validated, current.Username, fallbackConfigured); err != nil {
 		if errors.Is(err, settings.ErrMailConfigurationNeeded) {
 			writeAPIError(w, http.StatusConflict, "mail configuration changed; reload and try again")
+			return
+		}
+		if errors.Is(err, settings.ErrServiceControlConflict) {
+			writeAPIError(w, http.StatusConflict, "registration settings conflict with service control")
 			return
 		}
 		writeAPIError(w, http.StatusInternalServerError, "failed to store registration settings")

@@ -1,15 +1,15 @@
-# nyauth 0.3.0
+# nyauth 0.4.0-dev
 
 统一认证与用户系统，提供 OAuth 2.0 Authorization Server、OpenID Connect Provider 和第一方管理后台。
 
-## 0.3.0 破坏性基线说明
+## 0.3.0 基线与 0.4.0-dev 兼容演进
 
 `0.3.0` 是全新的破坏性开发基线，不提供旧数据库、配置、接口或 SDK 的兼容层：
 
 - 第一方后台仅使用 `HttpOnly + SameSite=Lax` 会话 Cookie，并对修改请求强制校验 CSRF。
 - OAuth 授权码客户端强制使用 PKCE S256；不支持 plain、implicit 或 hybrid 流程。
 - JWT 固定使用 RS256，refresh token 采用 family 轮换与重复使用检测。
-- 数据库以嵌入二进制的 `000001_baseline` 建立破坏性发布基线，并通过兼容的 `000002`、`000003` 加法迁移演进；`0.3.0` 当前要求 schema version 3。服务启动只校验 schema，不再隐式迁移。
+- 数据库以嵌入二进制的 `000001_baseline` 建立破坏性发布基线，并通过兼容的 `000002`、`000003` 和 `000004_runtime_service_control` 加法迁移演进；当前 `0.4.0-dev` 要求 schema version 4，可从正式 `0.3.0` 的 schema version 3 迁移。服务启动只校验 schema，不再隐式迁移。
 - 旧数据库、session、token、JWK、Provider 凭据和 OAuth 客户端注册均不兼容。
 - 旧 Go/TypeScript SDK 已删除；OAuth/OIDC 集成以标准协议和成熟语言库为准。
 
@@ -29,6 +29,7 @@
 - 自助注册：关闭 / 邀请制 / 开放三种模式，域名白名单与邀请码均为运行时设置
 - 动态邮件：数据库版本化 SMTP 配置、真实测试邮件、免重启激活/回滚、共享熔断
 - 安全头像：浏览器 1:1 裁剪、服务端重编码、本地持久化或私有 S3、Provider 首次异步导入
+- 运行时服务控制：六类能力独立暂停、常用维护预设、多实例排空确认、定时恢复与 CLI 紧急解锁
 - 运维：严格 readiness、JSON 日志、内部 Prometheus、可选 OTLP 与审计 outbox
 - 集成方式：标准 OAuth/OIDC Discovery、成熟语言库与 BFF 会话模式
 
@@ -63,6 +64,12 @@ docker compose logs --follow nyauth
 开发 Compose 将应用、PostgreSQL 和 Redis 分别绑定到 `127.0.0.1:8080`、`127.0.0.1:5432` 和 `127.0.0.1:6379`，并通过一次性 `migrate` service 初始化空数据库。头像使用 `media` 命名 volume 挂载到 `/var/lib/nyauth/media`，与 PostgreSQL 的 `pgdata` 分开持久化。正常停止使用 `docker compose down`，两个 volume 都会保留。不要使用 `docker compose down -v`；`-v` 会同时删除本地 PostgreSQL 和头像数据。
 
 更新已有开发栈时也必须使用完整的 `docker compose up -d --build`，让新镜像中的一次性 `migrate` 先完成 schema 升级，再由 Compose 启动应用。不要使用 `--no-deps` 单独替换 `nyauth`；`serve` 按设计只校验 schema，不执行 DDL。如果最初使用了 `docker compose -p <name>` 创建栈，后续所有构建、迁移和启动命令必须继续使用同一个 `-p <name>`；可先用 `docker compose ls` 核对项目名，避免误建第二套数据库和端口冲突。
+
+若误设无限期暂停且管理界面无法恢复，可使用运行时数据库账号执行紧急解锁。该命令原子清空暂停、递增 revision、通知在线实例并写入审计；它不修改其他运行时设置：
+
+```powershell
+docker compose exec nyauth nyauth service-control reset -reason "local operator recovery"
+```
 
 ### 使用本机服务
 
@@ -284,9 +291,10 @@ OAuth 客户端支持 `post_logout_redirect_uris`。`/end_session` 仅允许跳�
 |---|---|---|
 | GET | `/livez` | 仅表示进程仍可响应 |
 | GET | `/readyz` | 检查 schema、PostgreSQL、Redis、活动 JWK 与 Provider 快照 |
+| GET | `/api/service-status` | 公开的派生运行状态、暂停能力、提示与预计恢复时间；不返回内部原因或实例信息 |
 | GET | `/metrics` | 仅允许内部或可信来源访问的 Prometheus 指标 |
 
-旧 `/health` 已删除。`/readyz` 失败返回 503，响应不会包含数据库地址、原始依赖错误或 secret。SMTP 和头像媒体存储故障都不进入 `/readyz`，避免非核心能力降级让登录与 OAuth/OIDC 整体下线；管理员通过 `/api/admin/system/status` 的 `services.mail`、`services.media` 和对应设置状态查看降级信息。媒体故障期间头像上传或读取返回 `503`；删除以 PostgreSQL 中解除当前引用为成功边界，对象删除失败会标记降级并交给后台清理重试。
+旧 `/health` 已删除。`/readyz` 失败返回 503，响应不会包含数据库地址、原始依赖错误或 secret。主动维护是预期运行状态，不会把 `/readyz` 改为失败；系统状态通过独立的 `operating_state` 展示。SMTP 和头像媒体存储故障也不进入 `/readyz`，避免非核心能力降级让登录与 OAuth/OIDC 整体下线；管理员通过 `/api/admin/system/status` 的 `services.mail`、`services.media` 和对应设置状态查看降级信息。媒体故障期间头像上传或读取返回 `503`；删除以 PostgreSQL 中解除当前引用为成功边界，对象删除失败会标记降级并交给后台清理重试。
 
 ## 外部身份
 
@@ -307,6 +315,7 @@ Provider 不再从 YAML 或环境变量静态加载，只能由管理员写入�
 内部管理界面继续使用 Cookie + CSRF，不是稳定的自动化 API：
 
 - `GET /api/admin/system/status`：版本、schema、PostgreSQL/Redis/JWK/Provider、SMTP 与头像媒体状态。
+- `GET/PUT /api/admin/settings/operations`：六类能力的运行时暂停、恢复、到期和多实例应用进度；修改要求近期重新认证，使用 revision CAS 并与审计同事务提交。
 - `GET /api/admin/stats`：快照化的用户、会话、注册、邮件 backlog、24 小时失败尝试和 SMTP 熔断摘要。
 - `GET /api/admin/stats/login-trend`、`registration-trend`、`mail-trend`：按 UTC 返回 7–90 天的补零趋势；注册趋势含邀请预占/消费/释放，邮件趋势区分其他失败尝试（不含永久拒收）、永久拒收与过期。
 - `GET /api/admin/audit-logs/options`：返回有界、静态的事件、结果、风险和目标类型筛选目录，不扫描审计分区。

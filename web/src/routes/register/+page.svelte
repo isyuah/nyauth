@@ -6,6 +6,7 @@
   import Input from '$lib/components/ui/Input.svelte';
   import { PASSWORD_REQUIREMENT, passwordPolicyError } from '$lib/password-policy';
   import { takeQuerySecret } from '$lib/query-secret';
+  import { capabilityPauseReason, isCapabilityPaused, serviceStatusStore } from '$lib/service-control';
   import { CheckCircle, MailCheck, UserPlus } from 'lucide-svelte';
 
   let options = $state<RegistrationOptions | null>(null);
@@ -19,6 +20,7 @@
   let error = $state('');
   let result = $state<'pending_verification' | 'registered' | ''>('');
   let verificationExpiresAt = $state('');
+  let registrationPaused = $derived(isCapabilityPaused($serviceStatusStore.value, 'self_registration'));
 
   function formatDeadline(value: string): string {
     const deadline = new Date(value);
@@ -37,6 +39,10 @@
   async function submit(event: SubmitEvent) {
     event.preventDefault();
     error = '';
+    if (registrationPaused) {
+      error = capabilityPauseReason($serviceStatusStore.value, 'self_registration');
+      return;
+    }
     const policyError = passwordPolicyError(password);
     if (policyError) { error = policyError; return; }
     if (password !== confirmation) { error = '两次输入的密码不一致。'; return; }
@@ -94,7 +100,7 @@
       {#if options.require_email_verification}
         <p class="text-small text-nya-text-tertiary">注册后需要完成邮箱验证才能登录。</p>
       {/if}
-      <Button type="submit" variant="primary" size="lg" loading={loading} fullWidth><UserPlus size={16} /> 注册</Button>
+      <Button type="submit" variant="primary" size="lg" loading={loading} requiredCapability="self_registration" fullWidth><UserPlus size={16} /> 注册</Button>
       <p class="text-center"><a href="/login" class="text-small text-nya-primary hover:underline">已有账号？返回登录</a></p>
     </form>
   {/if}

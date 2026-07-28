@@ -563,7 +563,7 @@
           <Input id="mail-send-timeout" label="发送超时" bind:value={draft.send_timeout} required placeholder="30s" />
         </div>
         <div class="flex flex-wrap gap-2">
-          <Button type="submit" variant="primary" loading={operation === 'save'} disabled={operation !== '' || retrySeconds('save') > 0}>
+          <Button type="submit" variant="primary" requiredCapability="admin_mutations" loading={operation === 'save'} disabled={operation !== '' || retrySeconds('save') > 0}>
             保存候选配置{#if retrySeconds('save') > 0}（{retrySeconds('save')} 秒）{/if}
           </Button>
           <Button variant="ghost" onclick={resetDraft} disabled={operation !== ''}>放弃表单修改</Button>
@@ -581,10 +581,10 @@
           </div>
           <div class="mt-4 grid gap-3 md:grid-cols-[minmax(0,1fr)_auto_auto] md:items-end">
             <Input id="mail-test-email" label="测试邮件收件地址" type="email" bind:value={testEmail} autocomplete="email" placeholder="operator@example.com" />
-            <Button variant="secondary" loading={operation === 'test'} disabled={(operation !== '' && operation !== 'test') || retrySeconds('test') > 0} onclick={() => testCandidate()}>
+            <Button variant="secondary" requiredCapability="admin_mutations" loading={operation === 'test'} disabled={(operation !== '' && operation !== 'test') || retrySeconds('test') > 0} onclick={() => testCandidate()}>
               <Send size={16} /> 发送真实测试{#if retrySeconds('test') > 0}（{retrySeconds('test')} 秒）{/if}
             </Button>
-            <Button variant="primary" loading={operation === 'activate'} disabled={(operation !== '' && operation !== 'activate') || retrySeconds('activate') > 0} onclick={() => activateCandidate()}>
+            <Button variant="primary" requiredCapability="admin_mutations" loading={operation === 'activate'} disabled={(operation !== '' && operation !== 'activate') || retrySeconds('activate') > 0} onclick={() => activateCandidate()}>
               <ShieldCheck size={16} /> 激活候选版本{#if retrySeconds('activate') > 0}（{retrySeconds('activate')} 秒）{/if}
             </Button>
           </div>
@@ -597,7 +597,7 @@
           {#if settings.previous}
             <p class="mt-2 text-small text-nya-text-secondary">版本 #{settings.previous.revision} · {settings.previous.host}:{settings.previous.port} · {tlsModeLabel(settings.previous.tls_mode)}</p>
             <div class="mt-3">
-              <Button variant="secondary" loading={operation === 'rollback'} disabled={(operation !== '' && operation !== 'rollback') || retrySeconds('rollback') > 0} onclick={() => rollbackSettings()}>
+              <Button variant="secondary" requiredCapability="admin_mutations" loading={operation === 'rollback'} disabled={(operation !== '' && operation !== 'rollback') || retrySeconds('rollback') > 0} onclick={() => rollbackSettings()}>
                 <RotateCcw size={16} /> 回滚到上一版本{#if retrySeconds('rollback') > 0}（{retrySeconds('rollback')} 秒）{/if}
               </Button>
             </div>
@@ -610,7 +610,7 @@
           <p class="mt-2 text-small text-nya-text-secondary">禁用后停止领取 outbox，但不会删除待发送邮件。必须先关闭自助注册。</p>
           {#if registrationMode === null}<p class="mt-2 text-small text-nya-warning">注册设置仍在加载，暂不能禁用邮件。</p>{:else if registrationMode !== 'closed'}<p class="mt-2 text-small text-nya-warning">当前注册模式未关闭，暂不能禁用邮件。</p>{/if}
           <div class="mt-3">
-            <Button variant="danger" loading={operation === 'disable'} disabled={settings.mode === 'disabled' || registrationMode !== 'closed' || operation !== '' || retrySeconds('disable') > 0} onclick={() => (disableConfirmationOpen = true)}>
+            <Button variant="danger" requiredCapability="admin_mutations" loading={operation === 'disable'} disabled={settings.mode === 'disabled' || registrationMode !== 'closed' || operation !== '' || retrySeconds('disable') > 0} onclick={() => (disableConfirmationOpen = true)}>
               <Power size={16} /> 禁用邮件服务{#if retrySeconds('disable') > 0}（{retrySeconds('disable')} 秒）{/if}
             </Button>
           </div>

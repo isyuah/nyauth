@@ -55,6 +55,7 @@ func TestParseCommand(t *testing.T) {
 		{name: "maintenance", args: []string{"maintenance", "-config", "config.yaml"}, command: commandMaintenance, rest: []string{"-config", "config.yaml"}},
 		{name: "healthcheck", args: []string{"healthcheck", "-timeout", "1s"}, command: commandHealthcheck, rest: []string{"-timeout", "1s"}},
 		{name: "verify recovery", args: []string{"verify-recovery", "-config", "config.yaml"}, command: commandVerifyRecovery, rest: []string{"-config", "config.yaml"}},
+		{name: "service control reset", args: []string{"service-control", "reset", "-reason", "incident resolved"}, command: commandServiceControl, rest: []string{"reset", "-reason", "incident resolved"}},
 		{name: "unknown", args: []string{"rollback"}, wantErr: true},
 	}
 	for _, tt := range tests {
@@ -73,6 +74,30 @@ func TestParseCommand(t *testing.T) {
 				if rest[i] != tt.rest[i] {
 					t.Errorf("rest[%d] = %q, want %q", i, rest[i], tt.rest[i])
 				}
+			}
+		})
+	}
+}
+
+func TestRunServiceControlRejectsInvalidArgumentsBeforeLoadingConfiguration(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "missing subcommand", want: "service-control reset"},
+		{name: "unknown subcommand", args: []string{"status"}, want: "service-control reset"},
+		{name: "missing reason", args: []string{"reset"}, want: "requires -reason"},
+		{name: "blank reason", args: []string{"reset", "-reason", "   "}, want: "requires -reason"},
+		{name: "unexpected argument", args: []string{"reset", "-reason", "incident resolved", "extra"}, want: "unexpected service control arguments"},
+		{name: "zero wait", args: []string{"reset", "-reason", "incident resolved", "-wait", "0s"}, want: "greater than zero"},
+		{name: "excessive wait", args: []string{"reset", "-reason", "incident resolved", "-wait", "6m"}, want: "no more than 5m"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := runServiceControl(test.args)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("runServiceControl(%v) error = %v, want containing %q", test.args, err, test.want)
 			}
 		})
 	}

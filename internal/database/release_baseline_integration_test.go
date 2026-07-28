@@ -45,6 +45,66 @@ func TestReleaseBaselineMigratesFreshDatabaseDownAndUp(t *testing.T) {
 	assertReleaseBaseline(t, schema)
 }
 
+func TestReleaseBaselineUpgradesSchema3To4(t *testing.T) {
+	schema := newPostgresTestSchema(t)
+	source, err := iofs.New(migrationfiles.Files, ".")
+	if err != nil {
+		t.Fatalf("open embedded migrations: %v", err)
+	}
+	runner, err := migrate.NewWithSourceInstance("iofs", source, schema.migrationDSN)
+	if err != nil {
+		_ = source.Close()
+		t.Fatalf("create schema 3 migration runner: %v", err)
+	}
+	if err := runner.Migrate(3); err != nil {
+		_, _ = runner.Close()
+		t.Fatalf("migrate to schema 3: %v", err)
+	}
+
+	var version int64
+	var dirty bool
+	if err := schema.pool.QueryRow(t.Context(), `SELECT version,dirty FROM schema_migrations`).Scan(&version, &dirty); err != nil {
+		_, _ = runner.Close()
+		t.Fatalf("read schema 3 migration state: %v", err)
+	}
+	if version != 3 || dirty {
+		_, _ = runner.Close()
+		t.Fatalf("migration state=%d dirty=%v, want schema 3 clean", version, dirty)
+	}
+	var serviceControlTable *string
+	if err := schema.pool.QueryRow(t.Context(), `SELECT to_regclass('service_control_state')::text`).Scan(&serviceControlTable); err != nil {
+		_, _ = runner.Close()
+		t.Fatalf("inspect service control table before upgrade: %v", err)
+	}
+	if serviceControlTable != nil {
+		_, _ = runner.Close()
+		t.Fatalf("service control table exists before schema 4: %q", *serviceControlTable)
+	}
+	if sourceErr, databaseErr := runner.Close(); sourceErr != nil || databaseErr != nil {
+		t.Fatalf("close schema 3 migration runner: source=%v database=%v", sourceErr, databaseErr)
+	}
+
+	if err := database.RunMigrations(schema.migrationDSN); err != nil {
+		t.Fatalf("upgrade schema 3 to 4: %v", err)
+	}
+	assertReleaseBaseline(t, schema)
+
+	var revision int64
+	var pauses int
+	if err := schema.pool.QueryRow(t.Context(), `
+		SELECT state.revision,COUNT(pauses.capability)
+		FROM service_control_state AS state
+		LEFT JOIN service_control_pauses AS pauses ON pauses.singleton=state.singleton
+		WHERE state.singleton=TRUE
+		GROUP BY state.revision
+	`).Scan(&revision, &pauses); err != nil {
+		t.Fatalf("read initial service control state: %v", err)
+	}
+	if revision != 1 || pauses != 0 {
+		t.Fatalf("initial service control revision=%d pauses=%d, want revision 1 with no pauses", revision, pauses)
+	}
+}
+
 func assertReleaseBaseline(t *testing.T, schema *postgresTestSchema) {
 	t.Helper()
 	ctx := context.Background()
@@ -61,6 +121,7 @@ func assertReleaseBaseline(t *testing.T, schema *postgresTestSchema) {
 		"runtime_settings", "client_access_users", "self_registrations", "mail_config_versions",
 		"registration_stats_daily", "user_totp_credentials", "user_passkey_credentials",
 		"user_avatars", "provider_avatar_import_jobs", "idx_audit_logs_target_created",
+		"service_control_state", "service_control_pauses", "service_control_instances",
 	} {
 		var resolved *string
 		if err := schema.pool.QueryRow(ctx, `SELECT to_regclass($1)::text`, object).Scan(&resolved); err != nil {

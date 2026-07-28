@@ -67,3 +67,17 @@ func TestProviderImportRetryScheduleTreatsJobTimeoutAsTransient(t *testing.T) {
 		})
 	}
 }
+
+func TestProviderImportWorkerDoesNotClaimWhileMediaWritesArePaused(t *testing.T) {
+	acquired := 0
+	worker := &ImportWorker{acquireWork: func() (func(), bool) {
+		acquired++
+		return nil, false
+	}}
+	if err := worker.RunOnce(t.Context()); err != nil {
+		t.Fatalf("RunOnce() error = %v", err)
+	}
+	if acquired != 1 {
+		t.Fatalf("AcquireWork calls = %d, want 1", acquired)
+	}
+}

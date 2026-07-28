@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/nyasharp/nyauth/internal/config"
+	"github.com/nyasharp/nyauth/internal/servicecontrol"
 )
 
 func TestLivenessDoesNotDependOnRuntimeDependencies(t *testing.T) {
@@ -63,5 +64,24 @@ func TestReadinessSucceedsWhenEveryCheckPasses(t *testing.T) {
 	server.handleReadiness(recorder, httptest.NewRequest(http.MethodGet, "/readyz", nil))
 	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"status":"ready"`) {
 		t.Fatalf("readiness response = %d %s", recorder.Code, recorder.Body.String())
+	}
+}
+
+func TestReadinessIgnoresIntentionalServiceControlPauses(t *testing.T) {
+	t.Parallel()
+	server := &Server{
+		cfg: &config.Config{Server: config.ServerConfig{ReadinessTimeout: time.Second}},
+		serviceControl: &fakeServiceControlRuntime{snapshot: servicecontrol.Snapshot{
+			PausedCapabilities: servicecontrol.AllCapabilities(),
+		}},
+	}
+	server.readiness.checks = []readinessCheck{
+		{name: "database", check: func(context.Context) error { return nil }},
+		{name: "redis", check: func(context.Context) error { return nil }},
+	}
+	recorder := httptest.NewRecorder()
+	server.handleReadiness(recorder, httptest.NewRequest(http.MethodGet, "/readyz", nil))
+	if recorder.Code != http.StatusOK || !strings.Contains(recorder.Body.String(), `"status":"ready"`) {
+		t.Fatalf("readiness during full pause = %d %s", recorder.Code, recorder.Body.String())
 	}
 }

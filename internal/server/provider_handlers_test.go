@@ -4,12 +4,14 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
 	"github.com/go-chi/chi/v5"
 	"github.com/nyasharp/nyauth/internal/config"
+	"github.com/nyasharp/nyauth/internal/servicecontrol"
 	"github.com/nyasharp/nyauth/internal/session"
 	"github.com/nyasharp/nyauth/pkg/models"
 	"github.com/redis/go-redis/v9"
@@ -91,6 +93,54 @@ func TestProviderCallbackFromWrongBrowserDoesNotCreateSession(t *testing.T) {
 	}
 	if !cleared {
 		t.Fatal("provider flow cookie was not cleared on callback")
+	}
+}
+
+func TestProviderCallbackCapabilityDependsOnIntent(t *testing.T) {
+	for _, test := range []struct {
+		name         string
+		intent       string
+		wantError    string
+		wantAcquired servicecontrol.Capability
+		wantAcquireN int
+	}{
+		{name: "login is issuance controlled", intent: "login", wantError: "service_paused", wantAcquired: servicecontrol.CapabilityAuthIssuance, wantAcquireN: 1},
+		{name: "reauth is exempt", intent: "reauth", wantError: "missing_code", wantAcquireN: 0},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			mini := miniredis.RunT(t)
+			rdb := redis.NewClient(&redis.Options{Addr: mini.Addr()})
+			t.Cleanup(func() { _ = rdb.Close() })
+			stateStore := session.NewStore(rdb)
+			state := "state-" + test.intent
+			flowSecret := "flow-" + test.intent
+			if err := stateStore.SaveCSRFState(context.Background(), state, map[string]string{
+				"provider": "test", "intent": test.intent, "return_to": "/profile",
+				"flow_digest": providerSessionDigest(flowSecret),
+			}, time.Minute); err != nil {
+				t.Fatal(err)
+			}
+			runtime := &fakeServiceControlRuntime{acquireErr: &servicecontrol.PausedError{
+				Capabilities: []servicecontrol.Capability{servicecontrol.CapabilityAuthIssuance},
+				RetryAfter:   time.Minute,
+			}}
+			server := &Server{cfg: &config.Config{}, sessionStore: stateStore, serviceControl: runtime}
+			router := chi.NewRouter()
+			router.Get("/auth/{provider}/callback", server.handleProviderCallback)
+			request := httptest.NewRequest(http.MethodGet, "/auth/test/callback?state="+state, nil)
+			request.AddCookie(&http.Cookie{Name: providerFlowCookie, Value: flowSecret})
+			response := httptest.NewRecorder()
+			router.ServeHTTP(response, request)
+			if response.Code != http.StatusFound || !strings.Contains(response.Header().Get("Location"), "auth_error="+test.wantError) {
+				t.Fatalf("status=%d location=%q", response.Code, response.Header().Get("Location"))
+			}
+			if len(runtime.acquired) != test.wantAcquireN {
+				t.Fatalf("acquired=%v, want count %d", runtime.acquired, test.wantAcquireN)
+			}
+			if test.wantAcquireN == 1 && runtime.acquired[0][0] != test.wantAcquired {
+				t.Fatalf("acquired=%v, want %s", runtime.acquired, test.wantAcquired)
+			}
+		})
 	}
 }
 

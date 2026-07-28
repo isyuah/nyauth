@@ -15,6 +15,32 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+func TestTimeoutExceptOnlyExemptsExactStreamingPath(t *testing.T) {
+	handler := timeoutExcept(time.Second, serviceStatusEventsPath)(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		_, hasDeadline := r.Context().Deadline()
+		if hasDeadline {
+			w.Header().Set("X-Has-Deadline", "true")
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	for _, test := range []struct {
+		path         string
+		wantsTimeout bool
+	}{
+		{path: serviceStatusEventsPath, wantsTimeout: false},
+		{path: "/api/service-status", wantsTimeout: true},
+		{path: serviceStatusEventsPath + "/other", wantsTimeout: true},
+	} {
+		recorder := httptest.NewRecorder()
+		handler.ServeHTTP(recorder, httptest.NewRequest(http.MethodGet, test.path, nil))
+		got := recorder.Header().Get("X-Has-Deadline") == "true"
+		if got != test.wantsTimeout {
+			t.Fatalf("path %q timeout=%v, want %v", test.path, got, test.wantsTimeout)
+		}
+	}
+}
+
 func TestUserAuthMiddlewareDistinguishesMissingAndExpiredSessions(t *testing.T) {
 	mini := miniredis.RunT(t)
 	rdb := redis.NewClient(&redis.Options{Addr: mini.Addr()})

@@ -41,6 +41,6 @@
   {:else if !token}
     <p class="rounded-nya-sm bg-nya-danger-soft px-3 py-3 text-center text-body text-nya-danger" role="alert">确认链接不完整，请从个人资料页重新发起邮箱变更。</p>
   {:else}
-    <div class="space-y-4 text-center">{#if error}<p class="rounded-nya-sm bg-nya-danger-soft px-3 py-2 text-small text-nya-danger" role="alert">{error}</p>{/if}<MailCheck size={40} class="mx-auto text-nya-primary" /><p class="text-body text-nya-text-secondary">确认后，旧会话和令牌会立即失效。</p><Button variant="primary" size="lg" onclick={confirm} loading={loading} fullWidth>确认更换邮箱</Button></div>
+    <div class="space-y-4 text-center">{#if error}<p class="rounded-nya-sm bg-nya-danger-soft px-3 py-2 text-small text-nya-danger" role="alert">{error}</p>{/if}<MailCheck size={40} class="mx-auto text-nya-primary" /><p class="text-body text-nya-text-secondary">确认后，旧会话和令牌会立即失效。</p><Button variant="primary" size="lg" requiredCapability="account_mutations" onclick={confirm} loading={loading} fullWidth>确认更换邮箱</Button></div>
   {/if}
 </AccountActionCard>

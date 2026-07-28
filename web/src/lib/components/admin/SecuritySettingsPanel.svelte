@@ -185,7 +185,7 @@
         </div>
       </div>
 
-      <Button type="submit" variant="primary" loading={saving}>保存登录安全策略</Button>
+      <Button type="submit" variant="primary" requiredCapability="admin_mutations" loading={saving}>保存登录安全策略</Button>
     </form>
   {/if}
 </section>

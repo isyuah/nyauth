@@ -97,4 +97,7 @@ const (
 	AuditTokenGrantFailed       = "token.grant_failed"
 	AuditRefreshTokenReuse      = "token.refresh_reuse"
 	AuditTokenRevoked           = "token.revoked"
+	AuditServiceControlUpdated  = "service_control.updated"
+	AuditServiceControlExpired  = "service_control.expired"
+	AuditServiceControlCLIReset = "service_control.cli_reset"
 )

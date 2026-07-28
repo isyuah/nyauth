@@ -143,9 +143,9 @@
         {#if hasPassword}<p class="mt-1 text-body text-nya-text-secondary">修改密码会退出其他设备并撤销已有令牌。</p>{:else}<p class="mt-1 text-body text-nya-text-secondary">此账户当前仅通过外部身份登录，可以额外设置本地密码。</p>{/if}
       </div>
       {#if hasPassword}
-        <Button variant="secondary" onclick={() => goto(`/change-password?return_to=${encodeURIComponent(returnTo)}`)}><KeyRound size={16} /> 修改密码</Button>
+        <Button variant="secondary" requiredCapability="account_mutations" onclick={() => goto(`/change-password?return_to=${encodeURIComponent(returnTo)}`)}><KeyRound size={16} /> 修改密码</Button>
       {:else}
-        <Button variant="secondary" onclick={openSetPassword}><KeyRound size={16} /> 设置本地密码</Button>
+        <Button variant="secondary" requiredCapability="account_mutations" onclick={openSetPassword}><KeyRound size={16} /> 设置本地密码</Button>
       {/if}
     </div>
   </section>
@@ -200,7 +200,7 @@
       {#if setPasswordError}<p class="rounded-nya-sm bg-nya-danger-soft px-3 py-2 text-small text-nya-danger" role="alert">{setPasswordError}</p>{/if}
       <div><Input id="set-local-password" label="新密码" type="password" bind:value={setPasswordValue} autocomplete="new-password" required /><p class="mt-1.5 text-small text-nya-text-tertiary">{PASSWORD_REQUIREMENT}</p></div>
       <Input id="set-local-password-confirmation" label="确认新密码" type="password" bind:value={setPasswordConfirmation} autocomplete="new-password" required />
-      <div class="flex justify-end gap-2"><Button variant="secondary" onclick={() => (setPasswordOpen = false)} disabled={setPasswordLoading}>取消</Button><Button type="submit" variant="primary" loading={setPasswordLoading}>设置密码</Button></div>
+      <div class="flex justify-end gap-2"><Button variant="secondary" onclick={() => (setPasswordOpen = false)} disabled={setPasswordLoading}>取消</Button><Button type="submit" variant="primary" requiredCapability="account_mutations" loading={setPasswordLoading}>设置密码</Button></div>
     </form>
   {:else}
     <div class="space-y-4">

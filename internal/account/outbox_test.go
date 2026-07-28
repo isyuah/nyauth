@@ -236,6 +236,42 @@ func TestDynamicDispatcherDoesNotClaimWhileUnavailable(t *testing.T) {
 	}
 }
 
+func TestDispatcherDoesNotClaimWhileServiceCapabilityIsPaused(t *testing.T) {
+	store := &fakeOutboxStore{items: []OutboxEmail{encryptedTestEmail(t)}}
+	released := false
+	dispatcher, err := newDispatcher(store, &fakeSender{}, DispatcherOptions{
+		WorkerID: "worker-1", MasterKeys: map[string][]byte{"primary": testKey}, Clock: func() time.Time { return testNow },
+		AcquireDelivery: func() (func(), bool) {
+			return func() { released = true }, false
+		},
+	})
+	if err != nil {
+		t.Fatalf("newDispatcher: %v", err)
+	}
+	processed, err := dispatcher.DispatchOnce(context.Background())
+	if err != nil || processed != 0 || store.claims != 0 || store.expirations != 1 || released {
+		t.Fatalf("processed=%d claims=%d expirations=%d released=%v err=%v", processed, store.claims, store.expirations, released, err)
+	}
+}
+
+func TestDispatcherHoldsServiceCapabilityUntilClaimedBatchFinishes(t *testing.T) {
+	store := &fakeOutboxStore{items: []OutboxEmail{encryptedTestEmail(t)}}
+	released := false
+	dispatcher, err := newDispatcher(store, &fakeSender{}, DispatcherOptions{
+		WorkerID: "worker-1", MasterKeys: map[string][]byte{"primary": testKey}, Clock: func() time.Time { return testNow },
+		AcquireDelivery: func() (func(), bool) {
+			return func() { released = true }, true
+		},
+	})
+	if err != nil {
+		t.Fatalf("newDispatcher: %v", err)
+	}
+	processed, err := dispatcher.DispatchOnce(context.Background())
+	if err != nil || processed != 1 || store.claims != 1 || !released {
+		t.Fatalf("processed=%d claims=%d released=%v err=%v", processed, store.claims, released, err)
+	}
+}
+
 func TestDynamicDispatcherRefreshesAfterAuthoritativeCircuitOpen(t *testing.T) {
 	item := encryptedTestEmail(t)
 	store := &fakeOutboxStore{items: []OutboxEmail{item}, claimErr: runtimecoord.ErrMailCircuitOpen}

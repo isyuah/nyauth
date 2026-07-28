@@ -513,7 +513,7 @@
 {/snippet}
 
 <PageHeader title="应用管理" description="管理 OAuth 2.0 / OIDC 客户端、授权能力与回调地址">
-  {#snippet action()}<Button variant="primary" onclick={openCreate}><Plus size={16} /> 创建应用</Button>{/snippet}
+  {#snippet action()}<Button variant="primary" requiredCapability="admin_mutations" onclick={openCreate}><Plus size={16} /> 创建应用</Button>{/snippet}
 </PageHeader>
 
 {#if ownerNotice}<p class="mb-4 rounded-nya-sm bg-nya-success-soft px-4 py-3 text-small text-nya-success" role="status">{ownerNotice}</p>{/if}
@@ -540,16 +540,16 @@
   emptyDescription="创建第一个 OAuth / OIDC 客户端后即可接入应用。"
   onretry={loadClients}
 >
-  {#snippet emptyAction()}<Button variant="primary" onclick={openCreate}>创建应用</Button>{/snippet}
+  {#snippet emptyAction()}<Button variant="primary" requiredCapability="admin_mutations" onclick={openCreate}>创建应用</Button>{/snippet}
   {#snippet children()}
     <div class="space-y-3">
       {#each clients as client}
         <Card>
           <div class="flex flex-col justify-between gap-4 md:flex-row md:items-start">
             <div class="flex min-w-0 items-center gap-3"><span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-nya-md bg-nya-blue-soft"><AppWindow size={20} class="text-nya-blue" /></span><div class="min-w-0"><h2 class="truncate text-card-title text-nya-text-primary">{client.name}</h2><CopyField value={client.id} /></div></div>
-            <div class="flex flex-wrap items-center gap-2">{#if client.is_public}<Badge variant="warning">Public</Badge>{:else}<Badge variant="default">Confidential</Badge><Button variant="secondary" size="sm" onclick={() => requestRotation(client)}><RefreshCw size={14} /> 轮换 Secret</Button>{/if}{#if client.access_policy && client.access_policy !== 'open'}<Badge variant="warning">访问：{accessPolicyLabel(client.access_policy)}</Badge>{/if}<Badge variant="primary">{client.grants.join(', ')}</Badge>{#if client.access_policy === 'allowlist'}<Button variant="secondary" size="sm" ariaLabel={`管理 ${client.name} 访问名单`} onclick={() => openAccessUsers(client)}><Users size={14} /> 访问名单</Button>{/if}<Button variant="ghost" size="sm" onclick={() => openEdit(client)}><Pencil size={14} /> 编辑</Button><Button variant="ghost" size="sm" onclick={() => requestDelete(client)}>删除</Button></div>
+            <div class="flex flex-wrap items-center gap-2">{#if client.is_public}<Badge variant="warning">Public</Badge>{:else}<Badge variant="default">Confidential</Badge><Button variant="secondary" size="sm" requiredCapability="admin_mutations" onclick={() => requestRotation(client)}><RefreshCw size={14} /> 轮换 Secret</Button>{/if}{#if client.access_policy && client.access_policy !== 'open'}<Badge variant="warning">访问：{accessPolicyLabel(client.access_policy)}</Badge>{/if}<Badge variant="primary">{client.grants.join(', ')}</Badge>{#if client.access_policy === 'allowlist'}<Button variant="secondary" size="sm" requiredCapability="admin_mutations" ariaLabel={`管理 ${client.name} 访问名单`} onclick={() => openAccessUsers(client)}><Users size={14} /> 访问名单</Button>{/if}<Button variant="ghost" size="sm" requiredCapability="admin_mutations" onclick={() => openEdit(client)}><Pencil size={14} /> 编辑</Button><Button variant="ghost" size="sm" requiredCapability="admin_mutations" onclick={() => requestDelete(client)}>删除</Button></div>
           </div>
-          <div class="mt-3 flex flex-wrap items-center justify-between gap-2"><p class="min-w-0 text-small text-nya-text-tertiary">Owner：<code class="break-all font-mono">{client.owner_id || '未分配'}</code> · Client 类型为只读，创建后不可更改。</p><Button variant="secondary" size="sm" ariaLabel={`管理 ${client.name} Owner`} onclick={() => openOwnerManager(client)}><Users size={14} /> 管理 Owner</Button></div>
+          <div class="mt-3 flex flex-wrap items-center justify-between gap-2"><p class="min-w-0 text-small text-nya-text-tertiary">Owner：<code class="break-all font-mono">{client.owner_id || '未分配'}</code> · Client 类型为只读，创建后不可更改。</p><Button variant="secondary" size="sm" requiredCapability="admin_mutations" ariaLabel={`管理 ${client.name} Owner`} onclick={() => openOwnerManager(client)}><Users size={14} /> 管理 Owner</Button></div>
           {#if !client.is_public}<p class="mt-3 text-small text-nya-text-tertiary">Secret 版本 {client.secret_version}{#if client.secret_hint} · 尾号 {client.secret_hint}{/if}{#if client.secret_rotated_at} · 最近轮换 {new Date(client.secret_rotated_at).toLocaleString()}{/if}{#if client.secret_last_used_at} · 最近使用 {new Date(client.secret_last_used_at).toLocaleString()}{/if}</p>{/if}
           <div class="mt-4"><p class="mb-1 text-small font-semibold text-nya-text-tertiary">Redirect URI</p><div class="flex flex-wrap gap-1.5">{#each client.redirect_uris as uri}<code class="break-all rounded-nya-xs bg-nya-surface-muted px-2 py-1 text-micro text-nya-text-secondary">{uri}</code>{/each}</div></div>
           {#if client.post_logout_redirect_uris.length > 0}<div class="mt-3"><p class="mb-1 text-small font-semibold text-nya-text-tertiary">Post-logout Redirect URI</p><div class="flex flex-wrap gap-1.5">{#each client.post_logout_redirect_uris as uri}<code class="break-all rounded-nya-xs bg-nya-surface-muted px-2 py-1 text-micro text-nya-text-secondary">{uri}</code>{/each}</div></div>{/if}
@@ -570,7 +570,7 @@
     <div class="flex flex-col gap-1.5"><label for="admin-post-logout-uris" class="text-body-medium text-nya-text-primary">Post-logout Redirect URI <span class="text-small text-nya-text-tertiary">（每行一个）</span></label><textarea id="admin-post-logout-uris" bind:value={newClient.post_logout_redirect_uris} rows="2" placeholder="https://app.example.com/signed-out" class="w-full rounded-nya-sm border border-nya-border bg-nya-surface px-3 py-2 font-mono text-small text-nya-text-primary focus:border-nya-primary focus:outline-none focus:ring-2 focus:ring-nya-primary/24"></textarea></div>
     {@render ownerPicker(newClient.owner_id, selectCreateOwner, 'create-client-owner')}
     <label class="flex cursor-pointer items-start gap-2"><input type="checkbox" bind:checked={newClient.is_public} class="mt-0.5 rounded" /><span><span class="block text-body text-nya-text-primary">公共客户端</span><span class="block text-small text-nya-text-tertiary">仅用于无法安全保存 Secret 的原生应用；浏览器 SPA 暂不作为正式支持模式。</span></span></label>
-    <div class="flex justify-end gap-2 pt-2"><Button variant="secondary" onclick={() => (showCreate = false)} disabled={creating}>取消</Button><Button type="submit" variant="primary" loading={creating}>创建</Button></div>
+    <div class="flex justify-end gap-2 pt-2"><Button variant="secondary" onclick={() => (showCreate = false)} disabled={creating}>取消</Button><Button type="submit" variant="primary" requiredCapability="admin_mutations" loading={creating}>创建</Button></div>
   </form>
 </Modal>
 
@@ -584,7 +584,7 @@
     <fieldset><legend class="mb-2 text-body-medium text-nya-text-primary">访问策略</legend><div class="grid gap-2 sm:grid-cols-3">{#each accessPolicyOptions as option}<label class="flex cursor-pointer items-start gap-2 rounded-nya-sm border border-nya-border px-3 py-2 {editForm.access_policy === option.value ? 'border-nya-primary bg-nya-primary-soft' : ''}"><input type="radio" name="edit-access-policy" value={option.value} bind:group={editForm.access_policy} class="mt-0.5" /><span><span class="block text-small font-semibold text-nya-text-primary">{option.label}</span><span class="block text-micro text-nya-text-tertiary">{option.description}</span></span></label>{/each}</div><p class="mt-1.5 text-micro text-nya-text-tertiary">策略只作用于用户授权流程；client_credentials 机器流程不受限制。切换为白名单后请在应用卡片上维护访问名单。</p></fieldset>
     <div><label for="edit-client-scopes" class="mb-1.5 block text-body-medium text-nya-text-primary">Scopes（空格、逗号或换行分隔）</label><textarea id="edit-client-scopes" bind:value={editForm.scopes} rows="2" class="w-full rounded-nya-sm border border-nya-border bg-nya-surface px-3 py-2 font-mono text-small focus:border-nya-primary focus:outline-none focus:ring-2 focus:ring-nya-primary/24"></textarea></div>
     <div><label for="edit-client-metadata" class="mb-1.5 block text-body-medium text-nya-text-primary">Metadata（JSON 字符串键值）</label><textarea id="edit-client-metadata" bind:value={editForm.metadata} rows="5" spellcheck="false" class="w-full rounded-nya-sm border border-nya-border bg-nya-surface px-3 py-2 font-mono text-small focus:border-nya-primary focus:outline-none focus:ring-2 focus:ring-nya-primary/24"></textarea></div>
-    <div class="flex justify-end gap-2"><Button variant="secondary" onclick={() => (showEdit = false)} disabled={editing}>取消</Button><Button type="submit" variant="primary" loading={editing}>保存更改</Button></div>
+    <div class="flex justify-end gap-2"><Button variant="secondary" onclick={() => (showEdit = false)} disabled={editing}>取消</Button><Button type="submit" variant="primary" requiredCapability="admin_mutations" loading={editing}>保存更改</Button></div>
   </form>
 </Modal>
 
@@ -627,14 +627,14 @@
         </ul>
       {/if}
     </div>
-    <div class="flex justify-end gap-2"><Button variant="secondary" onclick={() => (accessModalOpen = false)} disabled={accessSaving}>关闭</Button><Button variant="primary" onclick={saveAccessUsers} loading={accessSaving}>保存名单</Button></div>
+    <div class="flex justify-end gap-2"><Button variant="secondary" onclick={() => (accessModalOpen = false)} disabled={accessSaving}>关闭</Button><Button variant="primary" requiredCapability="admin_mutations" onclick={saveAccessUsers} loading={accessSaving}>保存名单</Button></div>
   </div>
 </Modal>
 
 <Modal bind:open={ownerModalOpen} title={`管理 Client Owner · ${ownerTarget?.name || ''}`} description="转移或解除 Owner 会改变用户对该客户端的管理权限" size="md">
   <div class="space-y-4">
     {@render ownerPicker(pendingOwnerID, selectPendingOwner, 'transfer-client-owner')}
-    <div class="flex justify-end gap-2"><Button variant="secondary" onclick={() => (ownerModalOpen = false)}>取消</Button><Button variant="primary" onclick={requestOwnerChange} disabled={pendingOwnerID === (ownerTarget?.owner_id || null)}>继续</Button></div>
+    <div class="flex justify-end gap-2"><Button variant="secondary" onclick={() => (ownerModalOpen = false)}>取消</Button><Button variant="primary" requiredCapability="admin_mutations" onclick={requestOwnerChange} disabled={pendingOwnerID === (ownerTarget?.owner_id || null)}>继续</Button></div>
   </div>
 </Modal>
 
