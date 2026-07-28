@@ -73,13 +73,14 @@ type systemSchemaSnapshot struct {
 }
 
 type systemStatusSources struct {
-	pingPostgreSQL func(context.Context) error
-	pingRedis      func(context.Context) error
-	readSchema     func(context.Context) (systemSchemaSnapshot, error)
-	readSigningKey func(context.Context) (*models.JWK, error)
-	providerState  func() (bool, uint64)
-	mailState      func() mailruntime.RuntimeStatus
-	mediaState     func() avatar.RuntimeStatus
+	pingPostgreSQL   func(context.Context) error
+	pingRedis        func(context.Context) error
+	readSchema       func(context.Context) (systemSchemaSnapshot, error)
+	readSigningKey   func(context.Context) (*models.JWK, error)
+	providerState    func() (bool, uint64)
+	providerDegraded func() bool
+	mailState        func() mailruntime.RuntimeStatus
+	mediaState       func() avatar.RuntimeStatus
 }
 
 func (s *Server) handleSystemStatus(w http.ResponseWriter, r *http.Request) {
@@ -103,8 +104,9 @@ func (s *Server) handleSystemStatus(w http.ResponseWriter, r *http.Request) {
 		providerState: func() (bool, uint64) {
 			return s.providerMgr.Ready(), s.providerMgr.SnapshotRevision()
 		},
-		mailState:  s.mailRuntimeStatus,
-		mediaState: s.avatarService.RuntimeStatus,
+		providerDegraded: s.providerMgr.Degraded,
+		mailState:        s.mailRuntimeStatus,
+		mediaState:       s.avatarService.RuntimeStatus,
 	})
 	writeJSON(w, http.StatusOK, response)
 }
@@ -161,6 +163,9 @@ func collectSystemStatus(ctx context.Context, rotationInterval time.Duration, so
 	providerStatus := "ok"
 	if !providersReady {
 		providerStatus = "not_ready"
+		response.Status = "degraded"
+	} else if sources.providerDegraded != nil && sources.providerDegraded() {
+		providerStatus = "degraded"
 		response.Status = "degraded"
 	}
 	response.Services.Providers = systemProviderStatus{Status: providerStatus, LatencyMS: elapsedMilliseconds(started), SnapshotRevision: revision}

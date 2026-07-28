@@ -8,6 +8,7 @@ import (
 	"github.com/nyasharp/nyauth/internal/account"
 	"github.com/nyasharp/nyauth/internal/audit"
 	"github.com/nyasharp/nyauth/internal/user"
+	"github.com/nyasharp/nyauth/pkg/models"
 )
 
 func isRecentAuthentication(authenticatedAt, now time.Time) bool {
@@ -81,7 +82,7 @@ func (s *Server) handlePasswordReauthentication(w http.ResponseWriter, r *http.R
 		writeAPIError(w, http.StatusServiceUnavailable, "reauthentication session could not be updated")
 		return
 	}
-	s.enqueueAuditTargetResult(r.Context(), "user.reauthenticated", &current.ID, current.Username, "user", current.ID.String(), "success", "medium", requestIP(r), truncateAuditValue(r.UserAgent(), maxAuditUserAgentLength), map[string]any{"authentication_method": "password"})
+	s.enqueueAuditTargetResult(r.Context(), models.AuditUserReauthenticated, &current.ID, current.Username, "user", current.ID.String(), "success", "medium", requestIP(r), truncateAuditValue(r.UserAgent(), maxAuditUserAgentLength), map[string]any{"authentication_method": "password"})
 	s.telemetry.RecordAuthEvent(r.Context(), "reauthentication", "success")
 	writeJSON(w, http.StatusOK, sessionResponse(updated, authenticated.Data))
 }

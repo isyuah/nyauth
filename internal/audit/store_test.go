@@ -49,3 +49,13 @@ func TestBuildListFilterUsesExactTargetFilters(t *testing.T) {
 		t.Fatalf("arguments = %#v", args)
 	}
 }
+
+func TestBuildListFilterEscapesSearchWildcards(t *testing.T) {
+	where, args := buildListFilter(ListFilter{Actor: `ops_%\team`, Target: `client_%`})
+	if strings.Count(where, `ESCAPE '\'`) != 3 {
+		t.Fatalf("escaped LIKE clauses missing from %q", where)
+	}
+	if len(args) != 2 || args[0] != `ops\_\%\\team` || args[1] != `client\_\%` {
+		t.Fatalf("escaped arguments = %#v", args)
+	}
+}

@@ -133,7 +133,9 @@ func VerifyPassword(password, encodedHash string) (bool, error) {
 	return subtle.ConstantTimeCompare(hash, comparisonHash) == 1, nil
 }
 
-// HashClientSecret hashes a high-entropy client secret with SHA-256.
+// HashClientSecret hashes a server-generated 256-bit random client secret with
+// SHA-256. Callers must not use this for imported or user-chosen low-entropy
+// values; those require a password hashing function.
 func HashClientSecret(secret string) string {
 	digest := sha256.Sum256([]byte(secret))
 	return "$sha256$" + base64.RawStdEncoding.EncodeToString(digest[:])

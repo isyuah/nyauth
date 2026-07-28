@@ -1653,7 +1653,10 @@ test('provider reauthentication denial does not replay a pending TOTP action', a
   let enrollmentAttempts = 0;
   await page.route('**/api/me/mfa/totp/enroll', async (route) => {
     enrollmentAttempts += 1;
-    await fulfillJSON(route, 403, { error: 'recent authentication is required' });
+    await fulfillJSON(route, 403, {
+      error: 'recent authentication is required',
+      code: 'auth.recent_authentication_required',
+    });
   });
 
   await page.goto('/profile/security');
@@ -1696,7 +1699,10 @@ test('provider reauthentication completes MFA before replaying a pending TOTP ac
     if (path === '/api/me/mfa/totp/enroll' && request.method() === 'POST') {
       enrollmentCSRFs.push(await request.headerValue('x-csrf-token'));
       if (enrollmentCSRFs.length === 1) {
-        await fulfillJSON(route, 403, { error: 'recent authentication is required' });
+        await fulfillJSON(route, 403, {
+          error: 'recent authentication is required',
+          code: 'auth.recent_authentication_required',
+        });
       } else {
         await fulfillJSON(route, 200, {
           secret: 'JBSWY3DPEHPK3PXP',
@@ -2110,7 +2116,7 @@ test('login distinguishes an unverified email from bad credentials', async ({ pa
   await page.route('**/api/providers', (route) => fulfillJSON(route, 200, []));
   await page.route('**/api/registration', (route) => fulfillJSON(route, 200, registrationOptions('closed')));
   await page.route('**/api/login', (route) =>
-    fulfillJSON(route, 403, { error: 'email verification is required before signing in' }));
+    fulfillJSON(route, 403, { error: 'email verification is required before signing in', code: 'account.email_verification_required' }));
 
   await page.goto('/login');
   await page.getByLabel('用户名').fill('pending-user');
@@ -2842,7 +2848,10 @@ test('admin invites are created with CSRF and the one-time code is shown once', 
     createCSRFs.push(route.request().headers()['x-csrf-token'] ?? null);
     createAttempts += 1;
     if (createAttempts === 1) {
-      await fulfillJSON(route, 403, { error: 'recent authentication is required' });
+      await fulfillJSON(route, 403, {
+        error: 'recent authentication is required',
+        code: 'auth.recent_authentication_required',
+      });
       return;
     }
     await fulfillJSON(route, 201, {
@@ -2965,7 +2974,10 @@ test('provider reauthentication restores registration settings and retries the s
     putBody = route.request().postDataJSON();
     putCSRFs.push(route.request().headers()['x-csrf-token'] ?? null);
     if (putAttempts === 1) {
-      await fulfillJSON(route, 403, { error: 'recent authentication is required' });
+      await fulfillJSON(route, 403, {
+        error: 'recent authentication is required',
+        code: 'auth.recent_authentication_required',
+      });
       return;
     }
     await fulfillJSON(route, 200, putBody);
@@ -3018,7 +3030,10 @@ test('provider reauthentication denial restores the unsaved registration form', 
       return;
     }
     putAttempts += 1;
-    await fulfillJSON(route, 403, { error: 'recent authentication is required' });
+    await fulfillJSON(route, 403, {
+      error: 'recent authentication is required',
+      code: 'auth.recent_authentication_required',
+    });
   });
 
   await page.goto('/admin/settings/registration');
@@ -3085,7 +3100,10 @@ test('SMTP candidate is saved, tested, activated, rolled back and disabled with 
       saveBodies.push(request.postDataJSON());
       saveCSRFs.push(await request.headerValue('x-csrf-token'));
       if (saveAttempts === 1) {
-        await fulfillJSON(route, 403, { error: 'recent authentication is required' });
+        await fulfillJSON(route, 403, {
+          error: 'recent authentication is required',
+          code: 'auth.recent_authentication_required',
+        });
         return;
       }
       const body = request.postDataJSON() as Record<string, unknown>;
@@ -3287,7 +3305,10 @@ test('provider reauthentication restores SMTP fields once without retaining or r
       const body = request.postDataJSON() as Record<string, unknown>;
       saveBodies.push(body);
       if (saveAttempts === 1) {
-        await fulfillJSON(route, 403, { error: 'recent authentication is required' });
+        await fulfillJSON(route, 403, {
+          error: 'recent authentication is required',
+          code: 'auth.recent_authentication_required',
+        });
         return;
       }
       const candidate: MailConfig = {
@@ -3336,7 +3357,7 @@ test('audit filters use backend options, exact URL parameters, quick ranges and 
   await page.goto('/admin/audit');
   await expect(page.getByRole('heading', { name: '审计日志' })).toBeVisible();
   await expect.poll(() => state.auditLogOptionsRequests || 0).toBe(1);
-  await page.getByRole('textbox', { name: '事件', exact: true }).fill('user.');
+  await page.getByRole('combobox', { name: '事件', exact: true }).fill('user.');
   await expect(page.locator('#audit-event-tree')).toBeVisible();
   await page.getByRole('checkbox', { name: 'user.login', exact: true }).check();
   await page.getByRole('checkbox', { name: 'user.profile_updated', exact: true }).check();

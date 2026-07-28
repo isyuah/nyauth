@@ -40,6 +40,7 @@ type Manager struct {
 	production       bool
 	snapshotRevision atomic.Uint64
 	ready            atomic.Bool
+	degraded         atomic.Bool
 	telemetryMu      sync.RWMutex
 	telemetrySink    TelemetrySink
 }
@@ -111,7 +112,11 @@ func (m *Manager) LoadDynamic(ctx context.Context) error {
 		m.recordTelemetry(ctx, "synchronization", "failure", "load_failed", time.Since(started))
 		return err
 	}
-	m.recordTelemetry(ctx, "synchronization", "success", "none", time.Since(started))
+	if m.Degraded() {
+		m.recordTelemetry(ctx, "synchronization", "degraded", "provider_rows_skipped", time.Since(started))
+	} else {
+		m.recordTelemetry(ctx, "synchronization", "success", "none", time.Since(started))
+	}
 	return nil
 }
 
@@ -132,6 +137,7 @@ func (m *Manager) loadDynamic(ctx context.Context) error {
 	dynamicProviders := make(map[string]Provider)
 	dynamicPolicies := make(map[string]AvatarImportPolicy)
 	dynamicPresentations := make(map[string]ProviderPresentation)
+	degraded := false
 	for rows.Next() {
 		var providerID uuid.UUID
 		var name, displayName, iconKey, providerType, clientID, encryptedSecret string
@@ -148,12 +154,20 @@ func (m *Manager) loadDynamic(ctx context.Context) error {
 		}
 		secret, err := m.decryptSecret(name, encryptedSecret)
 		if err != nil {
-			return fmt.Errorf("decrypting secret for %s: %w", name, err)
+			degraded = true
+			slog.ErrorContext(ctx, "skipping provider with undecryptable secret; runtime snapshot is degraded",
+				"provider", name, "error", err)
+			m.recordTelemetry(ctx, "synchronization", "degraded", "secret_decrypt_failed", 0)
+			continue
 		}
 		configured, err := m.providerFromConfig(name, providerType, clientID, secret, scopes,
 			valueOrEmpty(discoveryURL), valueOrEmpty(authorizationURL), valueOrEmpty(tokenURL), valueOrEmpty(userinfoURL))
 		if err != nil {
-			return fmt.Errorf("loading provider %s: %w", name, err)
+			degraded = true
+			slog.ErrorContext(ctx, "skipping provider with invalid configuration; runtime snapshot is degraded",
+				"provider", name, "error", err)
+			m.recordTelemetry(ctx, "synchronization", "degraded", "provider_config_invalid", 0)
+			continue
 		}
 		dynamicProviders[name] = configured
 		dynamicPolicies[name] = AvatarImportPolicy{ProviderID: providerID, Enabled: importAvatar, ProviderType: providerType, AllowedHosts: append([]string(nil), avatarAllowedHosts...)}
@@ -170,6 +184,7 @@ func (m *Manager) loadDynamic(ctx context.Context) error {
 	m.mu.Unlock()
 	m.snapshotRevision.Add(1)
 	m.ready.Store(true)
+	m.degraded.Store(degraded)
 	return nil
 }
 
@@ -567,6 +582,8 @@ func (m *Manager) removeDynamicProvider(name string) {
 }
 
 func (m *Manager) Ready() bool { return m.ready.Load() }
+
+func (m *Manager) Degraded() bool { return m.degraded.Load() }
 
 func (m *Manager) SnapshotRevision() uint64 { return m.snapshotRevision.Load() }
 

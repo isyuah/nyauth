@@ -106,6 +106,8 @@ x-app: &app
   mem_limit: 512m
   cpus: 1.0
   command: ["serve"]
+  expose:
+    - "8080"
   secrets:
     - database_runtime_dsn
     - redis_password

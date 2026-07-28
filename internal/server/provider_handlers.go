@@ -348,7 +348,7 @@ func (s *Server) finishExternalReauthentication(w http.ResponseWriter, r *http.R
 		s.providerCallbackFailure(w, r, "reauth", returnTo, "session_failed", http.StatusServiceUnavailable)
 		return
 	}
-	s.enqueueAuditTargetResult(r.Context(), "user.reauthenticated", &current.ID, current.Username, "provider", providerName, "success", "medium", requestIP(r), truncateAuditValue(r.UserAgent(), maxAuditUserAgentLength), map[string]any{"authentication_method": "provider"})
+	s.enqueueAuditTargetResult(r.Context(), models.AuditUserReauthenticated, &current.ID, current.Username, "provider", providerName, "success", "medium", requestIP(r), truncateAuditValue(r.UserAgent(), maxAuditUserAgentLength), map[string]any{"authentication_method": "provider"})
 	s.telemetry.RecordAuthEvent(r.Context(), "reauthentication", "success")
 	s.telemetry.RecordProviderEvent(r.Context(), "callback", "reauth", "success", "none", -1)
 	http.Redirect(w, r, safeReturnPath(returnTo, "/profile"), http.StatusFound)

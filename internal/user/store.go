@@ -288,7 +288,7 @@ func (s *Store) UpdateAdmin(ctx context.Context, id uuid.UUID, req models.AdminU
 			return nil, err
 		}
 	}
-	if _, err := tx.Exec(ctx, `LOCK TABLE users IN SHARE ROW EXCLUSIVE MODE`); err != nil {
+	if err := runtimecoord.LockAdminInvariant(ctx, tx); err != nil {
 		return nil, err
 	}
 	var currentStatus models.UserStatus
@@ -512,7 +512,7 @@ func (s *Store) Delete(ctx context.Context, id uuid.UUID, mutation audit.Mutatio
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `LOCK TABLE users IN SHARE ROW EXCLUSIVE MODE`); err != nil {
+	if err := runtimecoord.LockAdminInvariant(ctx, tx); err != nil {
 		return err
 	}
 	var status models.UserStatus
@@ -558,14 +558,14 @@ func (s *Store) Count(ctx context.Context) (int64, error) {
 	return count, err
 }
 
-// BootstrapAdmin creates the first user while holding a database table lock.
+// BootstrapAdmin creates the first user while holding the administrator-invariant advisory lock.
 func (s *Store) BootstrapAdmin(ctx context.Context, u *models.User) (bool, error) {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return false, err
 	}
 	defer tx.Rollback(ctx)
-	if _, err := tx.Exec(ctx, `LOCK TABLE users IN SHARE ROW EXCLUSIVE MODE`); err != nil {
+	if err := runtimecoord.LockAdminInvariant(ctx, tx); err != nil {
 		return false, err
 	}
 	var count int64
@@ -589,21 +589,22 @@ func (s *Store) BootstrapAdmin(ctx context.Context, u *models.User) (bool, error
 }
 
 func (s *Store) List(ctx context.Context, p models.Pagination, search string, status models.UserStatus) (*models.PaginatedResponse[models.User], error) {
+	search = escapeLikePattern(strings.TrimSpace(search))
 	var total int64
 	if err := s.db.QueryRow(ctx, `
 		SELECT COUNT(*) FROM users
 		WHERE ($1::text='' OR status=$1)
-		  AND ($2::text='' OR username ILIKE '%' || $2 || '%'
-		       OR COALESCE(email,'') ILIKE '%' || $2 || '%'
-		       OR COALESCE(display_name,'') ILIKE '%' || $2 || '%')
+		  AND ($2::text='' OR username ILIKE '%' || $2 || '%' ESCAPE '\'
+		       OR COALESCE(email,'') ILIKE '%' || $2 || '%' ESCAPE '\'
+		       OR COALESCE(display_name,'') ILIKE '%' || $2 || '%' ESCAPE '\')
 	`, status, search).Scan(&total); err != nil {
 		return nil, fmt.Errorf("counting users: %w", err)
 	}
 	rows, err := s.db.Query(ctx, `SELECT `+userSelectCols+` FROM users
 		WHERE ($1::text='' OR status=$1)
-		  AND ($2::text='' OR username ILIKE '%' || $2 || '%'
-		       OR COALESCE(email,'') ILIKE '%' || $2 || '%'
-		       OR COALESCE(display_name,'') ILIKE '%' || $2 || '%')
+		  AND ($2::text='' OR username ILIKE '%' || $2 || '%' ESCAPE '\'
+		       OR COALESCE(email,'') ILIKE '%' || $2 || '%' ESCAPE '\'
+		       OR COALESCE(display_name,'') ILIKE '%' || $2 || '%' ESCAPE '\')
 		ORDER BY created_at DESC, id DESC LIMIT $3 OFFSET $4
 	`, status, search, p.PageSize, p.Offset())
 	if err != nil {
@@ -623,6 +624,10 @@ func (s *Store) List(ctx context.Context, p models.Pagination, search string, st
 	}
 	totalPages := (int(total) + p.PageSize - 1) / p.PageSize
 	return &models.PaginatedResponse[models.User]{Items: users, Total: total, Page: p.Page, PageSize: p.PageSize, TotalPages: totalPages}, nil
+}
+
+func escapeLikePattern(value string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(value)
 }
 
 func (s *Store) RecordLogin(ctx context.Context, id uuid.UUID, ip string) error {

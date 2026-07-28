@@ -26,6 +26,25 @@ func TestProviderSessionDigestBindsExactSession(t *testing.T) {
 	}
 }
 
+func TestSafeReturnPathRejectsCrossOriginAndAmbiguousPaths(t *testing.T) {
+	t.Parallel()
+	for _, test := range []struct {
+		value string
+		want  string
+	}{
+		{value: "/profile/security?from=provider#passkeys", want: "/profile/security?from=provider#passkeys"},
+		{value: "https://evil.example/path", want: "/profile"},
+		{value: "//evil.example/path", want: "/profile"},
+		{value: `/\\evil.example/path`, want: "/profile"},
+		{value: "/profile\nadmin", want: "/profile"},
+		{value: "/%2f%2fevil.example", want: "/%2f%2fevil.example"},
+	} {
+		if got := safeReturnPath(test.value, "/profile"); got != test.want {
+			t.Errorf("safeReturnPath(%q) = %q, want %q", test.value, got, test.want)
+		}
+	}
+}
+
 func TestProviderFlowCookieBindsInitiatingBrowser(t *testing.T) {
 	t.Parallel()
 	digest := providerSessionDigest("browser-a-secret")

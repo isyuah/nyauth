@@ -108,7 +108,7 @@ func TestRedisIntegrationAuthorizationCodeConsumedOnceAcrossStores(t *testing.T)
 		Nonce:           "integration-nonce-" + id,
 		AuthVersion:     7,
 	}
-	cleanupRedisIntegrationKeys(t, stores.cleanupClient, secretKey(codePrefix, code))
+	cleanupRedisIntegrationKeys(t, stores.cleanupClient, secretKey(codePrefix, code), secretKey(codeUsedPrefix, code))
 	if err := stores.first.SaveAuthorizationCode(ctx, code, data, time.Minute); err != nil {
 		t.Fatalf("save authorization code: %v", err)
 	}
@@ -121,7 +121,7 @@ func TestRedisIntegrationAuthorizationCodeConsumedOnceAcrossStores(t *testing.T)
 		go func(candidate *Store) {
 			defer workers.Done()
 			<-start
-			_, err := candidate.ConsumeAuthorizationCodeIfMatch(ctx, code, data)
+			_, err := candidate.ConsumeAuthorizationCodeIfMatch(ctx, code, data, time.Minute)
 			results <- err
 		}(store)
 	}
@@ -130,25 +130,25 @@ func TestRedisIntegrationAuthorizationCodeConsumedOnceAcrossStores(t *testing.T)
 	close(results)
 
 	successes := 0
-	notFound := 0
+	reuses := 0
 	for err := range results {
 		switch {
 		case err == nil:
 			successes++
-		case errors.Is(err, ErrNotFound):
-			notFound++
+		case errors.Is(err, ErrAuthorizationCodeReuse):
+			reuses++
 		default:
 			t.Fatalf("unexpected authorization code consumption result: %v", err)
 		}
 	}
-	if successes != 1 || notFound != 1 {
-		t.Fatalf("authorization code outcomes: successes=%d not_found=%d, want 1 and 1", successes, notFound)
+	if successes != 1 || reuses != 1 {
+		t.Fatalf("authorization code outcomes: successes=%d reuses=%d, want 1 and 1", successes, reuses)
 	}
-	if _, err := stores.first.GetAuthorizationCode(ctx, code); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("consumed authorization code visible through first store: %v", err)
+	if _, err := stores.first.GetAuthorizationCode(ctx, code); !errors.Is(err, ErrAuthorizationCodeReuse) {
+		t.Fatalf("used authorization code state through first store: %v", err)
 	}
-	if _, err := stores.second.GetAuthorizationCode(ctx, code); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("consumed authorization code visible through second store: %v", err)
+	if _, err := stores.second.GetAuthorizationCode(ctx, code); !errors.Is(err, ErrAuthorizationCodeReuse) {
+		t.Fatalf("used authorization code state through second store: %v", err)
 	}
 }
 

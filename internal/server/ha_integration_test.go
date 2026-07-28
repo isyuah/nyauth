@@ -12,6 +12,7 @@ import (
 	"encoding/binary"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"image"
 	"image/color"
@@ -431,87 +432,110 @@ func TestHAHTTPServersConsumeAuthorizationCodeOnce(t *testing.T) {
 	verifier := "0123456789abcdefghijklmnopqrstuvwxyzABCDEFG"
 	challengeDigest := sha256.Sum256([]byte(verifier))
 	code := "ha-code-" + marker
+	authorizationIssuedAt, err := cluster.apps[0].sessionStore.AuthorizationIssueTime(ctx, current.ID.String(), registered.ID, time.Hour)
+	if err != nil {
+		t.Fatalf("allocate authorization issue time: %v", err)
+	}
+	cluster.trackRedisKey("nyauth:authorization-clock:" + haDigest(current.ID.String()+"\x00"+registered.ID))
 	stored := &session.AuthorizationData{
 		ClientID: registered.ID, UserID: current.ID.String(), RedirectURI: redirectURI,
 		Scopes: []string{"profile"}, CodeChallenge: base64.RawURLEncoding.EncodeToString(challengeDigest[:]),
-		ChallengeMethod: "S256", AuthVersion: current.AuthVersion, AuthorizationIssuedAt: time.Now().UTC().UnixMicro(),
+		ChallengeMethod: "S256", AuthVersion: current.AuthVersion, AuthorizationIssuedAt: authorizationIssuedAt,
 	}
 	if err := cluster.apps[0].sessionStore.SaveAuthorizationCode(ctx, code, stored, time.Minute); err != nil {
 		t.Fatalf("store authorization code through first instance: %v", err)
 	}
 	cluster.trackRedisKey("nyauth:code:" + haDigest(code))
-
-	type tokenResult struct {
-		status int
-		body   []byte
-		err    error
+	cluster.trackRedisKey("nyauth:code-used:" + haDigest(code))
+	form := url.Values{
+		"grant_type":    {models.GrantAuthorizationCode},
+		"client_id":     {registered.ID},
+		"code":          {code},
+		"redirect_uri":  {redirectURI},
+		"code_verifier": {verifier},
 	}
-	start := make(chan struct{})
-	results := make(chan tokenResult, 2)
-	var workers sync.WaitGroup
-	for index := range 2 {
-		workers.Add(1)
-		go func(instance int) {
-			defer workers.Done()
-			<-start
-			form := url.Values{
-				"grant_type":    {models.GrantAuthorizationCode},
-				"client_id":     {registered.ID},
-				"code":          {code},
-				"redirect_uri":  {redirectURI},
-				"code_verifier": {verifier},
-			}
-			request, requestErr := http.NewRequest(http.MethodPost, cluster.httpServers[instance].URL+"/token", strings.NewReader(form.Encode()))
-			if requestErr != nil {
-				results <- tokenResult{err: requestErr}
-				return
-			}
-			request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
-			response, requestErr := cluster.httpServers[instance].Client().Do(request)
-			if requestErr != nil {
-				results <- tokenResult{err: requestErr}
-				return
-			}
-			defer response.Body.Close()
-			body, readErr := io.ReadAll(io.LimitReader(response.Body, 1<<20))
-			results <- tokenResult{status: response.StatusCode, body: body, err: readErr}
-		}(index)
+	exchange := func(instance int) (int, []byte) {
+		request, requestErr := http.NewRequest(http.MethodPost, cluster.httpServers[instance].URL+"/token", strings.NewReader(form.Encode()))
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+		request.Header.Set("Content-Type", "application/x-www-form-urlencoded")
+		response, requestErr := cluster.httpServers[instance].Client().Do(request)
+		if requestErr != nil {
+			t.Fatal(requestErr)
+		}
+		defer response.Body.Close()
+		body, readErr := io.ReadAll(io.LimitReader(response.Body, 1<<20))
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		return response.StatusCode, body
 	}
-	close(start)
-	workers.Wait()
-	close(results)
 
-	successes := 0
-	invalidGrants := 0
+	status, body := exchange(0)
+	if status != http.StatusOK {
+		t.Fatalf("first authorization-code exchange: status=%d body=%s", status, body)
+	}
 	var tokenPair auth.TokenPair
-	for result := range results {
-		if result.err != nil {
-			t.Fatalf("exchange authorization code: %v", result.err)
-		}
-		switch result.status {
-		case http.StatusOK:
-			successes++
-			if err := json.Unmarshal(result.body, &tokenPair); err != nil {
-				t.Fatalf("decode successful token response: %v; body=%s", err, result.body)
-			}
-		case http.StatusBadRequest:
-			var payload struct {
-				Error string `json:"error"`
-			}
-			if err := json.Unmarshal(result.body, &payload); err != nil || payload.Error != "invalid_grant" {
-				t.Fatalf("unexpected failed token response: status=%d body=%s", result.status, result.body)
-			}
-			invalidGrants++
-		default:
-			t.Fatalf("unexpected token response: status=%d body=%s", result.status, result.body)
-		}
+	if err := json.Unmarshal(body, &tokenPair); err != nil || tokenPair.AccessToken == "" {
+		t.Fatalf("decode successful token response: %v; body=%s", err, body)
 	}
-	if successes != 1 || invalidGrants != 1 || tokenPair.AccessToken == "" {
-		t.Fatalf("authorization-code outcomes: success=%d invalid_grant=%d access_token_present=%v", successes, invalidGrants, tokenPair.AccessToken != "")
+	if _, err := cluster.apps[0].db.Exec(ctx, `UPDATE oauth_clients SET scopes='{}'::text[] WHERE id=$1`, registered.ID); err != nil {
+		t.Fatalf("remove client scope before replay: %v", err)
+	}
+	status, body = exchange(1)
+	var reusePayload struct {
+		Error string `json:"error"`
+	}
+	if err := json.Unmarshal(body, &reusePayload); status != http.StatusBadRequest || err != nil || reusePayload.Error != "invalid_grant" {
+		t.Fatalf("reused authorization-code response: status=%d body=%s err=%v", status, body, err)
+	}
+	revoked, err := cluster.apps[0].sessionStore.IsUserClientAuthorizationRevoked(ctx, current.ID.String(), registered.ID, stored.AuthorizationIssuedAt)
+	if err != nil || !revoked {
+		t.Fatalf("authorization code replay did not revoke issued grant: revoked=%v err=%v", revoked, err)
+	}
+	cluster.trackRedisKey("nyauth:authorization-revoked:" + haDigest(current.ID.String()+"\x00"+registered.ID))
+	if _, err := cluster.apps[0].tokenService.ValidateAccessToken(ctx, tokenPair.AccessToken); !errors.Is(err, auth.ErrInvalidToken) {
+		t.Fatalf("access token issued from replayed code remained valid: %v", err)
+	}
+	reuseAudit, reuseAuditPayload := cluster.auditPayload(t, models.AuditTokenGrantFailed, registered.ID, "failure")
+	reuseDetails, _ := reuseAudit["details"].(map[string]any)
+	if reuseDetails["failure_reason"] != "code_reuse" || reuseAudit["target_id"] != registered.ID {
+		t.Fatalf("authorization code replay audit: %#v", reuseAudit)
+	}
+	if bytes.Contains(reuseAuditPayload, []byte(code)) || bytes.Contains(reuseAuditPayload, []byte(tokenPair.AccessToken)) {
+		t.Fatal("authorization code replay audit persisted an OAuth credential")
+	}
+	if _, err := cluster.apps[0].db.Exec(ctx, `UPDATE oauth_clients SET scopes=ARRAY['profile']::text[] WHERE id=$1`, registered.ID); err != nil {
+		t.Fatalf("restore client scope after replay: %v", err)
+	}
+
+	// A grant issued after the replay revocation remains independently usable
+	// and exercises cross-instance RFC 7009 ownership checks.
+	freshIssuedAt, err := cluster.apps[0].sessionStore.AuthorizationIssueTime(ctx, current.ID.String(), registered.ID, time.Hour)
+	if err != nil {
+		t.Fatalf("allocate fresh authorization issue time: %v", err)
+	}
+	freshCode := code + "-fresh"
+	freshStored := *stored
+	freshStored.AuthorizationIssuedAt = freshIssuedAt
+	if err := cluster.apps[0].sessionStore.SaveAuthorizationCode(ctx, freshCode, &freshStored, time.Minute); err != nil {
+		t.Fatalf("store fresh authorization code: %v", err)
+	}
+	cluster.trackRedisKey("nyauth:code:" + haDigest(freshCode))
+	cluster.trackRedisKey("nyauth:code-used:" + haDigest(freshCode))
+	form.Set("code", freshCode)
+	status, body = exchange(0)
+	if status != http.StatusOK {
+		t.Fatalf("fresh authorization-code exchange: status=%d body=%s", status, body)
+	}
+	var revocationTokenPair auth.TokenPair
+	if err := json.Unmarshal(body, &revocationTokenPair); err != nil || revocationTokenPair.AccessToken == "" {
+		t.Fatalf("decode fresh token response: %v; body=%s", err, body)
 	}
 
 	claims := &auth.Claims{}
-	if _, _, err := jwt.NewParser().ParseUnverified(tokenPair.AccessToken, claims); err != nil || claims.ID == "" {
+	if _, _, err := jwt.NewParser().ParseUnverified(revocationTokenPair.AccessToken, claims); err != nil || claims.ID == "" {
 		t.Fatalf("parse issued access token metadata: jti=%q err=%v", claims.ID, err)
 	}
 	accessKey := "nyauth:token:" + haDigest(claims.ID)
@@ -524,7 +548,7 @@ func TestHAHTTPServersConsumeAuthorizationCodeOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("create non-owner OAuth client: %v", err)
 	}
-	mismatchForm := url.Values{"client_id": {otherClient.ID}, "token": {tokenPair.AccessToken}}
+	mismatchForm := url.Values{"client_id": {otherClient.ID}, "token": {revocationTokenPair.AccessToken}}
 	response := cluster.request(t, 1, http.MethodPost, "/revoke", strings.NewReader(mismatchForm.Encode()), nil, "", "")
 	if response.StatusCode != http.StatusOK {
 		body := readHAResponse(t, response)
@@ -542,11 +566,11 @@ func TestHAHTTPServersConsumeAuthorizationCodeOnce(t *testing.T) {
 	if mismatchDetails["failure_reason"] != "client_binding_mismatch" {
 		t.Fatalf("cross-client revocation audit details: %#v", mismatchDetails)
 	}
-	if bytes.Contains(mismatchPayload, []byte(tokenPair.AccessToken)) {
+	if bytes.Contains(mismatchPayload, []byte(revocationTokenPair.AccessToken)) {
 		t.Fatal("cross-client revocation audit persisted the access token")
 	}
 
-	revokeForm := url.Values{"client_id": {registered.ID}, "token": {tokenPair.AccessToken}}
+	revokeForm := url.Values{"client_id": {registered.ID}, "token": {revocationTokenPair.AccessToken}}
 	response = cluster.request(t, 1, http.MethodPost, "/revoke", strings.NewReader(revokeForm.Encode()), nil, "", "")
 	if response.StatusCode != http.StatusOK {
 		body := readHAResponse(t, response)
@@ -560,7 +584,7 @@ func TestHAHTTPServersConsumeAuthorizationCodeOnce(t *testing.T) {
 	if successAudit["actor_name"] != registered.ID || successAudit["target_type"] != "client" || successAudit["target_id"] != registered.ID {
 		t.Fatalf("successful revocation audit identity: %#v", successAudit)
 	}
-	if bytes.Contains(successPayload, []byte(tokenPair.AccessToken)) || bytes.Contains(successPayload, []byte(code)) {
+	if bytes.Contains(successPayload, []byte(revocationTokenPair.AccessToken)) || bytes.Contains(successPayload, []byte(freshCode)) {
 		t.Fatal("successful revocation audit persisted an OAuth credential")
 	}
 }

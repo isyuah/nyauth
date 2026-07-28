@@ -25,6 +25,10 @@ const (
 	// securityPolicyLockKey protects the invariant between the runtime MFA
 	// policy, administrator role changes, and removal of administrator factors.
 	securityPolicyLockKey int64 = 0x4e59414d4641
+	// adminInvariantLockKey serializes transactions that check or change the
+	// "at least one active administrator" invariant without blocking ordinary
+	// writes to the users table.
+	adminInvariantLockKey int64 = 0x4e594141444d
 )
 
 var (
@@ -72,6 +76,16 @@ func LockSecurityShared(ctx context.Context, tx pgx.Tx) error {
 func LockSecurityExclusive(ctx context.Context, tx pgx.Tx) error {
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, securityPolicyLockKey); err != nil {
 		return fmt.Errorf("locking security policy exclusive: %w", err)
+	}
+	return nil
+}
+
+// LockAdminInvariant serializes admin status/role mutations, deletions, and
+// bootstrap so the active-administrator count cannot be raced, while leaving
+// ordinary users-table writes (logins, registrations) unblocked.
+func LockAdminInvariant(ctx context.Context, tx pgx.Tx) error {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, adminInvariantLockKey); err != nil {
+		return fmt.Errorf("locking administrator invariant: %w", err)
 	}
 	return nil
 }

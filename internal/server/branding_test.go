@@ -25,6 +25,16 @@ func TestValidateBrandingAllowsEmptyLogoURL(t *testing.T) {
 	}
 }
 
+func TestValidateBrandingAllowsSameOriginLogoPath(t *testing.T) {
+	branding, err := validateBranding("Nya", "/media/branding/logo.png?v=2")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if branding.LogoURL != "/media/branding/logo.png?v=2" {
+		t.Fatalf("logo url = %q", branding.LogoURL)
+	}
+}
+
 func TestValidateBrandingRejectsInvalidInput(t *testing.T) {
 	cases := []struct {
 		name    string
@@ -33,7 +43,10 @@ func TestValidateBrandingRejectsInvalidInput(t *testing.T) {
 	}{
 		{"empty title", "   ", ""},
 		{"overlong title", strings.Repeat("喵", 65), ""},
-		{"relative logo url", "Nya", "/logo.png"},
+		{"relative logo url", "Nya", "logo.png"},
+		{"scheme relative logo url", "Nya", "//tracker.example/logo.png"},
+		{"backslash logo url", "Nya", `/\\tracker.example/logo.png`},
+		{"insecure absolute logo url", "Nya", "http://cdn.example.com/logo.png"},
 		{"non-http scheme", "Nya", "javascript:alert(1)"},
 		{"credentials in url", "Nya", "https://user:pass@cdn.example.com/logo.png"},
 		{"overlong logo url", "Nya", "https://cdn.example.com/" + strings.Repeat("a", 512)},

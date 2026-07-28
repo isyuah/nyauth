@@ -1,0 +1,99 @@
+package server
+
+import "strings"
+
+const apiErrorCodeRequestFailed = "request_failed"
+
+var apiErrorCodesByMessage = map[string]string{
+	"invalid credentials":                                                                "auth.invalid_credentials",
+	"current password is incorrect":                                                      "auth.current_password_incorrect",
+	"authentication required":                                                            "auth.authentication_required",
+	"recent authentication is required":                                                  "auth.recent_authentication_required",
+	"password reauthentication is unavailable":                                           "auth.password_reauthentication_unavailable",
+	"password login is not available for this account":                                   "auth.password_login_unavailable",
+	"a local password is already configured":                                             "auth.password_already_configured",
+	"reauthentication failed":                                                            "auth.reauthentication_failed",
+	"reauthentication session could not be updated":                                      "auth.reauthentication_session_update_failed",
+	"csrf_validation_failed":                                                             "security.csrf_validation_failed",
+	"invalid csrf token":                                                                 "security.csrf_validation_failed",
+	"password change required":                                                           "account.password_change_required",
+	"email verification is required before signing in":                                   "account.email_verification_required",
+	"registration is closed":                                                             "registration.closed",
+	"invite code is required":                                                            "registration.invite_required",
+	"invalid or expired invite code":                                                     "registration.invite_invalid",
+	"username or email is already taken":                                                 "registration.identity_conflict",
+	"email domain is not allowed":                                                        "registration.email_domain_not_allowed",
+	"too many registration attempts":                                                     "registration.rate_limited",
+	"registration is temporarily unavailable":                                            "registration.unavailable",
+	"registration temporarily unavailable":                                               "registration.unavailable",
+	"registration requires email delivery, which is not configured":                      "registration.mail_not_configured",
+	"mail settings are temporarily unavailable":                                          "mail.settings_unavailable",
+	"mail configuration is invalid":                                                      "mail.configuration_invalid",
+	"mail configuration version was not found":                                           "mail.version_not_found",
+	"mail settings changed; reload and try again":                                        "mail.revision_conflict",
+	"a successful candidate test is required":                                            "mail.test_required",
+	"the successful candidate test has expired":                                          "mail.test_expired",
+	"no previous mail configuration is available":                                        "mail.rollback_unavailable",
+	"mail is already disabled":                                                           "mail.already_disabled",
+	"close self-registration before disabling mail":                                      "mail.registration_must_close",
+	"too many mail settings operations":                                                  "mail.rate_limited",
+	"connect_timeout must be a valid duration":                                           "mail.connect_timeout_invalid",
+	"send_timeout must be a valid duration":                                              "mail.send_timeout_invalid",
+	"plain smtp is forbidden in production":                                              "mail.plain_forbidden",
+	"public_base_url must use https in production":                                       "mail.public_base_url_insecure",
+	"email is invalid":                                                                   "account.email_invalid",
+	"mfa challenge expired":                                                              "mfa.challenge_expired",
+	"mfa challenge temporarily unavailable":                                              "mfa.challenge_unavailable",
+	"mfa verification temporarily unavailable":                                           "mfa.verification_unavailable",
+	"too many mfa attempts":                                                              "mfa.rate_limited",
+	"invalid mfa code":                                                                   "mfa.code_invalid",
+	"invalid totp code":                                                                  "mfa.totp_invalid",
+	"unsupported mfa method":                                                             "mfa.method_unsupported",
+	"account changed; sign in again":                                                     "auth.account_changed",
+	"mfa enrollment is required; contact an administrator":                               "mfa.enrollment_required",
+	"totp enrollment is disabled":                                                        "mfa.totp_enrollment_disabled",
+	"totp is already enrolled":                                                           "mfa.totp_already_enrolled",
+	"totp enrollment must be restarted":                                                  "mfa.totp_enrollment_restart_required",
+	"totp is not enrolled":                                                               "mfa.totp_not_enrolled",
+	"mfa is required for active administrators":                                          "mfa.required_for_admins",
+	"all active administrators must enroll mfa before it can be required":                "mfa.admin_enrollment_incomplete",
+	"totp must remain enabled while administrator mfa is required":                       "mfa.totp_required_by_policy",
+	"passkey login temporarily unavailable":                                              "passkey.login_unavailable",
+	"passkey ceremony temporarily unavailable":                                           "passkey.ceremony_unavailable",
+	"passkey verification temporarily unavailable":                                       "passkey.verification_unavailable",
+	"passkey reauthentication temporarily unavailable":                                   "passkey.reauthentication_unavailable",
+	"passkey registration temporarily unavailable":                                       "passkey.registration_unavailable",
+	"passkey registered; please sign in again":                                           "passkey.registered_sign_in_required",
+	"passkey removed; please sign in again":                                              "passkey.removed_sign_in_required",
+	"passkey verification failed":                                                        "passkey.verification_failed",
+	"passkey registration could not be verified":                                         "passkey.registration_invalid",
+	"passkey enrollment is disabled":                                                     "passkey.enrollment_disabled",
+	"this passkey is already registered":                                                 "passkey.already_registered",
+	"no passkey is registered":                                                           "passkey.none_registered",
+	"passkey not found":                                                                  "passkey.not_found",
+	"passkey name must contain 1 to 64 characters":                                       "passkey.name_invalid",
+	"add a password, provider identity, or another passkey before removing this passkey": "passkey.last_authenticator",
+	"webauthn ceremony id is required":                                                   "passkey.ceremony_id_required",
+	"webauthn ceremony expired":                                                          "passkey.ceremony_expired",
+	"webauthn ceremony is invalid":                                                       "passkey.ceremony_invalid",
+	"too many passkey ceremonies":                                                        "passkey.rate_limited",
+	"avatar image exceeds 8 mib":                                                         "avatar.too_large",
+	"avatar media type must be jpeg, png, or static webp":                                "avatar.media_type_invalid",
+	"animated webp avatars are not supported":                                            "avatar.animated_webp_unsupported",
+	"avatar image dimensions are invalid":                                                "avatar.dimensions_invalid",
+	"user avatar upload must be square after browser crop":                               "avatar.square_required",
+	"too many avatar operations":                                                         "avatar.rate_limited",
+	"avatar operation is temporarily unavailable":                                        "avatar.operation_unavailable",
+	"avatar storage is temporarily unavailable":                                          "avatar.storage_unavailable",
+}
+
+func apiErrorCodeForMessage(message string) string {
+	normalized := strings.ToLower(strings.TrimSpace(message))
+	if strings.Contains(normalized, "password must be valid utf-8 and 12 to 1024 bytes") {
+		return "auth.password_policy_violation"
+	}
+	if code := apiErrorCodesByMessage[normalized]; code != "" {
+		return code
+	}
+	return apiErrorCodeRequestFailed
+}

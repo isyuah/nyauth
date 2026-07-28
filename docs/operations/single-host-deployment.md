@@ -6,7 +6,17 @@
 
 ### 同机外部 PostgreSQL/Redis
 
-`docker-compose.external.yml` 不创建或管理 PostgreSQL、Redis，只运行一次性迁移容器和 Nyauth。数据库、Redis 与 Nyauth 必须加入同一个受控 external Docker network，使用容器 DNS 名连接；不要为此开放数据库公网端口。同机 Docker bridge 可显式设置 `NYAUTH_DATABASE_TLS_MODE=disable` 和 `NYAUTH_REDIS_TLS_ENABLED=false`，跨主机连接则必须启用并验证 TLS。
+`docker-compose.external.yml` 不创建或管理 PostgreSQL、Redis，只运行一次性迁移容器和 Nyauth。数据库、Redis 与 Nyauth 必须加入同一个受控 external Docker network，使用容器 DNS 名连接；不要为此开放数据库公网端口。该 Compose 不会替运维人员选择传输安全边界，`NYAUTH_DATABASE_TLS_MODE` 和 `NYAUTH_REDIS_TLS_ENABLED` 都必须显式设置。同机、仅受控工作负载可加入的 Docker bridge 可以明确设置 `disable` 和 `false`；跨主机连接必须设置 PostgreSQL `verify-full` 和 Redis TLS，并验证服务端身份。
+
+同机 external 拓扑至少在 `.env.production` 中明确加入以下配置，network 名称替换为 PostgreSQL、Redis 和 Nyauth 实际共同加入的网络：
+
+```dotenv
+NYAUTH_DEPENDENCY_NETWORK=nyauth-dependencies
+NYAUTH_DATABASE_TLS_MODE=disable
+NYAUTH_REDIS_TLS_ENABLED=false
+```
+
+跨主机依赖改为 `NYAUTH_DATABASE_TLS_MODE=verify-full` 和 `NYAUTH_REDIS_TLS_ENABLED=true`。公共 CA 可直接使用系统信任库；私有 CA、mTLS 证书或自定义 TLS server name 通过只读 volume override 挂载到容器，并分别设置 `NYAUTH_DATABASE_TLS_ROOT_CA_FILE`、`NYAUTH_DATABASE_TLS_CLIENT_CERT_FILE`、`NYAUTH_DATABASE_TLS_CLIENT_KEY_FILE`、`NYAUTH_DATABASE_TLS_SERVER_NAME`、`NYAUTH_REDIS_TLS_ROOT_CA_FILE`、`NYAUTH_REDIS_TLS_CLIENT_CERT_FILE`、`NYAUTH_REDIS_TLS_CLIENT_KEY_FILE` 和 `NYAUTH_REDIS_TLS_SERVER_NAME`。这些路径必须是容器内路径，不能直接填写宿主机路径。
 
 应用默认只发布 `127.0.0.1:43001:8080`。使用 host network 的 1Panel OpenResty 可反向代理到 `http://127.0.0.1:43001`，该端口不会监听公网地址。Docker 端口转发通常会让 Nyauth 看到 `172.18.0.1` 这样的 Docker bridge 网关作为直接对端，但必须通过一次实际请求和日志核对；`NYAUTH_TRUSTED_PROXY_CIDRS` 只配置该精确 `/32`。如果改为让容器代理通过 Docker 网络访问应用，则必须改用实际代理容器地址的精确 `/32`。代理仍需丢弃客户端伪造的转发头并重新设置 `Host`、`X-Forwarded-Proto`、`X-Forwarded-Host` 和 `X-Forwarded-For`。
 

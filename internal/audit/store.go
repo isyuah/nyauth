@@ -163,10 +163,11 @@ func buildListFilter(filter ListFilter) (string, []any) {
 		add("risk_level = $%d", value)
 	}
 	if value := strings.TrimSpace(filter.Actor); value != "" {
-		addRepeated("(actor_name ILIKE '%%' || $%d || '%%' OR actor_id::text = $%d)", value)
+		addRepeated("(actor_name ILIKE '%%' || $%d || '%%' ESCAPE '\\' OR actor_id::text = $%d)", escapeLikePattern(value))
 	}
 	if value := strings.TrimSpace(filter.Target); value != "" {
-		addRepeated("(target_id ILIKE '%%' || $%d || '%%' OR target_type ILIKE '%%' || $%d || '%%')", value)
+		value = escapeLikePattern(value)
+		addRepeated("(target_id ILIKE '%%' || $%d || '%%' ESCAPE '\\' OR target_type ILIKE '%%' || $%d || '%%' ESCAPE '\\')", value)
 	}
 	if value := strings.TrimSpace(filter.TargetType); value != "" {
 		add("target_type = $%d", value)
@@ -195,6 +196,10 @@ func buildListFilter(filter ListFilter) (string, []any) {
 		return "", args
 	}
 	return " WHERE " + strings.Join(conditions, " AND "), args
+}
+
+func escapeLikePattern(value string) string {
+	return strings.NewReplacer(`\`, `\\`, `%`, `\%`, `_`, `\_`).Replace(value)
 }
 
 // CountEvents counts audit events matching a filter.

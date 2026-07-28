@@ -9,6 +9,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/nyasharp/nyauth/internal/audit"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
 
@@ -22,6 +23,13 @@ func TestDescribeMutation(t *testing.T) {
 		{http.MethodPut, "/api/me", "/api/me", "", models.AuditUserProfileUpdated, "user", false},
 		{http.MethodPost, "/api/me/password/set", "/api/me/password/set", "", models.AuditUserPasswordSet, "user", true},
 		{http.MethodDelete, "/api/me/identities/identity-1", "/api/me/identities/{id}", "identity-1", models.AuditIdentityUnbound, "identity", true},
+		{http.MethodDelete, "/api/me/sessions/session-1", "/api/me/sessions/{id}", "session-1", models.AuditSessionRevoked, "session", true},
+		{http.MethodPost, "/api/me/sessions/revoke-others", "/api/me/sessions/revoke-others", "", models.AuditSessionOthersRevoked, "user", true},
+		{http.MethodPost, "/api/me/reauth/password", "/api/me/reauth/password", "", models.AuditUserReauthenticated, "user", true},
+		{http.MethodPost, "/api/me/reauth/passkey/verify", "/api/me/reauth/passkey/verify", "", models.AuditUserReauthenticated, "user", true},
+		{http.MethodPost, "/api/me/reauth/github", "/api/me/reauth/{provider}", "", models.AuditUserReauthenticated, "user", true},
+		{http.MethodPost, "/api/me/email/verification", "/api/me/email/verification", "", models.AuditEmailVerifyRequested, "user", false},
+		{http.MethodPost, "/api/me/email/change", "/api/me/email/change", "", models.AuditEmailChangeRequested, "user", false},
 		{http.MethodPost, "/api/admin/users", "/api/admin/users", "", models.AuditUserCreated, "user", true},
 		{http.MethodPost, "/api/admin/users/target/suspend", "/api/admin/users/{id}/suspend", "target", models.AuditUserSuspended, "user", true},
 		{http.MethodPost, "/api/admin/users/target/reset-password", "/api/admin/users/{id}/reset-password", "target", models.AuditUserPasswordReset, "user", true},
@@ -59,6 +67,30 @@ func TestDescribeMutation(t *testing.T) {
 				t.Fatalf("target ID = %q, want %q", descriptor.targetID, test.id)
 			}
 		})
+	}
+}
+
+func TestMutationAuditMiddlewareDefaultsUnknownMutationToGenericAudit(t *testing.T) {
+	actor := &models.User{ID: uuid.New(), Username: "admin"}
+	request := httptest.NewRequest(http.MethodPatch, "/api/admin/future-setting", nil)
+	routeContext := chi.NewRouteContext()
+	routeContext.RoutePatterns = []string{"/api/admin/future-setting"}
+	request = request.WithContext(context.WithValue(request.Context(), chi.RouteCtxKey, routeContext))
+	request = request.WithContext(context.WithValue(request.Context(), currentUserContextKey, actor))
+
+	var captured audit.MutationAudit
+	handler := (&Server{}).mutationAuditMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var ok bool
+		captured, ok = audit.MutationAuditFromContext(r.Context())
+		if !ok {
+			t.Fatal("generic mutation audit context was not installed")
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	handler.ServeHTTP(httptest.NewRecorder(), request)
+
+	if captured.Event != models.AuditMutationUnclassified || captured.TargetType != "route" || captured.TargetID != "PATCH /api/admin/future-setting" {
+		t.Fatalf("generic mutation audit = %#v", captured)
 	}
 }
 

@@ -79,6 +79,7 @@ func TestSecurityMetricsBoundAllLabelValues(t *testing.T) {
 	runtime.RecordOAuthGrant(t.Context(), "private_extension", "unexpected", "refresh-token-secret")
 	runtime.RecordOAuthGrant(t.Context(), "refresh_token", "failure", "refresh_reuse")
 	runtime.RecordProviderEvent(t.Context(), "callback", "login", "failure", "provider_authentication_failed", time.Millisecond)
+	runtime.RecordProviderEvent(t.Context(), "synchronization", "none", "degraded", "provider_rows_skipped", time.Millisecond)
 	runtime.RecordProviderEvent(t.Context(), "provider-name-123", "user-id-123", "unexpected", "upstream-secret", time.Millisecond)
 	runtime.RecordJWKRotation(t.Context(), "scheduled", "success", "none", time.Millisecond)
 	runtime.RecordRateLimit(t.Context(), "account_action", "email_change", "rejected")
@@ -112,6 +113,7 @@ func TestSecurityMetricsBoundAllLabelValues(t *testing.T) {
 	}
 	if !strings.Contains(body, `reason="other"`) || !strings.Contains(body, `grant_type="unsupported"`) ||
 		!strings.Contains(body, `rate_limit_action="register"`) || !strings.Contains(body, `smtp_error_category="unknown"`) ||
+		!strings.Contains(body, `provider_result="degraded"`) || !strings.Contains(body, `provider_reason="provider_rows_skipped"`) ||
 		!metricHasValue(body, "nyauth_smtp_circuit_open", "1") {
 		t.Fatalf("unexpected bounded labels:\n%s", body)
 	}

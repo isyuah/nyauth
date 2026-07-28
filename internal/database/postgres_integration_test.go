@@ -28,6 +28,7 @@ import (
 	"github.com/nyasharp/nyauth/internal/database"
 	"github.com/nyasharp/nyauth/internal/identity"
 	"github.com/nyasharp/nyauth/internal/provider"
+	"github.com/nyasharp/nyauth/internal/runtimecoord"
 	"github.com/nyasharp/nyauth/internal/session"
 	dashboardstats "github.com/nyasharp/nyauth/internal/stats"
 	"github.com/nyasharp/nyauth/internal/user"
@@ -503,6 +504,64 @@ func TestRoleChangeIncrementsAuthVersion(t *testing.T) {
 		if actual, _ := payload[key].(string); actual != expected {
 			t.Fatalf("role-change audit %s=%q, want %q (payload=%v)", key, actual, expected, payload)
 		}
+	}
+}
+
+func TestAdminInvariantLockDoesNotBlockOrdinaryUserWrites(t *testing.T) {
+	schema := newPostgresTestSchema(t)
+	if err := database.RunMigrations(schema.migrationDSN); err != nil {
+		t.Fatalf("RunMigrations: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	targetID, ordinaryID := uuid.New(), uuid.New()
+	if _, err := schema.pool.Exec(ctx, `
+		INSERT INTO users (id,username,status,role,auth_version,session_version,must_change_password,metadata,creation_source)
+		VALUES ($1,$2,'active','user',1,1,FALSE,'{}'::jsonb,'legacy'),
+		       ($3,$4,'active','user',1,1,FALSE,'{}'::jsonb,'legacy')
+	`, targetID, "admin-lock-target-"+targetID.String(), ordinaryID, "admin-lock-ordinary-"+ordinaryID.String()); err != nil {
+		t.Fatal(err)
+	}
+
+	blocker, err := schema.pool.Begin(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer blocker.Rollback(context.Background())
+	if err := runtimecoord.LockAdminInvariant(ctx, blocker); err != nil {
+		t.Fatal(err)
+	}
+
+	updateDone := make(chan error, 1)
+	go func() {
+		role := "admin"
+		_, updateErr := user.NewStore(schema.pool).UpdateAdmin(ctx, targetID, models.AdminUpdateUserRequest{Role: &role}, audit.MutationAudit{
+			Event: models.AuditUserRoleChanged, ActorID: uuid.New(), ActorName: "integration-admin",
+			Result: "success", RiskLevel: "high",
+		})
+		updateDone <- updateErr
+	}()
+
+	ordinaryCtx, ordinaryCancel := context.WithTimeout(ctx, 2*time.Second)
+	defer ordinaryCancel()
+	if _, err := schema.pool.Exec(ordinaryCtx, `UPDATE users SET last_login_at=NOW() WHERE id=$1`, ordinaryID); err != nil {
+		t.Fatalf("ordinary users write was blocked by administrator invariant lock: %v", err)
+	}
+	select {
+	case err := <-updateDone:
+		t.Fatalf("administrator mutation passed held invariant lock: %v", err)
+	case <-time.After(150 * time.Millisecond):
+	}
+	if err := blocker.Rollback(ctx); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case err := <-updateDone:
+		if err != nil {
+			t.Fatalf("administrator mutation after lock release: %v", err)
+		}
+	case <-ctx.Done():
+		t.Fatalf("administrator mutation did not resume: %v", ctx.Err())
 	}
 }
 

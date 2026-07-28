@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/url"
 	"os"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -118,6 +119,46 @@ func TestProviderReconciliationRepairsMissedNotifications(t *testing.T) {
 		t.Fatalf("disable provider without notification: %v", err)
 	}
 	waitForProviderState(t, ctx, reader, providerName, "")
+}
+
+func TestProviderLoadIsolatesCorruptRowsAndReportsDegraded(t *testing.T) {
+	pool, _ := newProviderSyncTestPools(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	masterKey := []byte("0123456789abcdef0123456789abcdef")
+	manager := NewManager(pool, masterKey)
+	validSecret, err := manager.EncryptSecret("healthy-github", "provider-secret")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO oauth_providers (name,type,client_id,client_secret,scopes,enabled)
+		VALUES ('healthy-github','github','healthy-client',$1,ARRAY['user:email'],TRUE),
+		       ('broken-github','github','broken-client','not-an-envelope',ARRAY['user:email'],TRUE)
+	`, validSecret); err != nil {
+		t.Fatal(err)
+	}
+	var results []string
+	manager.SetTelemetrySink(func(_ context.Context, operation, _ string, result, reason string, _ time.Duration) {
+		if operation == "synchronization" {
+			results = append(results, result+":"+reason)
+		}
+	})
+	if err := manager.LoadDynamic(ctx); err != nil {
+		t.Fatalf("LoadDynamic: %v", err)
+	}
+	if _, ok := manager.Get("healthy-github"); !ok {
+		t.Fatal("healthy provider was omitted with corrupt neighbor")
+	}
+	if _, ok := manager.Get("broken-github"); ok {
+		t.Fatal("corrupt provider entered runtime snapshot")
+	}
+	if !manager.Ready() || !manager.Degraded() {
+		t.Fatalf("provider state ready=%v degraded=%v", manager.Ready(), manager.Degraded())
+	}
+	if !slices.Contains(results, "degraded:secret_decrypt_failed") || !slices.Contains(results, "degraded:provider_rows_skipped") {
+		t.Fatalf("provider degradation telemetry = %v", results)
+	}
 }
 
 func waitForProviderState(t *testing.T, ctx context.Context, manager *Manager, name, expectedClientID string) {

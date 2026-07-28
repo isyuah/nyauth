@@ -1,8 +1,10 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   api,
+  ApiError,
   buildAuditLogExportURL,
   isMFARequiredResponse,
+  isAPIErrorCode,
   localizeAPIErrorMessage,
   missingAdminsFromError,
   setCsrfToken,
@@ -26,6 +28,8 @@ describe('localizeAPIErrorMessage', () => {
     ['password reauthentication is unavailable', '此账户无法使用密码重新认证'],
     ['a local password is already configured', '此账户已设置本地密码'],
     ['csrf_validation_failed', '安全校验失败，请刷新页面后重试'],
+    ['invalid CSRF token', '安全校验失败，请刷新页面后重试'],
+    ['password change required', '请先修改密码后再继续'],
     ['registration is temporarily unavailable', '注册功能暂时不可用，请稍后重试'],
     ['mail settings changed; reload and try again', '邮件设置已被其他管理员修改，请重新加载后再试'],
     ['a successful candidate test is required', '激活前必须先成功发送候选配置的测试邮件'],
@@ -42,6 +46,20 @@ describe('localizeAPIErrorMessage', () => {
 
   it('preserves unrelated API errors', () => {
     expect(localizeAPIErrorMessage('provider temporarily unavailable')).toBe('provider temporarily unavailable');
+  });
+
+  it('localizes by stable error code when backend wording changes', () => {
+    expect(localizeAPIErrorMessage('wording changed', 'auth.recent_authentication_required')).toBe('请先完成近期身份验证');
+    expect(localizeAPIErrorMessage('wording changed', 'account.password_change_required')).toBe('请先修改密码后再继续');
+  });
+
+  it('uses a Chinese fallback for an unknown coded backend error', () => {
+    expect(localizeAPIErrorMessage('new backend wording', 'request_failed')).toBe('请求失败，请稍后重试');
+  });
+
+  it('matches control-flow errors by code instead of server wording', () => {
+    const error = new ApiError('本地化消息', 400, undefined, 'wording changed', { code: 'mfa.challenge_expired' }, 'mfa.challenge_expired');
+    expect(isAPIErrorCode(error, 'mfa.challenge_expired')).toBe(true);
   });
 });
 

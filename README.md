@@ -39,7 +39,7 @@
 - Go 1.26.5+
 - PostgreSQL 16+
 - Redis 7+
-- Node.js 20+
+- Node.js 24+
 
 ### 使用开发 Compose（推荐）
 

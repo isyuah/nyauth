@@ -306,7 +306,10 @@ async function installPasskeyMocks(page: Page, state: PasskeyMockState) {
     if (path === `/api/me/passkeys/${passkeyID}` && method === 'DELETE') {
       state.deleteAttempts += 1;
       if (state.deleteRequiresReauthentication && !state.reauthenticated) {
-        await fulfillJSON(route, 403, { error: 'recent authentication is required' });
+        await fulfillJSON(route, 403, {
+          error: 'recent authentication is required',
+          code: 'auth.recent_authentication_required',
+        });
         return;
       }
       state.passkeys = [];
@@ -440,7 +443,10 @@ async function installPasskeyMocks(page: Page, state: PasskeyMockState) {
       state.securitySaveBodies.push(body);
       state.securitySaveCSRF.push(await request.headerValue('x-csrf-token'));
       if (state.securitySaveAttempts === 1) {
-        await fulfillJSON(route, 403, { error: 'recent authentication is required' });
+        await fulfillJSON(route, 403, {
+          error: 'recent authentication is required',
+          code: 'auth.recent_authentication_required',
+        });
         return;
       }
       state.security = body;

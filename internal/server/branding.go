@@ -61,8 +61,10 @@ func validateBranding(title, logoURL string) (settings.Branding, error) {
 			return settings.Branding{}, fmt.Errorf("logo_url must be at most %d characters", brandingLogoURLMaxLength)
 		}
 		parsed, err := url.Parse(logoURL)
-		if err != nil || parsed.Host == "" || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.User != nil {
-			return settings.Branding{}, fmt.Errorf("logo_url must be an absolute HTTP(S) URL without credentials")
+		sameOriginPath := err == nil && parsed.IsAbs() == false && parsed.Host == "" && strings.HasPrefix(parsed.Path, "/") && !strings.HasPrefix(logoURL, "//") && !strings.Contains(logoURL, `\`)
+		secureAbsolute := err == nil && parsed.Scheme == "https" && parsed.Host != "" && parsed.User == nil
+		if !sameOriginPath && !secureAbsolute {
+			return settings.Branding{}, fmt.Errorf("logo_url must be a same-origin path or an absolute HTTPS URL without credentials")
 		}
 	}
 	return settings.Branding{Title: title, LogoURL: logoURL}, nil

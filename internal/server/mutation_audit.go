@@ -55,6 +55,15 @@ func (s *Server) mutationAuditMiddleware(next http.Handler) http.Handler {
 
 		actor := currentUserFromContext(r)
 		descriptor, ok := describeMutation(r, actor)
+		if !ok {
+			descriptor = mutationAuditDescriptor{
+				event:      models.AuditMutationUnclassified,
+				targetType: "route",
+				targetID:   r.Method + " " + routePattern(r),
+				riskLevel:  "medium",
+			}
+			ok = true
+		}
 		if ok && actor != nil {
 			riskLevel := descriptor.riskLevel
 			if riskLevel == "" {
@@ -72,7 +81,7 @@ func (s *Server) mutationAuditMiddleware(next http.Handler) http.Handler {
 		recorder := &auditResponseWriter{ResponseWriter: w}
 		next.ServeHTTP(recorder, r)
 
-		if !ok || actor == nil || s.auditStore == nil {
+		if actor == nil || s.auditStore == nil {
 			return
 		}
 		status := recorder.status
@@ -158,6 +167,24 @@ func describeMutation(r *http.Request, actor *models.User) (mutationAuditDescrip
 		return mutationAuditDescriptor{event: models.AuditIdentityUnbound, targetType: "identity", targetID: param("id"), riskLevel: "high", successAlreadyAudited: true}, true
 	case r.Method == http.MethodPost && strings.HasPrefix(path, "/api/me/identities/") && strings.HasSuffix(path, "/bind"):
 		return mutationAuditDescriptor{event: models.AuditIdentityBindStarted, targetType: "provider", targetID: param("provider")}, true
+	case r.Method == http.MethodDelete && strings.HasPrefix(path, "/api/me/sessions/"):
+		return mutationAuditDescriptor{event: models.AuditSessionRevoked, targetType: "session", targetID: param("id"), riskLevel: "medium", successAlreadyAudited: true}, true
+	case r.Method == http.MethodPost && path == "/api/me/sessions/revoke-others":
+		descriptor := userMutation(models.AuditSessionOthersRevoked, actor, true)
+		descriptor.riskLevel = "medium"
+		return descriptor, true
+	case r.Method == http.MethodPost && strings.HasPrefix(path, "/api/me/reauth/"):
+		descriptor := userMutation(models.AuditUserReauthenticated, actor, true)
+		descriptor.riskLevel = "medium"
+		return descriptor, true
+	case r.Method == http.MethodPost && path == "/api/me/email/verification":
+		descriptor := userMutation(models.AuditEmailVerifyRequested, actor, false)
+		descriptor.riskLevel = "medium"
+		return descriptor, true
+	case r.Method == http.MethodPost && path == "/api/me/email/change":
+		descriptor := userMutation(models.AuditEmailChangeRequested, actor, false)
+		descriptor.riskLevel = "high"
+		return descriptor, true
 	case r.Method == http.MethodPost && path == "/api/consent/accept":
 		return mutationAuditDescriptor{event: models.AuditConsentAccepted, targetType: "oauth_consent"}, true
 	case r.Method == http.MethodPost && path == "/api/consent/deny":

@@ -347,7 +347,7 @@ func (s *Server) completeMFAChallenge(
 			details["provider"] = pending.Data.Provider
 			s.telemetry.RecordProviderEvent(r.Context(), "mfa", "reauth", "success", "none", -1)
 		}
-		s.enqueueAuditTargetResult(r.Context(), "user.reauthenticated", &current.ID, current.Username, "user", current.ID.String(), "success", "medium", ip, truncateAuditValue(r.UserAgent(), maxAuditUserAgentLength), details)
+		s.enqueueAuditTargetResult(r.Context(), models.AuditUserReauthenticated, &current.ID, current.Username, "user", current.ID.String(), "success", "medium", ip, truncateAuditValue(r.UserAgent(), maxAuditUserAgentLength), details)
 		s.telemetry.RecordAuthEvent(r.Context(), "reauthentication", "success")
 		writeJSON(w, http.StatusOK, sessionResponse(updated, marked.Data))
 		return

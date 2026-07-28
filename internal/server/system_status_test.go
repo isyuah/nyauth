@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"github.com/nyasharp/nyauth/internal/buildinfo"
 	"github.com/nyasharp/nyauth/internal/avatar"
+	"github.com/nyasharp/nyauth/internal/buildinfo"
 	"github.com/nyasharp/nyauth/internal/database"
 	"github.com/nyasharp/nyauth/internal/mailruntime"
 	"github.com/nyasharp/nyauth/pkg/models"
@@ -42,6 +42,24 @@ func TestCollectSystemStatusReportsHealthyRuntime(t *testing.T) {
 	}
 	if response.ActiveSigningKey == nil || response.ActiveSigningKey.Kid != "public-kid" || !response.ActiveSigningKey.NextRotationAt.Equal(started.Add(24*time.Hour)) {
 		t.Fatalf("signing key = %#v", response.ActiveSigningKey)
+	}
+}
+
+func TestCollectSystemStatusReportsDegradedProviderSnapshot(t *testing.T) {
+	response := collectSystemStatus(context.Background(), time.Hour, systemStatusSources{
+		pingPostgreSQL: func(context.Context) error { return nil },
+		pingRedis:      func(context.Context) error { return nil },
+		readSchema: func(context.Context) (systemSchemaSnapshot, error) {
+			return systemSchemaSnapshot{version: database.SchemaVersion, rows: 1}, nil
+		},
+		readSigningKey: func(context.Context) (*models.JWK, error) {
+			return &models.JWK{Kid: "kid", Status: models.JWKStatusSigning, SigningStartedAt: time.Now()}, nil
+		},
+		providerState:    func() (bool, uint64) { return true, 9 },
+		providerDegraded: func() bool { return true },
+	})
+	if response.Status != "degraded" || response.Services.Providers.Status != "degraded" || response.Services.Providers.SnapshotRevision != 9 {
+		t.Fatalf("status = %#v", response)
 	}
 }
 

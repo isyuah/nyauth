@@ -1,6 +1,6 @@
 <script lang="ts">
   import { page } from '$app/stores';
-  import { api, ApiError, isMFARequiredResponse } from '$lib/api';
+  import { api, ApiError, isAPIErrorCode, isMFARequiredResponse } from '$lib/api';
   import { brandingStore, consumeProviderAuthError, safeReturnPath, sessionStore } from '$lib/stores';
   import { goto } from '$app/navigation';
   import { onMount } from 'svelte';
@@ -243,7 +243,7 @@
     } catch (err) {
       pendingVerification = err instanceof ApiError
         && err.status === 403
-        && err.serverMessage.toLowerCase() === 'email verification is required before signing in';
+        && isAPIErrorCode(err, 'account.email_verification_required');
       if (err instanceof ApiError && err.status === 429 && err.retryAfter) {
         error = `尝试次数过多，请在 ${err.retryAfter} 秒后重试`;
       } else {

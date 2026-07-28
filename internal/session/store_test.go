@@ -206,18 +206,22 @@ func TestAuthorizationCodeOnlyConsumesMatchingValue(t *testing.T) {
 		t.Fatal(err)
 	}
 	mismatch := *data
-	mismatch.ClientID = "client-b"
-	if _, err := store.ConsumeAuthorizationCodeIfMatch(ctx, "code", &mismatch); !errors.Is(err, ErrValueMismatch) {
+	mismatch.RecordVersion = "stale-record-version"
+	if _, err := store.ConsumeAuthorizationCodeIfMatch(ctx, "code", &mismatch, time.Minute); !errors.Is(err, ErrValueMismatch) {
 		t.Fatalf("mismatch error = %v", err)
 	}
 	if _, err := store.GetAuthorizationCode(ctx, "code"); err != nil {
 		t.Fatalf("mismatch consumed code: %v", err)
 	}
-	if _, err := store.ConsumeAuthorizationCodeIfMatch(ctx, "code", data); err != nil {
+	if _, err := store.ConsumeAuthorizationCodeIfMatch(ctx, "code", data, time.Minute); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := store.GetAuthorizationCode(ctx, "code"); !errors.Is(err, ErrNotFound) {
-		t.Fatalf("code remained after consume: %v", err)
+	used, err := store.GetAuthorizationCode(ctx, "code")
+	if !errors.Is(err, ErrAuthorizationCodeReuse) || used.RecordVersion != data.RecordVersion {
+		t.Fatalf("used code marker = %#v, err=%v", used, err)
+	}
+	if _, err := store.ConsumeAuthorizationCodeIfMatch(ctx, "code", data, time.Minute); !errors.Is(err, ErrAuthorizationCodeReuse) {
+		t.Fatalf("authorization code reuse error = %v", err)
 	}
 }
 

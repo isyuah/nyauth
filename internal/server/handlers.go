@@ -45,7 +45,7 @@ func writeJSON(w http.ResponseWriter, status int, value any) {
 	_ = json.NewEncoder(w).Encode(value)
 }
 func writeAPIError(w http.ResponseWriter, status int, message string) {
-	writeJSON(w, status, map[string]string{"error": message})
+	writeJSON(w, status, map[string]string{"error": message, "code": apiErrorCodeForMessage(message)})
 }
 func sessionResponse(current *models.User, data *session.SessionData) *models.SessionResponse {
 	authenticatedAt := data.AuthenticatedAt

@@ -351,7 +351,7 @@ func (s *Server) handleFinishPasskeyReauthentication(w http.ResponseWriter, r *h
 		writeAPIError(w, http.StatusServiceUnavailable, "reauthentication session could not be updated")
 		return
 	}
-	s.enqueueAuditTargetResult(r.Context(), "user.reauthenticated", &updated.ID, updated.Username, "user", updated.ID.String(), "success", "medium", requestIP(r), truncateAuditValue(r.UserAgent(), maxAuditUserAgentLength), map[string]any{
+	s.enqueueAuditTargetResult(r.Context(), models.AuditUserReauthenticated, &updated.ID, updated.Username, "user", updated.ID.String(), "success", "medium", requestIP(r), truncateAuditValue(r.UserAgent(), maxAuditUserAgentLength), map[string]any{
 		"authentication_method": "passkey", "passkey_id": credential.ID.String(),
 	})
 	s.telemetry.RecordAuthEvent(r.Context(), "reauthentication", "success")

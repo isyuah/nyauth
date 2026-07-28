@@ -73,12 +73,28 @@ x-hardened-nyauth: &hardened-nyauth
 
 services:
   postgres:
-    image: postgres:16-alpine
+    image: postgres:16-alpine@sha256:57c72fd2a128e416c7fcc499958864df5301e940bca0a56f58fddf30ffc07777
     restart: unless-stopped
     stop_grace_period: 60s
     pids_limit: 300
     mem_limit: 1g
     cpus: 2.0
+    read_only: true
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=64m
+      - /var/run/postgresql:rw,noexec,nosuid,size=16m
+    cap_drop:
+      - ALL
+    # The official entrypoint starts as root to initialize/chown PGDATA, then
+    # drops to postgres. These are the capabilities required for that path.
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
     environment:
       POSTGRES_DB: "${POSTGRES_DB:-nyauth}"
       POSTGRES_USER: "nyauth_migrator"
@@ -106,15 +122,29 @@ services:
         max-file: "5"
 
   redis:
-    image: redis:7-alpine
+    image: redis:7-alpine@sha256:e7723ff73d963f5cc6d9c4643ea3d989527a402a319239054e9472a7fb9219a2
     restart: unless-stopped
     stop_grace_period: 20s
     pids_limit: 100
     mem_limit: 512m
     cpus: 1.0
+    read_only: true
+    tmpfs:
+      - /data:rw,noexec,nosuid,size=32m
+      - /tmp:rw,noexec,nosuid,size=16m
+    cap_drop:
+      - ALL
+    # The secret bootstrap wrapper only needs to own /data and drop to redis.
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - SETGID
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
     environment:
       REDIS_MAXMEMORY: "${NYAUTH_REDIS_MAXMEMORY:-384mb}"
-    command: ["sh", "-ec", "REDIS_PASSWORD=$$(cat /run/secrets/redis_password); exec redis-server --save '' --appendonly no --maxmemory \"$$REDIS_MAXMEMORY\" --maxmemory-policy noeviction --requirepass \"$$REDIS_PASSWORD\""]
+    command: ["sh", "-ec", "REDIS_PASSWORD=$$(cat /run/secrets/redis_password); chown redis:redis /data; exec /usr/bin/setpriv --reuid redis --regid redis --clear-groups redis-server --save '' --appendonly no --maxmemory \"$$REDIS_MAXMEMORY\" --maxmemory-policy noeviction --requirepass \"$$REDIS_PASSWORD\""]
     secrets:
       - redis_password
     networks:

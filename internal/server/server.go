@@ -274,6 +274,7 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 func (s *Server) buildRouter() *chi.Mux {
 	r := chi.NewRouter()
 	r.Use(middleware.RequestID)
+	r.Use(securityHeadersMiddleware)
 	r.Use(s.clientIPMiddleware)
 	if s.telemetry != nil {
 		r.Use(s.telemetry.HTTPMiddleware)

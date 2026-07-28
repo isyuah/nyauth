@@ -684,6 +684,7 @@ export interface UpdateUserInput {
 }
 
 export interface APIErrorResponse {
+  code?: string;
   error?: string;
   error_description?: string;
   message?: string;
@@ -698,6 +699,7 @@ export class ApiError extends Error {
     readonly retryAfter?: number,
     readonly serverMessage: string = message,
     readonly response?: APIErrorResponse,
+    readonly code: string = response?.code || 'request_failed',
   ) {
     super(message);
     this.name = 'ApiError';
@@ -721,6 +723,8 @@ const API_ERROR_TRANSLATIONS: Record<string, string> = {
   'reauthentication failed': '重新认证失败，请稍后重试',
   'reauthentication session could not be updated': '重新认证成功，但会话更新失败，请重试',
   'csrf_validation_failed': '安全校验失败，请刷新页面后重试',
+  'invalid csrf token': '安全校验失败，请刷新页面后重试',
+  'password change required': '请先修改密码后再继续',
   'email verification is required before signing in': '邮箱尚未验证，请先完成验证邮件中的确认再登录',
   'registration is closed': '当前未开放注册',
   'invite code is required': '需要邀请码才能注册',
@@ -763,6 +767,7 @@ const API_ERROR_TRANSLATIONS: Record<string, string> = {
   'all active administrators must enroll mfa before it can be required': '仍有管理员未启用多因素验证，暂时无法强制执行',
   'totp must remain enabled while administrator mfa is required': '要求管理员启用多因素验证时，必须同时开放动态验证码功能',
   'passkey login temporarily unavailable': 'Passkey 登录暂时不可用，请稍后重试',
+  'passkey ceremony temporarily unavailable': 'Passkey 安全验证暂时不可用，请稍后重试',
   'passkey verification temporarily unavailable': 'Passkey 验证暂时不可用，请稍后重试',
   'passkey reauthentication temporarily unavailable': 'Passkey 重新认证暂时不可用，请稍后重试',
   'passkey registration temporarily unavailable': 'Passkey 注册暂时不可用，请稍后重试',
@@ -790,17 +795,106 @@ const API_ERROR_TRANSLATIONS: Record<string, string> = {
   'avatar storage is temporarily unavailable': '头像存储暂时不可用，请稍后重试',
 };
 
-export function localizeAPIErrorMessage(message: string): string {
+const API_ERROR_MESSAGES_BY_CODE: Record<string, string> = {
+  'auth.invalid_credentials': 'invalid credentials',
+  'auth.current_password_incorrect': 'current password is incorrect',
+  'auth.authentication_required': 'authentication required',
+  'auth.recent_authentication_required': 'recent authentication is required',
+  'auth.password_reauthentication_unavailable': 'password reauthentication is unavailable',
+  'auth.password_login_unavailable': 'password login is not available for this account',
+  'auth.password_already_configured': 'a local password is already configured',
+  'auth.reauthentication_failed': 'reauthentication failed',
+  'auth.reauthentication_session_update_failed': 'reauthentication session could not be updated',
+  'security.csrf_validation_failed': 'csrf_validation_failed',
+  'account.password_change_required': 'password change required',
+  'account.email_verification_required': 'email verification is required before signing in',
+  'registration.closed': 'registration is closed',
+  'registration.invite_required': 'invite code is required',
+  'registration.invite_invalid': 'invalid or expired invite code',
+  'registration.identity_conflict': 'username or email is already taken',
+  'registration.email_domain_not_allowed': 'email domain is not allowed',
+  'registration.rate_limited': 'too many registration attempts',
+  'registration.unavailable': 'registration is temporarily unavailable',
+  'registration.mail_not_configured': 'registration requires email delivery, which is not configured',
+  'mail.settings_unavailable': 'mail settings are temporarily unavailable',
+  'mail.configuration_invalid': 'mail configuration is invalid',
+  'mail.version_not_found': 'mail configuration version was not found',
+  'mail.revision_conflict': 'mail settings changed; reload and try again',
+  'mail.test_required': 'a successful candidate test is required',
+  'mail.test_expired': 'the successful candidate test has expired',
+  'mail.rollback_unavailable': 'no previous mail configuration is available',
+  'mail.already_disabled': 'mail is already disabled',
+  'mail.registration_must_close': 'close self-registration before disabling mail',
+  'mail.rate_limited': 'too many mail settings operations',
+  'mail.connect_timeout_invalid': 'connect_timeout must be a valid duration',
+  'mail.send_timeout_invalid': 'send_timeout must be a valid duration',
+  'mail.plain_forbidden': 'plain smtp is forbidden in production',
+  'mail.public_base_url_insecure': 'public_base_url must use https in production',
+  'account.email_invalid': 'email is invalid',
+  'mfa.challenge_expired': 'mfa challenge expired',
+  'mfa.challenge_unavailable': 'mfa challenge temporarily unavailable',
+  'mfa.verification_unavailable': 'mfa verification temporarily unavailable',
+  'mfa.rate_limited': 'too many mfa attempts',
+  'mfa.code_invalid': 'invalid mfa code',
+  'mfa.totp_invalid': 'invalid totp code',
+  'mfa.method_unsupported': 'unsupported mfa method',
+  'auth.account_changed': 'account changed; sign in again',
+  'mfa.enrollment_required': 'mfa enrollment is required; contact an administrator',
+  'mfa.totp_enrollment_disabled': 'totp enrollment is disabled',
+  'mfa.totp_already_enrolled': 'totp is already enrolled',
+  'mfa.totp_enrollment_restart_required': 'totp enrollment must be restarted',
+  'mfa.totp_not_enrolled': 'totp is not enrolled',
+  'mfa.required_for_admins': 'mfa is required for active administrators',
+  'mfa.admin_enrollment_incomplete': 'all active administrators must enroll mfa before it can be required',
+  'mfa.totp_required_by_policy': 'totp must remain enabled while administrator mfa is required',
+  'passkey.login_unavailable': 'passkey login temporarily unavailable',
+  'passkey.ceremony_unavailable': 'passkey ceremony temporarily unavailable',
+  'passkey.verification_unavailable': 'passkey verification temporarily unavailable',
+  'passkey.reauthentication_unavailable': 'passkey reauthentication temporarily unavailable',
+  'passkey.registration_unavailable': 'passkey registration temporarily unavailable',
+  'passkey.registered_sign_in_required': 'passkey registered; please sign in again',
+  'passkey.removed_sign_in_required': 'passkey removed; please sign in again',
+  'passkey.verification_failed': 'passkey verification failed',
+  'passkey.registration_invalid': 'passkey registration could not be verified',
+  'passkey.enrollment_disabled': 'passkey enrollment is disabled',
+  'passkey.already_registered': 'this passkey is already registered',
+  'passkey.none_registered': 'no passkey is registered',
+  'passkey.not_found': 'passkey not found',
+  'passkey.name_invalid': 'passkey name must contain 1 to 64 characters',
+  'passkey.last_authenticator': 'add a password, provider identity, or another passkey before removing this passkey',
+  'passkey.ceremony_id_required': 'webauthn ceremony id is required',
+  'passkey.ceremony_expired': 'webauthn ceremony expired',
+  'passkey.ceremony_invalid': 'webauthn ceremony is invalid',
+  'passkey.rate_limited': 'too many passkey ceremonies',
+  'avatar.too_large': 'avatar image exceeds 8 mib',
+  'avatar.media_type_invalid': 'avatar media type must be jpeg, png, or static webp',
+  'avatar.animated_webp_unsupported': 'animated webp avatars are not supported',
+  'avatar.dimensions_invalid': 'avatar image dimensions are invalid',
+  'avatar.square_required': 'user avatar upload must be square after browser crop',
+  'avatar.rate_limited': 'too many avatar operations',
+  'avatar.operation_unavailable': 'avatar operation is temporarily unavailable',
+  'avatar.storage_unavailable': 'avatar storage is temporarily unavailable',
+};
+
+export function localizeAPIErrorMessage(message: string, code = ''): string {
+  const stableMessage = API_ERROR_MESSAGES_BY_CODE[code];
+  if (stableMessage && API_ERROR_TRANSLATIONS[stableMessage]) return API_ERROR_TRANSLATIONS[stableMessage];
+  if (code === 'auth.password_policy_violation') return PASSWORD_REQUIREMENT;
   const normalized = message.trim().toLowerCase();
   if (normalized.includes(PASSWORD_POLICY_ERROR)) return PASSWORD_REQUIREMENT;
   if (API_ERROR_TRANSLATIONS[normalized]) return API_ERROR_TRANSLATIONS[normalized];
+  if (code === 'request_failed' && /^[\x00-\x7F]*$/.test(message)) return '请求失败，请稍后重试';
   return message;
+}
+
+export function isAPIErrorCode(cause: unknown, code: string): cause is ApiError {
+  return cause instanceof ApiError && cause.code === code;
 }
 
 export function isRecentAuthenticationError(cause: unknown): cause is ApiError {
   return cause instanceof ApiError
     && cause.status === 403
-    && cause.serverMessage.trim().toLowerCase() === 'recent authentication is required';
+    && cause.code === 'auth.recent_authentication_required';
 }
 
 let csrfToken = '';
@@ -845,11 +939,12 @@ async function req<T>(path: string, opts: RequestInit = {}, redirectOnUnauthoriz
     const retryAfter = retryAfterHeader ? Number.parseInt(retryAfterHeader, 10) : undefined;
     const message = body.error_description || body.message || body.error || `请求失败 (${res.status})`;
     throw new ApiError(
-      localizeAPIErrorMessage(message),
+      localizeAPIErrorMessage(message, body.code),
       res.status,
       Number.isFinite(retryAfter) ? retryAfter : undefined,
       message,
       body,
+      body.code,
     );
   }
 

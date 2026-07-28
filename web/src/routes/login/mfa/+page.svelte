@@ -2,7 +2,7 @@
   import { goto } from '$app/navigation';
   import { page } from '$app/stores';
   import { onMount } from 'svelte';
-  import { api, ApiError, type MFAMethod, type MFAPurpose, type MFARequiredResponse, type SessionInfo } from '$lib/api';
+  import { api, ApiError, isAPIErrorCode, type MFAMethod, type MFAPurpose, type MFARequiredResponse, type SessionInfo } from '$lib/api';
   import { brandingStore, safeReturnPath, sessionStore } from '$lib/stores';
   import Button from '$lib/components/ui/Button.svelte';
   import Input from '$lib/components/ui/Input.svelte';
@@ -125,7 +125,7 @@
       } else {
         error = cause instanceof Error ? cause.message : '验证失败';
       }
-      if (cause instanceof ApiError && cause.serverMessage.trim().toLowerCase() === 'mfa challenge expired') {
+      if (isAPIErrorCode(cause, 'mfa.challenge_expired')) {
         challengeExpired = true;
         challenge = null;
       }
@@ -181,7 +181,7 @@
           error = passkeyErrorMessage(cause);
         }
       }
-      if (cause instanceof ApiError && cause.serverMessage.trim().toLowerCase() === 'mfa challenge expired') {
+      if (isAPIErrorCode(cause, 'mfa.challenge_expired')) {
         challengeExpired = true;
         challenge = null;
       }

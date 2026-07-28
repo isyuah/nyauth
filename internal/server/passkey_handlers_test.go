@@ -82,9 +82,13 @@ func TestBeginPasskeyLoginOptionsRateLimitAndHideInfrastructureErrors(t *testing
 		if response.Code != http.StatusServiceUnavailable {
 			t.Fatalf("Redis failure status=%d body=%s", response.Code, response.Body.String())
 		}
-		const genericError = `{"error":"Passkey ceremony temporarily unavailable"}`
-		if strings.TrimSpace(response.Body.String()) != genericError {
-			t.Fatalf("Redis failure was not mapped to the generic API error: %s", response.Body.String())
+		var failure struct {
+			Error string `json:"error"`
+			Code  string `json:"code"`
+		}
+		if err := json.Unmarshal(response.Body.Bytes(), &failure); err != nil ||
+			failure.Error != "Passkey ceremony temporarily unavailable" || failure.Code != "passkey.ceremony_unavailable" {
+			t.Fatalf("Redis failure was not mapped to the generic API contract: body=%s err=%v", response.Body.String(), err)
 		}
 	})
 }

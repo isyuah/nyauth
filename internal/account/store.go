@@ -273,7 +273,7 @@ func (s *Store) ConsumeEmailVerification(ctx context.Context, token *ActionToken
 		`, token.UserID, ActionEmailVerification, now, token.ID); err != nil {
 			return nil, fmt.Errorf("revoking other email verification actions: %w", err)
 		}
-		if err := insertAuditEvent(ctx, tx, "user.email_verified", token.UserID, now, map[string]any{
+		if err := insertAuditEvent(ctx, tx, models.AuditUserEmailVerified, token.UserID, now, map[string]any{
 			"result": "success", "risk_level": "low",
 		}); err != nil {
 			return nil, err
@@ -307,7 +307,7 @@ func (s *Store) ConsumeEmailChange(ctx context.Context, token *ActionToken, prev
 		`, token.UserID, now, token.ID); err != nil {
 			return nil, fmt.Errorf("revoking account actions after email change: %w", err)
 		}
-		if err := insertAuditEvent(ctx, tx, "user.email_changed", token.UserID, now, map[string]any{
+		if err := insertAuditEvent(ctx, tx, models.AuditUserEmailChanged, token.UserID, now, map[string]any{
 			"result": "success", "risk_level": "high", "auth_version": updated.AuthVersion,
 		}); err != nil {
 			return nil, err

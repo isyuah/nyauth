@@ -1,15 +1,20 @@
-.PHONY: build build-server build-ui build-all run migrate clean test fmt lint tidy dev dev-full docker-build docker-up docker-down docker-logs docker-prod-config docker-prod-up
+.PHONY: all build build-server build-ui build-all run migrate clean test fmt lint swagger tidy dev dev-full docker-build docker-up docker-down docker-logs docker-prod-config docker-prod-up
+
+PROD_ENV_FILE ?= .env.production
+# Append optional files here so config/up always use the same ordered set, for
+# example: -f docker-compose.prod.yml -f docker-compose.media-s3.yml
+PROD_COMPOSE_FILES ?= -f docker-compose.prod.yml
 
 # Default target
 all: build
 
 # Build Go binary
 build:
-	go build -o bin/nyauth.exe ./cmd/nyauth
+	go build -o bin/ ./cmd/nyauth
 
 # Build Go binary without embedded UI
 build-server:
-	go build -tags noembed -o bin/nyauth.exe ./cmd/nyauth
+	go build -tags noembed -o bin/ ./cmd/nyauth
 
 # Build Web UI
 build-ui:
@@ -73,7 +78,7 @@ docker-logs:
 	docker compose logs -f nyauth
 
 docker-prod-config:
-	docker compose -f docker-compose.prod.yml config
+	docker compose --env-file "$(PROD_ENV_FILE)" $(PROD_COMPOSE_FILES) config --quiet
 
 docker-prod-up:
-	docker compose -f docker-compose.prod.yml up -d
+	docker compose --env-file "$(PROD_ENV_FILE)" $(PROD_COMPOSE_FILES) up -d

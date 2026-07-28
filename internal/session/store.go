@@ -21,6 +21,7 @@ const (
 	sessionPrefix              = keyPrefix + "session:"
 	userSessionsPrefix         = keyPrefix + "user-sessions:"
 	codePrefix                 = keyPrefix + "code:"
+	codeUsedPrefix             = keyPrefix + "code-used:"
 	tokenPrefix                = keyPrefix + "token:"
 	refreshPrefix              = keyPrefix + "refresh:"
 	refreshUsedPrefix          = keyPrefix + "refresh-used:"
@@ -35,13 +36,14 @@ const (
 )
 
 var (
-	ErrNotFound             = errors.New("session value not found or expired")
-	ErrValueMismatch        = errors.New("session value no longer matches")
-	ErrConsentUserMismatch  = errors.New("consent does not belong to current user")
-	ErrRefreshTokenReuse    = errors.New("refresh token reuse detected; token family revoked")
-	ErrRefreshFamilyRevoked = errors.New("refresh token family is revoked")
-	ErrTokenBindingMismatch = errors.New("stored token binding does not match")
-	ErrInvalidTokenData     = errors.New("invalid stored token data")
+	ErrNotFound               = errors.New("session value not found or expired")
+	ErrValueMismatch          = errors.New("session value no longer matches")
+	ErrAuthorizationCodeReuse = errors.New("authorization code reuse detected")
+	ErrConsentUserMismatch    = errors.New("consent does not belong to current user")
+	ErrRefreshTokenReuse      = errors.New("refresh token reuse detected; token family revoked")
+	ErrRefreshFamilyRevoked   = errors.New("refresh token family is revoked")
+	ErrTokenBindingMismatch   = errors.New("stored token binding does not match")
+	ErrInvalidTokenData       = errors.New("invalid stored token data")
 )
 
 type Store struct{ rdb *redis.Client }
@@ -49,6 +51,7 @@ type Store struct{ rdb *redis.Client }
 func NewStore(rdb *redis.Client) *Store { return &Store{rdb: rdb} }
 
 type AuthorizationData struct {
+	RecordVersion         string   `json:"record_version"`
 	ClientID              string   `json:"client_id"`
 	UserID                string   `json:"user_id"`
 	RedirectURI           string   `json:"redirect_uri"`
@@ -98,8 +101,16 @@ type ConsentData struct {
 
 var consumeMatchingScript = redis.NewScript(`
 local current = redis.call("GET", KEYS[1])
-if not current then return {0, ""} end
-if current ~= ARGV[1] then return {-1, ""} end
+if not current then
+    local used = redis.call("GET", KEYS[2])
+    if not used then return {0, ""} end
+    local usedValue = cjson.decode(used)
+    if usedValue["record_version"] ~= ARGV[1] then return {-1, ""} end
+    return {-2, used}
+end
+local value = cjson.decode(current)
+if value["record_version"] ~= ARGV[1] then return {-1, ""} end
+redis.call("SET", KEYS[2], current, "PX", ARGV[2])
 redis.call("DEL", KEYS[1])
 return {1, current}
 `)
@@ -376,21 +387,39 @@ return 1
 `)
 
 func (s *Store) SaveAuthorizationCode(ctx context.Context, code string, data *AuthorizationData, ttl time.Duration) error {
+	if data == nil {
+		return ErrInvalidTokenData
+	}
+	version, err := randomSecret(16)
+	if err != nil {
+		return fmt.Errorf("generating authorization code record version: %w", err)
+	}
+	data.RecordVersion = version
 	return s.setJSON(ctx, secretKey(codePrefix, code), data, ttl)
 }
 func (s *Store) GetAuthorizationCode(ctx context.Context, code string) (*AuthorizationData, error) {
 	var value AuthorizationData
-	if err := s.getJSON(ctx, secretKey(codePrefix, code), &value); err != nil {
+	if err := s.getJSON(ctx, secretKey(codePrefix, code), &value); err == nil {
+		return &value, nil
+	} else if !errors.Is(err, ErrNotFound) {
 		return nil, err
 	}
-	return &value, nil
+	if err := s.getJSON(ctx, secretKey(codeUsedPrefix, code), &value); err != nil {
+		return nil, err
+	}
+	return &value, ErrAuthorizationCodeReuse
 }
-func (s *Store) ConsumeAuthorizationCodeIfMatch(ctx context.Context, code string, expected *AuthorizationData) (*AuthorizationData, error) {
-	encoded, err := json.Marshal(expected)
+func (s *Store) ConsumeAuthorizationCodeIfMatch(ctx context.Context, code string, expected *AuthorizationData, usedTTL time.Duration) (*AuthorizationData, error) {
+	if expected == nil || expected.RecordVersion == "" {
+		return nil, ErrInvalidTokenData
+	}
+	usedMillis, err := ttlMilliseconds(usedTTL)
 	if err != nil {
 		return nil, err
 	}
-	values, err := consumeMatchingScript.Run(ctx, s.rdb, []string{secretKey(codePrefix, code)}, encoded).Slice()
+	values, err := consumeMatchingScript.Run(ctx, s.rdb, []string{
+		secretKey(codePrefix, code), secretKey(codeUsedPrefix, code),
+	}, expected.RecordVersion, usedMillis).Slice()
 	if err != nil {
 		return nil, err
 	}
@@ -403,6 +432,8 @@ func (s *Store) ConsumeAuthorizationCodeIfMatch(ctx context.Context, code string
 		return nil, ErrNotFound
 	case -1:
 		return nil, ErrValueMismatch
+	case -2:
+		return nil, ErrAuthorizationCodeReuse
 	case 1:
 	default:
 		return nil, fmt.Errorf("unexpected authorization code result %d", status)

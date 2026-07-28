@@ -355,7 +355,8 @@ func (r *Runtime) RecordOAuthGrant(ctx context.Context, grantType, result, reaso
 	reason = boundedValue(reason, "other",
 		"none", "invalid_form", "unsupported_grant_type", "invalid_request", "invalid_or_expired_code",
 		"invalid_client", "code_binding_validation", "scope_no_longer_allowed", "invalid_subject",
-		"inactive_subject", "code_reuse", "authorization_inactive", "token_issuance_failed",
+		"inactive_subject", "code_reuse", "code_reuse_revocation_failed", "authorization_code_store_unavailable",
+		"authorization_inactive", "token_issuance_failed",
 		"id_token_issuance_failed", "grant_not_allowed", "invalid_scope", "refresh_reuse", "invalid_refresh",
 	)
 	r.oauthGrants.Add(ctx, 1, metric.WithAttributes(
@@ -374,14 +375,14 @@ func (r *Runtime) RecordProviderEvent(ctx context.Context, operation, intent, re
 	}
 	operation = boundedValue(operation, "other", "callback", "authentication", "synchronization", "validation")
 	intent = boundedValue(intent, "none", "none", "login", "bind", "reauth")
-	result = boundedValue(result, "failure", "success", "failure")
+	result = boundedValue(result, "failure", "success", "failure", "degraded")
 	reason = boundedValue(reason, "other",
 		"none", "invalid_state", "provider_denied", "missing_code", "provider_unavailable",
 		"provider_authentication_failed", "session_changed", "identity_already_bound", "binding_failed",
 		"identity_mismatch", "reauthentication_failed", "session_failed", "account_unavailable",
 		"load_failed", "database_unavailable", "not_found", "decrypt_failed", "configuration_invalid",
 		"endpoint_invalid", "listener_connect_failed", "listener_subscribe_failed", "listener_disconnected",
-		"notification_publish_failed",
+		"notification_publish_failed", "provider_rows_skipped", "secret_decrypt_failed", "provider_config_invalid",
 	)
 	attributes := []attribute.KeyValue{
 		attribute.String("provider.operation", operation),

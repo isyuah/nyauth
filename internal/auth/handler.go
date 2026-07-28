@@ -381,7 +381,8 @@ func (h *Handler) handleAuthorizationCodeGrant(w http.ResponseWriter, r *http.Re
 		return
 	}
 	stored, err := h.sessionStore.GetAuthorizationCode(r.Context(), code)
-	if err != nil {
+	codeWasUsed := errors.Is(err, session.ErrAuthorizationCodeReuse)
+	if err != nil && !codeWasUsed {
 		h.recordGrantAudit(r.Context(), models.AuditTokenGrantFailed, models.GrantAuthorizationCode, "", "failure", "high", "invalid_or_expired_code")
 		writeTokenError(w, http.StatusBadRequest, "invalid_grant", "invalid or expired authorization code")
 		return
@@ -396,6 +397,10 @@ func (h *Handler) handleAuthorizationCodeGrant(w http.ResponseWriter, r *http.Re
 		stored.ChallengeMethod != "S256" || !validatePKCE(verifier, stored.CodeChallenge, stored.ChallengeMethod) {
 		h.recordGrantAudit(r.Context(), models.AuditTokenGrantFailed, models.GrantAuthorizationCode, stored.ClientID, "failure", "high", "code_binding_validation")
 		writeTokenError(w, http.StatusBadRequest, "invalid_grant", "authorization code binding validation failed")
+		return
+	}
+	if codeWasUsed {
+		h.rejectAuthorizationCodeReuse(w, r, stored)
 		return
 	}
 	if _, err := parseAndValidateScopes(joinScopes(stored.Scopes), cl.Scopes); err != nil {
@@ -415,9 +420,17 @@ func (h *Handler) handleAuthorizationCodeGrant(w http.ResponseWriter, r *http.Re
 		writeTokenError(w, http.StatusBadRequest, "invalid_grant", "authorization subject is no longer active")
 		return
 	}
-	if _, err := h.sessionStore.ConsumeAuthorizationCodeIfMatch(r.Context(), code, stored); err != nil {
-		h.recordGrantAudit(r.Context(), models.AuditTokenGrantFailed, models.GrantAuthorizationCode, cl.ID, "failure", "high", "code_reuse")
-		writeTokenError(w, http.StatusBadRequest, "invalid_grant", "authorization code was already consumed")
+	if _, err := h.sessionStore.ConsumeAuthorizationCodeIfMatch(r.Context(), code, stored, h.config.Auth.AuthorizationCodeTTL); err != nil {
+		if errors.Is(err, session.ErrAuthorizationCodeReuse) {
+			h.rejectAuthorizationCodeReuse(w, r, stored)
+			return
+		}
+		reason, status, oauthError, description := "authorization_code_store_unavailable", http.StatusInternalServerError, "server_error", "authorization code could not be consumed"
+		if errors.Is(err, session.ErrNotFound) || errors.Is(err, session.ErrValueMismatch) {
+			reason, status, oauthError, description = "invalid_or_expired_code", http.StatusBadRequest, "invalid_grant", "invalid or expired authorization code"
+		}
+		h.recordGrantAudit(r.Context(), models.AuditTokenGrantFailed, models.GrantAuthorizationCode, cl.ID, "failure", "high", reason)
+		writeTokenError(w, status, oauthError, description)
 		return
 	}
 	issueRefresh := containsScope(stored.Scopes, "offline_access") && cl.HasGrant(models.GrantRefreshToken)
@@ -455,6 +468,20 @@ func (h *Handler) handleAuthorizationCodeGrant(w http.ResponseWriter, r *http.Re
 	}
 	h.recordGrantAudit(r.Context(), models.AuditTokenIssued, models.GrantAuthorizationCode, cl.ID, "success", "low", "")
 	writeJSON(w, http.StatusOK, pair)
+}
+
+func (h *Handler) rejectAuthorizationCodeReuse(w http.ResponseWriter, r *http.Request, stored *session.AuthorizationData) {
+	tokenTTL := h.config.Auth.RefreshTokenTTL
+	if h.config.Auth.AccessTokenTTL > tokenTTL {
+		tokenTTL = h.config.Auth.AccessTokenTTL
+	}
+	if _, err := h.sessionStore.RevokeUserClientAuthorization(r.Context(), stored.UserID, stored.ClientID, tokenTTL+5*time.Minute); err != nil {
+		h.recordGrantAudit(r.Context(), models.AuditTokenGrantFailed, models.GrantAuthorizationCode, stored.ClientID, "failure", "critical", "code_reuse_revocation_failed")
+		writeTokenError(w, http.StatusInternalServerError, "server_error", "authorization code reuse could not be contained")
+		return
+	}
+	h.recordGrantAudit(r.Context(), models.AuditTokenGrantFailed, models.GrantAuthorizationCode, stored.ClientID, "failure", "critical", "code_reuse")
+	writeTokenError(w, http.StatusBadRequest, "invalid_grant", "authorization code was already consumed")
 }
 
 func (h *Handler) handleClientCredentialsGrant(w http.ResponseWriter, r *http.Request) {
