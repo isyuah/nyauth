@@ -433,10 +433,22 @@ func (s *Server) handleAdminResetPassword(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) revokeUserSecurityState(ctx context.Context, userID uuid.UUID, operation string) {
-	if _, err := s.sessionStore.DeleteUserSessions(ctx, userID.String()); err != nil {
+	var authVersion, sessionVersion int64
+	if err := s.db.QueryRow(ctx, `
+		SELECT auth_version,session_version FROM users WHERE id=$1
+	`, userID).Scan(&authVersion, &sessionVersion); err != nil {
+		slog.ErrorContext(ctx, "security generation lookup failed",
+			"operation", operation, "error_class", "database_error")
+		return
+	}
+	if _, err := s.sessionStore.DeleteUserSessionsBeforeSecurityVersion(
+		ctx, userID.String(), authVersion, sessionVersion,
+	); err != nil {
 		slog.ErrorContext(ctx, "user session cleanup failed", "operation", operation, "error_class", "redis_error")
 	}
-	if _, err := s.sessionStore.RevokeRefreshFamiliesForUser(ctx, userID.String(), s.cfg.Auth.RefreshTokenTTL); err != nil {
+	if _, err := s.sessionStore.RevokeRefreshFamiliesBeforeAuthVersion(
+		ctx, userID.String(), authVersion, s.cfg.Auth.RefreshTokenTTL,
+	); err != nil {
 		slog.ErrorContext(ctx, "refresh family cleanup failed", "operation", operation, "error_class", "redis_error")
 	}
 }

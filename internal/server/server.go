@@ -35,6 +35,7 @@ import (
 	"github.com/nyasharp/nyauth/internal/mfa"
 	"github.com/nyasharp/nyauth/internal/provider"
 	"github.com/nyasharp/nyauth/internal/registration"
+	"github.com/nyasharp/nyauth/internal/securityrevocation"
 	"github.com/nyasharp/nyauth/internal/session"
 	"github.com/nyasharp/nyauth/internal/settings"
 	"github.com/nyasharp/nyauth/internal/stats"
@@ -82,6 +83,7 @@ type Server struct {
 	avatarImportWorker  *avatar.ImportWorker
 	avatarProcessing    chan struct{}
 	emailDispatcher     *account.Dispatcher
+	revocationWorker    *securityrevocation.Dispatcher
 	readiness           readinessState
 }
 
@@ -198,6 +200,22 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 		return nil, fmt.Errorf("configuring audit dispatcher: %w", err)
 	}
 	s.auditDispatcher = auditDispatcher
+	revocationDispatcher, err := securityrevocation.NewDispatcher(
+		securityrevocation.NewStore(db), sessionStore, securityrevocation.DispatcherOptions{
+			WorkerID:        workerPrefix + "-security-revocation",
+			RefreshTokenTTL: cfg.Auth.RefreshTokenTTL,
+			OnError: func(ctx context.Context, task securityrevocation.Task, err error) {
+				slog.ErrorContext(ctx, "durable security revocation failed",
+					"user_id", task.UserID, "revision", task.Revision,
+					"reason", task.Reason, "error_class", "redis_or_database_error",
+				)
+			},
+		},
+	)
+	if err != nil {
+		return nil, fmt.Errorf("configuring security revocation dispatcher: %w", err)
+	}
+	s.revocationWorker = revocationDispatcher
 	accountStore := account.NewStore(db)
 	publicBaseURL := cfg.Mail.PublicBaseURL
 	if strings.TrimSpace(publicBaseURL) == "" {
@@ -504,6 +522,13 @@ func (s *Server) Run(ctx context.Context) error {
 		go func() {
 			if dispatchErr := s.emailDispatcher.Run(runCtx); dispatchErr != nil && !errors.Is(dispatchErr, context.Canceled) {
 				slog.ErrorContext(runCtx, "email dispatcher stopped", "error", dispatchErr)
+			}
+		}()
+	}
+	if s.revocationWorker != nil {
+		go func() {
+			if dispatchErr := s.revocationWorker.Run(runCtx); dispatchErr != nil && !errors.Is(dispatchErr, context.Canceled) {
+				slog.ErrorContext(runCtx, "security revocation dispatcher stopped", "error", dispatchErr)
 			}
 		}()
 	}

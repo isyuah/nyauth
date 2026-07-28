@@ -272,6 +272,47 @@ end
 redis.call("DEL", KEYS[1])
 return #families
 `)
+var revokeUserRefreshFamiliesBeforeAuthVersionScript = redis.NewScript(`
+local families = redis.call("SMEMBERS", KEYS[1])
+local revoked = 0
+local minimumAuthVersion = tonumber(ARGV[3])
+for _, familyKey in ipairs(families) do
+    local familySet = ARGV[1] .. familyKey
+    local members = redis.call("SMEMBERS", familySet)
+    local removeFamily = false
+    if #members == 0 then
+        redis.call("DEL", familySet)
+        redis.call("SREM", KEYS[1], familyKey)
+    else
+        for _, member in ipairs(members) do
+            local encoded = redis.call("GET", member)
+            if encoded then
+                local decoded, value = pcall(cjson.decode, encoded)
+                local authVersion = decoded and type(value) == "table" and tonumber(value["auth_version"])
+                if not authVersion or authVersion < minimumAuthVersion then
+                    removeFamily = true
+                    break
+                end
+            else
+                redis.call("SREM", familySet, member)
+            end
+        end
+        if removeFamily then
+            members = redis.call("SMEMBERS", familySet)
+            for _, member in ipairs(members) do redis.call("DEL", member) end
+            redis.call("DEL", familySet)
+            redis.call("SREM", KEYS[1], familyKey)
+            redis.call("SET", ARGV[2] .. familyKey, "1", "PX", ARGV[4])
+            revoked = revoked + 1
+        elseif redis.call("SCARD", familySet) == 0 then
+            redis.call("DEL", familySet)
+            redis.call("SREM", KEYS[1], familyKey)
+        end
+    end
+end
+if redis.call("SCARD", KEYS[1]) == 0 then redis.call("DEL", KEYS[1]) end
+return revoked
+`)
 var deleteSessionScript = redis.NewScript(`
 local current = redis.call("GET", KEYS[1])
 if not current then return 0 end
@@ -323,27 +364,30 @@ end
 if redis.call("SCARD", KEYS[1]) == 0 then redis.call("DEL", KEYS[1]) end
 return deleted
 `)
-var deleteSessionsBeforeVersionScript = redis.NewScript(`
+var deleteSessionsBeforeSecurityVersionScript = redis.NewScript(`
 local members = redis.call("SMEMBERS", KEYS[1])
 local deleted = 0
-local minimumVersion = tonumber(ARGV[1])
+local minimumAuthVersion = tonumber(ARGV[1])
+local minimumSessionVersion = tonumber(ARGV[2])
 for _, member in ipairs(members) do
     local encoded = redis.call("GET", member)
     if not encoded then
         redis.call("SREM", KEYS[1], member)
-        redis.call("ZREM", ARGV[2], member)
+        redis.call("ZREM", ARGV[3], member)
     else
         local decoded, value = pcall(cjson.decode, encoded)
         local validValue = decoded and type(value) == "table"
         local remove = not validValue
         if validValue then
-            local version = tonumber(value["session_version"])
-            remove = not version or version < minimumVersion or value["user_key"] ~= ARGV[3]
+            local authVersion = tonumber(value["auth_version"])
+            local sessionVersion = tonumber(value["session_version"])
+            remove = not authVersion or not sessionVersion or value["user_key"] ~= ARGV[4]
+                or authVersion < minimumAuthVersion or sessionVersion < minimumSessionVersion
         end
         if remove then
             redis.call("DEL", member)
             redis.call("SREM", KEYS[1], member)
-            redis.call("ZREM", ARGV[2], member)
+            redis.call("ZREM", ARGV[3], member)
             deleted = deleted + 1
         end
     end
@@ -707,6 +751,22 @@ func (s *Store) RevokeRefreshFamiliesForUser(ctx context.Context, userID string,
 	}
 	return count, nil
 }
+
+// RevokeRefreshFamiliesBeforeAuthVersion removes only token families issued
+// before the committed PostgreSQL auth generation. A user who signs in again
+// while durable cleanup is pending keeps the newly issued family.
+func (s *Store) RevokeRefreshFamiliesBeforeAuthVersion(ctx context.Context, userID string, minimumAuthVersion int64, ttl time.Duration) (int64, error) {
+	if userID == "" || minimumAuthVersion <= 0 {
+		return 0, ErrInvalidTokenData
+	}
+	ms, err := ttlMilliseconds(ttl)
+	if err != nil {
+		return 0, err
+	}
+	return revokeUserRefreshFamiliesBeforeAuthVersionScript.Run(ctx, s.rdb, []string{
+		userRefreshFamiliesPrefix + digest(userID),
+	}, refreshFamilyPrefix, refreshRevokedPrefix, minimumAuthVersion, ms).Int64()
+}
 func (s *Store) revokeFamilyKey(ctx context.Context, familyKey string, ttl time.Duration) error {
 	ms, err := ttlMilliseconds(ttl)
 	if err != nil {
@@ -921,12 +981,23 @@ func (s *Store) DeleteUserSessionsBeforeVersion(ctx context.Context, userID stri
 	if minimumVersion <= 0 {
 		return 0, fmt.Errorf("session version must be positive")
 	}
+	return s.DeleteUserSessionsBeforeSecurityVersion(ctx, userID, 1, minimumVersion)
+}
+
+// DeleteUserSessionsBeforeSecurityVersion removes sessions issued before
+// either committed security generation while preserving sessions created
+// after the PostgreSQL mutation that scheduled cleanup.
+func (s *Store) DeleteUserSessionsBeforeSecurityVersion(ctx context.Context, userID string, minimumAuthVersion, minimumSessionVersion int64) (int64, error) {
+	if userID == "" || minimumAuthVersion <= 0 || minimumSessionVersion <= 0 {
+		return 0, fmt.Errorf("security versions and user ID must be valid")
+	}
 	userKey := digest(userID)
-	return deleteSessionsBeforeVersionScript.Run(
+	return deleteSessionsBeforeSecurityVersionScript.Run(
 		ctx,
 		s.rdb,
 		[]string{userSessionsPrefix + userKey},
-		minimumVersion,
+		minimumAuthVersion,
+		minimumSessionVersion,
 		allSessionsKey,
 		userKey,
 	).Int64()

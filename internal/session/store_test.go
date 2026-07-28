@@ -144,6 +144,66 @@ func TestDeleteUserSessionsBeforeVersionKeepsCurrentAndFutureGenerations(t *test
 	}
 }
 
+func TestSecurityGenerationCleanupPreservesNewSessionsAndRefreshFamilies(t *testing.T) {
+	store, _ := testStore(t)
+	ctx := context.Background()
+	const userID = "generation-cleanup-user"
+	for sessionID, versions := range map[string][2]int64{
+		"old-auth": {1, 2}, "old-session": {2, 1}, "current": {2, 2}, "future": {3, 3},
+	} {
+		if err := store.SaveSession(ctx, sessionID, &SessionData{
+			UserID: userID, Username: "alice", AuthVersion: versions[0], SessionVersion: versions[1],
+		}, time.Hour); err != nil {
+			t.Fatalf("save session %s: %v", sessionID, err)
+		}
+	}
+	deleted, err := store.DeleteUserSessionsBeforeSecurityVersion(ctx, userID, 2, 2)
+	if err != nil || deleted != 2 {
+		t.Fatalf("generation session cleanup deleted=%d err=%v", deleted, err)
+	}
+	for _, sessionID := range []string{"old-auth", "old-session"} {
+		if _, err := store.GetSession(ctx, sessionID); !errors.Is(err, ErrNotFound) {
+			t.Fatalf("stale session %s remained: %v", sessionID, err)
+		}
+	}
+	for _, sessionID := range []string{"current", "future"} {
+		if _, err := store.GetSession(ctx, sessionID); err != nil {
+			t.Fatalf("new session %s was removed: %v", sessionID, err)
+		}
+	}
+
+	refreshes := map[string]*TokenData{
+		"old-refresh":     {ClientID: "client", UserID: userID, AuthVersion: 1},
+		"current-refresh": {ClientID: "client", UserID: userID, AuthVersion: 2},
+		"future-refresh":  {ClientID: "client", UserID: userID, AuthVersion: 3},
+	}
+	for token, data := range refreshes {
+		if err := store.SaveRefreshToken(ctx, token, data, time.Hour); err != nil {
+			t.Fatalf("save %s: %v", token, err)
+		}
+		if err := store.SaveTokenForRefreshFamily(ctx, token+"-access", &TokenData{
+			ClientID: "client", UserID: userID, TokenUse: "access", AuthVersion: data.AuthVersion,
+		}, data.FamilyKey, time.Hour); err != nil {
+			t.Fatalf("save %s access token: %v", token, err)
+		}
+	}
+	revoked, err := store.RevokeRefreshFamiliesBeforeAuthVersion(ctx, userID, 2, time.Hour)
+	if err != nil || revoked != 1 {
+		t.Fatalf("generation refresh cleanup revoked=%d err=%v", revoked, err)
+	}
+	if _, err := store.GetRefreshToken(ctx, "old-refresh"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("stale refresh family remained: %v", err)
+	}
+	for _, token := range []string{"current-refresh", "future-refresh"} {
+		if _, err := store.GetRefreshToken(ctx, token); err != nil {
+			t.Fatalf("new refresh family %s was removed: %v", token, err)
+		}
+		if _, err := store.GetToken(ctx, token+"-access"); err != nil {
+			t.Fatalf("new access metadata %s was removed: %v", token, err)
+		}
+	}
+}
+
 func TestTouchSessionUpdatesLastSeenWithoutChangingTTL(t *testing.T) {
 	store, mini := testStore(t)
 	ctx := context.Background()

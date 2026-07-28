@@ -1,0 +1,124 @@
+x-nyauth-build: &nyauth-build
+  context: .
+  dockerfile: Dockerfile
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    environment:
+      POSTGRES_DB: nyauth
+      POSTGRES_USER: nyauth_migrator
+      POSTGRES_PASSWORD_FILE: /run/secrets/postgres_password
+      NYAUTH_DATABASE_RUNTIME_ROLE: nyauth_runtime
+      NYAUTH_RUNTIME_DB_PASSWORD_FILE: /run/secrets/database_runtime_password
+    secrets:
+      - postgres_password
+      - database_runtime_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init-runtime-role.sh:/docker-entrypoint-initdb.d/010-nyauth-runtime-role.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nyauth_migrator -d nyauth"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 5s
+
+  redis:
+    image: redis:7-alpine
+    command:
+      - sh
+      - -ec
+      - |
+        REDIS_PASSWORD="$$(cat /run/secrets/redis_password)"
+        exec redis-server --save '' --appendonly no --maxmemory 128mb --maxmemory-policy noeviction --requirepass "$$REDIS_PASSWORD"
+    secrets:
+      - redis_password
+    healthcheck:
+      test: ["CMD-SHELL", "REDISCLI_AUTH=$$(cat /run/secrets/redis_password) redis-cli ping | grep -q PONG"]
+      interval: 2s
+      timeout: 3s
+      retries: 30
+      start_period: 3s
+
+  migrate:
+    image: "${NYAUTH_E2E_IMAGE:?NYAUTH_E2E_IMAGE is required}"
+    build: *nyauth-build
+    command: ["migrate"]
+    environment:
+      NYAUTH_ENVIRONMENT: test
+      NYAUTH_DATABASE_DSN_FILE: /run/secrets/database_migration_dsn
+      NYAUTH_DATABASE_RUNTIME_ROLE: nyauth_runtime
+      NYAUTH_MEDIA_BACKEND: local
+      NYAUTH_MEDIA_LOCAL_DIRECTORY: /var/lib/nyauth/media
+    secrets:
+      - database_migration_dsn
+    volumes:
+      - media_data:/var/lib/nyauth/media
+    depends_on:
+      postgres:
+        condition: service_healthy
+    restart: "no"
+
+  nyauth:
+    image: "${NYAUTH_E2E_IMAGE:?NYAUTH_E2E_IMAGE is required}"
+    build: *nyauth-build
+    command: ["serve"]
+    environment:
+      NYAUTH_ENVIRONMENT: test
+      NYAUTH_SERVER_HOST: 0.0.0.0
+      NYAUTH_SERVER_PORT: 8080
+      NYAUTH_SERVER_SECURE_COOKIE: "false"
+      NYAUTH_DATABASE_DSN_FILE: /run/secrets/database_runtime_dsn
+      NYAUTH_DATABASE_RUNTIME_ROLE: nyauth_runtime
+      NYAUTH_REDIS_ADDR: redis:6379
+      NYAUTH_REDIS_PASSWORD_FILE: /run/secrets/redis_password
+      NYAUTH_AUTH_ISSUER: "${NYAUTH_E2E_BASE_URL:?NYAUTH_E2E_BASE_URL is required}"
+      NYAUTH_AUTH_MASTER_KEY_FILE: /run/secrets/auth_master_key
+      NYAUTH_BOOTSTRAP_ADMIN_USERNAME: admin
+      NYAUTH_BOOTSTRAP_ADMIN_EMAIL: admin@e2e.invalid
+      NYAUTH_BOOTSTRAP_ADMIN_PASSWORD_FILE: /run/secrets/bootstrap_admin_password
+      NYAUTH_MEDIA_BACKEND: local
+      NYAUTH_MEDIA_LOCAL_DIRECTORY: /var/lib/nyauth/media
+      NYAUTH_WEB_ENABLED: "true"
+      NYAUTH_WEB_TITLE: Nyauth E2E
+    secrets:
+      - database_runtime_dsn
+      - redis_password
+      - auth_master_key
+      - bootstrap_admin_password
+    volumes:
+      - media_data:/var/lib/nyauth/media
+    ports:
+      - "127.0.0.1:${NYAUTH_E2E_HTTP_PORT:?NYAUTH_E2E_HTTP_PORT is required}:8080"
+    healthcheck:
+      test: ["CMD", "nyauth", "healthcheck", "-url", "http://127.0.0.1:8080/readyz", "-timeout", "3s"]
+      interval: 3s
+      timeout: 5s
+      retries: 30
+      start_period: 10s
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      redis:
+        condition: service_healthy
+
+volumes:
+  postgres_data:
+  media_data:
+
+secrets:
+  postgres_password:
+    file: "${NYAUTH_E2E_SECRET_DIR:?NYAUTH_E2E_SECRET_DIR is required}/postgres_password"
+  database_runtime_password:
+    file: "${NYAUTH_E2E_SECRET_DIR:?NYAUTH_E2E_SECRET_DIR is required}/database_runtime_password"
+  database_migration_dsn:
+    file: "${NYAUTH_E2E_SECRET_DIR:?NYAUTH_E2E_SECRET_DIR is required}/database_migration_dsn"
+  database_runtime_dsn:
+    file: "${NYAUTH_E2E_SECRET_DIR:?NYAUTH_E2E_SECRET_DIR is required}/database_runtime_dsn"
+  redis_password:
+    file: "${NYAUTH_E2E_SECRET_DIR:?NYAUTH_E2E_SECRET_DIR is required}/redis_password"
+  auth_master_key:
+    file: "${NYAUTH_E2E_SECRET_DIR:?NYAUTH_E2E_SECRET_DIR is required}/auth_master_key"
+  bootstrap_admin_password:
+    file: "${NYAUTH_E2E_SECRET_DIR:?NYAUTH_E2E_SECRET_DIR is required}/bootstrap_admin_password"
