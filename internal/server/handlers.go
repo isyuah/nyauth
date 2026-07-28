@@ -433,10 +433,8 @@ func (s *Server) handleAdminResetPassword(w http.ResponseWriter, r *http.Request
 }
 
 func (s *Server) revokeUserSecurityState(ctx context.Context, userID uuid.UUID, operation string) {
-	var authVersion, sessionVersion int64
-	if err := s.db.QueryRow(ctx, `
-		SELECT auth_version,session_version FROM users WHERE id=$1
-	`, userID).Scan(&authVersion, &sessionVersion); err != nil {
+	authVersion, sessionVersion, err := s.securityVersions(ctx, userID)
+	if err != nil {
 		slog.ErrorContext(ctx, "security generation lookup failed",
 			"operation", operation, "error_class", "database_error")
 		return

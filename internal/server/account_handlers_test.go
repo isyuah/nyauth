@@ -67,7 +67,7 @@ func newAccountHandlerTestServer(t *testing.T, service accountActionService) (*S
 	t.Cleanup(func() { _ = rdb.Close() })
 	store := session.NewStore(rdb)
 	return &Server{
-		cfg:               &config.Config{Auth: config.AuthConfig{Issuer: "https://auth.example.test"}},
+		cfg:               &config.Config{Auth: config.AuthConfig{Issuer: "https://auth.example.test", RefreshTokenTTL: time.Hour}},
 		accountService:    service,
 		accountLimiter:    NewAccountActionLimiter(rdb),
 		sessionStore:      store,
@@ -97,6 +97,11 @@ func TestPasswordResetConfirmationRevokesBrowserSessions(t *testing.T) {
 	userID := uuid.New()
 	service := &fakeAccountActionService{confirmPasswordUser: &models.User{ID: userID, AuthVersion: 2}}
 	server, _ := newAccountHandlerTestServer(t, service)
+	var lookedUpUserID uuid.UUID
+	server.securityVersions = func(_ context.Context, id uuid.UUID) (int64, int64, error) {
+		lookedUpUserID = id
+		return 2, 1, nil
+	}
 	const sessionID = "existing-browser-session"
 	if err := server.sessionStore.SaveSession(context.Background(), sessionID, &session.SessionData{UserID: userID.String(), AuthVersion: 1}, time.Hour); err != nil {
 		t.Fatalf("SaveSession: %v", err)
@@ -112,6 +117,9 @@ func TestPasswordResetConfirmationRevokesBrowserSessions(t *testing.T) {
 	}
 	if _, err := server.sessionStore.GetSession(context.Background(), sessionID); !errors.Is(err, session.ErrNotFound) {
 		t.Fatalf("session lookup error = %v, want ErrNotFound", err)
+	}
+	if lookedUpUserID != userID {
+		t.Fatalf("security version lookup user = %s, want %s", lookedUpUserID, userID)
 	}
 	setCookie := recorder.Header().Get("Set-Cookie")
 	if !strings.Contains(setCookie, sessionCookieName+"=") || !strings.Contains(setCookie, "Max-Age=0") {

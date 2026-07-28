@@ -84,6 +84,7 @@ type Server struct {
 	avatarProcessing    chan struct{}
 	emailDispatcher     *account.Dispatcher
 	revocationWorker    *securityrevocation.Dispatcher
+	securityVersions    func(context.Context, uuid.UUID) (int64, int64, error)
 	readiness           readinessState
 }
 
@@ -140,6 +141,13 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 		return nil, fmt.Errorf("configuring MFA service: %w", err)
 	}
 	s := &Server{cfg: cfg, db: db, rdb: rdb, webFS: webFS, trustedProxies: parseTrustedProxyCIDRs(cfg.Server.TrustedProxyCIDRs), userService: userService, clientService: clientService, providerMgr: providerMgr, identityStore: identityStore, sessionStore: sessionStore, tokenService: tokenService, jwkManager: jwkManager, authHandler: authHandler, consentHandler: consentHandler, sessionMiddleware: NewSessionMiddleware(sessionStore, cfg.Server.SecureCookie), loginLimiter: NewLoginLimiter(rdb), accountLimiter: NewAccountActionLimiter(rdb), mailSettingsLimiter: NewMailSettingsLimiter(rdb), avatarLimiter: NewAvatarLimiter(rdb), auditStore: audit.NewStore(db), authorizationStore: authorizationStore, statsHandler: stats.NewHandler(db, rdb), settingsMgr: settings.NewManagerForRP(db, settings.Branding{Title: cfg.Web.Title, LogoURL: cfg.Web.LogoURL}, passkeyRPID), inviteStore: invite.NewStore(db), registrationStore: registration.NewStore(db), telemetry: telemetryRuntime, mfaService: mfaService, avatarService: avatarService, avatarRepository: avatarRepository, avatarStore: avatarStore, avatarProcessing: make(chan struct{}, 1)}
+	s.securityVersions = func(ctx context.Context, userID uuid.UUID) (int64, int64, error) {
+		var authVersion, sessionVersion int64
+		err := db.QueryRow(ctx, `
+			SELECT auth_version,session_version FROM users WHERE id=$1
+		`, userID).Scan(&authVersion, &sessionVersion)
+		return authVersion, sessionVersion, err
+	}
 	if err := telemetryRuntime.BindPoolObservers(db, rdb); err != nil {
 		return nil, fmt.Errorf("configuring dependency pool metrics: %w", err)
 	}
