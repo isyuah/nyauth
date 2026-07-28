@@ -18,7 +18,7 @@ func TestAuditExportFilterAppliesBoundedDefaultWindow(t *testing.T) {
 	if err != nil {
 		t.Fatalf("auditExportFilter() error = %v", err)
 	}
-	if filter.Event != "user.login" || filter.SubjectUserID == nil || *filter.SubjectUserID != subject ||
+	if len(filter.Events) != 1 || filter.Events[0] != "user.login" || filter.SubjectUserID == nil || *filter.SubjectUserID != subject ||
 		filter.TargetType != "user" || filter.TargetID != "target-1" || filter.CreatedFrom == nil || filter.CreatedTo == nil {
 		t.Fatalf("unexpected filter: %#v", filter)
 	}

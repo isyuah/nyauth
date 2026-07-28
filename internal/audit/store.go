@@ -12,7 +12,7 @@ import (
 )
 
 type ListFilter struct {
-	Event         string
+	Events        []string
 	Result        string
 	RiskLevel     string
 	Actor         string
@@ -153,8 +153,8 @@ func buildListFilter(filter ListFilter) (string, []any) {
 		index := len(args)
 		conditions = append(conditions, fmt.Sprintf(format, index, index))
 	}
-	if value := strings.TrimSpace(filter.Event); value != "" {
-		add("event = $%d", value)
+	if len(filter.Events) > 0 {
+		add("event = ANY($%d::text[])", filter.Events)
 	}
 	if value := strings.TrimSpace(filter.Result); value != "" {
 		add("result = $%d", value)

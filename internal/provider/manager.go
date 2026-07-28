@@ -33,6 +33,7 @@ type Manager struct {
 	mu               sync.RWMutex
 	providers        map[string]Provider
 	avatarPolicies   map[string]AvatarImportPolicy
+	presentations    map[string]ProviderPresentation
 	db               *pgxpool.Pool
 	masterKeys       map[string][]byte
 	activeKeyID      string
@@ -51,6 +52,7 @@ func NewManager(db *pgxpool.Pool, masterKey []byte, production ...bool) *Manager
 	return &Manager{
 		providers:      make(map[string]Provider),
 		avatarPolicies: make(map[string]AvatarImportPolicy),
+		presentations:  make(map[string]ProviderPresentation),
 		db:             db, masterKeys: map[string][]byte{"primary": keyCopy}, activeKeyID: "primary",
 		production: isProduction,
 	}
@@ -93,6 +95,7 @@ func NewManagerWithKeyring(db *pgxpool.Pool, masterKeys map[string][]byte, activ
 	return &Manager{
 		providers:      make(map[string]Provider),
 		avatarPolicies: make(map[string]AvatarImportPolicy),
+		presentations:  make(map[string]ProviderPresentation),
 		db:             db, masterKeys: keys, activeKeyID: activeKeyID, production: production,
 	}, nil
 }
@@ -118,7 +121,7 @@ func (m *Manager) loadDynamic(ctx context.Context) error {
 		return nil
 	}
 	rows, err := m.db.Query(ctx, `
-		SELECT id, name, type, client_id, client_secret, scopes, discovery_url, authorization_url, token_url, userinfo_url, enabled, import_avatar, avatar_allowed_hosts
+		SELECT id, name, display_name, icon_key, type, client_id, client_secret, scopes, discovery_url, authorization_url, token_url, userinfo_url, enabled, import_avatar, avatar_allowed_hosts
 		FROM oauth_providers
 	`)
 	if err != nil {
@@ -128,15 +131,16 @@ func (m *Manager) loadDynamic(ctx context.Context) error {
 
 	dynamicProviders := make(map[string]Provider)
 	dynamicPolicies := make(map[string]AvatarImportPolicy)
+	dynamicPresentations := make(map[string]ProviderPresentation)
 	for rows.Next() {
 		var providerID uuid.UUID
-		var name, providerType, clientID, encryptedSecret string
+		var name, displayName, iconKey, providerType, clientID, encryptedSecret string
 		var enabled bool
 		var importAvatar bool
 		var avatarAllowedHosts []string
 		var scopes []string
 		var discoveryURL, authorizationURL, tokenURL, userinfoURL *string
-		if err := rows.Scan(&providerID, &name, &providerType, &clientID, &encryptedSecret, &scopes, &discoveryURL, &authorizationURL, &tokenURL, &userinfoURL, &enabled, &importAvatar, &avatarAllowedHosts); err != nil {
+		if err := rows.Scan(&providerID, &name, &displayName, &iconKey, &providerType, &clientID, &encryptedSecret, &scopes, &discoveryURL, &authorizationURL, &tokenURL, &userinfoURL, &enabled, &importAvatar, &avatarAllowedHosts); err != nil {
 			return fmt.Errorf("scanning provider: %w", err)
 		}
 		if !enabled {
@@ -153,6 +157,7 @@ func (m *Manager) loadDynamic(ctx context.Context) error {
 		}
 		dynamicProviders[name] = configured
 		dynamicPolicies[name] = AvatarImportPolicy{ProviderID: providerID, Enabled: importAvatar, ProviderType: providerType, AllowedHosts: append([]string(nil), avatarAllowedHosts...)}
+		dynamicPresentations[name] = ProviderPresentation{DisplayName: displayName, IconKey: iconKey}
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("iterating providers: %w", err)
@@ -161,6 +166,7 @@ func (m *Manager) loadDynamic(ctx context.Context) error {
 	m.mu.Lock()
 	m.providers = dynamicProviders
 	m.avatarPolicies = dynamicPolicies
+	m.presentations = dynamicPresentations
 	m.mu.Unlock()
 	m.snapshotRevision.Add(1)
 	m.ready.Store(true)
@@ -214,7 +220,8 @@ func (m *Manager) List() []ProviderInfo {
 	m.mu.RLock()
 	list := make([]ProviderInfo, 0, len(m.providers))
 	for _, configured := range m.providers {
-		list = append(list, ProviderInfo{Name: configured.Name(), Type: configured.Type()})
+		presentation := m.presentations[configured.Name()]
+		list = append(list, ProviderInfo{Name: configured.Name(), DisplayName: presentation.DisplayName, IconKey: presentation.IconKey, Type: configured.Type()})
 	}
 	m.mu.RUnlock()
 	sort.Slice(list, func(i, j int) bool { return list[i].Name < list[j].Name })
@@ -222,8 +229,15 @@ func (m *Manager) List() []ProviderInfo {
 }
 
 type ProviderInfo struct {
-	Name string `json:"name"`
-	Type string `json:"type"`
+	Name        string `json:"name"`
+	DisplayName string `json:"display_name"`
+	IconKey     string `json:"icon_key"`
+	Type        string `json:"type"`
+}
+
+type ProviderPresentation struct {
+	DisplayName string
+	IconKey     string
 }
 
 type AvatarImportPolicy struct {
@@ -272,6 +286,10 @@ func (m *Manager) CreateProvider(ctx context.Context, req models.CreateProviderR
 	if req.Enabled == nil {
 		return nil, errors.New("provider enabled state must be explicitly set")
 	}
+	displayName, iconKey, err := normalizePresentation(req.Name, req.DisplayName, req.IconKey)
+	if err != nil {
+		return nil, err
+	}
 	avatarHosts, err := NormalizeAvatarPolicy(req.Type, req.ImportAvatar, req.AvatarAllowedHosts)
 	if err != nil {
 		return nil, err
@@ -287,7 +305,7 @@ func (m *Manager) CreateProvider(ctx context.Context, req models.CreateProviderR
 		return nil, fmt.Errorf("encrypting secret: %w", err)
 	}
 	configured := &models.ExternalProvider{
-		Name: req.Name, Type: req.Type, ClientID: req.ClientID,
+		Name: req.Name, DisplayName: displayName, IconKey: iconKey, Type: req.Type, ClientID: req.ClientID,
 		ClientSecret: encryptedSecret, Scopes: req.Scopes, Enabled: *req.Enabled,
 		ImportAvatar: req.ImportAvatar, AvatarAllowedHosts: append([]string{}, req.AvatarAllowedHosts...),
 	}
@@ -309,10 +327,10 @@ func (m *Manager) CreateProvider(ctx context.Context, req models.CreateProviderR
 	}
 	defer tx.Rollback(ctx)
 	err = tx.QueryRow(ctx, `
-		INSERT INTO oauth_providers (name, type, client_id, client_secret, scopes, discovery_url, authorization_url, token_url, userinfo_url, enabled, import_avatar, avatar_allowed_hosts)
-		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		INSERT INTO oauth_providers (name, display_name, icon_key, type, client_id, client_secret, scopes, discovery_url, authorization_url, token_url, userinfo_url, enabled, import_avatar, avatar_allowed_hosts)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
 		RETURNING id,revision,metadata,created_at,updated_at
-	`, configured.Name, configured.Type, configured.ClientID, configured.ClientSecret, configured.Scopes,
+	`, configured.Name, configured.DisplayName, configured.IconKey, configured.Type, configured.ClientID, configured.ClientSecret, configured.Scopes,
 		configured.DiscoveryURL, configured.AuthorizationURL, configured.TokenURL, configured.UserinfoURL, configured.Enabled,
 		configured.ImportAvatar, configured.AvatarAllowedHosts).
 		Scan(&configured.ID, &configured.Revision, &configured.Metadata, &configured.CreatedAt, &configured.UpdatedAt)
@@ -325,7 +343,10 @@ func (m *Manager) CreateProvider(ctx context.Context, req models.CreateProviderR
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("committing provider creation: %w", err)
 	}
-	m.setDynamicProvider(req.Name, runtimeProvider, configured.Enabled, AvatarImportPolicy{ProviderID: configured.ID, Enabled: configured.ImportAvatar, ProviderType: configured.Type, AllowedHosts: configured.AvatarAllowedHosts})
+	m.setDynamicProvider(req.Name, runtimeProvider, configured.Enabled, providerSnapshotMetadata{
+		AvatarPolicy: AvatarImportPolicy{ProviderID: configured.ID, Enabled: configured.ImportAvatar, ProviderType: configured.Type, AllowedHosts: configured.AvatarAllowedHosts},
+		Presentation: ProviderPresentation{DisplayName: configured.DisplayName, IconKey: configured.IconKey},
+	})
 	m.notifyChange(ctx, req.Name, "created")
 	return configured, nil
 }
@@ -343,10 +364,10 @@ func (m *Manager) UpdateProvider(ctx context.Context, name string, req models.Up
 	var current models.ExternalProvider
 	var encryptedSecret string
 	err := m.db.QueryRow(ctx, `
-		SELECT id,name,type,client_id,client_secret,scopes,discovery_url,authorization_url,
+		SELECT id,name,display_name,icon_key,type,client_id,client_secret,scopes,discovery_url,authorization_url,
 		       token_url,userinfo_url,enabled,import_avatar,avatar_allowed_hosts,revision,metadata,created_at,updated_at
 		FROM oauth_providers WHERE name=$1
-	`, name).Scan(&current.ID, &current.Name, &current.Type, &current.ClientID, &encryptedSecret,
+	`, name).Scan(&current.ID, &current.Name, &current.DisplayName, &current.IconKey, &current.Type, &current.ClientID, &encryptedSecret,
 		&current.Scopes, &current.DiscoveryURL, &current.AuthorizationURL, &current.TokenURL,
 		&current.UserinfoURL, &current.Enabled, &current.ImportAvatar, &current.AvatarAllowedHosts,
 		&current.Revision, &current.Metadata, &current.CreatedAt, &current.UpdatedAt)
@@ -358,6 +379,12 @@ func (m *Manager) UpdateProvider(ctx context.Context, name string, req models.Up
 	}
 	plaintextSecret := ""
 	plaintextAvailable := false
+	if req.DisplayName != nil {
+		current.DisplayName = *req.DisplayName
+	}
+	if req.IconKey != nil {
+		current.IconKey = *req.IconKey
+	}
 	if req.ClientID != nil {
 		current.ClientID = *req.ClientID
 	}
@@ -388,6 +415,10 @@ func (m *Manager) UpdateProvider(ctx context.Context, name string, req models.Up
 	}
 	if req.AvatarAllowedHosts != nil {
 		current.AvatarAllowedHosts = append([]string(nil), (*req.AvatarAllowedHosts)...)
+	}
+	current.DisplayName, current.IconKey, err = normalizePresentation(current.Name, current.DisplayName, current.IconKey)
+	if err != nil {
+		return nil, err
 	}
 	current.AvatarAllowedHosts, err = NormalizeAvatarPolicy(current.Type, current.ImportAvatar, current.AvatarAllowedHosts)
 	if err != nil {
@@ -420,13 +451,13 @@ func (m *Manager) UpdateProvider(ctx context.Context, name string, req models.Up
 	}
 	defer tx.Rollback(ctx)
 	err = tx.QueryRow(ctx, `
-		UPDATE oauth_providers SET client_id=$2,client_secret=$3,scopes=$4,discovery_url=$5,
-		       authorization_url=$6,token_url=$7,userinfo_url=$8,enabled=$9,
-		       import_avatar=$10,avatar_allowed_hosts=$11,
+		UPDATE oauth_providers SET display_name=$2,icon_key=$3,client_id=$4,client_secret=$5,scopes=$6,discovery_url=$7,
+		       authorization_url=$8,token_url=$9,userinfo_url=$10,enabled=$11,
+		       import_avatar=$12,avatar_allowed_hosts=$13,
 		       revision=revision+1,updated_at=NOW()
-		WHERE name=$1 AND revision=$12
+		WHERE name=$1 AND revision=$14
 		RETURNING revision,updated_at
-	`, name, current.ClientID, encryptedSecret, current.Scopes, current.DiscoveryURL,
+	`, name, current.DisplayName, current.IconKey, current.ClientID, encryptedSecret, current.Scopes, current.DiscoveryURL,
 		current.AuthorizationURL, current.TokenURL, current.UserinfoURL, current.Enabled,
 		current.ImportAvatar, current.AvatarAllowedHosts, current.Revision).
 		Scan(&current.Revision, &current.UpdatedAt)
@@ -449,7 +480,10 @@ func (m *Manager) UpdateProvider(ctx context.Context, name string, req models.Up
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("committing provider update: %w", err)
 	}
-	m.setDynamicProvider(name, runtimeProvider, current.Enabled, AvatarImportPolicy{ProviderID: current.ID, Enabled: current.ImportAvatar, ProviderType: current.Type, AllowedHosts: current.AvatarAllowedHosts})
+	m.setDynamicProvider(name, runtimeProvider, current.Enabled, providerSnapshotMetadata{
+		AvatarPolicy: AvatarImportPolicy{ProviderID: current.ID, Enabled: current.ImportAvatar, ProviderType: current.Type, AllowedHosts: current.AvatarAllowedHosts},
+		Presentation: ProviderPresentation{DisplayName: current.DisplayName, IconKey: current.IconKey},
+	})
 	m.notifyChange(ctx, name, "updated")
 	return &current, nil
 }
@@ -488,25 +522,36 @@ func (m *Manager) DeleteProvider(ctx context.Context, name string, mutation audi
 
 // setDynamicProvider updates one runtime entry after its database mutation has
 // committed.
-func (m *Manager) setDynamicProvider(name string, configured Provider, enabled bool, policies ...AvatarImportPolicy) {
+type providerSnapshotMetadata struct {
+	AvatarPolicy AvatarImportPolicy
+	Presentation ProviderPresentation
+}
+
+func (m *Manager) setDynamicProvider(name string, configured Provider, enabled bool, metadata ...providerSnapshotMetadata) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	var policy AvatarImportPolicy
-	if len(policies) > 0 {
-		policy = policies[0]
+	var snapshot providerSnapshotMetadata
+	if len(metadata) > 0 {
+		snapshot = metadata[0]
 	}
 	if m.avatarPolicies == nil {
 		m.avatarPolicies = make(map[string]AvatarImportPolicy)
 	}
+	if m.presentations == nil {
+		m.presentations = make(map[string]ProviderPresentation)
+	}
 	if enabled {
 		m.providers[name] = configured
+		policy := snapshot.AvatarPolicy
 		m.avatarPolicies[name] = AvatarImportPolicy{ProviderID: policy.ProviderID, Enabled: policy.Enabled, ProviderType: policy.ProviderType, AllowedHosts: append([]string(nil), policy.AllowedHosts...)}
+		m.presentations[name] = snapshot.Presentation
 		m.snapshotRevision.Add(1)
 		m.ready.Store(true)
 		return
 	}
 	delete(m.providers, name)
 	delete(m.avatarPolicies, name)
+	delete(m.presentations, name)
 	m.snapshotRevision.Add(1)
 	m.ready.Store(true)
 }
@@ -516,6 +561,7 @@ func (m *Manager) removeDynamicProvider(name string) {
 	defer m.mu.Unlock()
 	delete(m.providers, name)
 	delete(m.avatarPolicies, name)
+	delete(m.presentations, name)
 	m.snapshotRevision.Add(1)
 	m.ready.Store(true)
 }

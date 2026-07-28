@@ -4,6 +4,7 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 
 	"github.com/go-chi/chi/v5"
@@ -25,6 +26,7 @@ func TestDescribeMutation(t *testing.T) {
 		{http.MethodPost, "/api/admin/users/target/suspend", "/api/admin/users/{id}/suspend", "target", models.AuditUserSuspended, "user", true},
 		{http.MethodPost, "/api/admin/users/target/reset-password", "/api/admin/users/{id}/reset-password", "target", models.AuditUserPasswordReset, "user", true},
 		{http.MethodDelete, "/api/admin/users/target/sessions", "/api/admin/users/{id}/sessions", "target", models.AuditUserSessionsRevoked, "user", true},
+		{http.MethodDelete, "/api/admin/users/target/sessions/session-1", "/api/admin/users/{id}/sessions/{session_id}", "target", models.AuditSessionRevoked, "user", true},
 		{http.MethodDelete, "/api/admin/users/target", "/api/admin/users/{id}", "target", models.AuditUserDeleted, "user", true},
 		{http.MethodPost, "/api/admin/clients", "/api/admin/clients", "", models.AuditClientCreated, "client", true},
 		{http.MethodPut, "/api/admin/clients/client-1", "/api/admin/clients/{id}", "client-1", models.AuditClientUpdated, "client", true},
@@ -40,6 +42,9 @@ func TestDescribeMutation(t *testing.T) {
 			routeContext.RoutePatterns = append(routeContext.RoutePatterns, test.route)
 			if test.id != "" {
 				routeContext.URLParams.Add("id", test.id)
+			}
+			if strings.Contains(test.route, "{session_id}") {
+				routeContext.URLParams.Add("session_id", "session-1")
 			}
 			r := httptest.NewRequest(test.method, test.path, nil)
 			r = r.WithContext(context.WithValue(r.Context(), chi.RouteCtxKey, routeContext))

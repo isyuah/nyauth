@@ -52,9 +52,27 @@ func (s *Server) handleAuditLogOptions(w http.ResponseWriter, _ *http.Request) {
 func auditLogFilterFromRequest(r *http.Request) (audit.ListFilter, error) {
 	query := r.URL.Query()
 	filter := audit.ListFilter{
-		Event: query.Get("event"), Result: query.Get("result"), RiskLevel: query.Get("risk"),
+		Result: query.Get("result"), RiskLevel: query.Get("risk"),
 		Actor: query.Get("actor"), Target: query.Get("target"), TargetType: query.Get("target_type"),
 		TargetID: query.Get("target_id"), IPAddress: query.Get("ip"),
+	}
+	seenEvents := make(map[string]struct{}, len(query["event"]))
+	for _, raw := range query["event"] {
+		event := strings.TrimSpace(raw)
+		if event == "" {
+			continue
+		}
+		if len(event) > 64 {
+			return filter, fmt.Errorf("event must contain at most 64 characters")
+		}
+		if _, exists := seenEvents[event]; exists {
+			continue
+		}
+		seenEvents[event] = struct{}{}
+		filter.Events = append(filter.Events, event)
+		if len(filter.Events) > 100 {
+			return filter, fmt.Errorf("at most 100 events may be selected")
+		}
 	}
 	if raw := strings.TrimSpace(query.Get("subject_user_id")); raw != "" {
 		id, err := uuid.Parse(raw)

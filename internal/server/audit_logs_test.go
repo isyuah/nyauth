@@ -12,7 +12,7 @@ import (
 
 func TestAuditLogFilterFromRequestParsesExactSubjectAndTarget(t *testing.T) {
 	subject := uuid.MustParse("aef64038-08ec-4c94-8129-e568664b05d8")
-	request := httptest.NewRequest("GET", "/api/admin/audit-logs?subject_user_id="+subject.String()+
+	request := httptest.NewRequest("GET", "/api/admin/audit-logs?event=user.login&event=user.logout&subject_user_id="+subject.String()+
 		"&target_type=user&target_id=target-42&from=2026-07-01T08%3A00%3A00%2B08%3A00&to=2026-07-02T00%3A00%3A00Z", nil)
 	filter, err := auditLogFilterFromRequest(request)
 	if err != nil {
@@ -23,6 +23,9 @@ func TestAuditLogFilterFromRequestParsesExactSubjectAndTarget(t *testing.T) {
 	}
 	if filter.TargetType != "user" || filter.TargetID != "target-42" {
 		t.Fatalf("exact target = %q/%q", filter.TargetType, filter.TargetID)
+	}
+	if len(filter.Events) != 2 || filter.Events[0] != "user.login" || filter.Events[1] != "user.logout" {
+		t.Fatalf("events = %#v", filter.Events)
 	}
 	if filter.CreatedFrom == nil || !filter.CreatedFrom.Equal(time.Date(2026, 7, 1, 0, 0, 0, 0, time.UTC)) {
 		t.Fatalf("created from = %v", filter.CreatedFrom)

@@ -183,6 +183,8 @@ func describeMutation(r *http.Request, actor *models.User) (mutationAuditDescrip
 		return mutationAuditDescriptor{event: models.AuditUserPasswordReset, targetType: "user", targetID: param("id"), riskLevel: "high", successAlreadyAudited: true}, true
 	case r.Method == http.MethodDelete && strings.HasSuffix(path, "/sessions") && strings.HasPrefix(path, "/api/admin/users/"):
 		return mutationAuditDescriptor{event: models.AuditUserSessionsRevoked, targetType: "user", targetID: param("id"), riskLevel: "high", successAlreadyAudited: true}, true
+	case r.Method == http.MethodDelete && param("session_id") != "" && strings.Contains(path, "/sessions/") && strings.HasPrefix(path, "/api/admin/users/"):
+		return mutationAuditDescriptor{event: models.AuditSessionRevoked, targetType: "user", targetID: param("id"), riskLevel: "medium", successAlreadyAudited: true}, true
 	case r.Method == http.MethodPost && strings.HasSuffix(path, "/avatar") && strings.HasPrefix(path, "/api/admin/users/"):
 		return mutationAuditDescriptor{event: models.AuditAdminUserAvatarUpdated, targetType: "user", targetID: param("id"), riskLevel: "medium"}, true
 	case r.Method == http.MethodDelete && strings.HasSuffix(path, "/avatar") && strings.HasPrefix(path, "/api/admin/users/"):

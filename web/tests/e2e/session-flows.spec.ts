@@ -84,6 +84,8 @@ interface MockState {
   adminUserAuthorizationRequests?: Record<string, number>;
   adminUserClientRequests?: Record<string, number>;
   adminUserActivityRequests?: Record<string, number>;
+  adminUserSessionDeleteCSRF?: string | null;
+  adminUserSessionDeletedID?: string;
   auditLogs?: AuditLog[];
   auditLogQueries?: string[];
   auditLogOptionsRequests?: number;
@@ -171,6 +173,8 @@ const oauthClient = {
 const externalProvider = {
   id: '44444444-4444-4444-4444-444444444444',
   name: 'company-sso',
+  display_name: 'Company SSO',
+  icon_key: 'globe',
   type: 'generic',
   client_id: 'provider-client',
   scopes: ['openid', 'profile'],
@@ -192,8 +196,8 @@ const systemStatus = {
   version: '0.3.0-test',
   schema: {
     status: 'ok',
-    version: 1,
-    required_version: 1,
+    version: 2,
+    required_version: 2,
   },
   services: {
     postgresql: { status: 'ok', latency_ms: 3 },
@@ -330,6 +334,9 @@ const githubIdentity = {
   id: '33333333-3333-3333-3333-333333333333',
   user_id: user.id,
   provider: 'github',
+  provider_type: 'github',
+  provider_display_name: 'GitHub',
+  provider_icon_key: 'auto',
   external_id: 'github-123',
   external_username: 'alice-gh',
   external_email: 'alice@example.com',
@@ -521,7 +528,7 @@ async function installAPIMocks(page: Page, state: MockState) {
         await fulfillJSON(route, 503, { error: 'provider list unavailable' });
         return;
       }
-      await fulfillJSON(route, 200, [{ name: 'github', type: 'github' }]);
+      await fulfillJSON(route, 200, [{ name: 'github', display_name: 'GitHub', icon_key: 'auto', type: 'github' }]);
       return;
     }
 
@@ -859,6 +866,12 @@ async function installAPIMocks(page: Page, state: MockState) {
       }
       if (endpoint === 'sessions' && request.method() === 'DELETE') {
         await fulfillJSON(route, 200, { revoked: browserSessions.length });
+        return;
+      }
+      if (endpoint.startsWith('sessions/') && request.method() === 'DELETE') {
+        state.adminUserSessionDeleteCSRF = await request.headerValue('x-csrf-token');
+        state.adminUserSessionDeletedID = decodeURIComponent(endpoint.slice('sessions/'.length));
+        await route.fulfill({ status: 204 });
         return;
       }
       if (endpoint === 'reset-password' && request.method() === 'POST') {
@@ -2510,7 +2523,7 @@ test('administrators can update user profiles and remove a confirmed identity fr
   await page.goto(`/admin/users/${user.id}?return_to=%2Fadmin%2Fusers`);
   await page.getByLabel('邮箱', { exact: true }).fill('alice.updated@example.com');
   await page.getByLabel('显示名称', { exact: true }).fill('Alice Updated');
-  await page.getByLabel('Metadata（JSON 字符串键值）').fill(JSON.stringify({
+  await page.getByLabel('高级扩展属性（JSON 字符串键值）').fill(JSON.stringify({
     department: 'security',
     region: 'apac',
   }));
@@ -2576,6 +2589,8 @@ test('admin user details preserve the filtered list return path across every dee
   await expectReturnToPreserved(`/admin/users/${target.id}`);
   await expect(page.getByRole('heading', { name: target.display_name || target.username })).toBeVisible();
   await expect(page.getByRole('link', { name: '资料', exact: true })).toHaveAttribute('aria-current', 'page');
+  await expect(page.getByRole('link', { name: '资料', exact: true })).toHaveClass(/border-nya-primary/);
+  await expect(page.getByRole('link', { name: '资料', exact: true })).not.toHaveClass(/border-transparent/);
 
   await page.getByRole('link', { name: '安全', exact: true }).click();
   await expectReturnToPreserved(`/admin/users/${target.id}/security`);
@@ -2584,6 +2599,11 @@ test('admin user details preserve the filtered list return path across every dee
   await page.getByRole('link', { name: '会话', exact: true }).click();
   await expectReturnToPreserved(`/admin/users/${target.id}/sessions`);
   await expect(page.getByRole('heading', { name: '设备会话' })).toBeVisible();
+  await page.getByRole('button', { name: '撤销会话' }).first().click();
+  await page.getByRole('dialog').getByRole('button', { name: '撤销会话' }).click();
+  await expect(page.getByText('已撤销该设备会话。')).toBeVisible();
+  expect(state.adminUserSessionDeleteCSRF).toBe('csrf-admin-detail-routes');
+  expect(state.adminUserSessionDeletedID).toBe(browserSessions[0].id);
 
   await page.getByRole('link', { name: '访问', exact: true }).click();
   await expectReturnToPreserved(`/admin/users/${target.id}/access`);
@@ -2625,6 +2645,9 @@ test('provider edits preserve the stored secret when the secret input is empty',
   await page.goto('/admin/providers');
   await page.getByRole('button', { name: '编辑配置' }).click();
   const dialog = page.getByRole('dialog');
+  await dialog.getByLabel('显示名称').fill('Company Identity');
+  await dialog.getByLabel('图标').click();
+  await page.getByRole('option', { name: '链接' }).click();
   await dialog.getByLabel('Client ID').fill('provider-client-updated');
   await expect(dialog.getByLabel('Client Secret')).toHaveValue('');
   await dialog.getByLabel('Scopes').fill('openid profile email');
@@ -2633,6 +2656,8 @@ test('provider edits preserve the stored secret when the secret input is empty',
   await expect(dialog).toBeHidden();
   expect(state.adminProviderUpdateCSRF).toBe('csrf-admin');
   expect(state.adminProviderUpdateBody).toEqual({
+    display_name: 'Company Identity',
+    icon_key: 'link',
     client_id: 'provider-client-updated',
     scopes: ['openid', 'profile', 'email'],
     discovery_url: 'https://idp.example/.well-known/openid-configuration',
@@ -2692,7 +2717,7 @@ test('provider management remains usable when public discovery is unavailable', 
 
   await page.goto('/admin/providers');
 
-  await expect(page.getByRole('heading', { name: externalProvider.name })).toBeVisible();
+  await expect(page.getByRole('heading', { name: externalProvider.display_name })).toBeVisible();
   await expect(page.getByRole('alert')).toContainText('暂时不能生成 Callback URL');
   await page.getByRole('button', { name: '编辑配置' }).click();
   await expect(page.getByRole('dialog')).toBeVisible();
@@ -2717,7 +2742,8 @@ test('disabled provider creation is a single request with an explicit enabled st
   await page.goto('/admin/providers');
   await page.getByRole('button', { name: '添加身份提供者' }).first().click();
   const dialog = page.getByRole('dialog');
-  await dialog.getByLabel('名称').fill('disabled-github');
+  await dialog.getByLabel('技术标识').fill('disabled-github');
+  await dialog.getByLabel('显示名称').fill('Disabled GitHub');
   await dialog.getByLabel('Client ID').fill('disabled-client');
   await dialog.getByLabel('Client Secret').fill('disabled-secret');
   await dialog.getByLabel('Scopes').fill('read:user user:email');
@@ -2728,6 +2754,8 @@ test('disabled provider creation is a single request with an explicit enabled st
   expect(state.adminProviderCreateCSRF).toBe('csrf-admin');
   expect(state.adminProviderCreateBody).toEqual({
     name: 'disabled-github',
+    display_name: 'Disabled GitHub',
+    icon_key: 'auto',
     type: 'github',
     client_id: 'disabled-client',
     client_secret: 'disabled-secret',
@@ -2761,6 +2789,8 @@ test('runtime branding propagates to the sidebar and saves with CSRF', async ({ 
   await expect(sidebar.getByRole('link', { name: '系统设置' })).toHaveAttribute('aria-current', 'page');
   await expect(sidebar.getByRole('link', { name: '系统状态' })).not.toHaveAttribute('aria-current', 'page');
   await expect(page.getByRole('link', { name: '品牌', exact: true })).toHaveAttribute('aria-current', 'page');
+  await expect(page.getByRole('link', { name: '品牌', exact: true })).toHaveClass(/border-nya-primary/);
+  await expect(page.getByRole('link', { name: '品牌', exact: true })).not.toHaveClass(/border-transparent/);
 
   await page.getByLabel('站点名称').fill('Acme SSO');
   await page.getByLabel(/Logo URL/).fill('https://cdn.example.com/logo.png');
@@ -3306,8 +3336,11 @@ test('audit filters use backend options, exact URL parameters, quick ranges and 
   await page.goto('/admin/audit');
   await expect(page.getByRole('heading', { name: '审计日志' })).toBeVisible();
   await expect.poll(() => state.auditLogOptionsRequests || 0).toBe(1);
-  await expect(page.getByLabel('事件')).toHaveAttribute('list', 'audit-event-options');
-  await expect(page.locator('#audit-event-options option[value="user.login"]')).toHaveCount(1);
+  await page.getByRole('textbox', { name: '事件', exact: true }).fill('user.');
+  await expect(page.locator('#audit-event-tree')).toBeVisible();
+  await page.getByRole('checkbox', { name: 'user.login', exact: true }).check();
+  await page.getByRole('checkbox', { name: 'user.profile_updated', exact: true }).check();
+  await expect(page.getByText('user.login', { exact: true }).first()).toBeVisible();
 
   await page.getByRole('button', { name: '最近 1 小时' }).click();
   await expect(page).toHaveURL(/from=.*&to=/);
@@ -3319,7 +3352,6 @@ test('audit filters use backend options, exact URL parameters, quick ranges and 
   expect(quickTo - quickFrom).toBe(60 * 60 * 1000);
   expect(quickRangeURL.searchParams.get('from')).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:00\.000Z$/);
 
-  await page.getByLabel('事件').fill('user.login');
   await page.getByLabel('结果').click();
   await page.getByRole('option', { name: '失败', exact: true }).click();
   await page.getByLabel('风险').click();
@@ -3336,9 +3368,8 @@ test('audit filters use backend options, exact URL parameters, quick ranges and 
   await expect(page).toHaveURL(/subject_user_id=/);
   const filteredURL = new URL(page.url());
   expect(Object.fromEntries([
-    'event', 'result', 'risk', 'actor', 'target', 'subject_user_id', 'target_type', 'target_id', 'ip',
+    'result', 'risk', 'actor', 'target', 'subject_user_id', 'target_type', 'target_id', 'ip',
   ].map((key) => [key, filteredURL.searchParams.get(key)]))).toEqual({
-    event: 'user.login',
     result: 'failure',
     risk: 'high',
     actor: 'alice',
@@ -3348,10 +3379,12 @@ test('audit filters use backend options, exact URL parameters, quick ranges and 
     target_id: 'client-123',
     ip: '192.0.2.10',
   });
+  expect(filteredURL.searchParams.getAll('event')).toEqual(['user.login', 'user.profile_updated']);
   const latestListQuery = new URLSearchParams((state.auditLogQueries?.at(-1) || '').replace(/^\?/, ''));
   expect(latestListQuery.get('subject_user_id')).toBe(user.id);
   expect(latestListQuery.get('target_type')).toBe('client');
   expect(latestListQuery.get('target_id')).toBe('client-123');
+  expect(latestListQuery.getAll('event')).toEqual(['user.login', 'user.profile_updated']);
   await expect(page.getByRole('button', { name: `移除筛选：主体用户 ID：${user.id}` })).toBeVisible();
   await expect(page.getByRole('button', { name: '移除筛选：目标 ID：client-123' })).toBeVisible();
 
@@ -3363,6 +3396,7 @@ test('audit filters use backend options, exact URL parameters, quick ranges and 
   expect(exportQuery.get('subject_user_id')).toBe(user.id);
   expect(exportQuery.get('target_type')).toBe('client');
   expect(exportQuery.get('target_id')).toBe('client-123');
+  expect(exportQuery.getAll('event')).toEqual(['user.login', 'user.profile_updated']);
   expect(exportQuery.get('from')).toBe(filteredURL.searchParams.get('from'));
   expect(exportQuery.get('to')).toBe(filteredURL.searchParams.get('to'));
   await download.cancel();

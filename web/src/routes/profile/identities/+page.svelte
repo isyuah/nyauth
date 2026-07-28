@@ -3,6 +3,7 @@
   import { api, isRecentAuthenticationError, type ExternalIdentity, type ProviderSummary, type SessionInfo } from '$lib/api';
   import { consumeProviderAuthError, sessionStore } from '$lib/stores';
   import ReauthenticationDialog from '$lib/components/account/ReauthenticationDialog.svelte';
+  import ProviderIcon from '$lib/components/identity/ProviderIcon.svelte';
   import Badge from '$lib/components/ui/Badge.svelte';
   import Button from '$lib/components/ui/Button.svelte';
   import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
@@ -10,8 +11,6 @@
 
   const returnTo = '/profile/identities';
   const initialProviderAuthError = consumeProviderAuthError();
-  const providerIcons: Record<string, string> = { github: '🐙', google: '🔵', generic: '🔗' };
-
   let session = $derived($sessionStore.session);
   let identities = $state<ExternalIdentity[]>([]);
   let availableProviders = $state<ProviderSummary[]>([]);
@@ -144,8 +143,8 @@
           {#each identities as identity}
             <div class="flex items-center justify-between gap-4 rounded-nya-sm border border-nya-border p-3.5">
               <div class="flex min-w-0 items-center gap-3">
-                <span class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-nya-surface-muted text-lg">{providerIcons[identity.provider] || '🔗'}</span>
-                <div class="min-w-0"><p class="text-body-medium font-semibold text-nya-text-primary">{identity.provider}</p><p class="truncate text-small text-nya-text-secondary">{identity.external_username || identity.external_id}</p></div>
+                <span class="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-nya-surface-muted text-nya-text-primary"><ProviderIcon type={identity.provider_type} iconKey={identity.provider_icon_key} size={18} /></span>
+                <div class="min-w-0"><p class="text-body-medium font-semibold text-nya-text-primary">{identity.provider_display_name || identity.provider}</p><p class="truncate text-small text-nya-text-secondary">{identity.external_username || identity.external_id}</p></div>
               </div>
               <div class="flex items-center gap-2"><Badge variant="success">已绑定</Badge><Button variant="ghost" size="sm" onclick={() => requestIdentityRemoval(identity)}>解绑</Button></div>
             </div>
@@ -166,7 +165,7 @@
         <div class="flex flex-wrap gap-3">
           {#each availableProviders as provider}
             {@const alreadyBound = identities.some((identity) => identity.provider === provider.name)}
-            <Button variant="secondary" disabled={identitiesLoading || !!identitiesError || alreadyBound} loading={bindingProvider === provider.name} onclick={() => bindProvider(provider.name)}><span>{providerIcons[provider.type] || '🔗'}</span>{provider.name}{#if alreadyBound}<CheckCircle size={14} />{:else}<Link2 size={14} />{/if}</Button>
+            <Button variant="secondary" disabled={identitiesLoading || !!identitiesError || alreadyBound} loading={bindingProvider === provider.name} onclick={() => bindProvider(provider.name)}><ProviderIcon type={provider.type} iconKey={provider.icon_key} size={16} />{provider.display_name || provider.name}{#if alreadyBound}<CheckCircle size={14} />{:else}<Link2 size={14} />{/if}</Button>
           {/each}
         </div>
       {:else}

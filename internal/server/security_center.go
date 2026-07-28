@@ -11,6 +11,7 @@ import (
 	"github.com/nyasharp/nyauth/internal/audit"
 	"github.com/nyasharp/nyauth/internal/session"
 	"github.com/nyasharp/nyauth/internal/user"
+	"github.com/nyasharp/nyauth/pkg/models"
 )
 
 type browserSessionResponse struct {
@@ -50,9 +51,7 @@ func (s *Server) handleDeleteMySession(w http.ResponseWriter, r *http.Request) {
 	current := currentUserFromContext(r)
 	authenticated := sessionFromContext(r.Context())
 	publicID := chi.URLParam(r, "id")
-	if publicID == authenticated.Data.PublicID {
-		s.sessionMiddleware.DestroySession(w, r)
-	} else if err := s.sessionStore.DeleteUserSessionByPublicID(r.Context(), current.ID.String(), publicID); err != nil {
+	if err := s.sessionStore.DeleteUserSessionByPublicID(r.Context(), current.ID.String(), publicID); err != nil {
 		if errors.Is(err, session.ErrNotFound) {
 			writeAPIError(w, http.StatusNotFound, "session not found")
 		} else {
@@ -60,7 +59,10 @@ func (s *Server) handleDeleteMySession(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	s.enqueueAuditTargetResult(r.Context(), "session.revoked", &current.ID, current.Username, "session", publicID, "success", "medium", requestIP(r), truncateAuditValue(r.UserAgent(), maxAuditUserAgentLength), nil)
+	if publicID == authenticated.Data.PublicID {
+		s.sessionMiddleware.clearCookie(w)
+	}
+	s.enqueueAuditTargetResult(r.Context(), models.AuditSessionRevoked, &current.ID, current.Username, "session", publicID, "success", "medium", requestIP(r), truncateAuditValue(r.UserAgent(), maxAuditUserAgentLength), nil)
 	w.WriteHeader(http.StatusNoContent)
 }
 
@@ -72,11 +74,13 @@ func (s *Server) handleRevokeOtherSessions(w http.ResponseWriter, r *http.Reques
 		writeAPIError(w, http.StatusServiceUnavailable, "failed to revoke sessions")
 		return
 	}
-	s.enqueueAuditTargetResult(r.Context(), "session.others_revoked", &current.ID, current.Username, "user", current.ID.String(), "success", "medium", requestIP(r), truncateAuditValue(r.UserAgent(), maxAuditUserAgentLength), map[string]any{"revoked_count": count})
+	s.enqueueAuditTargetResult(r.Context(), models.AuditSessionOthersRevoked, &current.ID, current.Username, "user", current.ID.String(), "success", "medium", requestIP(r), truncateAuditValue(r.UserAgent(), maxAuditUserAgentLength), map[string]any{"revoked_count": count})
 	writeJSON(w, http.StatusOK, map[string]int64{"revoked": count})
 }
 
 func (s *Server) handleAdminListUserSessions(w http.ResponseWriter, r *http.Request) {
+	actor := currentUserFromContext(r)
+	authenticated := sessionFromContext(r.Context())
 	id, err := uuid.Parse(chi.URLParam(r, "id"))
 	if err != nil {
 		writeAPIError(w, http.StatusBadRequest, "invalid user ID")
@@ -91,7 +95,41 @@ func (s *Server) handleAdminListUserSessions(w http.ResponseWriter, r *http.Requ
 		writeAPIError(w, http.StatusServiceUnavailable, "failed to list sessions")
 		return
 	}
-	writeJSON(w, http.StatusOK, mapBrowserSessions(items, ""))
+	currentPublicID := ""
+	if actor != nil && actor.ID == id && authenticated != nil {
+		currentPublicID = authenticated.Data.PublicID
+	}
+	writeJSON(w, http.StatusOK, mapBrowserSessions(items, currentPublicID))
+}
+
+func (s *Server) handleAdminDeleteUserSession(w http.ResponseWriter, r *http.Request) {
+	actor := currentUserFromContext(r)
+	authenticated := sessionFromContext(r.Context())
+	id, err := uuid.Parse(chi.URLParam(r, "id"))
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid user ID")
+		return
+	}
+	if _, err := s.userService.GetByID(r.Context(), id); err != nil {
+		writeAPIError(w, http.StatusNotFound, "user not found")
+		return
+	}
+	publicID := chi.URLParam(r, "session_id")
+	if err := s.sessionStore.DeleteUserSessionByPublicID(r.Context(), id.String(), publicID); err != nil {
+		if errors.Is(err, session.ErrNotFound) {
+			writeAPIError(w, http.StatusNotFound, "session not found")
+		} else {
+			writeAPIError(w, http.StatusServiceUnavailable, "failed to revoke session")
+		}
+		return
+	}
+	if actor != nil && actor.ID == id && authenticated != nil && publicID == authenticated.Data.PublicID {
+		s.sessionMiddleware.clearCookie(w)
+	}
+	if actor != nil {
+		s.enqueueAuditTargetResult(r.Context(), models.AuditSessionRevoked, &actor.ID, actor.Username, "user", id.String(), "success", "medium", requestIP(r), truncateAuditValue(r.UserAgent(), maxAuditUserAgentLength), map[string]any{"session_id": publicID})
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
 
 func (s *Server) handleAdminRevokeUserSessions(w http.ResponseWriter, r *http.Request) {

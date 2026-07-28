@@ -155,18 +155,26 @@ type CreateUserAndIdentityOptions struct {
 }
 
 func (s *Store) ListByUser(ctx context.Context, userID uuid.UUID) ([]models.Identity, error) {
-	rows, err := s.db.Query(ctx, `SELECT `+identityCols+` FROM identities WHERE user_id=$1 ORDER BY created_at,id`, userID)
+	rows, err := s.db.Query(ctx, `
+		SELECT i.id,i.user_id,i.provider,i.external_id,i.external_username,i.external_email,
+		       i.metadata,i.created_at,i.updated_at,p.type,p.display_name,p.icon_key
+		FROM identities AS i
+		LEFT JOIN oauth_providers AS p ON p.name=i.provider
+		WHERE i.user_id=$1 ORDER BY i.created_at,i.id
+	`, userID)
 	if err != nil {
 		return nil, err
 	}
 	defer rows.Close()
 	items := make([]models.Identity, 0)
 	for rows.Next() {
-		i, err := scanIdentity(rows)
-		if err != nil {
+		var i models.Identity
+		if err := rows.Scan(&i.ID, &i.UserID, &i.Provider, &i.ExternalID, &i.ExternalUsername,
+			&i.ExternalEmail, &i.Metadata, &i.CreatedAt, &i.UpdatedAt, &i.ProviderType,
+			&i.ProviderDisplayName, &i.ProviderIconKey); err != nil {
 			return nil, err
 		}
-		items = append(items, *i)
+		items = append(items, i)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, err

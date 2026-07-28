@@ -87,8 +87,8 @@ func KnownFilterOptions() FilterOptions {
 		models.AuditUserSessionsRevoked,
 		models.AuditUserSuspended,
 		models.AuditUserUpdated,
-		"session.others_revoked",
-		"session.revoked",
+		models.AuditSessionOthersRevoked,
+		models.AuditSessionRevoked,
 	}
 	sort.Strings(events)
 	return FilterOptions{

@@ -2,7 +2,15 @@
 
 本手册使用 `docker-compose.prod.yml` 在一台 Linux 主机上运行 Nyauth、PostgreSQL 和 Redis，并由同机或外部平台的通用反向代理终止 TLS。Compose 不发布应用或数据库端口；反向代理通过预先创建的 external Docker network 访问 `nyauth:8080`。头像默认保存到独立的本地 `media` volume，也可在首次开放头像上传前通过 `docker-compose.media-s3.yml` 切换到私有 S3 兼容存储。
 
-生产数据的备份与恢复要求见 [备份与恢复手册](backup-restore.md)。需要外部 PostgreSQL、外部 Redis 或双应用实例时，使用 [高可用部署](high-availability.md)，不要把本手册的内置数据库拓扑直接扩展成多主机部署。
+生产数据的备份与恢复要求见 [备份与恢复手册](backup-restore.md)。需要双应用实例时使用 [高可用部署](high-availability.md)，不要把本手册的内置数据库拓扑直接扩展成多主机部署。同一主机已经由 1Panel 等平台维护 PostgreSQL 和 Redis 时，可使用仓库中的 `docker-compose.external.yml` 运行单个 Nyauth 实例；该拓扑只共用服务实例，仍必须使用 Nyauth 专用数据库和数据库角色。
+
+### 同机外部 PostgreSQL/Redis
+
+`docker-compose.external.yml` 不创建或管理 PostgreSQL、Redis，只运行一次性迁移容器和 Nyauth。数据库、Redis 与 Nyauth 必须加入同一个受控 external Docker network，使用容器 DNS 名连接；不要为此开放数据库公网端口。同机 Docker bridge 可显式设置 `NYAUTH_DATABASE_TLS_MODE=disable` 和 `NYAUTH_REDIS_TLS_ENABLED=false`，跨主机连接则必须启用并验证 TLS。
+
+应用默认只发布 `127.0.0.1:43001:8080`。使用 host network 的 1Panel OpenResty 可反向代理到 `http://127.0.0.1:43001`，该端口不会监听公网地址。Docker 端口转发通常会让 Nyauth 看到 `172.18.0.1` 这样的 Docker bridge 网关作为直接对端，但必须通过一次实际请求和日志核对；`NYAUTH_TRUSTED_PROXY_CIDRS` 只配置该精确 `/32`。如果改为让容器代理通过 Docker 网络访问应用，则必须改用实际代理容器地址的精确 `/32`。代理仍需丢弃客户端伪造的转发头并重新设置 `Host`、`X-Forwarded-Proto`、`X-Forwarded-Host` 和 `X-Forwarded-For`。
+
+外部依赖部署目录只需要 `docker-compose.external.yml`、`.env.production` 和五个 secret：migrator DSN、runtime DSN、Redis 密码、master key、bootstrap 管理员密码。五个源文件均应由 `65532:65532` 所有且模式为 `0400`，外层 `secrets` 目录继续保持 `0700 root`；这是 Linux Compose file secret 与镜像非 root 用户共同要求的权限模型。Compose 默认把 PostgreSQL 连接池限制为 10、Redis 连接池限制为 20；低内存单机不应无依据地改回 HA 默认值。首次启动顺序与下文相同，所有命令把 `-f docker-compose.prod.yml` 替换为 `-f docker-compose.external.yml`。外部 PostgreSQL 的数据库和两个角色必须在迁移前由平台管理员创建；迁移完成后 Nyauth 会验证 runtime 角色无 DDL、无迁移表写权限且不属于其他角色。
 
 ## 安全边界与前置条件
 
@@ -65,6 +73,16 @@ printf 'postgres://nyauth_runtime:%s@postgres:5432/nyauth?sslmode=disable' "$RUN
 printf '%s' "$REDIS_PASSWORD" > secrets/redis-password
 printf '%s' "$MASTER_KEY" > secrets/auth-master-key
 chmod 0600 secrets/*
+sudo chown 65532:65532 \
+  secrets/database-migration-dsn \
+  secrets/database-runtime-dsn \
+  secrets/redis-password \
+  secrets/auth-master-key
+sudo chmod 0400 \
+  secrets/database-migration-dsn \
+  secrets/database-runtime-dsn \
+  secrets/redis-password \
+  secrets/auth-master-key
 unset MIGRATION_PASSWORD RUNTIME_PASSWORD REDIS_PASSWORD MASTER_KEY
 ```
 
@@ -279,7 +297,7 @@ docker compose --env-file .env.production -f docker-compose.prod.yml down
 
 ## 升级
 
-`0.3.0-rc.1` 本身是 schema version 1 的破坏性 release baseline，只能部署到全新 PostgreSQL/Redis，不能对早期开发数据库执行以下升级流程。对未来发布，只有目标版本说明明确兼容当前 baseline 时才可继续；升级前保存旧 digest，备份 PostgreSQL、头像媒体和 master key，并阅读目标版本的迁移说明：
+`0.3.0-rc.1` 建立了 schema version 1 的破坏性 release baseline，不能从更早的开发数据库升级。当前开发分支在该 baseline 上提供兼容的 `000002_provider_presentation` 加法迁移并要求 schema version 2；从 RC1 升级可按以下流程执行。升级前保存旧 digest，备份 PostgreSQL、头像媒体和 master key，并阅读目标版本的迁移说明：
 
 1. 把匹配目标版本的 Compose 和初始化脚本放入部署目录。
 2. 在临时副本中把 `.env.production` 的 `NYAUTH_IMAGE` 更新为已验证的新 digest，执行 `config --quiet`，确认后再原子替换正式文件。

@@ -174,6 +174,9 @@ export interface ExternalIdentity {
   id: string;
   user_id: string;
   provider: string;
+  provider_type?: string | null;
+  provider_display_name?: string | null;
+  provider_icon_key?: string | null;
   external_id: string;
   external_username?: string | null;
   external_email?: string | null;
@@ -183,6 +186,8 @@ export interface ExternalIdentity {
 
 export interface ProviderSummary {
   name: string;
+  display_name: string;
+  icon_key: string;
   type: 'github' | 'google' | 'generic' | string;
 }
 
@@ -263,6 +268,8 @@ export interface OAuthAuthorization {
 export interface ExternalProvider {
   id: string;
   name: string;
+  display_name: string;
+  icon_key: string;
   type: 'github' | 'google' | 'generic' | string;
   client_id: string;
   scopes: string[];
@@ -281,6 +288,8 @@ export interface ExternalProvider {
 
 export interface CreateProviderInput {
   name: string;
+  display_name?: string;
+  icon_key?: string;
   type: 'github' | 'google' | 'generic';
   client_id: string;
   client_secret: string;
@@ -295,6 +304,8 @@ export interface CreateProviderInput {
 }
 
 export interface UpdateProviderInput {
+  display_name?: string;
+  icon_key?: string;
   client_id?: string;
   client_secret?: string;
   scopes?: string[];
@@ -416,6 +427,7 @@ export interface AuditLogFilters {
   page?: number;
   pageSize?: number;
   event?: string;
+  events?: string[];
   result?: string;
   risk?: string;
   actor?: string;
@@ -455,7 +467,12 @@ export function buildAuditLogSearchParams(filters: AuditLogFilters = {}, include
     params.set('page', String(filters.page || 1));
     params.set('page_size', String(filters.pageSize || 20));
   }
+  const events = filters.events?.length ? filters.events : filters.event ? [filters.event] : [];
+  for (const event of events) {
+    if (event) params.append('event', event);
+  }
   for (const [filterKey, parameter] of Object.entries(auditLogFilterParameters) as Array<[keyof typeof auditLogFilterParameters, string]>) {
+    if (filterKey === 'event') continue;
     const value = filters[filterKey];
     if (value) params.set(parameter, value);
   }
@@ -1081,6 +1098,8 @@ export const api = {
     deleteUserIdentity: (userID: string, identityID: string) =>
       req<void>(`/api/admin/users/${encodeURIComponent(userID)}/identities/${encodeURIComponent(identityID)}`, { method: 'DELETE' }),
     getUserSessions: (id: string) => req<BrowserSession[]>(`/api/admin/users/${encodeURIComponent(id)}/sessions`),
+    revokeUserSession: (id: string, sessionID: string) =>
+      req<void>(`/api/admin/users/${encodeURIComponent(id)}/sessions/${encodeURIComponent(sessionID)}`, { method: 'DELETE' }),
     revokeUserSessions: (id: string) => req<{ revoked: number }>(`/api/admin/users/${encodeURIComponent(id)}/sessions`, { method: 'DELETE' }),
     getClients: (page = 1, pageSize = 20) => req<PaginatedResponse<OAuthClient>>(`/api/admin/clients?page=${page}&page_size=${pageSize}`),
     createClient: (data: CreateClientInput) => req<CreateClientResult>('/api/admin/clients', { method: 'POST', body: JSON.stringify(data) }),

@@ -7,6 +7,7 @@
   import PasskeySettingsCard from '$lib/components/account/PasskeySettingsCard.svelte';
   import ReauthenticationDialog from '$lib/components/account/ReauthenticationDialog.svelte';
   import TOTPSettingsCard from '$lib/components/account/TOTPSettingsCard.svelte';
+  import ProviderIcon from '$lib/components/identity/ProviderIcon.svelte';
   import Badge from '$lib/components/ui/Badge.svelte';
   import Button from '$lib/components/ui/Button.svelte';
   import Input from '$lib/components/ui/Input.svelte';
@@ -15,8 +16,6 @@
 
   const returnTo = '/profile/security';
   const initialProviderAuthError = consumeProviderAuthError();
-  const providerIcons: Record<string, string> = { github: '🐙', google: '🔵', generic: '🔗' };
-
   let session = $derived($sessionStore.session);
   let identities = $state<ExternalIdentity[]>([]);
   let identitiesLoading = $state(true);
@@ -181,7 +180,7 @@
         <div class="flex items-center gap-2"><p class="text-body text-nya-warning">{identitiesError}</p><Button variant="ghost" size="sm" onclick={loadIdentities}>重试</Button></div>
       {:else}
         {#each identities as identity}
-          <Button variant="secondary" loading={reauthProvider === identity.provider} onclick={() => beginProviderReauthentication(identity.provider)}><span>{providerIcons[identity.provider] || '🔗'}</span> 使用 {identity.provider}</Button>
+          <Button variant="secondary" loading={reauthProvider === identity.provider} onclick={() => beginProviderReauthentication(identity.provider)}><ProviderIcon type={identity.provider_type} iconKey={identity.provider_icon_key} size={16} /> 使用 {identity.provider_display_name || identity.provider}</Button>
         {/each}
       {/if}
     </div>
@@ -211,7 +210,7 @@
       {:else if identitiesError}
         <p class="text-small text-nya-danger">{identitiesError}</p>
       {:else}
-        <div class="flex flex-wrap gap-2">{#each identities as identity}<Button variant="secondary" loading={reauthProvider === identity.provider} onclick={() => beginProviderReauthentication(identity.provider)}><span>{providerIcons[identity.provider] || '🔗'}</span> 使用 {identity.provider} 重新认证</Button>{/each}</div>
+        <div class="flex flex-wrap gap-2">{#each identities as identity}<Button variant="secondary" loading={reauthProvider === identity.provider} onclick={() => beginProviderReauthentication(identity.provider)}><ProviderIcon type={identity.provider_type} iconKey={identity.provider_icon_key} size={16} /> 使用 {identity.provider_display_name || identity.provider} 重新认证</Button>{/each}</div>
         {#if identities.length === 0}<p class="text-small text-nya-danger">没有可用于重新认证的外部身份，请联系管理员。</p>{/if}
       {/if}
     </div>

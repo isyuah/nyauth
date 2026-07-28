@@ -134,6 +134,72 @@ func TestHAHTTPServersShareSessionAndAccountState(t *testing.T) {
 
 	adminIP := fmt.Sprintf("2001:db8:%s:%s::42", marker[:4], marker[4:8])
 	adminLogin := cluster.login(t, 1, admin.Username, password, adminIP)
+	secondTargetLogin := cluster.login(t, 1, target.Username, password, targetIP)
+	userSessionsPath := "/api/admin/users/" + target.ID.String() + "/sessions"
+	response = cluster.request(t, 0, http.MethodGet, userSessionsPath, nil, adminLogin.cookie, "", adminIP)
+	if response.StatusCode != http.StatusOK {
+		body := readHAResponse(t, response)
+		t.Fatalf("list user sessions before single revocation: status=%d body=%s", response.StatusCode, body)
+	}
+	var sessionsBefore []browserSessionResponse
+	decodeHAResponse(t, response, &sessionsBefore)
+	if len(sessionsBefore) != 2 {
+		t.Fatalf("user sessions before single revocation = %d, want 2", len(sessionsBefore))
+	}
+	revokedPublicID := sessionsBefore[0].ID
+	singleSessionPath := userSessionsPath + "/" + url.PathEscape(revokedPublicID)
+	response = cluster.request(t, 1, http.MethodDelete, singleSessionPath, nil, adminLogin.cookie, adminLogin.session.CSRFToken, adminIP)
+	if response.StatusCode != http.StatusNoContent {
+		body := readHAResponse(t, response)
+		t.Fatalf("revoke one user session: status=%d body=%s", response.StatusCode, body)
+	}
+	response = cluster.request(t, 0, http.MethodGet, userSessionsPath, nil, adminLogin.cookie, "", adminIP)
+	if response.StatusCode != http.StatusOK {
+		body := readHAResponse(t, response)
+		t.Fatalf("list user sessions after single revocation: status=%d body=%s", response.StatusCode, body)
+	}
+	var sessionsAfter []browserSessionResponse
+	decodeHAResponse(t, response, &sessionsAfter)
+	if len(sessionsAfter) != 1 || sessionsAfter[0].ID == revokedPublicID {
+		t.Fatalf("user sessions after single revocation = %#v", sessionsAfter)
+	}
+	afterSingleRevocation, err := cluster.apps[0].userService.GetByID(ctx, target.ID)
+	if err != nil {
+		t.Fatalf("load target after single session revocation: %v", err)
+	}
+	if afterSingleRevocation.SessionVersion != target.SessionVersion {
+		t.Fatalf("single session revocation changed session_version to %d", afterSingleRevocation.SessionVersion)
+	}
+	validSessions := 0
+	for _, candidate := range []haLogin{targetLogin, secondTargetLogin} {
+		response = cluster.request(t, 0, http.MethodGet, "/api/session", nil, candidate.cookie, "", targetIP)
+		if response.StatusCode == http.StatusOK {
+			validSessions++
+			targetLogin = candidate
+		}
+		_ = readHAResponse(t, response)
+	}
+	if validSessions != 1 {
+		t.Fatalf("valid sessions after single revocation = %d, want 1", validSessions)
+	}
+	var singleAuditPayload []byte
+	if err := cluster.apps[0].db.QueryRow(ctx, `
+		SELECT payload FROM audit_event_outbox
+		WHERE event=$1 AND aggregate_type='user' AND aggregate_id=$2 AND payload->>'result'='success'
+		ORDER BY created_at DESC LIMIT 1
+	`, models.AuditSessionRevoked, target.ID.String()).Scan(&singleAuditPayload); err != nil {
+		t.Fatalf("load single session revocation audit: %v", err)
+	}
+	var singleAudit map[string]any
+	if err := json.Unmarshal(singleAuditPayload, &singleAudit); err != nil {
+		t.Fatalf("decode single session revocation audit: %v", err)
+	}
+	singleDetails, _ := singleAudit["details"].(map[string]any)
+	if singleAudit["actor_id"] != admin.ID.String() || singleAudit["target_id"] != target.ID.String() ||
+		singleAudit["risk_level"] != "medium" || singleDetails["session_id"] != revokedPublicID {
+		t.Fatalf("unexpected single session revocation audit: %#v", singleAudit)
+	}
+
 	revokeSessionsPath := "/api/admin/users/" + target.ID.String() + "/sessions"
 	response = cluster.request(t, 0, http.MethodDelete, revokeSessionsPath, nil, adminLogin.cookie, adminLogin.session.CSRFToken, adminIP)
 	if response.StatusCode != http.StatusOK {

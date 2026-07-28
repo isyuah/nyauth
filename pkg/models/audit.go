@@ -36,6 +36,8 @@ const (
 	AuditUserProfileUpdated     = "user.profile_updated"
 	AuditUserLogout             = "user.logout"
 	AuditUserSessionsRevoked    = "session.user_revoked"
+	AuditSessionRevoked         = "session.revoked"
+	AuditSessionOthersRevoked   = "session.others_revoked"
 	AuditIdentityBindStarted    = "identity.bind_started"
 	AuditIdentityBound          = "identity.bound"
 	AuditIdentityUnbound        = "identity.unbound"

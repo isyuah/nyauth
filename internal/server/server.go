@@ -403,6 +403,7 @@ func (s *Server) buildRouter() *chi.Mux {
 			r.Get("/admin/users/{id}/identities", s.handleUserIdentities)
 			r.Delete("/admin/users/{id}/identities/{identity_id}", s.handleAdminDeleteUserIdentity)
 			r.Get("/admin/users/{id}/sessions", s.handleAdminListUserSessions)
+			r.Delete("/admin/users/{id}/sessions/{session_id}", s.handleAdminDeleteUserSession)
 			r.Delete("/admin/users/{id}/sessions", s.handleAdminRevokeUserSessions)
 			r.Post("/admin/users/{id}/suspend", s.handleSuspendUser)
 			r.Post("/admin/users/{id}/activate", s.handleActivateUser)

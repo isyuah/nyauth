@@ -123,13 +123,13 @@
   <div class="grid gap-4 xl:grid-cols-[minmax(0,1fr)_340px]">
     <section class="rounded-nya-card border border-nya-border bg-nya-surface p-5 shadow-nya-card">
       <h2 class="text-card-title text-nya-text-primary">基本资料</h2>
-      <p class="mb-4 mt-1 text-body text-nya-text-secondary">管理用户的联系方式、展示信息、头像和 metadata。</p>
+      <p class="mb-4 mt-1 text-body text-nya-text-secondary">管理用户的联系方式、展示信息、头像和内部扩展属性。</p>
       {#if error}<p class="mb-3 rounded-nya-sm bg-nya-danger-soft px-3 py-2 text-small text-nya-danger" role="alert">{error}</p>{/if}
       {#if notice}<p class="mb-3 rounded-nya-sm bg-nya-success-soft px-3 py-2 text-small text-nya-success" role="status">{notice}</p>{/if}
       <form onsubmit={saveProfile} class="space-y-4">
         <div class="grid gap-4 md:grid-cols-2"><Input id="admin-user-email" label="邮箱" type="email" bind:value={profileForm.email} autocomplete="email" placeholder="可选" /><Input id="admin-user-display-name" label="显示名称" bind:value={profileForm.display_name} placeholder="可选" /></div>
         <div><p class="mb-2 text-body-medium text-nya-text-primary">头像</p><AvatarCropper currentUrl={user.avatar_url} onupload={uploadAvatar} onremove={removeAvatar} /></div>
-        <div><label for="admin-user-metadata" class="mb-1.5 block text-body-medium text-nya-text-primary">Metadata（JSON 字符串键值）</label><textarea id="admin-user-metadata" bind:value={profileForm.metadata} rows="5" spellcheck="false" class="w-full rounded-nya-sm border border-nya-border bg-nya-surface px-3 py-2 font-mono text-small focus:border-nya-primary focus:outline-none focus:ring-2 focus:ring-nya-primary/24"></textarea></div>
+        <div><label for="admin-user-metadata" class="mb-1.5 block text-body-medium text-nya-text-primary">高级扩展属性（JSON 字符串键值）</label><textarea id="admin-user-metadata" bind:value={profileForm.metadata} rows="5" spellcheck="false" class="w-full rounded-nya-sm border border-nya-border bg-nya-surface px-3 py-2 font-mono text-small focus:border-nya-primary focus:outline-none focus:ring-2 focus:ring-nya-primary/24"></textarea><p class="mt-1.5 text-small text-nya-text-tertiary">用于内部编号、同步来源等集成数据；不参与认证或授权，也不会自动写入 Access Token、ID Token 或 UserInfo。</p></div>
         <Button type="submit" variant="primary" loading={saving}>保存资料</Button>
       </form>
     </section>

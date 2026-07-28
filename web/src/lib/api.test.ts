@@ -371,7 +371,7 @@ describe('audit API contract', () => {
     await api.admin.getAuditLogs({
       page: 2,
       pageSize: 25,
-      event: 'user.login',
+      events: ['user.login', 'user.logout'],
       result: 'failure',
       risk: 'high',
       actor: 'alice',
@@ -386,10 +386,10 @@ describe('audit API contract', () => {
 
     expect(fetchMock.mock.calls[0][0]).toBe('/api/admin/audit-logs/options');
     const requestURL = new URL(String(fetchMock.mock.calls[1][0]), 'https://auth.example');
-    expect(Object.fromEntries(requestURL.searchParams)).toEqual({
+    expect(requestURL.searchParams.getAll('event')).toEqual(['user.login', 'user.logout']);
+    expect(Object.fromEntries(Array.from(requestURL.searchParams).filter(([key]) => key !== 'event'))).toEqual({
       page: '2',
       page_size: '25',
-      event: 'user.login',
       result: 'failure',
       risk: 'high',
       actor: 'alice',

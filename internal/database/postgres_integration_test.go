@@ -171,6 +171,8 @@ func TestConcurrentBaselineMigrationInIsolatedSchema(t *testing.T) {
 	assertColumn(t, schema, "oauth_clients", "secret_rotated_at", "YES")
 	assertColumn(t, schema, "oauth_clients", "secret_last_used_at", "YES")
 	assertColumn(t, schema, "oauth_providers", "revision", "NO")
+	assertColumn(t, schema, "oauth_providers", "display_name", "NO")
+	assertColumn(t, schema, "oauth_providers", "icon_key", "NO")
 	assertColumn(t, schema, "account_action_tokens", "token_hash", "NO")
 	assertColumn(t, schema, "email_outbox", "encrypted_message", "NO")
 	assertColumn(t, schema, "oauth_authorizations", "revoked_at", "YES")
@@ -198,6 +200,17 @@ func TestConcurrentBaselineMigrationInIsolatedSchema(t *testing.T) {
 		"audit_logs_details_object",
 	} {
 		assertConstraint(t, schema, constraintName)
+	}
+	var displayName, iconKey string
+	if err := schema.pool.QueryRow(ctx, `
+		INSERT INTO oauth_providers (name,type,client_id,client_secret,enabled)
+		VALUES ('migration-default-provider','github','client','test-envelope',FALSE)
+		RETURNING display_name,icon_key
+	`).Scan(&displayName, &iconKey); err != nil {
+		t.Fatalf("insert provider with presentation defaults: %v", err)
+	}
+	if displayName != "migration-default-provider" || iconKey != "auto" {
+		t.Fatalf("provider presentation defaults = %q/%q", displayName, iconKey)
 	}
 }
 
@@ -793,7 +806,8 @@ func TestProviderMutationAuditIsAtomicAndSnapshotFollowsCommit(t *testing.T) {
 	const plaintextSecret = "provider-secret-must-not-enter-audit"
 	enabledOnCreate := true
 	created, err := manager.CreateProvider(ctx, models.CreateProviderRequest{
-		Name: providerName, Type: "github", ClientID: "provider-client", ClientSecret: plaintextSecret,
+		Name: providerName, DisplayName: "Integration GitHub", IconKey: "github",
+		Type: "github", ClientID: "provider-client", ClientSecret: plaintextSecret,
 		Enabled: &enabledOnCreate, Scopes: []string{"read:user", "user:email"},
 	}, mutation(models.AuditProviderCreated, nil))
 	if err != nil {
@@ -801,6 +815,13 @@ func TestProviderMutationAuditIsAtomicAndSnapshotFollowsCommit(t *testing.T) {
 	}
 	if _, ok := manager.Get(providerName); !ok {
 		t.Fatal("committed enabled provider was not installed in runtime snapshot")
+	}
+	if created.DisplayName != "Integration GitHub" || created.IconKey != "github" {
+		t.Fatalf("created provider presentation = %q/%q", created.DisplayName, created.IconKey)
+	}
+	listed := manager.List()
+	if len(listed) != 1 || listed[0].DisplayName != created.DisplayName || listed[0].IconKey != created.IconKey {
+		t.Fatalf("runtime provider presentation = %#v", listed)
 	}
 	var createPayload []byte
 	if err := schema.pool.QueryRow(ctx, `SELECT payload FROM audit_event_outbox WHERE event=$1 AND aggregate_id=$2`, models.AuditProviderCreated, providerName).Scan(&createPayload); err != nil {
@@ -840,6 +861,17 @@ func TestProviderMutationAuditIsAtomicAndSnapshotFollowsCommit(t *testing.T) {
 	}
 	if disabledAuditEvents != 1 {
 		t.Fatalf("disabled provider audit events = %d, want 1", disabledAuditEvents)
+	}
+
+	updatedDisplayName, updatedIconKey := "GitHub for Employees", "link"
+	created, err = manager.UpdateProvider(ctx, providerName, models.UpdateProviderRequest{
+		DisplayName: &updatedDisplayName, IconKey: &updatedIconKey,
+	}, mutation(models.AuditProviderUpdated, nil))
+	if err != nil {
+		t.Fatalf("update provider presentation: %v", err)
+	}
+	if created.DisplayName != updatedDisplayName || created.IconKey != updatedIconKey {
+		t.Fatalf("updated provider presentation = %q/%q", created.DisplayName, created.IconKey)
 	}
 
 	if _, err := manager.UpdateProvider(ctx, providerName, models.UpdateProviderRequest{Enabled: &disabled}, mutation(models.AuditProviderUpdated, map[string]any{"provider_secret": "forbidden"})); err == nil {

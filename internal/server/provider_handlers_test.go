@@ -88,6 +88,10 @@ func TestEmptyProviderUpdate(t *testing.T) {
 	if emptyProviderUpdate(models.UpdateProviderRequest{Scopes: emptyScopes}) {
 		t.Fatal("an explicit empty scope list was mistaken for an empty update")
 	}
+	displayName := "Company SSO"
+	if emptyProviderUpdate(models.UpdateProviderRequest{DisplayName: &displayName}) {
+		t.Fatal("a display-name update was mistaken for an empty update")
+	}
 }
 
 func TestValidateProviderRequestRequiresExplicitEnabled(t *testing.T) {

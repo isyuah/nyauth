@@ -15,10 +15,10 @@
   import Badge from '$lib/components/ui/Badge.svelte';
   import Button from '$lib/components/ui/Button.svelte';
   import FilterBar from '$lib/components/ui/FilterBar.svelte';
-  import FormField from '$lib/components/ui/FormField.svelte';
   import Input from '$lib/components/ui/Input.svelte';
   import ResourceState from '$lib/components/ui/ResourceState.svelte';
   import Select from '$lib/components/ui/Select.svelte';
+  import TreeMultiSelect from '$lib/components/ui/TreeMultiSelect.svelte';
   import { Download, Eye, Filter, X } from 'lucide-svelte';
 
   type FilterKey = 'event' | 'result' | 'risk' | 'actor' | 'target' | 'subjectUserId' | 'targetType' | 'targetId' | 'ip' | 'from' | 'to';
@@ -53,7 +53,7 @@
   let logs = $state<AuditLog[]>([]);
   let total = $state(0);
   let currentPage = $state(Math.max(1, Number($pageStore.url.searchParams.get('page')) || 1));
-  let event = $state($pageStore.url.searchParams.get('event') || '');
+  let events = $state($pageStore.url.searchParams.getAll('event').filter(Boolean));
   let result = $state($pageStore.url.searchParams.get('result') || '');
   let risk = $state($pageStore.url.searchParams.get('risk') || '');
   let actor = $state($pageStore.url.searchParams.get('actor') || '');
@@ -77,7 +77,7 @@
   let riskOptions = $derived(selectOptions(filterOptions.risks, risk, '全部风险', riskLabels));
   let targetTypeOptions = $derived(selectOptions(filterOptions.target_types, targetType, '全部目标类型', targetTypeLabels));
   let activeFilters = $derived(([
-    { key: 'event', label: '事件', value: event.trim() },
+    ...events.map((value) => ({ key: 'event' as const, label: '事件', value })),
     { key: 'result', label: '结果', value: result.trim() },
     { key: 'risk', label: '风险', value: risk.trim() },
     { key: 'actor', label: '操作者（模糊）', value: actor.trim() },
@@ -118,7 +118,7 @@
     return {
       page: currentPage,
       pageSize,
-      event: event.trim() || undefined,
+      events,
       result: result.trim() || undefined,
       risk: risk.trim() || undefined,
       actor: actor.trim() || undefined,
@@ -135,7 +135,6 @@
   async function syncURL(): Promise<boolean> {
     const url = new URL($pageStore.url);
     const values: Record<string, string | undefined> = {
-      event: event.trim() || undefined,
       result: result.trim() || undefined,
       risk: risk.trim() || undefined,
       actor: actor.trim() || undefined,
@@ -151,6 +150,8 @@
       if (value) url.searchParams.set(key, value);
       else url.searchParams.delete(key);
     }
+    url.searchParams.delete('event');
+    for (const event of events) url.searchParams.append('event', event);
     if (currentPage > 1) url.searchParams.set('page', String(currentPage));
     else url.searchParams.delete('page');
     const destination = `${url.pathname}${url.search}${url.hash}`;
@@ -195,7 +196,7 @@
     if (key === currentURLKey) return;
     currentURLKey = key;
     currentPage = Math.max(1, Number(url.searchParams.get('page')) || 1);
-    event = url.searchParams.get('event') || '';
+    events = url.searchParams.getAll('event').filter(Boolean);
     result = url.searchParams.get('result') || '';
     risk = url.searchParams.get('risk') || '';
     actor = url.searchParams.get('actor') || '';
@@ -222,8 +223,8 @@
     await applyFilters();
   }
 
-  async function removeFilter(key: FilterKey) {
-    if (key === 'event') event = '';
+  async function removeFilter(key: FilterKey, value?: string) {
+    if (key === 'event') events = value ? events.filter((event) => event !== value) : [];
     else if (key === 'result') result = '';
     else if (key === 'risk') risk = '';
     else if (key === 'actor') actor = '';
@@ -238,7 +239,7 @@
   }
 
   async function clearFilters() {
-    event = '';
+    events = [];
     result = '';
     risk = '';
     actor = '';
@@ -295,12 +296,7 @@
     </div>
 
     <div class="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-      <FormField id="audit-event" label="事件">
-        {#snippet children()}
-          <input id="audit-event" list="audit-event-options" bind:value={event} placeholder="例如 user.login" autocomplete="off" class="h-[38px] w-full rounded-nya-sm border border-nya-border bg-nya-surface px-3 text-body text-nya-text-primary placeholder-nya-text-tertiary transition-all hover:border-nya-border-strong focus:border-nya-primary focus:outline-none focus:ring-2 focus:ring-nya-primary/24" />
-          <datalist id="audit-event-options">{#each filterOptions.events as option}<option value={option}></option>{/each}</datalist>
-        {/snippet}
-      </FormField>
+    <div class="md:col-span-2"><TreeMultiSelect id="audit-event" label="事件" bind:values={events} options={filterOptions.events} placeholder="搜索事件，例如 user.login" /></div>
       <Select id="audit-result" label="结果" bind:value={result} options={resultOptions} />
       <Select id="audit-risk" label="风险" bind:value={risk} options={riskOptions} />
       <Input id="audit-actor" label="操作者（模糊）" bind:value={actor} placeholder="名称或 ID" />
@@ -314,13 +310,13 @@
     </div>
 
     {#if optionsError}
-      <p class="mt-3 text-small text-nya-warning" role="alert">筛选选项暂时不可用：{optionsError}。仍可手动输入筛选条件。</p>
+    <p class="mt-3 text-small text-nya-warning" role="alert">筛选选项暂时不可用：{optionsError}。URL 中已有的事件筛选仍然有效。</p>
     {/if}
 
     {#if activeFilters.length > 0}
       <div class="mt-3 flex flex-wrap items-center gap-2" aria-label="已启用筛选">
         {#each activeFilters as filter}
-          <button type="button" onclick={() => removeFilter(filter.key)} aria-label={`移除筛选：${filter.label}：${filter.value}`} class="inline-flex max-w-full items-center gap-1.5 rounded-nya-full border border-nya-border bg-nya-surface px-2.5 py-1 text-small text-nya-text-secondary hover:border-nya-primary hover:text-nya-primary">
+          <button type="button" onclick={() => removeFilter(filter.key, filter.value)} aria-label={`移除筛选：${filter.label}：${filter.value}`} class="inline-flex max-w-full items-center gap-1.5 rounded-nya-full border border-nya-border bg-nya-surface px-2.5 py-1 text-small text-nya-text-secondary hover:border-nya-primary hover:text-nya-primary">
             <span class="truncate">{filter.label}：{filter.value}</span><X size={13} aria-hidden="true" />
           </button>
         {/each}

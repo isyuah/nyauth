@@ -28,7 +28,9 @@
       <a
         href={tab.href}
         aria-current={isActive(tab) ? 'page' : undefined}
-        class="-mb-px border-b-2 border-transparent px-4 py-2.5 text-body-medium text-nya-text-secondary transition-colors hover:text-nya-text-primary {isActive(tab) ? 'border-nya-primary text-nya-primary' : ''}"
+        class="-mb-px border-b-2 px-4 py-2.5 text-body-medium transition-colors {isActive(tab)
+          ? 'border-nya-primary text-nya-primary'
+          : 'border-transparent text-nya-text-secondary hover:text-nya-text-primary'}"
       >
         {tab.label}
       </a>

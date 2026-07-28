@@ -456,7 +456,7 @@ func (s *Server) finishExternalLogin(w http.ResponseWriter, r *http.Request, pro
 }
 
 func (s *Server) handleAdminListProviders(w http.ResponseWriter, r *http.Request) {
-	rows, err := s.db.Query(r.Context(), `SELECT id,name,type,client_id,scopes,discovery_url,authorization_url,token_url,userinfo_url,enabled,import_avatar,avatar_allowed_hosts,revision,metadata,created_at,updated_at FROM oauth_providers ORDER BY name`)
+	rows, err := s.db.Query(r.Context(), `SELECT id,name,display_name,icon_key,type,client_id,scopes,discovery_url,authorization_url,token_url,userinfo_url,enabled,import_avatar,avatar_allowed_hosts,revision,metadata,created_at,updated_at FROM oauth_providers ORDER BY display_name,name`)
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "failed to list providers")
 		return
@@ -465,7 +465,7 @@ func (s *Server) handleAdminListProviders(w http.ResponseWriter, r *http.Request
 	items := make([]models.ExternalProvider, 0)
 	for rows.Next() {
 		var item models.ExternalProvider
-		if err := rows.Scan(&item.ID, &item.Name, &item.Type, &item.ClientID, &item.Scopes, &item.DiscoveryURL, &item.AuthorizationURL, &item.TokenURL, &item.UserinfoURL, &item.Enabled, &item.ImportAvatar, &item.AvatarAllowedHosts, &item.Revision, &item.Metadata, &item.CreatedAt, &item.UpdatedAt); err != nil {
+		if err := rows.Scan(&item.ID, &item.Name, &item.DisplayName, &item.IconKey, &item.Type, &item.ClientID, &item.Scopes, &item.DiscoveryURL, &item.AuthorizationURL, &item.TokenURL, &item.UserinfoURL, &item.Enabled, &item.ImportAvatar, &item.AvatarAllowedHosts, &item.Revision, &item.Metadata, &item.CreatedAt, &item.UpdatedAt); err != nil {
 			writeAPIError(w, http.StatusInternalServerError, "failed to list providers")
 			return
 		}
@@ -504,7 +504,7 @@ func validateProviderRequest(request models.CreateProviderRequest) error {
 }
 
 func emptyProviderUpdate(request models.UpdateProviderRequest) bool {
-	return request.ClientID == nil && request.ClientSecret == nil && request.Scopes == nil &&
+	return request.DisplayName == nil && request.IconKey == nil && request.ClientID == nil && request.ClientSecret == nil && request.Scopes == nil &&
 		request.DiscoveryURL == nil && request.AuthorizationURL == nil && request.TokenURL == nil &&
 		request.UserinfoURL == nil && request.Enabled == nil && request.ImportAvatar == nil && request.AvatarAllowedHosts == nil
 }
@@ -526,7 +526,7 @@ func (s *Server) handleAdminCreateProvider(w http.ResponseWriter, r *http.Reques
 	}
 	created, err := s.providerMgr.CreateProvider(r.Context(), request, mutation)
 	if err != nil {
-		if errors.Is(err, provider.ErrInvalidAvatarPolicy) {
+		if errors.Is(err, provider.ErrInvalidAvatarPolicy) || errors.Is(err, provider.ErrInvalidPresentation) {
 			writeAPIError(w, http.StatusBadRequest, err.Error())
 		} else {
 			writeAPIError(w, http.StatusConflict, "failed to create provider")
@@ -577,7 +577,7 @@ func (s *Server) handleAdminUpdateProvider(w http.ResponseWriter, r *http.Reques
 	if err != nil {
 		if errors.Is(err, provider.ErrProviderNotFound) {
 			writeAPIError(w, http.StatusNotFound, "provider not found")
-		} else if errors.Is(err, provider.ErrInvalidAvatarPolicy) {
+		} else if errors.Is(err, provider.ErrInvalidAvatarPolicy) || errors.Is(err, provider.ErrInvalidPresentation) {
 			writeAPIError(w, http.StatusBadRequest, err.Error())
 		} else {
 			writeAPIError(w, http.StatusConflict, "provider configuration could not be updated")

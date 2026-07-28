@@ -9,6 +9,7 @@
   } from '$lib/api';
   import { parseTokenList } from '$lib/admin-form-utils';
   import PageHeader from '$lib/components/layout/PageHeader.svelte';
+  import ProviderIcon from '$lib/components/identity/ProviderIcon.svelte';
   import Badge from '$lib/components/ui/Badge.svelte';
   import Button from '$lib/components/ui/Button.svelte';
   import Card from '$lib/components/ui/Card.svelte';
@@ -17,11 +18,13 @@
   import Modal from '$lib/components/ui/Modal.svelte';
   import ResourceState from '$lib/components/ui/ResourceState.svelte';
   import Select from '$lib/components/ui/Select.svelte';
-  import { CheckCircle, ExternalLink, KeyRound, Plus, XCircle } from 'lucide-svelte';
+  import { CheckCircle, ExternalLink, Plus, XCircle } from 'lucide-svelte';
 
   type ProviderTestState = { revision: number; loading: boolean; result?: ProviderTestResult; error?: string };
   type ProviderForm = {
     name: string;
+    display_name: string;
+    icon_key: string;
     type: 'github' | 'google' | 'generic';
     client_id: string;
     client_secret: string;
@@ -37,7 +40,14 @@
   type ProviderEditForm = Omit<ProviderForm, 'name' | 'type'>;
 
   const typeLabels: Record<string, string> = { github: 'GitHub', google: 'Google', generic: '通用 OIDC' };
-  const typeColors: Record<string, string> = { github: 'var(--nya-text-primary)', google: 'var(--nya-blue)', generic: 'var(--nya-orange)' };
+  const iconOptions = [
+    { value: 'auto', label: '自动匹配类型' },
+    { value: 'github', label: 'GitHub' },
+    { value: 'google', label: 'Google' },
+    { value: 'key', label: '钥匙' },
+    { value: 'link', label: '链接' },
+    { value: 'globe', label: '地球' },
+  ];
   const setupGuides: Record<string, { title: string; url: string; steps: string[] }> = {
     github: {
       title: 'GitHub OAuth App',
@@ -67,8 +77,8 @@
   let showEdit = $state(false);
   let editingProvider = $state<ExternalProvider | null>(null);
   let editing = $state(false);
-  let editForm = $state<ProviderEditForm>({ client_id: '', client_secret: '', scopes: '', discovery_url: '', authorization_url: '', token_url: '', userinfo_url: '', enabled: true, import_avatar: false, avatar_allowed_hosts: '' });
-  let newProvider = $state<ProviderForm>({ name: '', type: 'github', client_id: '', client_secret: '', scopes: '', discovery_url: '', authorization_url: '', token_url: '', userinfo_url: '', enabled: true, import_avatar: false, avatar_allowed_hosts: '' });
+  let editForm = $state<ProviderEditForm>({ display_name: '', icon_key: 'auto', client_id: '', client_secret: '', scopes: '', discovery_url: '', authorization_url: '', token_url: '', userinfo_url: '', enabled: true, import_avatar: false, avatar_allowed_hosts: '' });
+  let newProvider = $state<ProviderForm>({ name: '', display_name: '', icon_key: 'auto', type: 'github', client_id: '', client_secret: '', scopes: '', discovery_url: '', authorization_url: '', token_url: '', userinfo_url: '', enabled: true, import_avatar: false, avatar_allowed_hosts: '' });
   let createError = $state('');
   let editError = $state('');
   let testResults = $state<Record<string, ProviderTestState>>({});
@@ -126,6 +136,8 @@
     try {
       const payload: CreateProviderInput = {
         name: newProvider.name.trim(),
+        display_name: newProvider.display_name.trim() || undefined,
+        icon_key: newProvider.icon_key,
         type: newProvider.type,
         client_id: newProvider.client_id.trim(),
         client_secret: newProvider.client_secret,
@@ -148,7 +160,7 @@
       }
       await api.admin.createProvider(payload);
       showCreate = false;
-      newProvider = { name: '', type: 'github', client_id: '', client_secret: '', scopes: '', discovery_url: '', authorization_url: '', token_url: '', userinfo_url: '', enabled: true, import_avatar: false, avatar_allowed_hosts: '' };
+      newProvider = { name: '', display_name: '', icon_key: 'auto', type: 'github', client_id: '', client_secret: '', scopes: '', discovery_url: '', authorization_url: '', token_url: '', userinfo_url: '', enabled: true, import_avatar: false, avatar_allowed_hosts: '' };
       await loadProviders();
     } catch (cause) {
       createError = cause instanceof Error ? cause.message : '创建失败';
@@ -175,6 +187,8 @@
   function openEdit(provider: ExternalProvider) {
     editingProvider = provider;
     editForm = {
+      display_name: provider.display_name,
+      icon_key: provider.icon_key,
       client_id: provider.client_id,
       client_secret: '',
       scopes: provider.scopes.join('\n'),
@@ -208,6 +222,8 @@
       return;
     }
     const payload: UpdateProviderInput = {
+      display_name: editForm.display_name.trim(),
+      icon_key: editForm.icon_key,
       client_id: clientID,
       scopes: parseTokenList(editForm.scopes),
       authorization_url: editForm.authorization_url.trim(),
@@ -307,8 +323,8 @@
         <Card>
           <div class="flex flex-col justify-between gap-4 lg:flex-row lg:items-start">
             <div class="flex items-center gap-3">
-              <span class="flex h-11 w-11 items-center justify-center rounded-nya-md bg-nya-surface-muted"><KeyRound size={20} color={typeColors[provider.type] || 'var(--nya-text-secondary)'} /></span>
-              <div><h2 class="text-card-title text-nya-text-primary">{provider.name}</h2><div class="mt-1 flex flex-wrap items-center gap-2"><Badge variant="info">{typeLabels[provider.type] || provider.type}</Badge><Badge variant={provider.enabled ? 'success' : 'default'}>{provider.enabled ? '已启用' : '已禁用'}</Badge>{#if provider.import_avatar}<Badge variant="warning">首次导入头像</Badge>{/if}<span class="text-micro text-nya-text-tertiary">配置修订 #{provider.revision}</span></div></div>
+              <span class="flex h-11 w-11 items-center justify-center rounded-nya-md bg-nya-surface-muted text-nya-text-primary"><ProviderIcon type={provider.type} iconKey={provider.icon_key} size={20} /></span>
+              <div><h2 class="text-card-title text-nya-text-primary">{provider.display_name}</h2><p class="mt-0.5 font-mono text-micro text-nya-text-tertiary">{provider.name}</p><div class="mt-1 flex flex-wrap items-center gap-2"><Badge variant="info">{typeLabels[provider.type] || provider.type}</Badge><Badge variant={provider.enabled ? 'success' : 'default'}>{provider.enabled ? '已启用' : '已禁用'}</Badge>{#if provider.import_avatar}<Badge variant="warning">首次导入头像</Badge>{/if}<span class="text-micro text-nya-text-tertiary">配置修订 #{provider.revision}</span></div></div>
             </div>
             <div class="flex flex-wrap items-center gap-2">
               <Button variant="ghost" size="sm" onclick={() => openEdit(provider)}>编辑配置</Button>
@@ -357,8 +373,10 @@
 <Modal bind:open={showCreate} title="添加身份提供者" description="凭据会在服务端加密保存" size="md">
   <form onsubmit={handleCreate} class="space-y-4">
     {#if createError}<p class="rounded-nya-sm bg-nya-danger-soft px-3 py-2 text-small text-nya-danger" role="alert">{createError}</p>{/if}
-    <Input id="provider-name" label="名称" bind:value={newProvider.name} required placeholder="例如 github 或 company-sso" />
+    <Input id="provider-name" label="技术标识" bind:value={newProvider.name} required placeholder="例如 github 或 company-sso" />
+    <Input id="provider-display-name" label="显示名称" bind:value={newProvider.display_name} placeholder="留空时使用技术标识" />
     <Select id="provider-type" label="类型" bind:value={newProvider.type} options={[{ value: 'github', label: 'GitHub' }, { value: 'google', label: 'Google' }, { value: 'generic', label: '通用 OIDC' }]} />
+    <div class="grid grid-cols-[1fr_auto] items-end gap-3"><Select id="provider-icon" label="图标" bind:value={newProvider.icon_key} options={iconOptions} /><span class="flex h-[38px] w-[38px] items-center justify-center rounded-nya-sm border border-nya-border bg-nya-surface-muted text-nya-text-primary"><ProviderIcon type={newProvider.type} iconKey={newProvider.icon_key} size={19} /></span></div>
     <Input id="provider-client-id" label="Client ID" bind:value={newProvider.client_id} required mono placeholder="从上游 Provider 获取" />
     <Input id="provider-client-secret" label="Client Secret" type="password" bind:value={newProvider.client_secret} required autocomplete="off" placeholder="从上游 Provider 获取" />
     <Input id="provider-scopes" label="Scopes" bind:value={newProvider.scopes} mono placeholder="openid profile email" />
@@ -373,11 +391,13 @@
   </form>
 </Modal>
 
-<Modal bind:open={showEdit} title={`编辑 Provider 配置 · ${editingProvider?.name || ''}`} description="Provider 名称和类型创建后不可变更" size="lg">
+<Modal bind:open={showEdit} title={`编辑 Provider 配置 · ${editingProvider?.display_name || ''}`} description="技术标识和类型创建后不可变更" size="lg">
   <form onsubmit={handleEdit} class="space-y-4">
     {#if editError}<p class="rounded-nya-sm bg-nya-danger-soft px-3 py-2 text-small text-nya-danger" role="alert">{editError}</p>{/if}
     <p class="rounded-nya-sm bg-nya-warning-soft px-3 py-2 text-small text-nya-warning">当前配置修订 #{editingProvider?.revision ?? '-'}。Client Secret 留空会保持原值；填写新值则立即替换。</p>
-    <div class="grid gap-4 sm:grid-cols-2"><Input id="edit-provider-client-id" label="Client ID" bind:value={editForm.client_id} mono required /><div><span class="mb-1.5 block text-body-medium text-nya-text-primary">名称 / 类型</span><p class="rounded-nya-sm bg-nya-surface-muted px-3 py-2 text-small text-nya-text-secondary">{editingProvider?.name} · {editingProvider ? (typeLabels[editingProvider.type] || editingProvider.type) : ''}</p></div></div>
+    <div class="grid gap-4 sm:grid-cols-2"><Input id="edit-provider-display-name" label="显示名称" bind:value={editForm.display_name} required /><div><span class="mb-1.5 block text-body-medium text-nya-text-primary">技术标识 / 类型</span><p class="rounded-nya-sm bg-nya-surface-muted px-3 py-2 text-small text-nya-text-secondary">{editingProvider?.name} · {editingProvider ? (typeLabels[editingProvider.type] || editingProvider.type) : ''}</p></div></div>
+    <div class="grid grid-cols-[1fr_auto] items-end gap-3"><Select id="edit-provider-icon" label="图标" bind:value={editForm.icon_key} options={iconOptions} /><span class="flex h-[38px] w-[38px] items-center justify-center rounded-nya-sm border border-nya-border bg-nya-surface-muted text-nya-text-primary"><ProviderIcon type={editingProvider?.type} iconKey={editForm.icon_key} size={19} /></span></div>
+    <Input id="edit-provider-client-id" label="Client ID" bind:value={editForm.client_id} mono required />
     <Input id="edit-provider-client-secret" label="Client Secret" type="password" bind:value={editForm.client_secret} autocomplete="off" placeholder="留空保持不变" />
     <Input id="edit-provider-scopes" label="Scopes" bind:value={editForm.scopes} mono placeholder="openid profile email" />
     <Input id="edit-provider-discovery" label="Discovery URL" bind:value={editForm.discovery_url} required={editingProvider?.type === 'generic'} />

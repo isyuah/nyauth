@@ -10,6 +10,8 @@ import (
 type ExternalProvider struct {
 	ID                 uuid.UUID         `json:"id" db:"id"`
 	Name               string            `json:"name" db:"name"`
+	DisplayName        string            `json:"display_name" db:"display_name"`
+	IconKey            string            `json:"icon_key" db:"icon_key"`
 	Type               string            `json:"type" db:"type"` // github, google, generic
 	ClientID           string            `json:"client_id" db:"client_id"`
 	ClientSecret       string            `json:"-" db:"client_secret"` // encrypted
@@ -30,6 +32,8 @@ type ExternalProvider struct {
 // CreateProviderRequest is the payload to create an external provider.
 type CreateProviderRequest struct {
 	Name               string   `json:"name" validate:"required"`
+	DisplayName        string   `json:"display_name,omitempty"`
+	IconKey            string   `json:"icon_key,omitempty"`
 	Type               string   `json:"type" validate:"required,oneof=github google generic"`
 	ClientID           string   `json:"client_id" validate:"required"`
 	ClientSecret       string   `json:"client_secret" validate:"required"`
@@ -45,6 +49,8 @@ type CreateProviderRequest struct {
 
 // UpdateProviderRequest is the payload to update a provider.
 type UpdateProviderRequest struct {
+	DisplayName        *string   `json:"display_name,omitempty"`
+	IconKey            *string   `json:"icon_key,omitempty"`
 	ClientID           *string   `json:"client_id,omitempty"`
 	ClientSecret       *string   `json:"client_secret,omitempty"`
 	Scopes             []string  `json:"scopes,omitempty"`

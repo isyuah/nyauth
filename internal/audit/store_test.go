@@ -13,13 +13,13 @@ func TestBuildListFilterUsesBoundParameters(t *testing.T) {
 	to := from.Add(24 * time.Hour)
 	subjectUserID := uuid.New()
 	where, args := buildListFilter(ListFilter{
-		Event: "user.login", Result: "success", RiskLevel: "low",
+		Events: []string{"user.login", "user.logout"}, Result: "success", RiskLevel: "low",
 		Actor: "alice", Target: "client", IPAddress: "192.0.2.1",
 		SubjectUserID: &subjectUserID,
 		CreatedFrom:   &from, CreatedTo: &to,
 	})
 	for _, fragment := range []string{
-		"event = $1", "result = $2", "risk_level = $3", "actor_name ILIKE",
+		"event = ANY($1::text[])", "result = $2", "risk_level = $3", "actor_name ILIKE",
 		"actor_id::text = $4", "target_id ILIKE", "target_type ILIKE", "ip_address = $6",
 		"actor_id = $7", "target_type = 'user'", "target_id = $7::text",
 		"created_at >= $8", "created_at <= $9",
