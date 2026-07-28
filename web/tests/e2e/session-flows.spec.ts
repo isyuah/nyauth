@@ -3354,7 +3354,7 @@ test('audit filters use backend options, exact URL parameters, quick ranges and 
   };
   await installAPIMocks(page, state);
 
-  await page.goto('/admin/audit');
+  await page.goto('/admin/audit?from=2026-07-01T00%3A00%3A00.000Z&to=2026-07-31T23%3A59%3A00.000Z');
   await expect(page.getByRole('heading', { name: '审计日志' })).toBeVisible();
   await expect.poll(() => state.auditLogOptionsRequests || 0).toBe(1);
   await page.getByRole('combobox', { name: '事件', exact: true }).fill('user.');
@@ -3363,14 +3363,59 @@ test('audit filters use backend options, exact URL parameters, quick ranges and 
   await page.getByRole('checkbox', { name: 'user.profile_updated', exact: true }).check();
   await expect(page.getByText('user.login', { exact: true }).first()).toBeVisible();
 
-  await page.getByRole('button', { name: '最近 1 小时' }).click();
+  await page.getByRole('button', { name: '时间范围', exact: true }).click();
+  const rangeDialog = page.getByRole('dialog', { name: '选择时间范围' });
+  await expect(rangeDialog).toBeVisible();
+  await expect(rangeDialog.getByRole('heading', { name: '2026 年 7 月' })).toBeVisible();
+  await rangeDialog.getByRole('button', { name: '下一年' }).click();
+  await expect(rangeDialog.getByRole('heading', { name: '2027 年 7 月' })).toBeVisible();
+  await rangeDialog.getByRole('button', { name: '上一年' }).click();
+  await rangeDialog.getByRole('button', { name: '下个月' }).click();
+  await expect(rangeDialog.getByRole('heading', { name: '2026 年 8 月' })).toBeVisible();
+  await rangeDialog.getByRole('button', { name: '上个月' }).click();
+  await rangeDialog.getByRole('gridcell', { name: '2026年7月5日' }).click();
+  await rangeDialog.getByRole('gridcell', { name: '2026年7月20日' }).click();
+  const startHour = rangeDialog.getByLabel('起始时间小时');
+  const startMinute = rangeDialog.getByLabel('起始时间分钟');
+  const originalStartHour = await startHour.inputValue();
+  await startHour.fill('ab');
+  await expect(startHour).toHaveValue(originalStartHour);
+  await expect(startHour).not.toHaveAttribute('aria-invalid', 'true');
+  await startHour.fill('99');
+  await expect(startHour).toHaveAttribute('aria-invalid', 'true');
+  await startHour.fill('08');
+  await expect(startMinute).toBeFocused();
+  await startMinute.fill('15');
+  await rangeDialog.getByRole('button', { name: '选择结束时间' }).click();
+  const endTimeDialog = page.getByRole('dialog', { name: '选择结束时间' });
+  await endTimeDialog.getByRole('option', { name: '小时 21' }).click();
+  await endTimeDialog.getByRole('option', { name: '分钟 45' }).click();
+  await endTimeDialog.getByRole('button', { name: '完成' }).click();
+  await expect(rangeDialog.locator('input[type="time"]')).toHaveCount(0);
+  await rangeDialog.getByRole('button', { name: '确认并应用' }).click();
+
+  const preciseRangeURL = new URL(page.url());
+  expect(preciseRangeURL.searchParams.get('from')).toBe(new Date('2026-07-05T08:15').toISOString());
+  expect(preciseRangeURL.searchParams.get('to')).toBe(new Date('2026-07-20T21:45').toISOString());
+
+  await page.getByRole('button', { name: '时间范围', exact: true }).click();
+  await rangeDialog.getByRole('button', { name: '最近 1 天' }).click();
+  await rangeDialog.getByRole('checkbox', { name: '结束时间使用确认时刻' }).check();
+  await expect(rangeDialog.getByLabel('结束时间小时')).toBeDisabled();
+  await expect(rangeDialog.getByLabel('结束时间分钟')).toBeDisabled();
+  const confirmationStartedAt = Date.now();
+  await rangeDialog.getByRole('button', { name: '确认并应用' }).click();
+  const confirmationFinishedAt = Date.now();
   await expect(page).toHaveURL(/from=.*&to=/);
   const quickRangeURL = new URL(page.url());
   const quickFrom = new Date(quickRangeURL.searchParams.get('from') || '').getTime();
   const quickTo = new Date(quickRangeURL.searchParams.get('to') || '').getTime();
   expect(quickFrom).not.toBeNaN();
   expect(quickTo).not.toBeNaN();
-  expect(quickTo - quickFrom).toBe(60 * 60 * 1000);
+  expect(quickTo - quickFrom).toBeGreaterThanOrEqual(24 * 60 * 60 * 1000);
+  expect(quickTo - quickFrom).toBeLessThanOrEqual((24 * 60 + 2) * 60 * 1000);
+  expect(quickTo).toBeGreaterThanOrEqual(confirmationStartedAt - 60 * 1000);
+  expect(quickTo).toBeLessThanOrEqual(confirmationFinishedAt);
   expect(quickRangeURL.searchParams.get('from')).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:00\.000Z$/);
 
   await page.getByLabel('结果').click();
@@ -3421,6 +3466,12 @@ test('audit filters use backend options, exact URL parameters, quick ranges and 
   expect(exportQuery.get('from')).toBe(filteredURL.searchParams.get('from'));
   expect(exportQuery.get('to')).toBe(filteredURL.searchParams.get('to'));
   await download.cancel();
+
+  await page.getByRole('button', { name: '清除时间范围筛选' }).click();
+  const withoutTimeRangeURL = new URL(page.url());
+  expect(withoutTimeRangeURL.searchParams.has('from')).toBe(false);
+  expect(withoutTimeRangeURL.searchParams.has('to')).toBe(false);
+  await expect(page.getByRole('button', { name: '清除时间范围筛选' })).toHaveCount(0);
 
   await page.getByRole('button', { name: '移除筛选：目标 ID：client-123' }).click();
   await expect(page).not.toHaveURL(/target_id=/);

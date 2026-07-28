@@ -14,6 +14,7 @@
   import Pagination from '$lib/components/data-display/Pagination.svelte';
   import Badge from '$lib/components/ui/Badge.svelte';
   import Button from '$lib/components/ui/Button.svelte';
+  import DateTimeRangePicker from '$lib/components/ui/DateTimeRangePicker.svelte';
   import FilterBar from '$lib/components/ui/FilterBar.svelte';
   import Input from '$lib/components/ui/Input.svelte';
   import ResourceState from '$lib/components/ui/ResourceState.svelte';
@@ -21,16 +22,10 @@
   import TreeMultiSelect from '$lib/components/ui/TreeMultiSelect.svelte';
   import { Download, Eye, Filter, X } from 'lucide-svelte';
 
-  type FilterKey = 'event' | 'result' | 'risk' | 'actor' | 'target' | 'subjectUserId' | 'targetType' | 'targetId' | 'ip' | 'from' | 'to';
+  type FilterKey = 'event' | 'result' | 'risk' | 'actor' | 'target' | 'subjectUserId' | 'targetType' | 'targetId' | 'ip' | 'range';
   type ActiveFilter = { key: FilterKey; label: string; value: string };
 
   const pageSize = 20;
-  const quickRanges = [
-    { label: '最近 1 小时', hours: 1 },
-    { label: '最近 24 小时', hours: 24 },
-    { label: '最近 7 天', hours: 24 * 7 },
-    { label: '最近 30 天', hours: 24 * 30 },
-  ];
   const resultLabels: Record<string, string> = { success: '成功', failure: '失败' };
   const riskLabels: Record<string, string> = { low: '低', medium: '中', high: '高', critical: '严重' };
   const targetTypeLabels: Record<string, string> = {
@@ -86,8 +81,7 @@
     { key: 'targetType', label: '目标类型', value: targetType.trim() },
     { key: 'targetId', label: '目标 ID', value: targetId.trim() },
     { key: 'ip', label: 'IP 地址', value: ip.trim() },
-    { key: 'from', label: '开始时间', value: from ? formatFilterDate(from) : '' },
-    { key: 'to', label: '结束时间', value: to ? formatFilterDate(to) : '' },
+    { key: 'range', label: '时间范围', value: formatFilterDateRange(from, to) },
   ] as ActiveFilter[]).filter((item) => item.value));
 
   function selectOptions(values: string[], current: string, emptyLabel: string, labels: Record<string, string>) {
@@ -112,6 +106,13 @@
   function formatFilterDate(value: string): string {
     const date = new Date(value);
     return Number.isNaN(date.getTime()) ? value : date.toLocaleString('zh-CN');
+  }
+
+  function formatFilterDateRange(start: string, end: string): string {
+    if (start && end) return `${formatFilterDate(start)} - ${formatFilterDate(end)}`;
+    if (start) return `${formatFilterDate(start)} - 未设置结束时间`;
+    if (end) return `未设置开始时间 - ${formatFilterDate(end)}`;
+    return '';
   }
 
   function currentFilters(): AuditLogFilters {
@@ -215,14 +216,6 @@
     if (!(await syncURL())) await loadLogs();
   }
 
-  async function setQuickRange(hours: number) {
-    const end = new Date();
-    const start = new Date(end.getTime() - hours * 60 * 60 * 1000);
-    from = toLocalDateTimeInput(start.toISOString());
-    to = toLocalDateTimeInput(end.toISOString());
-    await applyFilters();
-  }
-
   async function removeFilter(key: FilterKey, value?: string) {
     if (key === 'event') events = value ? events.filter((event) => event !== value) : [];
     else if (key === 'result') result = '';
@@ -233,8 +226,10 @@
     else if (key === 'targetType') targetType = '';
     else if (key === 'targetId') targetId = '';
     else if (key === 'ip') ip = '';
-    else if (key === 'from') from = '';
-    else if (key === 'to') to = '';
+    else if (key === 'range') {
+      from = '';
+      to = '';
+    }
     await applyFilters();
   }
 
@@ -288,25 +283,19 @@
 
 <FilterBar label="审计日志筛选">
   {#snippet children()}
-    <div class="mb-3 flex flex-wrap items-center gap-2" aria-label="快捷时间范围">
-      <span class="text-small font-medium text-nya-text-secondary">快捷范围</span>
-      {#each quickRanges as range}
-        <Button size="sm" variant="ghost" onclick={() => setQuickRange(range.hours)}>{range.label}</Button>
-      {/each}
-    </div>
-
     <div class="grid gap-3 md:grid-cols-2 xl:grid-cols-4">
-    <div class="md:col-span-2"><TreeMultiSelect id="audit-event" label="事件" bind:values={events} options={filterOptions.events} placeholder="搜索事件，例如 user.login" /></div>
+      <div class="md:col-span-2"><TreeMultiSelect id="audit-event" label="事件" bind:values={events} options={filterOptions.events} placeholder="搜索事件，例如 user.login" /></div>
       <Select id="audit-result" label="结果" bind:value={result} options={resultOptions} />
       <Select id="audit-risk" label="风险" bind:value={risk} options={riskOptions} />
       <Input id="audit-actor" label="操作者（模糊）" bind:value={actor} placeholder="名称或 ID" />
       <Input id="audit-target" label="目标（模糊）" bind:value={target} placeholder="类型或 ID" />
-      <Input id="audit-subject-user-id" label="主体用户 ID（精确）" bind:value={subjectUserId} placeholder="用户 UUID" mono />
+      <Input id="audit-subject-user-id" label="主体用户 ID（精确）" bind:value={subjectUserId} placeholder="用户 UUID" />
       <Select id="audit-target-type" label="目标类型（精确）" bind:value={targetType} options={targetTypeOptions} />
-      <Input id="audit-target-id" label="目标 ID（精确）" bind:value={targetId} placeholder="完整目标 ID" mono />
-      <Input id="audit-ip" label="IP 地址" bind:value={ip} placeholder="例如 203.0.113.10" mono />
-      <Input id="audit-from" label="开始时间" type="datetime-local" bind:value={from} />
-      <Input id="audit-to" label="结束时间" type="datetime-local" bind:value={to} />
+      <Input id="audit-target-id" label="目标 ID（精确）" bind:value={targetId} placeholder="完整目标 ID" />
+      <Input id="audit-ip" label="IP 地址" bind:value={ip} placeholder="例如 203.0.113.10" />
+      <div class="md:col-span-2">
+        <DateTimeRangePicker id="audit-time-range" bind:from bind:to onconfirm={applyFilters} />
+      </div>
     </div>
 
     {#if optionsError}
