@@ -6,9 +6,9 @@
 
 ### 新增
 
-- Phase C1 运行时服务控制：六类固定 capability、四种维护预设、公开维护横幅、可选到期恢复、revision 冲突保护和独立 `operating_state`
+- Phase C1 运行时服务控制：六类固定 capability、四种维护预设、实时公开维护横幅、可选到期恢复、revision 冲突保护和独立 `operating_state`
 - 多实例安全排空：进程内 gate 与 in-flight 计数、PostgreSQL 心跳和应用进度、`LISTEN/NOTIFY`、5 秒 reconciliation、15 秒失联 fail-closed 以及单 leader 到期审计
-- `GET /api/service-status`、`GET/PUT /api/admin/settings/operations` 与 `nyauth service-control reset -reason <text>` 紧急解锁命令
+- `GET /api/service-status`、`GET /api/service-status/events` SSE、`GET/PUT /api/admin/settings/operations` 与 `nyauth service-control reset -reason <text>` 紧急解锁命令
 
 ### 变更
 

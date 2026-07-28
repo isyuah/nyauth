@@ -292,6 +292,7 @@ OAuth 客户端支持 `post_logout_redirect_uris`。`/end_session` 仅允许跳�
 | GET | `/livez` | 仅表示进程仍可响应 |
 | GET | `/readyz` | 检查 schema、PostgreSQL、Redis、活动 JWK 与 Provider 快照 |
 | GET | `/api/service-status` | 公开的派生运行状态、暂停能力、提示与预计恢复时间；不返回内部原因或实例信息 |
+| GET | `/api/service-status/events` | 同一公开状态的 SSE 实时推送；浏览器断线自动重连，并以轮询和到期刷新兜底 |
 | GET | `/metrics` | 仅允许内部或可信来源访问的 Prometheus 指标 |
 
 旧 `/health` 已删除。`/readyz` 失败返回 503，响应不会包含数据库地址、原始依赖错误或 secret。主动维护是预期运行状态，不会把 `/readyz` 改为失败；系统状态通过独立的 `operating_state` 展示。SMTP 和头像媒体存储故障也不进入 `/readyz`，避免非核心能力降级让登录与 OAuth/OIDC 整体下线；管理员通过 `/api/admin/system/status` 的 `services.mail`、`services.media` 和对应设置状态查看降级信息。媒体故障期间头像上传或读取返回 `503`；删除以 PostgreSQL 中解除当前引用为成功边界，对象删除失败会标记降级并交给后台清理重试。
