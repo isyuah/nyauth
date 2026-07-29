@@ -3,9 +3,12 @@ package mediaruntime
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"io"
+	"strings"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/nyasharp/nyauth/internal/avatar"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
@@ -59,5 +62,29 @@ func TestCopyAndVerifyVariantsCopiesExactBytes(t *testing.T) {
 		if got := target.objects[key]; !bytes.Equal(got, want) {
 			t.Fatalf("target[%q]=%q want %q", key, got, want)
 		}
+	}
+}
+
+func TestBlobStoreProbeSupportsLocalFallback(t *testing.T) {
+	store, err := avatar.NewLocalStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("NewLocalStore() error=%v", err)
+	}
+	if err := testBlobStore(context.Background(), store); err != nil {
+		t.Fatalf("testBlobStore() local fallback error=%v", err)
+	}
+}
+
+func TestFallbackProfileJSONOmitsZeroID(t *testing.T) {
+	encoded, err := json.Marshal(Status{
+		Mode:     "fallback",
+		Active:   &Profile{Backend: string(avatar.StorageLocal), CredentialsConfigured: true},
+		Fallback: &Profile{Backend: string(avatar.StorageLocal), CredentialsConfigured: true},
+	})
+	if err != nil {
+		t.Fatalf("json.Marshal() error=%v", err)
+	}
+	if strings.Contains(string(encoded), uuid.Nil.String()) || strings.Contains(string(encoded), `"id"`) {
+		t.Fatalf("fallback status leaked a synthetic profile id: %s", encoded)
 	}
 }

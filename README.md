@@ -9,7 +9,7 @@
 - 第一方后台仅使用 `HttpOnly + SameSite=Lax` 会话 Cookie，并对修改请求强制校验 CSRF。
 - OAuth 授权码客户端强制使用 PKCE S256；不支持 plain、implicit 或 hybrid 流程。
 - JWT 固定使用 RS256，refresh token 采用 family 轮换与重复使用检测。
-- 数据库以嵌入二进制的 `000001_baseline` 建立破坏性发布基线，并通过兼容的 `000002` 至 `000006_runtime_media_storage` 加法迁移演进；当前 `0.4.0-dev` 要求 schema version 6，可从正式 `0.3.0` 的 schema version 3 依次迁移。服务启动只校验 schema，不再隐式迁移。
+- 数据库以嵌入二进制的 `000001_baseline` 建立破坏性发布基线，并通过兼容的 `000002` 至 `000007_runtime_media_fallback` 加法迁移演进；当前 `0.4.0-dev` 要求 schema version 7，可从正式 `0.3.0` 的 schema version 3 依次迁移。服务启动只校验 schema，不再隐式迁移。
 - 旧数据库、session、token、JWK、Provider 凭据和 OAuth 客户端注册均不兼容。
 - 旧 Go/TypeScript SDK 已删除；OAuth/OIDC 集成以标准协议和成熟语言库为准。
 
@@ -167,7 +167,7 @@ docker compose --env-file .env.production \
   up -d
 ```
 
-S3 override 要求 `NYAUTH_MEDIA_S3_REGION`、`NYAUTH_MEDIA_S3_BUCKET`、access key ID 与 secret access key 文件；可选配置 HTTPS endpoint、prefix 和 path-style。bucket 必须保持私有，浏览器始终通过 Nyauth 同源 `/media` 路由读取。该静态配置是数据库尚未激活动态 profile 时的 fallback。管理员可在 `/admin/settings/media` 保存不可变候选、执行真实 Put/Get/校验/Delete 测试，并在系统自动排空 `media_writes` 后把现有对象迁移到候选私有 S3；首版不允许通过 API 指定本地目录或从 S3 动态迁回本地。详细 secret 与命令见 [单机远程部署手册](docs/operations/single-host-deployment.md)。
+S3 override 要求 `NYAUTH_MEDIA_S3_REGION`、`NYAUTH_MEDIA_S3_BUCKET`、access key ID 与 secret access key 文件；可选配置 HTTPS endpoint、prefix 和 path-style。bucket 必须保持私有，浏览器始终通过 Nyauth 同源 `/media` 路由读取。该静态配置是数据库尚未激活动态 profile 时的 fallback。管理员可在 `/admin/settings/media` 保存不可变候选、执行真实 Put/Get/校验/Delete 测试，并在系统自动排空 `media_writes` 后把现有对象迁移到候选私有 S3。单实例若保留了部署时已挂载的本地 fallback，还可在相同排空、复制和回读校验流程中迁回本地；API 不接受任意本地路径，多实例环境禁止迁回非共享本地存储。详细 secret 与命令见 [单机远程部署手册](docs/operations/single-host-deployment.md)。
 
 生产 Compose 不发布 PostgreSQL/Redis 端口，应用仅通过预先创建的 external proxy network 暴露 `8080`；Compose 不创建或删除该网络。应用与迁移容器使用非 root 用户、只读根文件系统、临时 `/tmp`、cap drop 和 `no-new-privileges`。
 
@@ -318,7 +318,7 @@ Provider 不再从 YAML 或环境变量静态加载，只能由管理员写入�
 
 - `GET /api/admin/system/status`：版本、schema、PostgreSQL/Redis/JWK/Provider、SMTP 与头像媒体状态。
 - `GET/PUT /api/admin/settings/operations`：六类能力的运行时暂停、恢复、到期和多实例应用进度；修改要求近期重新认证，使用 revision CAS 并与审计同事务提交。
-- `GET /api/admin/settings/media`、候选保存/测试及迁移接口：私有 S3 运行时配置、真实对象测试、迁移进度和失败重试；凭据只加密保存且永不回显。
+- `GET /api/admin/settings/media`、候选保存/测试、迁移及 `fallback/migrate` 接口：私有 S3 运行时配置、迁回已配置本地 fallback、真实对象测试、迁移进度和失败重试；凭据只加密保存且永不回显。
 - `GET/PUT /api/admin/settings/branding`、`registration`、`security`、`protection`、`lifecycle`：五组运行时设置统一使用 revision CAS；写入要求近期重新认证、固定保护限流，并与 `settings.updated` 审计同事务提交。
 - `protection` 动态控制登录、账户操作、头像和 SMTP 管理限流，以及自助客户端全局默认配额。关闭限流组需要精确危险确认；每次 revision 都使用新的 Redis key namespace，旧计数自然过期。
 - `lifecycle` 动态控制浏览器会话绝对期限、近期认证期限和审计保留天数。缩短会话期限会在下一次请求时淘汰超龄会话；延长不会恢复 Redis 中已经过期的会话。

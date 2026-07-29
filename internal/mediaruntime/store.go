@@ -223,11 +223,39 @@ func (s *Store) StartMigration(ctx context.Context, input StartMigrationInput) (
 	if state.Revision != input.ExpectedRevision {
 		return Migration{}, State{}, ErrStateConflict
 	}
-	if state.CandidateProfileID == nil {
-		return Migration{}, State{}, ErrCandidateNotFound
+	if input.SourceBackend != "local" && input.SourceBackend != "s3" {
+		return Migration{}, State{}, ErrInvalidConfig
 	}
-	if *state.CandidateProfileID != input.ProfileID {
-		return Migration{}, State{}, ErrCandidateChanged
+	switch input.TargetBackend {
+	case "s3":
+		if input.TargetProfileID == nil {
+			return Migration{}, State{}, ErrInvalidConfig
+		}
+		if state.CandidateProfileID == nil {
+			return Migration{}, State{}, ErrCandidateNotFound
+		}
+		if *state.CandidateProfileID != *input.TargetProfileID {
+			return Migration{}, State{}, ErrCandidateChanged
+		}
+	case "local":
+		if input.TargetProfileID != nil || input.InstanceID == uuid.Nil {
+			return Migration{}, State{}, ErrInvalidConfig
+		}
+		if state.ActiveProfileID == nil {
+			return Migration{}, State{}, ErrFallbackAlreadyActive
+		}
+		var otherInstances int64
+		if err := tx.QueryRow(ctx, `
+			SELECT COUNT(*) FROM media_storage_instances
+			WHERE heartbeat_at > NOW()-INTERVAL '15 seconds' AND instance_id<>$1
+		`, input.InstanceID).Scan(&otherInstances); err != nil {
+			return Migration{}, State{}, fmt.Errorf("checking local fallback instances: %w", err)
+		}
+		if otherInstances > 0 {
+			return Migration{}, State{}, ErrFallbackRequiresSingleInstance
+		}
+	default:
+		return Migration{}, State{}, ErrInvalidConfig
 	}
 	var controlRevision int64
 	var mediaPaused bool
@@ -243,24 +271,26 @@ func (s *Store) StartMigration(ctx context.Context, input StartMigrationInput) (
 	if !mediaPaused || controlRevision != input.ServiceControlRevision {
 		return Migration{}, State{}, ErrMigrationNotPaused
 	}
-	var unprepared int64
-	if err := tx.QueryRow(ctx, `
-		SELECT COUNT(*) FROM media_storage_instances
-		WHERE heartbeat_at > NOW()-INTERVAL '15 seconds'
-		  AND (prepared_profile_id IS DISTINCT FROM $1 OR loaded_revision < $2)
-	`, input.ProfileID, input.ExpectedRevision).Scan(&unprepared); err != nil {
-		return Migration{}, State{}, fmt.Errorf("checking prepared media instances: %w", err)
-	}
-	if unprepared > 0 {
-		return Migration{}, State{}, ErrInstancesNotReady
-	}
-	var testedAt time.Time
-	err = tx.QueryRow(ctx, `SELECT tested_at FROM media_storage_profiles WHERE id=$1 AND test_result='success'`, input.ProfileID).Scan(&testedAt)
-	if errors.Is(err, pgx.ErrNoRows) || testedAt.Before(s.now().Add(-CandidateTestValidity)) {
-		return Migration{}, State{}, ErrCandidateTestRequired
-	}
-	if err != nil {
-		return Migration{}, State{}, err
+	if input.TargetBackend == "s3" {
+		var unprepared int64
+		if err := tx.QueryRow(ctx, `
+			SELECT COUNT(*) FROM media_storage_instances
+			WHERE heartbeat_at > NOW()-INTERVAL '15 seconds'
+			  AND (prepared_profile_id IS DISTINCT FROM $1 OR loaded_revision < $2)
+		`, input.TargetProfileID, input.ExpectedRevision).Scan(&unprepared); err != nil {
+			return Migration{}, State{}, fmt.Errorf("checking prepared media instances: %w", err)
+		}
+		if unprepared > 0 {
+			return Migration{}, State{}, ErrInstancesNotReady
+		}
+		var testedAt time.Time
+		err = tx.QueryRow(ctx, `SELECT tested_at FROM media_storage_profiles WHERE id=$1 AND test_result='success'`, input.TargetProfileID).Scan(&testedAt)
+		if errors.Is(err, pgx.ErrNoRows) || testedAt.Before(s.now().Add(-CandidateTestValidity)) {
+			return Migration{}, State{}, ErrCandidateTestRequired
+		}
+		if err != nil {
+			return Migration{}, State{}, err
+		}
 	}
 	var exists bool
 	if err := tx.QueryRow(ctx, `SELECT EXISTS(SELECT 1 FROM media_storage_migrations WHERE status<>'completed')`).Scan(&exists); err != nil {
@@ -271,18 +301,18 @@ func (s *Store) StartMigration(ctx context.Context, input StartMigrationInput) (
 	}
 	id, now := uuid.New(), s.now()
 	previousJSON, _ := json.Marshal(input.ServiceControlPrevious)
-	_, err = tx.Exec(ctx, `INSERT INTO media_storage_migrations (id,source_profile_id,source_backend,target_profile_id,status,service_control_revision,service_control_previous,created_by,created_by_name,created_at,updated_at) VALUES ($1,$2,$3,$4,'pending',$5,$6,$7,$8,$9,$9)`, id, state.ActiveProfileID, input.SourceBackend, input.ProfileID, input.ServiceControlRevision, previousJSON, input.Audit.ActorID, input.Audit.ActorName, now)
+	_, err = tx.Exec(ctx, `INSERT INTO media_storage_migrations (id,source_profile_id,source_backend,target_profile_id,target_backend,status,service_control_revision,service_control_previous,created_by,created_by_name,created_at,updated_at) VALUES ($1,$2,$3,$4,$5,'pending',$6,$7,$8,$9,$10,$10)`, id, state.ActiveProfileID, input.SourceBackend, input.TargetProfileID, input.TargetBackend, input.ServiceControlRevision, previousJSON, input.Audit.ActorID, input.Audit.ActorName, now)
 	if err != nil {
 		return Migration{}, State{}, err
 	}
-	_, err = tx.Exec(ctx, `INSERT INTO media_storage_migration_items (migration_id,avatar_id,source_profile_id,source_backend,target_profile_id,status,updated_at) SELECT $1,id,storage_profile_id,storage_backend,$2,'pending',$3 FROM user_avatars WHERE storage_deleted_at IS NULL AND storage_profile_id IS NOT DISTINCT FROM $4`, id, input.ProfileID, now, state.ActiveProfileID)
+	_, err = tx.Exec(ctx, `INSERT INTO media_storage_migration_items (migration_id,avatar_id,source_profile_id,source_backend,target_profile_id,target_backend,status,updated_at) SELECT $1,id,storage_profile_id,storage_backend,$2,$3,'pending',$4 FROM user_avatars WHERE storage_deleted_at IS NULL AND storage_profile_id IS NOT DISTINCT FROM $5`, id, input.TargetProfileID, input.TargetBackend, now, state.ActiveProfileID)
 	if err != nil {
 		return Migration{}, State{}, err
 	}
 	if _, err = tx.Exec(ctx, `UPDATE media_storage_migrations SET total_count=(SELECT COUNT(*) FROM media_storage_migration_items WHERE migration_id=$1) WHERE id=$1`, id); err != nil {
 		return Migration{}, State{}, err
 	}
-	if err := audit.EnqueueMutationTx(ctx, tx, input.Audit.WithTarget("media_migration", id.String()).WithDetails(map[string]any{"source_profile_id": state.ActiveProfileID, "target_profile_id": input.ProfileID, "service_control_revision": input.ServiceControlRevision})); err != nil {
+	if err := audit.EnqueueMutationTx(ctx, tx, input.Audit.WithTarget("media_migration", id.String()).WithDetails(map[string]any{"source_profile_id": state.ActiveProfileID, "source_backend": input.SourceBackend, "target_profile_id": input.TargetProfileID, "target_backend": input.TargetBackend, "service_control_revision": input.ServiceControlRevision})); err != nil {
 		return Migration{}, State{}, err
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -305,15 +335,31 @@ func (s *Store) RetryMigration(ctx context.Context, input RetryMigrationInput) (
 	if err != nil {
 		return Migration{}, err
 	}
-	var targetProfileID uuid.UUID
+	var targetProfileID *uuid.UUID
+	var targetBackend string
 	var previousControlRevision *int64
-	if err := tx.QueryRow(ctx, `SELECT target_profile_id,service_control_revision FROM media_storage_migrations WHERE id=$1 AND status='failed' FOR UPDATE`, input.MigrationID).Scan(&targetProfileID, &previousControlRevision); errors.Is(err, pgx.ErrNoRows) {
+	if err := tx.QueryRow(ctx, `SELECT target_profile_id,target_backend,service_control_revision FROM media_storage_migrations WHERE id=$1 AND status='failed' FOR UPDATE`, input.MigrationID).Scan(&targetProfileID, &targetBackend, &previousControlRevision); errors.Is(err, pgx.ErrNoRows) {
 		return Migration{}, ErrMigrationNotFound
 	} else if err != nil {
 		return Migration{}, err
 	}
-	if state.CandidateProfileID == nil || *state.CandidateProfileID != targetProfileID {
-		return Migration{}, ErrCandidateChanged
+	if targetBackend == "s3" {
+		if targetProfileID == nil || state.CandidateProfileID == nil || *state.CandidateProfileID != *targetProfileID {
+			return Migration{}, ErrCandidateChanged
+		}
+	} else if targetBackend == "local" {
+		if targetProfileID != nil || input.InstanceID == uuid.Nil {
+			return Migration{}, ErrInvalidConfig
+		}
+		var otherInstances int64
+		if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM media_storage_instances WHERE heartbeat_at > NOW()-INTERVAL '15 seconds' AND instance_id<>$1`, input.InstanceID).Scan(&otherInstances); err != nil {
+			return Migration{}, err
+		}
+		if otherInstances > 0 {
+			return Migration{}, ErrFallbackRequiresSingleInstance
+		}
+	} else {
+		return Migration{}, ErrInvalidConfig
 	}
 	var controlRevision int64
 	var mediaPaused bool
@@ -464,12 +510,12 @@ func scanState(row pgx.Row) (State, error) {
 	return v, err
 }
 
-const migrationSelect = `SELECT id,source_profile_id,source_backend,target_profile_id,status,total_count,copied_count,completed_count,failed_count,service_control_revision,service_control_previous,created_by,created_by_name,created_at,started_at,completed_at,failed_at,last_error,updated_at FROM media_storage_migrations`
+const migrationSelect = `SELECT id,source_profile_id,source_backend,target_profile_id,target_backend,status,total_count,copied_count,completed_count,failed_count,service_control_revision,service_control_previous,created_by,created_by_name,created_at,started_at,completed_at,failed_at,last_error,updated_at FROM media_storage_migrations`
 
 func scanMigration(row pgx.Row) (Migration, error) {
 	var v Migration
 	var previous []byte
-	err := row.Scan(&v.ID, &v.SourceProfileID, &v.SourceBackend, &v.TargetProfileID, &v.Status, &v.TotalCount, &v.CopiedCount, &v.CompletedCount, &v.FailedCount, &v.ServiceControlRevision, &previous, &v.CreatedBy, &v.CreatedByName, &v.CreatedAt, &v.StartedAt, &v.CompletedAt, &v.FailedAt, &v.LastError, &v.UpdatedAt)
+	err := row.Scan(&v.ID, &v.SourceProfileID, &v.SourceBackend, &v.TargetProfileID, &v.TargetBackend, &v.Status, &v.TotalCount, &v.CopiedCount, &v.CompletedCount, &v.FailedCount, &v.ServiceControlRevision, &previous, &v.CreatedBy, &v.CreatedByName, &v.CreatedAt, &v.StartedAt, &v.CompletedAt, &v.FailedAt, &v.LastError, &v.UpdatedAt)
 	if err == nil && len(previous) > 0 {
 		_ = json.Unmarshal(previous, &v.ServiceControlPrevious)
 	}

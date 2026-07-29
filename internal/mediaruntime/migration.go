@@ -21,7 +21,8 @@ type MigrationWorkItem struct {
 	AvatarID        uuid.UUID
 	SourceProfileID *uuid.UUID
 	SourceBackend   avatar.StorageBackend
-	TargetProfileID uuid.UUID
+	TargetProfileID *uuid.UUID
+	TargetBackend   avatar.StorageBackend
 	Status          string
 	AttemptCount    int
 	Variants        []models.AvatarVariant
@@ -59,9 +60,9 @@ func (s *Store) ClaimMigrationItem(ctx context.Context, worker string, now time.
 			FROM candidate WHERE item.migration_id=candidate.migration_id AND item.avatar_id=candidate.avatar_id
 			RETURNING item.*
 		)
-		SELECT claimed.migration_id,claimed.avatar_id,claimed.source_profile_id,claimed.source_backend,claimed.target_profile_id,claimed.status,claimed.attempt_count,avatar.variants
+		SELECT claimed.migration_id,claimed.avatar_id,claimed.source_profile_id,claimed.source_backend,claimed.target_profile_id,claimed.target_backend,claimed.status,claimed.attempt_count,avatar.variants
 		FROM claimed JOIN user_avatars avatar ON avatar.id=claimed.avatar_id
-	`, now.UTC(), now.UTC().Add(-migrationClaimLease), worker).Scan(&item.MigrationID, &item.AvatarID, &item.SourceProfileID, &item.SourceBackend, &item.TargetProfileID, &item.Status, &item.AttemptCount, &raw)
+	`, now.UTC(), now.UTC().Add(-migrationClaimLease), worker).Scan(&item.MigrationID, &item.AvatarID, &item.SourceProfileID, &item.SourceBackend, &item.TargetProfileID, &item.TargetBackend, &item.Status, &item.AttemptCount, &raw)
 	if errors.Is(err, pgx.ErrNoRows) {
 		return nil, nil
 	}
@@ -86,7 +87,7 @@ func (s *Store) MarkItemSwitched(ctx context.Context, item MigrationWorkItem, wo
 		return err
 	}
 	defer tx.Rollback(ctx)
-	tag, err := tx.Exec(ctx, `UPDATE user_avatars SET storage_backend='s3',storage_profile_id=$3,updated_at=$4 WHERE id=$1 AND storage_profile_id IS NOT DISTINCT FROM $2 AND storage_deleted_at IS NULL`, item.AvatarID, item.SourceProfileID, item.TargetProfileID, now.UTC())
+	tag, err := tx.Exec(ctx, `UPDATE user_avatars SET storage_backend=$3,storage_profile_id=$4,updated_at=$5 WHERE id=$1 AND storage_profile_id IS NOT DISTINCT FROM $2 AND storage_deleted_at IS NULL`, item.AvatarID, item.SourceProfileID, item.TargetBackend, item.TargetProfileID, now.UTC())
 	if err != nil {
 		return err
 	}
@@ -172,7 +173,7 @@ func (s *Store) FinalizeMigration(ctx context.Context, migrationID uuid.UUID, no
 		if err != nil {
 			return Migration{}, State{}, false, err
 		}
-		if state.ActiveProfileID == nil || *state.ActiveProfileID != migration.TargetProfileID {
+		if !sameProfileID(state.ActiveProfileID, migration.TargetProfileID) {
 			return Migration{}, State{}, false, ErrCandidateChanged
 		}
 		var unprepared int64
@@ -188,7 +189,7 @@ func (s *Store) FinalizeMigration(ctx context.Context, migrationID uuid.UUID, no
 		if _, err := tx.Exec(ctx, `UPDATE media_storage_migrations SET status='completed',completed_count=total_count,completed_at=$2,updated_at=$2,last_error=NULL WHERE id=$1 AND status='applying'`, migrationID, now.UTC()); err != nil {
 			return Migration{}, State{}, false, err
 		}
-		if err := audit.EnqueueTargetResultTx(ctx, tx, models.AuditMediaMigrationFinished, migration.CreatedBy, migration.CreatedByName, "media_migration", migrationID.String(), "success", "high", "", "", map[string]any{"source_profile_id": migration.SourceProfileID, "target_profile_id": migration.TargetProfileID, "objects": migration.TotalCount}, now.UTC()); err != nil {
+		if err := audit.EnqueueTargetResultTx(ctx, tx, models.AuditMediaMigrationFinished, migration.CreatedBy, migration.CreatedByName, "media_migration", migrationID.String(), "success", "high", "", "", map[string]any{"source_profile_id": migration.SourceProfileID, "source_backend": migration.SourceBackend, "target_profile_id": migration.TargetProfileID, "target_backend": migration.TargetBackend, "objects": migration.TotalCount}, now.UTC()); err != nil {
 			return Migration{}, State{}, false, err
 		}
 		if err := tx.Commit(ctx); err != nil {
@@ -211,8 +212,15 @@ func (s *Store) FinalizeMigration(ctx context.Context, migrationID uuid.UUID, no
 	if err != nil {
 		return Migration{}, State{}, false, err
 	}
-	if state.CandidateProfileID == nil || *state.CandidateProfileID != migration.TargetProfileID {
+	if !sameProfileID(state.ActiveProfileID, migration.SourceProfileID) {
 		return Migration{}, State{}, false, ErrCandidateChanged
+	}
+	if migration.TargetBackend == "s3" {
+		if migration.TargetProfileID == nil || !sameProfileID(state.CandidateProfileID, migration.TargetProfileID) {
+			return Migration{}, State{}, false, ErrCandidateChanged
+		}
+	} else if migration.TargetBackend != "local" || migration.TargetProfileID != nil {
+		return Migration{}, State{}, false, ErrInvalidConfig
 	}
 	state, err = scanState(tx.QueryRow(ctx, `UPDATE media_storage_state SET active_profile_id=$1,previous_profile_id=$2,candidate_profile_id=NULL,revision=revision+1,updated_by=$3,updated_by_name=$4,updated_at=$5 WHERE singleton=TRUE RETURNING revision,active_profile_id,candidate_profile_id,previous_profile_id,updated_by,updated_by_name,updated_at`, migration.TargetProfileID, migration.SourceProfileID, migration.CreatedBy, migration.CreatedByName, now.UTC()))
 	if err != nil {
@@ -230,4 +238,11 @@ func (s *Store) FinalizeMigration(ctx context.Context, migrationID uuid.UUID, no
 	}
 	migration, err = s.LoadMigration(ctx, migrationID)
 	return migration, state, false, err
+}
+
+func sameProfileID(left, right *uuid.UUID) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
 }

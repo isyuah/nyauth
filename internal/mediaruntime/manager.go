@@ -140,7 +140,8 @@ func (m *Manager) Status(ctx context.Context) (Status, error) {
 	if err != nil {
 		return Status{}, err
 	}
-	result := Status{Mode: "fallback", Revision: state.Revision, Available: true}
+	fallback := &Profile{Backend: string(m.fallback.Backend()), CredentialsConfigured: true}
+	result := Status{Mode: "fallback", Revision: state.Revision, Available: true, Fallback: fallback}
 	if state.ActiveProfileID != nil {
 		result.Mode = "dynamic"
 		p, e := m.store.LoadProfile(ctx, *state.ActiveProfileID)
@@ -149,7 +150,7 @@ func (m *Manager) Status(ctx context.Context) (Status, error) {
 		}
 		result.Active = &p
 	} else {
-		result.Active = &Profile{Backend: string(m.fallback.Backend()), CredentialsConfigured: true}
+		result.Active = fallback
 	}
 	if state.CandidateProfileID != nil {
 		p, e := m.store.LoadProfile(ctx, *state.CandidateProfileID)
@@ -178,10 +179,47 @@ func (m *Manager) CreateCandidate(ctx context.Context, input CreateCandidateInpu
 }
 
 func (m *Manager) StartMigration(ctx context.Context, input StartMigrationInput) (Migration, State, error) {
+	input.InstanceID = m.options.InstanceID
+	switch input.TargetBackend {
+	case "local":
+		if input.TargetProfileID != nil || m.fallback.Backend() != avatar.StorageLocal {
+			return Migration{}, State{}, ErrFallbackNotLocal
+		}
+		operationCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		err := testBlobStore(operationCtx, m.fallback)
+		cancel()
+		if err != nil {
+			m.options.OnError(fmt.Errorf("testing local media fallback: %w", err))
+			return Migration{}, State{}, ErrFallbackUnavailable
+		}
+	case "s3":
+		if input.TargetProfileID == nil {
+			return Migration{}, State{}, ErrInvalidConfig
+		}
+	default:
+		return Migration{}, State{}, ErrInvalidConfig
+	}
 	return m.store.StartMigration(ctx, input)
 }
 
 func (m *Manager) RetryMigration(ctx context.Context, input RetryMigrationInput) (Migration, error) {
+	migration, err := m.store.LoadMigration(ctx, input.MigrationID)
+	if err != nil {
+		return Migration{}, err
+	}
+	if migration.TargetBackend == "local" {
+		if m.fallback.Backend() != avatar.StorageLocal {
+			return Migration{}, ErrFallbackNotLocal
+		}
+		operationCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		err = testBlobStore(operationCtx, m.fallback)
+		cancel()
+		if err != nil {
+			m.options.OnError(fmt.Errorf("retesting local media fallback: %w", err))
+			return Migration{}, ErrFallbackUnavailable
+		}
+	}
+	input.InstanceID = m.options.InstanceID
 	return m.store.RetryMigration(ctx, input)
 }
 
@@ -194,30 +232,7 @@ func (m *Manager) TestCandidate(ctx context.Context, input TestCandidateInput) (
 		var store avatar.BlobStore
 		store, err = avatar.NewS3Store(operationCtx, config.S3Config())
 		if err == nil {
-			payload := []byte("nyauth media storage test " + uuid.NewString())
-			key := "runtime-tests/" + uuid.NewString() + ".bin"
-			err = store.Put(operationCtx, key, payload, "application/octet-stream")
-			if err == nil {
-				var object avatar.BlobObject
-				object, err = store.Get(operationCtx, key)
-				if err == nil {
-					var received []byte
-					received, err = io.ReadAll(io.LimitReader(object.Body, int64(len(payload)+1)))
-					closeErr := object.Body.Close()
-					if err == nil {
-						err = closeErr
-					}
-					if err == nil && !bytes.Equal(payload, received) {
-						err = fmt.Errorf("test object content mismatch")
-					}
-				}
-			}
-			cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
-			deleteErr := store.Delete(cleanupCtx, key)
-			cancelCleanup()
-			if err == nil {
-				err = deleteErr
-			}
+			err = testBlobStore(operationCtx, store)
 		}
 	}
 	if err != nil {
@@ -365,7 +380,7 @@ func (m *Manager) migrateOnce(ctx context.Context, worker string) {
 		_ = m.store.FailItem(ctx, *item, worker, err, time.Now().UTC())
 		return
 	}
-	target, err := m.Resolve(ctx, &item.TargetProfileID, avatar.StorageS3)
+	target, err := m.Resolve(ctx, item.TargetProfileID, item.TargetBackend)
 	if err != nil {
 		_ = m.store.FailItem(ctx, *item, worker, err, time.Now().UTC())
 		return
@@ -409,6 +424,34 @@ func (m *Manager) migrateOnce(ctx context.Context, worker string) {
 	if finished {
 		m.notifyMigrationCompleted(ctx, migration)
 	}
+}
+
+func testBlobStore(ctx context.Context, store avatar.BlobStore) error {
+	payload := []byte("nyauth media storage test " + uuid.NewString())
+	key := "runtime-tests/" + uuid.NewString() + ".bin"
+	err := store.Put(ctx, key, payload, "application/octet-stream")
+	if err == nil {
+		var object avatar.BlobObject
+		object, err = store.Get(ctx, key)
+		if err == nil {
+			var received []byte
+			received, err = io.ReadAll(io.LimitReader(object.Body, int64(len(payload)+1)))
+			closeErr := object.Body.Close()
+			if err == nil {
+				err = closeErr
+			}
+			if err == nil && !bytes.Equal(payload, received) {
+				err = fmt.Errorf("test object content mismatch")
+			}
+		}
+	}
+	cleanupCtx, cancelCleanup := context.WithTimeout(context.WithoutCancel(ctx), 3*time.Second)
+	deleteErr := store.Delete(cleanupCtx, key)
+	cancelCleanup()
+	if err == nil {
+		err = deleteErr
+	}
+	return err
 }
 
 func copyAndVerifyVariants(ctx context.Context, source, target avatar.BlobStore, variants []models.AvatarVariant) error {

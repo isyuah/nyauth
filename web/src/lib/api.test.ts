@@ -619,6 +619,7 @@ describe('runtime media storage API contract', () => {
       id: '33333333-3333-3333-3333-333333333333',
       source_backend: 'local',
       target_profile_id: profile.id,
+      target_backend: 's3',
       status: 'running',
       total_count: 2,
       copied_count: 1,
@@ -629,10 +630,11 @@ describe('runtime media storage API contract', () => {
       updated_at: '2026-07-29T01:06:00Z',
     };
     const responses = [
-      { mode: 'fallback', revision: 1, available: true, active: { backend: 'local', credentials_configured: true } },
+      { mode: 'fallback', revision: 1, available: true, active: { backend: 'local', credentials_configured: true }, fallback: { backend: 'local', credentials_configured: true } },
       { candidate: profile, revision: 2 },
       { candidate: { ...profile, test_result: 'success' }, revision: 3, result: 'success' },
       { migration, revision: 3 },
+      { migration: { ...migration, source_backend: 's3', target_profile_id: undefined, target_backend: 'local' }, revision: 4 },
       { migration: { ...migration, status: 'pending' } },
     ];
     const fetchMock = vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
@@ -652,6 +654,7 @@ describe('runtime media storage API contract', () => {
     });
     await api.admin.testMediaCandidate(2, profile.id);
     await api.admin.startMediaMigration(3, profile.id);
+    await api.admin.migrateMediaToLocalFallback(4);
     await api.admin.retryMediaMigration(migration.id);
 
     const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit]>;
@@ -660,6 +663,7 @@ describe('runtime media storage API contract', () => {
       '/api/admin/settings/media/candidate',
       '/api/admin/settings/media/candidate/test',
       '/api/admin/settings/media/migrations',
+      '/api/admin/settings/media/fallback/migrate',
       `/api/admin/settings/media/migrations/${migration.id}/retry`,
     ]);
     expect(calls[0][1].cache).toBe('no-store');
@@ -672,8 +676,9 @@ describe('runtime media storage API contract', () => {
     });
     expect(JSON.parse(String(calls[2][1].body))).toEqual({ expected_revision: 2, profile_id: profile.id });
     expect(JSON.parse(String(calls[3][1].body))).toEqual({ expected_revision: 3, profile_id: profile.id });
-    expect(calls[4][1].method).toBe('POST');
-    for (const index of [1, 2, 3, 4]) {
+    expect(JSON.parse(String(calls[4][1].body))).toEqual({ expected_revision: 4 });
+    expect(calls[5][1].method).toBe('POST');
+    for (const index of [1, 2, 3, 4, 5]) {
       expect(new Headers(calls[index][1].headers).get('X-CSRF-Token')).toBe('media-csrf');
     }
   });

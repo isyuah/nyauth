@@ -1,6 +1,6 @@
 # 安全头像媒体契约
 
-> 状态：已实现；`0.4.0-dev` 的 `000006_runtime_media_storage` 在原媒体安全契约上增加版本化运行时 S3 配置与可续跑迁移。
+> 状态：已实现；`0.4.0-dev` 的 `000006_runtime_media_storage` 增加版本化运行时 S3 配置与可续跑迁移，`000007_runtime_media_fallback` 补充迁回已配置本地 fallback。
 
 ## 1. 结论与边界
 
@@ -80,11 +80,11 @@ media:
 
 仓库中的 `docker-compose.media-s3.yml` 为单机生产 Compose 提供 S3 override；`docker-compose.ha.yml` 则直接强制 `NYAUTH_MEDIA_BACKEND=s3`。当前 Compose override 为 access key ID 和 secret access key 提供 secret 文件挂载；需要 session token 的平台应通过部署环境自己的受控 override 挂载并设置对应 `*_FILE`。
 
-静态 `media` 配置是数据库尚未激活动态 profile 时的 fallback。运行时 API 首版只接受私有 S3 兼容配置，不接受任意本地目录；每个候选版本不可变，access key、secret 和可选 session token 分字段使用 master key envelope encryption，响应、日志和审计只返回是否已配置。
+静态 `media` 配置是数据库尚未激活动态 profile 时的 fallback。运行时配置 API 只接受私有 S3 兼容候选，不接受任意本地目录；每个候选版本不可变，access key、secret 和可选 session token 分字段使用 master key envelope encryption，响应、日志和审计只返回是否已配置。单实例可把动态 S3 中的对象迁回部署时已挂载的本地 fallback，目标路径始终来自静态部署配置。
 
-候选必须在十秒有界操作窗口内实际执行 Put、Get、字节校验和 Delete，且成功结果只有十分钟有效。迁移自动通过运行时服务控制排空 `media_writes`，头像读取、登录和 OAuth 不暂停。每条头像绑定明确的 `storage_profile_id`；迁移期间新旧 store 同时可读，单个头像的四种变体全部复制并从目标重新读取校验后，数据库才切换该头像的 profile，再删除源对象。进程在复制、切换或删除之间退出时会从持久化 item 状态继续；失败状态仍属于未解决迁移，会继续阻止对象清理和候选替换，并保持媒体写入暂停供管理员显式重试。重试前服务控制必须再次确认 `media_writes` 已排空。全部完成并由实例加载新 revision 后才尝试以 CAS 恢复迁移前的服务控制状态；若管理员期间修改了维护状态，系统不会覆盖该修改。
+S3 候选必须在十秒有界操作窗口内实际执行 Put、Get、字节校验和 Delete，且成功结果只有十分钟有效；迁回本地时会在创建迁移前对既有 fallback 执行同样的真实测试。迁移自动通过运行时服务控制排空 `media_writes`，头像读取、登录和 OAuth 不暂停。每条头像绑定明确的 `storage_profile_id`；迁移期间新旧 store 同时可读，单个头像的四种变体全部复制并从目标重新读取校验后，数据库才切换该头像的 profile，再删除源对象。进程在复制、切换或删除之间退出时会从持久化 item 状态继续；失败状态仍属于未解决迁移，会继续阻止对象清理和候选替换，并保持媒体写入暂停供管理员显式重试。重试前服务控制必须再次确认 `media_writes` 已排空。全部完成并由实例加载新 revision 后才尝试以 CAS 恢复迁移前的服务控制状态；若管理员期间修改了维护状态，系统不会覆盖该修改。
 
-首版不支持动态迁回本地目录，也不支持浏览器直传 S3。HA 仍要求所有实例能访问同一静态 fallback 和所有已使用的动态 S3 profile。
+系统不支持通过 API 新增或修改本地目录，也不支持浏览器直传 S3。迁回本地只允许使用已挂载的静态 fallback，并要求当前只有一个活动实例；HA 仍必须使用所有实例可访问的私有 S3。
 
 ## 4. 数据与事务生命周期
 

@@ -46,11 +46,12 @@ const profile: MediaStorageProfile = {
   created_at: '2026-07-29T01:05:00Z',
 };
 
-function migration(status: MediaStorageMigration['status']): MediaStorageMigration {
+function migration(status: MediaStorageMigration['status'], targetBackend: 'local' | 's3' = 's3'): MediaStorageMigration {
   return {
     id: migrationID,
-    source_backend: 'local',
-    target_profile_id: profileID,
+    source_backend: targetBackend === 'local' ? 's3' : 'local',
+    target_profile_id: targetBackend === 's3' ? profileID : undefined,
+    target_backend: targetBackend,
     status,
     total_count: 4,
     copied_count: status === 'failed' ? 2 : status === 'pending' ? 0 : 4,
@@ -75,15 +76,18 @@ interface MediaMockOptions {
 
 async function installMediaMocks(page: Page, options: MediaMockOptions = {}) {
   let currentSession = options.reauthentication === 'provider' ? { ...session, has_password: false } : session;
+  const legacyFallbackID = '00000000-0000-0000-0000-000000000000';
   let current: MediaStorageSettings = options.initial ?? {
     mode: 'fallback',
     revision: 1,
     available: true,
-    active: { backend: 'local', credentials_configured: true },
+    active: { id: legacyFallbackID, backend: 'local', credentials_configured: true },
+    fallback: { id: legacyFallbackID, backend: 'local', credentials_configured: true },
   };
   let saveAttempts = 0;
   let applyingReads = 0;
   let retryCount = 0;
+  let fallbackCount = 0;
   const saveBodies: Array<Record<string, unknown>> = [];
 
   await page.route('**/api/**', async (route) => {
@@ -104,13 +108,10 @@ async function installMediaMocks(page: Page, options: MediaMockOptions = {}) {
       if (current.migration?.status === 'applying') {
         applyingReads += 1;
         if (applyingReads > 1) {
-          current = {
-            ...current,
-            mode: 'dynamic',
-            active: { ...profile, test_result: 'success' },
-            candidate: undefined,
-            migration: migration('completed'),
-          };
+          const targetBackend = current.migration.target_backend;
+          current = targetBackend === 'local'
+            ? { ...current, mode: 'fallback', active: current.fallback, candidate: undefined, migration: migration('completed', 'local') }
+            : { ...current, mode: 'dynamic', active: { ...profile, test_result: 'success' }, candidate: undefined, migration: migration('completed') };
         }
       }
       return json(route, 200, current);
@@ -132,6 +133,12 @@ async function installMediaMocks(page: Page, options: MediaMockOptions = {}) {
     }
     if (path === '/api/admin/settings/media/migrations' && method === 'POST') {
       current = { ...current, migration: migration('applying') };
+      applyingReads = 0;
+      return json(route, 202, { migration: current.migration, revision: current.revision });
+    }
+    if (path === '/api/admin/settings/media/fallback/migrate' && method === 'POST') {
+      fallbackCount += 1;
+      current = { ...current, migration: migration('applying', 'local') };
       applyingReads = 0;
       return json(route, 202, { migration: current.migration, revision: current.revision });
     }
@@ -166,6 +173,7 @@ async function installMediaMocks(page: Page, options: MediaMockOptions = {}) {
     saveBodies,
     saveAttempts: () => saveAttempts,
     retryCount: () => retryCount,
+    fallbackCount: () => fallbackCount,
   };
 }
 
@@ -180,6 +188,7 @@ test('saves, tests and migrates a private S3 candidate without rendering credent
   const state = await installMediaMocks(page);
   await page.goto('/admin/settings/media');
   await expect(page.getByRole('heading', { name: '媒体存储' })).toBeVisible();
+  await expect(page.getByRole('heading', { name: '本地存储' })).toBeVisible();
   await fillCandidate(page);
   await page.getByRole('button', { name: '保存候选配置' }).click();
 
@@ -201,7 +210,31 @@ test('saves, tests and migrates a private S3 candidate without rendering credent
 
   await expect(page.getByText('applying', { exact: true })).toBeVisible();
   await expect(page.getByText('completed', { exact: true })).toBeVisible({ timeout: 6_000 });
-  await expect(page.getByText('运行时配置')).toBeVisible();
+  await expect(page.getByRole('heading', { name: 'private-media / nyauth' })).toBeVisible();
+  await expect(page.getByText('运行时配置', { exact: true })).toHaveCount(0);
+});
+
+test('migrates a dynamic S3 profile back to the configured local fallback', async ({ page }) => {
+  const state = await installMediaMocks(page, {
+    initial: {
+      mode: 'dynamic', revision: 5, available: true,
+      active: { ...profile, test_result: 'success' },
+      fallback: { backend: 'local', credentials_configured: true },
+      migration: migration('completed'),
+    },
+  });
+  await page.goto('/admin/settings/media');
+  await page.getByRole('button', { name: '迁回本地存储' }).click();
+  const dialog = page.getByRole('dialog', { name: '迁回本地存储' });
+  await dialog.getByLabel('输入“迁回本地存储”以确认').fill('迁回本地存储');
+  await dialog.getByRole('button', { name: '检查并开始迁回' }).click();
+
+  await expect.poll(() => state.fallbackCount()).toBe(1);
+  await expect(page.getByText('applying', { exact: true })).toBeVisible();
+  await expect(page.getByText('completed', { exact: true })).toBeVisible({ timeout: 6_000 });
+  await expect(page.getByRole('heading', { name: '本地存储' })).toBeVisible();
+  await expect(page.getByText('静态回退', { exact: true })).toHaveCount(0);
+  await expect(page.getByRole('button', { name: '迁回本地存储' })).toHaveCount(0);
 });
 
 test('retries a failed migration without replacing the candidate profile', async ({ page }) => {
@@ -210,6 +243,7 @@ test('retries a failed migration without replacing the candidate profile', async
     initial: {
       mode: 'fallback', revision: 3, available: true,
       active: { backend: 'local', credentials_configured: true },
+      fallback: { backend: 'local', credentials_configured: true },
       candidate: { ...profile, test_result: 'success' }, migration: failed,
     },
   });

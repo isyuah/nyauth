@@ -16,16 +16,20 @@ const (
 )
 
 var (
-	ErrStoreUnavailable      = errors.New("media runtime store is unavailable")
-	ErrInvalidConfig         = errors.New("media storage configuration is invalid")
-	ErrStateConflict         = errors.New("media storage state revision conflict")
-	ErrCandidateNotFound     = errors.New("media storage candidate was not found")
-	ErrCandidateChanged      = errors.New("media storage candidate changed")
-	ErrCandidateTestRequired = errors.New("recent successful media storage test is required")
-	ErrMigrationActive       = errors.New("a media storage migration is already active")
-	ErrMigrationNotFound     = errors.New("media storage migration was not found")
-	ErrMigrationNotPaused    = errors.New("media writes must be paused before migration")
-	ErrInstancesNotReady     = errors.New("active instances have not prepared the media storage candidate")
+	ErrStoreUnavailable               = errors.New("media runtime store is unavailable")
+	ErrInvalidConfig                  = errors.New("media storage configuration is invalid")
+	ErrStateConflict                  = errors.New("media storage state revision conflict")
+	ErrCandidateNotFound              = errors.New("media storage candidate was not found")
+	ErrCandidateChanged               = errors.New("media storage candidate changed")
+	ErrCandidateTestRequired          = errors.New("recent successful media storage test is required")
+	ErrMigrationActive                = errors.New("a media storage migration is already active")
+	ErrMigrationNotFound              = errors.New("media storage migration was not found")
+	ErrMigrationNotPaused             = errors.New("media writes must be paused before migration")
+	ErrInstancesNotReady              = errors.New("active instances have not prepared the media storage candidate")
+	ErrFallbackNotLocal               = errors.New("local media fallback is not configured")
+	ErrFallbackAlreadyActive          = errors.New("local media fallback is already active")
+	ErrFallbackUnavailable            = errors.New("local media fallback is unavailable")
+	ErrFallbackRequiresSingleInstance = errors.New("local media fallback migration requires a single active instance")
 )
 
 type ProfileSettings struct {
@@ -43,7 +47,7 @@ type Credentials struct {
 }
 
 type Profile struct {
-	ID                     uuid.UUID       `json:"id"`
+	ID                     uuid.UUID       `json:"id,omitzero"`
 	Backend                string          `json:"backend"`
 	Settings               ProfileSettings `json:"settings"`
 	CredentialsConfigured  bool            `json:"credentials_configured"`
@@ -85,7 +89,8 @@ type Migration struct {
 	ID                     uuid.UUID      `json:"id"`
 	SourceProfileID        *uuid.UUID     `json:"source_profile_id,omitempty"`
 	SourceBackend          string         `json:"source_backend"`
-	TargetProfileID        uuid.UUID      `json:"target_profile_id"`
+	TargetProfileID        *uuid.UUID     `json:"target_profile_id,omitempty"`
+	TargetBackend          string         `json:"target_backend"`
 	Status                 string         `json:"status"`
 	TotalCount             int64          `json:"total_count"`
 	CopiedCount            int64          `json:"copied_count"`
@@ -108,6 +113,7 @@ type Status struct {
 	Revision  int64      `json:"revision"`
 	Available bool       `json:"available"`
 	Active    *Profile   `json:"active,omitempty"`
+	Fallback  *Profile   `json:"fallback,omitempty"`
 	Candidate *Profile   `json:"candidate,omitempty"`
 	Previous  *Profile   `json:"previous,omitempty"`
 	Migration *Migration `json:"migration,omitempty"`
@@ -128,8 +134,10 @@ type TestCandidateInput struct {
 
 type StartMigrationInput struct {
 	ExpectedRevision       int64
-	ProfileID              uuid.UUID
+	TargetProfileID        *uuid.UUID
+	TargetBackend          string
 	SourceBackend          string
+	InstanceID             uuid.UUID
 	ServiceControlRevision int64
 	ServiceControlPrevious map[string]any
 	Audit                  audit.MutationAudit
@@ -137,6 +145,7 @@ type StartMigrationInput struct {
 
 type RetryMigrationInput struct {
 	MigrationID            uuid.UUID
+	InstanceID             uuid.UUID
 	ServiceControlRevision int64
 	ServiceControlPrevious map[string]any
 	Audit                  audit.MutationAudit

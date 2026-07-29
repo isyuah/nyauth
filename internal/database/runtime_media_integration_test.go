@@ -111,13 +111,13 @@ func TestRuntimeMediaCandidateEncryptionAndMigrationStateMachine(t *testing.T) {
 	`, instanceID, testedState.Revision); err != nil {
 		t.Fatalf("insert unprepared media instance: %v", err)
 	}
-	if _, _, err := store.StartMigration(ctx, mediaruntime.StartMigrationInput{ExpectedRevision: testedState.Revision, ProfileID: candidate.ID, SourceBackend: "local", ServiceControlRevision: controlRevision, ServiceControlPrevious: map[string]any{"auto_added_media_writes": true}, Audit: runtimeMediaAudit(models.AuditMediaMigrationStarted, actorID)}); !errors.Is(err, mediaruntime.ErrInstancesNotReady) {
+	if _, _, err := store.StartMigration(ctx, mediaruntime.StartMigrationInput{ExpectedRevision: testedState.Revision, TargetProfileID: &candidate.ID, TargetBackend: "s3", SourceBackend: "local", InstanceID: instanceID, ServiceControlRevision: controlRevision, ServiceControlPrevious: map[string]any{"auto_added_media_writes": true}, Audit: runtimeMediaAudit(models.AuditMediaMigrationStarted, actorID)}); !errors.Is(err, mediaruntime.ErrInstancesNotReady) {
 		t.Fatalf("StartMigration() with unprepared instance error=%v", err)
 	}
 	if _, err := schema.pool.Exec(ctx, `UPDATE media_storage_instances SET prepared_profile_id=$2 WHERE instance_id=$1`, instanceID, candidate.ID); err != nil {
 		t.Fatalf("prepare media instance: %v", err)
 	}
-	migration, _, err := store.StartMigration(ctx, mediaruntime.StartMigrationInput{ExpectedRevision: testedState.Revision, ProfileID: candidate.ID, SourceBackend: "local", ServiceControlRevision: controlRevision, ServiceControlPrevious: map[string]any{"auto_added_media_writes": true}, Audit: runtimeMediaAudit(models.AuditMediaMigrationStarted, actorID)})
+	migration, _, err := store.StartMigration(ctx, mediaruntime.StartMigrationInput{ExpectedRevision: testedState.Revision, TargetProfileID: &candidate.ID, TargetBackend: "s3", SourceBackend: "local", InstanceID: instanceID, ServiceControlRevision: controlRevision, ServiceControlPrevious: map[string]any{"auto_added_media_writes": true}, Audit: runtimeMediaAudit(models.AuditMediaMigrationStarted, actorID)})
 	if err != nil {
 		t.Fatalf("StartMigration() error=%v", err)
 	}
@@ -128,7 +128,7 @@ func TestRuntimeMediaCandidateEncryptionAndMigrationStateMachine(t *testing.T) {
 	if err != nil || item == nil {
 		t.Fatalf("ClaimMigrationItem() item=%#v err=%v", item, err)
 	}
-	if item.AvatarID != uploaded.ID || item.SourceProfileID != nil || item.TargetProfileID != candidate.ID {
+	if item.AvatarID != uploaded.ID || item.SourceProfileID != nil || item.TargetProfileID == nil || *item.TargetProfileID != candidate.ID || item.TargetBackend != "s3" {
 		t.Fatalf("claimed item=%#v", item)
 	}
 	if err := store.FailItem(ctx, *item, "worker-a", errors.New("simulated target outage"), time.Now().UTC()); err != nil {
@@ -199,6 +199,53 @@ func TestRuntimeMediaCandidateEncryptionAndMigrationStateMachine(t *testing.T) {
 	}
 	if profileID == nil || *profileID != candidate.ID || backend != "s3" {
 		t.Fatalf("avatar profile=%v backend=%q", profileID, backend)
+	}
+
+	otherInstanceID := uuid.New()
+	if _, err := schema.pool.Exec(ctx, `INSERT INTO media_storage_instances(instance_id,version,started_at,heartbeat_at,loaded_revision) VALUES($1,'0.4.0-dev',NOW(),NOW(),$2)`, otherInstanceID, state.Revision); err != nil {
+		t.Fatalf("insert second media instance: %v", err)
+	}
+	localInput := mediaruntime.StartMigrationInput{ExpectedRevision: state.Revision, TargetBackend: "local", SourceBackend: "s3", InstanceID: instanceID, ServiceControlRevision: controlRevision, ServiceControlPrevious: map[string]any{"auto_added_media_writes": false}, Audit: runtimeMediaAudit(models.AuditMediaMigrationStarted, actorID)}
+	if _, _, err := store.StartMigration(ctx, localInput); !errors.Is(err, mediaruntime.ErrFallbackRequiresSingleInstance) {
+		t.Fatalf("StartMigration() to local with second instance error=%v", err)
+	}
+	if _, err := schema.pool.Exec(ctx, `DELETE FROM media_storage_instances WHERE instance_id=$1`, otherInstanceID); err != nil {
+		t.Fatalf("remove second media instance: %v", err)
+	}
+
+	returnMigration, _, err := store.StartMigration(ctx, localInput)
+	if err != nil {
+		t.Fatalf("StartMigration() back to local error=%v", err)
+	}
+	returnItem, err := store.ClaimMigrationItem(ctx, "worker-local", time.Now().UTC())
+	if err != nil || returnItem == nil {
+		t.Fatalf("ClaimMigrationItem() back to local item=%#v err=%v", returnItem, err)
+	}
+	if returnItem.SourceProfileID == nil || *returnItem.SourceProfileID != candidate.ID || returnItem.TargetProfileID != nil || returnItem.TargetBackend != "local" {
+		t.Fatalf("local migration item=%#v", returnItem)
+	}
+	if err := store.MarkItemSwitched(ctx, *returnItem, "worker-local", time.Now().UTC()); err != nil {
+		t.Fatalf("MarkItemSwitched() back to local error=%v", err)
+	}
+	if err := store.CompleteItem(ctx, *returnItem, time.Now().UTC()); err != nil {
+		t.Fatalf("CompleteItem() back to local error=%v", err)
+	}
+	_, state, completed, err := store.FinalizeMigration(ctx, returnMigration.ID, time.Now().UTC())
+	if err != nil || completed || state.ActiveProfileID != nil {
+		t.Fatalf("FinalizeMigration() back to local applying state=%#v completed=%v err=%v", state, completed, err)
+	}
+	if _, err := schema.pool.Exec(ctx, `UPDATE media_storage_instances SET loaded_revision=$2,heartbeat_at=NOW() WHERE instance_id=$1`, instanceID, state.Revision); err != nil {
+		t.Fatalf("apply local fallback revision: %v", err)
+	}
+	finishedReturn, state, completed, err := store.FinalizeMigration(ctx, returnMigration.ID, time.Now().UTC())
+	if err != nil || !completed || finishedReturn.Status != "completed" || state.ActiveProfileID != nil || state.PreviousProfileID == nil || *state.PreviousProfileID != candidate.ID {
+		t.Fatalf("FinalizeMigration() back to local migration=%#v state=%#v completed=%v err=%v", finishedReturn, state, completed, err)
+	}
+	if err := schema.pool.QueryRow(ctx, `SELECT storage_profile_id,storage_backend FROM user_avatars WHERE id=$1`, uploaded.ID).Scan(&profileID, &backend); err != nil {
+		t.Fatal(err)
+	}
+	if profileID != nil || backend != "local" {
+		t.Fatalf("avatar after local fallback profile=%v backend=%q", profileID, backend)
 	}
 
 	if _, err := schema.pool.Exec(ctx, `UPDATE media_storage_profiles SET bucket='tampered' WHERE id=$1`, candidate.ID); !isPostgresCode(err, "55000") {

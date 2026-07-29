@@ -266,6 +266,8 @@ func describeMutation(r *http.Request, actor *models.User) (mutationAuditDescrip
 		return mutationAuditDescriptor{event: models.AuditMediaSettingsTested, targetType: "media_config", riskLevel: "critical", successAlreadyAudited: true}, true
 	case r.Method == http.MethodPost && path == "/api/admin/settings/media/migrations":
 		return mutationAuditDescriptor{event: models.AuditMediaMigrationStarted, targetType: "media_migration", riskLevel: "critical", successAlreadyAudited: true}, true
+	case r.Method == http.MethodPost && path == "/api/admin/settings/media/fallback/migrate":
+		return mutationAuditDescriptor{event: models.AuditMediaMigrationStarted, targetType: "media_migration", riskLevel: "critical", successAlreadyAudited: true}, true
 	case r.Method == http.MethodPost && strings.HasSuffix(path, "/retry") && strings.HasPrefix(path, "/api/admin/settings/media/migrations/"):
 		return mutationAuditDescriptor{event: models.AuditMediaMigrationRetried, targetType: "media_migration", targetID: param("id"), riskLevel: "critical", successAlreadyAudited: true}, true
 	case r.Method == http.MethodPost && path == "/api/admin/invites":

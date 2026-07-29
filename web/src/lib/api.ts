@@ -802,7 +802,8 @@ export interface MediaStorageMigration {
   id: string;
   source_profile_id?: string;
   source_backend: string;
-  target_profile_id: string;
+  target_profile_id?: string;
+  target_backend: 'local' | 's3' | string;
   status: 'pending' | 'running' | 'applying' | 'completed' | 'failed' | string;
   total_count: number;
   copied_count: number;
@@ -823,6 +824,7 @@ export interface MediaStorageSettings {
   revision: number;
   available: boolean;
   active?: MediaStorageProfile;
+  fallback?: MediaStorageProfile;
   candidate?: MediaStorageProfile;
   previous?: MediaStorageProfile;
   migration?: MediaStorageMigration;
@@ -1430,6 +1432,8 @@ export const api = {
       req<{ candidate: MediaStorageProfile; revision: number; result?: string }>('/api/admin/settings/media/candidate/test', { method: 'POST', body: JSON.stringify({ expected_revision: expectedRevision, profile_id: profileID }) }),
     startMediaMigration: (expectedRevision: number, profileID: string) =>
       req<{ migration: MediaStorageMigration; revision: number }>('/api/admin/settings/media/migrations', { method: 'POST', body: JSON.stringify({ expected_revision: expectedRevision, profile_id: profileID }) }),
+    migrateMediaToLocalFallback: (expectedRevision: number) =>
+      req<{ migration: MediaStorageMigration; revision: number }>('/api/admin/settings/media/fallback/migrate', { method: 'POST', body: JSON.stringify({ expected_revision: expectedRevision }) }),
     retryMediaMigration: (migrationID: string) =>
       req<{ migration: MediaStorageMigration }>(`/api/admin/settings/media/migrations/${encodeURIComponent(migrationID)}/retry`, { method: 'POST' }),
     getInvites: () => req<Invite[]>('/api/admin/invites'),

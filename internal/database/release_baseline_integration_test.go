@@ -139,6 +139,8 @@ func assertReleaseBaseline(t *testing.T, schema *postgresTestSchema) {
 		{"oauth_clients", "access_policy"}, {"oauth_providers", "import_avatar"},
 		{"oauth_providers", "avatar_allowed_hosts"},
 		{"user_avatars", "storage_profile_id"},
+		{"media_storage_migrations", "target_backend"},
+		{"media_storage_migration_items", "target_backend"},
 	} {
 		var count int
 		if err := schema.pool.QueryRow(ctx, `

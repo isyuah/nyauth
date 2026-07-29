@@ -29,7 +29,7 @@ NYAUTH_REDIS_TLS_ENABLED=false
 - 安装 Docker Engine 与 Compose v2，并由受控运维账号管理部署目录。
 - 从发布产物取得 `ghcr.io/nyasharp/nyauth@sha256:<64-hex-digest>`。生产环境固定 digest，不使用 `latest` 或可移动 tag。
 - 在首次启动前确定 PostgreSQL runtime role 名称。内置初始化脚本只在空 PostgreSQL volume 上执行；已有数据库改名或新增角色必须由 DBA 显式处理。
-- 确认初始使用本地 media volume 还是私有 S3 fallback；已有头像可在后台通过受控迁移切换到动态私有 S3，但不能动态迁回本地目录。
+- 确认初始使用本地 media volume 还是私有 S3 fallback；已有头像可在后台通过受控迁移切换到动态私有 S3。保留本地 volume 挂载的单实例可迁回该静态 fallback，但不能通过 API 指定其他本地目录。
 - 建立 PostgreSQL、头像媒体、master key 和部署配置备份，明确 RPO/RTO 和回滚负责人。
 
 `auth.issuer` 必须是浏览器唯一使用的公开 HTTPS origin，例如 `https://auth.example.com`。协议、主机名或端口任一不一致都会使同源检查、Cookie 或 OIDC 校验失败。
@@ -181,7 +181,7 @@ docker compose --env-file .env.production \
   up -d
 ```
 
-静态配置作为 fallback，不能靠修改 `.env.production` 或 Compose override 直接替换已有对象的位置。需要切换时，在 `/admin/settings/media` 保存候选私有 S3 配置，完成真实读写测试，再启动受控迁移。系统会暂停并排空媒体写入、逐对象复制和回读校验、持久化进度；失败状态继续阻止对象清理和候选替换，并保留暂停状态供重试。若管理员期间修改了运行控制，重试前必须重新确认 `media_writes` 已排空，系统不会擅自覆盖新的维护状态。迁移完成前不得删除本地 media volume、旧 S3 prefix 或对应凭据。首版不支持动态迁回本地目录。
+静态配置作为 fallback，不能靠修改 `.env.production` 或 Compose override 直接替换已有对象的位置。需要切换时，在 `/admin/settings/media` 保存候选私有 S3 配置，完成真实读写测试，再启动受控迁移。系统会暂停并排空媒体写入、逐对象复制和回读校验、持久化进度；失败状态继续阻止对象清理和候选替换，并保留暂停状态供重试。若管理员期间修改了运行控制，重试前必须重新确认 `media_writes` 已排空，系统不会擅自覆盖新的维护状态。迁移完成前不得删除本地 media volume、旧 S3 prefix 或对应凭据。动态 S3 生效后，只要原本的本地 volume 仍挂载且当前只有一个活动实例，管理页可以先真实测试该 fallback，再把对象迁回本地；这不会接受新目录或修改 Docker volume。
 
 ## 配置展开与首次启动
 
@@ -327,7 +327,7 @@ docker compose --env-file .env.production -f docker-compose.prod.yml down
 
 ## 升级
 
-`0.3.0-rc.1` 建立了 schema version 1 的破坏性 release baseline，不能从更早的开发数据库升级。正式 `0.3.0` 通过兼容迁移演进到 schema version 3；`0.4.0-dev` 再通过兼容的 `000004` 至 `000006_runtime_media_storage` 演进到 schema version 6。升级前保存旧 digest，备份 PostgreSQL、头像媒体和 master key，并阅读目标版本的迁移说明：
+`0.3.0-rc.1` 建立了 schema version 1 的破坏性 release baseline，不能从更早的开发数据库升级。正式 `0.3.0` 通过兼容迁移演进到 schema version 3；`0.4.0-dev` 再通过兼容的 `000004` 至 `000007_runtime_media_fallback` 演进到 schema version 7。升级前保存旧 digest，备份 PostgreSQL、头像媒体和 master key，并阅读目标版本的迁移说明：
 
 1. 把匹配目标版本的 Compose 和初始化脚本放入部署目录。
 2. 在临时副本中把 `.env.production` 的 `NYAUTH_IMAGE` 更新为已验证的新 digest，执行 `config --quiet`，确认后再原子替换正式文件。

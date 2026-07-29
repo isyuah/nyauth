@@ -488,6 +488,7 @@ func (s *Server) buildRouter() *chi.Mux {
 			r.With(adminMutations).Put("/admin/settings/media/candidate", s.handleSaveMediaCandidate)
 			r.With(adminMutations).Post("/admin/settings/media/candidate/test", s.handleTestMediaCandidate)
 			r.With(adminMutations).Post("/admin/settings/media/migrations", s.handleStartMediaMigration)
+			r.With(adminMutations).Post("/admin/settings/media/fallback/migrate", s.handleStartMediaFallbackMigration)
 			r.With(adminMutations).Post("/admin/settings/media/migrations/{id}/retry", s.handleRetryMediaMigration)
 			r.Get("/admin/invites", s.handleListInvites)
 			r.With(adminMutations).Post("/admin/invites", s.handleCreateInvite)

@@ -65,7 +65,7 @@ NYAUTH_MEDIA_S3_SECRET_ACCESS_KEY_FILE=/secure/path/media-s3-secret-access-key
 
 凭据只授予目标 bucket 中配置 prefix 所需的读取、写入和删除权限。bucket 应启用默认静态加密、versioning、访问审计和删除告警；lifecycle 不得按年龄删除当前对象版本，只能在覆盖 PostgreSQL PITR 窗口后清理 noncurrent version 和 delete marker。完整恢复要求见 [备份与恢复手册](backup-restore.md)。
 
-静态媒体配置只是在数据库尚未激活动态 profile 时使用的 fallback。管理员可在单机阶段通过 `/admin/settings/media` 保存并真实测试私有 S3 候选，再由系统排空 `media_writes`、逐对象复制回读校验并切换 profile；迁移完成且所有实例加载新 revision 后，才能把应用扩成 HA。失败迁移仍会阻止清理和候选替换，必须在媒体写入保持排空时重试。首版不支持动态迁回本地目录，也不能用各实例互不共享的本地目录运行 HA。
+静态媒体配置只是在数据库尚未激活动态 profile 时使用的 fallback。管理员可在单机阶段通过 `/admin/settings/media` 保存并真实测试私有 S3 候选，再由系统排空 `media_writes`、逐对象复制回读校验并切换 profile；迁移完成且所有实例加载新 revision 后，才能把应用扩成 HA。失败迁移仍会阻止清理和候选替换，必须在媒体写入保持排空时重试。迁回已配置本地 fallback 只允许在单实例阶段执行；HA 不能使用各实例互不共享的本地目录。
 
 展开配置前先确认两个 secret 文件存在且权限受控：
 
@@ -120,7 +120,7 @@ docker compose -f docker-compose.ha.yml ps
 
 ## 发布顺序
 
-`0.3.0-rc.1` 是 schema version 1 的破坏性 release baseline，不支持从早期开发数据库滚动升级。正式 `0.3.0` 通过兼容迁移演进到 schema version 3；`0.4.0-dev` 再通过 `000004` 至 `000006_runtime_media_storage` 兼容升级到 schema version 6。必须先由迁移任务完成加法迁移，再逐个替换应用实例。首次部署仍必须使用全新 PostgreSQL/Redis；启动单个新实例完成 smoke test 后再扩容第二实例。后续版本只有在发布说明明确承诺兼容时才可滚动升级，不得让要求不同数据库契约的应用版本同时处理流量。
+`0.3.0-rc.1` 是 schema version 1 的破坏性 release baseline，不支持从早期开发数据库滚动升级。正式 `0.3.0` 通过兼容迁移演进到 schema version 3；`0.4.0-dev` 再通过 `000004` 至 `000007_runtime_media_fallback` 兼容升级到 schema version 7。必须先由迁移任务完成加法迁移，再逐个替换应用实例。首次部署仍必须使用全新 PostgreSQL/Redis；启动单个新实例完成 smoke test 后再扩容第二实例。后续版本只有在发布说明明确承诺兼容时才可滚动升级，不得让要求不同数据库契约的应用版本同时处理流量。
 
 运行时暂停变更后，管理 API 最多等待 5 秒收集所有活动实例的排空确认；返回 `202 applying` 时设置已经生效且不会自动回滚，应轮询管理状态直至所有活动实例 applied。无限期暂停的 HA 紧急解锁可从任一相同版本服务定义执行：
 

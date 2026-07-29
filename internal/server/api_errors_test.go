@@ -51,6 +51,10 @@ func TestMediaSettingsErrorsHaveSpecificStableCodes(t *testing.T) {
 		"media settings changed; reload and try again":                         "media.revision_conflict",
 		"a recent successful media storage test is required":                   "media.test_required",
 		"active instances are still preparing the media storage candidate":     "media.instances_not_ready",
+		"local media fallback is not configured":                               "media.fallback_not_configured",
+		"local media fallback is already active":                               "media.fallback_already_active",
+		"local media fallback migration requires a single active instance":     "media.fallback_requires_single_instance",
+		"local media fallback is unavailable":                                  "media.fallback_unavailable",
 		"clear the current maintenance expiry before starting media migration": "media.maintenance_expiry",
 	}
 	for message, expected := range tests {

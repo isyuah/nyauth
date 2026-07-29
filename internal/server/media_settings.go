@@ -35,6 +35,10 @@ type mediaProfileRequest struct {
 	ProfileID        string `json:"profile_id"`
 }
 
+type mediaFallbackMigrationRequest struct {
+	ExpectedRevision int64 `json:"expected_revision"`
+}
+
 func (s *Server) handleGetMediaSettings(w http.ResponseWriter, r *http.Request) {
 	if !s.requireRecentAuthentication(w, r) {
 		return
@@ -96,6 +100,23 @@ func (s *Server) handleStartMediaMigration(w http.ResponseWriter, r *http.Reques
 	if !ok {
 		return
 	}
+	s.startMediaMigration(w, r, mutation, request.ExpectedRevision, &profileID, string(avatar.StorageS3))
+}
+
+func (s *Server) handleStartMediaFallbackMigration(w http.ResponseWriter, r *http.Request) {
+	mutation, ok := s.authorizeMediaMutation(w, r)
+	if !ok {
+		return
+	}
+	var request mediaFallbackMigrationRequest
+	if decodeJSON(w, r, &request) != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	s.startMediaMigration(w, r, mutation, request.ExpectedRevision, nil, string(avatar.StorageLocal))
+}
+
+func (s *Server) startMediaMigration(w http.ResponseWriter, r *http.Request, mutation audit.MutationAudit, expectedRevision int64, targetProfileID *uuid.UUID, targetBackend string) {
 	current, err := s.mediaManager.Current(r.Context())
 	if err != nil {
 		s.writeMediaMutationError(w, err)
@@ -139,7 +160,7 @@ func (s *Server) handleStartMediaMigration(w http.ResponseWriter, r *http.Reques
 		return
 	}
 	previous["auto_added_media_writes"] = autoAdded
-	migration, state, startErr := s.mediaManager.StartMigration(r.Context(), mediaruntime.StartMigrationInput{ExpectedRevision: request.ExpectedRevision, ProfileID: profileID, SourceBackend: string(current.Store.Backend()), ServiceControlRevision: controlRevision, ServiceControlPrevious: previous, Audit: mutation})
+	migration, state, startErr := s.mediaManager.StartMigration(r.Context(), mediaruntime.StartMigrationInput{ExpectedRevision: expectedRevision, TargetProfileID: targetProfileID, TargetBackend: targetBackend, SourceBackend: string(current.Store.Backend()), ServiceControlRevision: controlRevision, ServiceControlPrevious: previous, Audit: mutation})
 	if startErr != nil {
 		if autoAdded {
 			s.tryRestoreMediaControl(r.Context(), controlRevision, previous, mutation)
@@ -244,6 +265,14 @@ func (s *Server) writeMediaMutationError(w http.ResponseWriter, err error) {
 		writeAPIError(w, http.StatusConflict, "media writes must be paused before migration")
 	case errors.Is(err, mediaruntime.ErrInstancesNotReady):
 		writeAPIError(w, http.StatusConflict, "active instances are still preparing the media storage candidate")
+	case errors.Is(err, mediaruntime.ErrFallbackNotLocal):
+		writeAPIError(w, http.StatusConflict, "local media fallback is not configured")
+	case errors.Is(err, mediaruntime.ErrFallbackAlreadyActive):
+		writeAPIError(w, http.StatusConflict, "local media fallback is already active")
+	case errors.Is(err, mediaruntime.ErrFallbackRequiresSingleInstance):
+		writeAPIError(w, http.StatusConflict, "local media fallback migration requires a single active instance")
+	case errors.Is(err, mediaruntime.ErrFallbackUnavailable):
+		writeAPIError(w, http.StatusServiceUnavailable, "local media fallback is unavailable")
 	case errors.Is(err, mediaruntime.ErrMigrationNotFound):
 		writeAPIError(w, http.StatusNotFound, "media storage migration was not found")
 	default:

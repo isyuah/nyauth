@@ -240,6 +240,7 @@ func TestDescribeMediaAdministrationMutations(t *testing.T) {
 		{http.MethodPut, "/api/admin/settings/media/candidate", "/api/admin/settings/media/candidate", "", models.AuditMediaSettingsSaved, "media_config"},
 		{http.MethodPost, "/api/admin/settings/media/candidate/test", "/api/admin/settings/media/candidate/test", "", models.AuditMediaSettingsTested, "media_config"},
 		{http.MethodPost, "/api/admin/settings/media/migrations", "/api/admin/settings/media/migrations", "", models.AuditMediaMigrationStarted, "media_migration"},
+		{http.MethodPost, "/api/admin/settings/media/fallback/migrate", "/api/admin/settings/media/fallback/migrate", "", models.AuditMediaMigrationStarted, "media_migration"},
 		{http.MethodPost, "/api/admin/settings/media/migrations/migration-1/retry", "/api/admin/settings/media/migrations/{id}/retry", "migration-1", models.AuditMediaMigrationRetried, "media_migration"},
 	}
 

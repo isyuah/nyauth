@@ -4,6 +4,7 @@
     api,
     isRecentAuthenticationError,
     type MediaStorageMigration,
+    type MediaStorageProfile,
     type MediaStorageSettings,
   } from '$lib/api';
   import { consumeProviderAuthError } from '$lib/stores';
@@ -14,9 +15,9 @@
   import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
   import Input from '$lib/components/ui/Input.svelte';
   import Switch from '$lib/components/ui/Switch.svelte';
-  import { Database, Play, RefreshCw, RotateCcw, ShieldCheck } from 'lucide-svelte';
+  import { Database, HardDrive, Play, RefreshCw, RotateCcw, ShieldCheck } from 'lucide-svelte';
 
-  type Action = 'load' | 'save' | 'test' | 'migrate' | 'retry';
+  type Action = 'load' | 'save' | 'test' | 'migrate' | 'fallback' | 'retry';
   interface PendingAction {
     action: Action;
     expected_revision?: number;
@@ -43,6 +44,7 @@
   let sessionToken = $state('');
   let draft = $state<Draft>(emptyDraft());
   let migrationConfirmationOpen = $state(false);
+  let fallbackConfirmationOpen = $state(false);
   let reauthenticationOpen = $state(false);
   let pending = $state<PendingAction | null>(null);
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
@@ -177,6 +179,22 @@
     } finally { operation = ''; }
   }
 
+  async function migrateToLocalFallback(allowReauthentication = true, expectedRevision?: number) {
+    if (!settings || settings.mode !== 'dynamic' || settings.fallback?.backend !== 'local') return;
+    const revision = expectedRevision ?? settings.revision;
+    const snapshot: PendingAction = { action: 'fallback', expected_revision: revision };
+    operation = 'fallback';
+    try {
+      await api.admin.migrateMediaToLocalFallback(revision);
+      toast.info('本地存储检查已通过，媒体写入已排空，正在迁回头像对象。');
+      await load(false, false);
+    } catch (cause) {
+      if (allowReauthentication && isRecentAuthenticationError(cause)) openReauthentication(snapshot);
+      else toast.error(message(cause, '迁回本地存储失败'));
+      throw cause;
+    } finally { operation = ''; }
+  }
+
   function openReauthentication(snapshot: PendingAction) {
     pending = snapshot;
     reauthenticationOpen = true;
@@ -201,6 +219,7 @@
       case 'save': await saveCandidate(false, snapshot.expected_revision); break;
       case 'test': await testCandidate(false, snapshot.expected_revision, snapshot.profile_id); break;
       case 'migrate': await startMigration(false, snapshot.expected_revision, snapshot.profile_id); break;
+      case 'fallback': await migrateToLocalFallback(false, snapshot.expected_revision); break;
       case 'retry': await retryMigration(false, snapshot.migration_id); break;
     }
   }
@@ -231,9 +250,10 @@
 
   function message(cause: unknown, fallback: string): string { return cause instanceof Error ? cause.message : fallback; }
   function formatDate(value?: string): string { if (!value) return '—'; const date = new Date(value); return Number.isNaN(date.getTime()) ? value : date.toLocaleString('zh-CN'); }
-  function profileTitle(profile = settings?.active): string {
+  function profileTitle(profile: MediaStorageProfile | undefined, deploymentFallback = false): string {
     if (!profile) return '未配置';
-    if (!profile.id) return profile.backend === 'local' ? '部署配置 · 本地存储' : '部署配置 · S3';
+    if (deploymentFallback) return profile.backend === 'local' ? '本地存储' : 'S3';
+    if (profile.backend === 'local') return '本地存储';
     return `${profile.settings?.bucket || 'S3'}${profile.settings?.prefix ? ` / ${profile.settings.prefix}` : ''}`;
   }
 
@@ -254,15 +274,17 @@
   {:else if settings}
     <div class="grid gap-4 lg:grid-cols-2">
       <div class="rounded-nya-md border border-nya-border bg-nya-surface p-4">
-        <div class="flex items-start justify-between gap-3">
-          <div><p class="text-micro uppercase text-nya-text-tertiary">当前存储</p><h3 class="mt-1 text-body-medium font-semibold text-nya-text-primary">{profileTitle()}</h3></div>
-          <Badge variant={settings.mode === 'dynamic' ? 'success' : 'default'}>{settings.mode === 'dynamic' ? '运行时配置' : '静态回退'}</Badge>
-        </div>
+        <div><p class="text-micro uppercase text-nya-text-tertiary">当前存储</p><h3 class="mt-1 text-body-medium font-semibold text-nya-text-primary">{profileTitle(settings.active, settings.mode === 'fallback')}</h3></div>
         <p class="mt-3 text-small text-nya-text-secondary">现有头像读取会按各自绑定的存储版本路由；切换不会让旧地址失效。</p>
+        {#if settings.mode === 'dynamic' && settings.fallback?.backend === 'local'}
+          <div class="mt-4">
+            <Button variant="secondary" requiredCapability="admin_mutations" loading={operation === 'fallback'} disabled={operation !== '' || isMigrationUnresolved(settings.migration)} onclick={() => (fallbackConfirmationOpen = true)}><HardDrive size={16} />迁回本地存储</Button>
+          </div>
+        {/if}
       </div>
       <div class="rounded-nya-md border border-nya-border bg-nya-surface p-4">
         <p class="text-micro uppercase text-nya-text-tertiary">安全边界</p>
-        <p class="mt-2 text-small text-nya-text-secondary">仅支持私有 S3 兼容存储。凭据使用主密钥加密，API、日志和审计均不会回显。</p>
+        <p class="mt-2 text-small text-nya-text-secondary">后台仅接受私有 S3 兼容存储；可以迁回部署时已挂载的本地存储，但不会接受或修改任意本地路径。凭据使用主密钥加密且永不回显。</p>
       </div>
     </div>
 
@@ -313,4 +335,5 @@
 </section>
 
 <ConfirmDialog bind:open={migrationConfirmationOpen} title="迁移媒体存储" description="系统会自动暂停媒体写入，逐个复制并校验全部头像，再切换有效存储。失败时保持暂停并保留源对象。" confirmLabel="开始迁移" confirmationText="迁移媒体存储" onconfirm={() => startMigration()} />
+<ConfirmDialog bind:open={fallbackConfirmationOpen} title="迁回本地存储" description="系统会先验证已挂载的本地存储，再暂停媒体写入，将全部头像从当前 S3 复制回本地。多实例部署不允许使用非共享本地存储。" confirmLabel="检查并开始迁回" confirmationText="迁回本地存储" onconfirm={() => migrateToLocalFallback()} />
 <ReauthenticationDialog bind:open={reauthenticationOpen} {returnTo} description="查看或修改对象存储前需要完成近期身份验证" onauthenticated={retryAfterPassword} onbeforeprovider={persistProviderAction} />
