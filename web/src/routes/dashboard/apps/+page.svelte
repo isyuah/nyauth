@@ -1,6 +1,7 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { api, type CreateClientInput, type OAuthClient } from '$lib/api';
+  import { api, type CreateClientInput, type OAuthClient, type OAuthClientPolicy, type OAuthGrantType, type OAuthScope } from '$lib/api';
+  import { OAUTH_SCOPES } from '$lib/policy-settings';
   import PageHeader from '$lib/components/layout/PageHeader.svelte';
   import CopyField from '$lib/components/data-display/CopyField.svelte';
   import Badge from '$lib/components/ui/Badge.svelte';
@@ -15,6 +16,14 @@
   let clients = $state<OAuthClient[]>([]);
   let clientTotal = $state<number | null>(null);
   let clientLimit = $state<number | null>(null);
+  let clientPolicy = $state<OAuthClientPolicy>({
+    self_service_client_creation_enabled: true,
+    public_clients_enabled: true,
+    allowed_grant_types: ['authorization_code', 'refresh_token', 'client_credentials'],
+    allowed_scopes: ['openid', 'profile', 'email', 'offline_access'],
+    max_redirect_uris: 20,
+    max_post_logout_redirect_uris: 20,
+  });
   let loading = $state(true);
   let showCreate = $state(false);
   let creating = $state(false);
@@ -23,7 +32,7 @@
   let createdSecret = $state('');
   let rotatedSecret = $state('');
   let rotatedClientName = $state('');
-  let newApp = $state({ name: '', redirect_uris: '', post_logout_redirect_uris: '', is_public: false });
+  let newApp = $state<{ name: string; redirect_uris: string; post_logout_redirect_uris: string; is_public: boolean; grants: OAuthGrantType[]; scopes: OAuthScope[] }>({ name: '', redirect_uris: '', post_logout_redirect_uris: '', is_public: false, grants: ['authorization_code', 'refresh_token'], scopes: ['openid', 'profile', 'email', 'offline_access'] });
   let deleteTarget = $state<OAuthClient | null>(null);
   let deleteOpen = $state(false);
   let deleteError = $state('');
@@ -31,6 +40,38 @@
   let rotateOpen = $state(false);
   let rotateError = $state('');
   let quotaReached = $derived(clientTotal !== null && clientLimit !== null && clientTotal >= clientLimit);
+  let creationDisabled = $derived(!clientPolicy.self_service_client_creation_enabled);
+  let authorizationCodeSelected = $derived(newApp.grants.includes('authorization_code'));
+
+  function defaultNewApp(policy: OAuthClientPolicy) {
+    const grants: OAuthGrantType[] = [];
+    if (policy.allowed_grant_types.includes('authorization_code')) grants.push('authorization_code');
+    if (policy.allowed_grant_types.includes('refresh_token') && grants.includes('authorization_code')) grants.push('refresh_token');
+    if (grants.length === 0 && policy.allowed_grant_types[0]) grants.push(policy.allowed_grant_types[0]);
+    const scopes = policy.allowed_scopes.filter((scope) => OAUTH_SCOPES.some((standard) => standard === scope)
+      && (scope !== 'offline_access' || grants.includes('refresh_token')));
+    return { name: '', redirect_uris: '', post_logout_redirect_uris: '', is_public: false, grants, scopes };
+  }
+
+  function toggleGrant(grant: OAuthGrantType, checked: boolean) {
+    const selected = new Set(newApp.grants);
+    if (checked) selected.add(grant); else selected.delete(grant);
+    if (grant === 'authorization_code' && !checked) {
+      selected.delete('refresh_token');
+      newApp.is_public = false;
+      newApp.scopes = newApp.scopes.filter((scope) => scope !== 'offline_access');
+    }
+    if (grant === 'refresh_token' && checked) selected.add('authorization_code');
+    if (grant === 'refresh_token' && !checked) newApp.scopes = newApp.scopes.filter((scope) => scope !== 'offline_access');
+    newApp.grants = clientPolicy.allowed_grant_types.filter((item) => selected.has(item));
+  }
+
+  function toggleScope(scope: OAuthScope, checked: boolean) {
+    const selected = new Set(newApp.scopes);
+    if (checked) selected.add(scope); else selected.delete(scope);
+    newApp.scopes = clientPolicy.allowed_scopes.filter((item) => selected.has(item));
+    if (scope === 'offline_access' && checked) toggleGrant('refresh_token', true);
+  }
 
   async function loadApps() {
     loading = true;
@@ -40,6 +81,8 @@
       clients = result.items;
       clientTotal = result.quota_used;
       clientLimit = result.quota_limit;
+      clientPolicy = result.client_policy;
+      newApp = defaultNewApp(result.client_policy);
     } catch (cause) {
       pageError = cause instanceof Error ? cause.message : '应用列表加载失败';
     } finally {
@@ -55,18 +98,25 @@
     rotatedSecret = '';
     rotatedClientName = '';
     try {
+      if (creationDisabled) throw new Error('管理员已关闭用户自助创建客户端。');
+      if (newApp.grants.length === 0) throw new Error('至少选择一种 Grant。');
+      const redirectURIs = newApp.redirect_uris.split('\n').map((uri) => uri.trim()).filter(Boolean);
+      const logoutURIs = newApp.post_logout_redirect_uris.split('\n').map((uri) => uri.trim()).filter(Boolean);
+      if (authorizationCodeSelected && redirectURIs.length === 0) throw new Error('Authorization Code 客户端至少需要一个 Redirect URI。');
+      if (redirectURIs.length > clientPolicy.max_redirect_uris) throw new Error(`Redirect URI 不能超过 ${clientPolicy.max_redirect_uris} 个。`);
+      if (logoutURIs.length > clientPolicy.max_post_logout_redirect_uris) throw new Error(`Post-logout Redirect URI 不能超过 ${clientPolicy.max_post_logout_redirect_uris} 个。`);
       const payload: CreateClientInput = {
         name: newApp.name,
-        redirect_uris: newApp.redirect_uris.split('\n').map((uri) => uri.trim()).filter(Boolean),
-        post_logout_redirect_uris: newApp.post_logout_redirect_uris.split('\n').map((uri) => uri.trim()).filter(Boolean),
-        grants: ['authorization_code', 'refresh_token'],
-        scopes: ['openid', 'profile', 'email', 'offline_access'],
+        redirect_uris: redirectURIs,
+        post_logout_redirect_uris: logoutURIs,
+        grants: [...newApp.grants],
+        scopes: [...newApp.scopes],
         is_public: newApp.is_public,
       };
       const result = await api.my.createClient(payload);
       createdSecret = result.secret || '';
       showCreate = false;
-      newApp = { name: '', redirect_uris: '', post_logout_redirect_uris: '', is_public: false };
+      newApp = defaultNewApp(clientPolicy);
       await loadApps();
     } catch (cause) {
       createError = cause instanceof Error ? cause.message : '创建失败';
@@ -132,16 +182,17 @@
   {#snippet action()}
     <div class="flex items-center gap-3">
       <span title="已创建应用 / 配额上限"><Badge variant={quotaReached ? 'warning' : 'default'}>{clientTotal === null || clientLimit === null ? '—/—' : `${clientTotal}/${clientLimit}`}</Badge></span>
-      <Button variant="primary" requiredCapability="account_mutations" disabled={quotaReached} onclick={() => { createdSecret = ''; showCreate = true; }}><Plus size={16} /> 创建应用</Button>
+      <Button variant="primary" requiredCapability="account_mutations" disabled={quotaReached || creationDisabled} title={creationDisabled ? '管理员已关闭用户自助创建客户端' : undefined} onclick={() => { createdSecret = ''; showCreate = true; }}><Plus size={16} /> 创建应用</Button>
     </div>
   {/snippet}
 </PageHeader>
 
 {#if createdSecret}<div class="mb-4 rounded-nya-md border border-nya-info/20 bg-nya-info-soft px-5 py-4"><p class="mb-2 text-body-medium text-nya-info">请立即复制并安全保存 Client Secret，离开本页后无法再次查看。</p><SecretReveal value={createdSecret} label="Client Secret" /></div>{/if}
 {#if rotatedSecret}<div class="mb-4 rounded-nya-md border border-nya-warning/20 bg-nya-warning-soft px-5 py-4"><p class="mb-2 text-body-medium text-nya-warning">“{rotatedClientName}”的旧 Secret 已立即失效。新 Secret 仅在当前页面显示，请现在保存。</p><SecretReveal value={rotatedSecret} label="新 Client Secret" /></div>{/if}
+{#if creationDisabled}<div class="mb-4 rounded-nya-sm bg-nya-surface-muted px-4 py-3 text-small text-nya-text-secondary">管理员已关闭用户自助创建客户端；已有应用仍可查看、轮换 Secret 或删除。</div>{/if}
 
 <ResourceState {loading} error={pageError} empty={clients.length === 0} emptyTitle="还没有创建应用" emptyDescription="创建第一个 OAuth / OIDC 客户端后即可接入项目。" onretry={loadApps}>
-  {#snippet emptyAction()}<Button variant="primary" requiredCapability="account_mutations" disabled={quotaReached} onclick={() => (showCreate = true)}>创建应用</Button>{/snippet}
+  {#snippet emptyAction()}<Button variant="primary" requiredCapability="account_mutations" disabled={quotaReached || creationDisabled} onclick={() => (showCreate = true)}>创建应用</Button>{/snippet}
   {#snippet children()}
     <div class="space-y-3">
       {#each clients as client}
@@ -163,10 +214,12 @@
   <form onsubmit={handleCreate} class="space-y-4">
     {#if createError}<p class="rounded-nya-sm bg-nya-danger-soft px-3 py-2 text-small text-nya-danger" role="alert">{createError}</p>{/if}
     <Input id="my-client-name" label="应用名称" bind:value={newApp.name} required placeholder="我的应用" />
-    <div><label for="my-client-redirects" class="mb-1.5 block text-body-medium text-nya-text-primary">Redirect URI <span class="text-small text-nya-text-tertiary">（每行一个）</span></label><textarea id="my-client-redirects" bind:value={newApp.redirect_uris} required rows="3" placeholder="https://app.example.com/callback" class="w-full rounded-nya-sm border border-nya-border bg-nya-surface px-3 py-2 font-mono text-small focus:border-nya-primary focus:outline-none focus:ring-2 focus:ring-nya-primary/24"></textarea></div>
-    <div><label for="my-client-logouts" class="mb-1.5 block text-body-medium text-nya-text-primary">Post-logout Redirect URI <span class="text-small text-nya-text-tertiary">（每行一个）</span></label><textarea id="my-client-logouts" bind:value={newApp.post_logout_redirect_uris} rows="2" placeholder="https://app.example.com/signed-out" class="w-full rounded-nya-sm border border-nya-border bg-nya-surface px-3 py-2 font-mono text-small focus:border-nya-primary focus:outline-none focus:ring-2 focus:ring-nya-primary/24"></textarea></div>
-    <label class="flex cursor-pointer items-start gap-2"><input type="checkbox" bind:checked={newApp.is_public} class="mt-0.5 rounded" /><span><span class="block text-body text-nya-text-primary">公共客户端</span><span class="block text-small text-nya-text-tertiary">仅用于无法安全保存 Secret 的原生应用；浏览器 SPA 暂不作为正式支持模式。</span></span></label>
-    <div class="flex justify-end gap-2 pt-2"><Button variant="secondary" onclick={() => (showCreate = false)} disabled={creating}>取消</Button><Button type="submit" variant="primary" requiredCapability="account_mutations" loading={creating} disabled={quotaReached}>创建</Button></div>
+    <fieldset class="rounded-nya-sm border border-nya-border p-3"><legend class="px-1 text-body-medium text-nya-text-primary">Grant</legend><div class="grid gap-2 sm:grid-cols-2">{#each clientPolicy.allowed_grant_types as grant}<label class="flex items-center gap-2 text-small text-nya-text-primary"><input type="checkbox" checked={newApp.grants.includes(grant)} onchange={(event) => toggleGrant(grant, event.currentTarget.checked)} /> {grant}</label>{/each}</div></fieldset>
+    <fieldset class="rounded-nya-sm border border-nya-border p-3"><legend class="px-1 text-body-medium text-nya-text-primary">Scope</legend><div class="grid gap-2 sm:grid-cols-2">{#each clientPolicy.allowed_scopes as scope}<label class="flex items-center gap-2 font-mono text-small text-nya-text-primary"><input type="checkbox" checked={newApp.scopes.includes(scope)} onchange={(event) => toggleScope(scope, event.currentTarget.checked)} /> {scope}</label>{/each}</div></fieldset>
+    <div><label for="my-client-redirects" class="mb-1.5 block text-body-medium text-nya-text-primary">Redirect URI <span class="text-small text-nya-text-tertiary">（每行一个，最多 {clientPolicy.max_redirect_uris} 个）</span></label><textarea id="my-client-redirects" bind:value={newApp.redirect_uris} required={authorizationCodeSelected} rows="3" placeholder="https://app.example.com/callback" class="w-full rounded-nya-sm border border-nya-border bg-nya-surface px-3 py-2 font-mono text-small focus:border-nya-primary focus:outline-none focus:ring-2 focus:ring-nya-primary/24"></textarea></div>
+    <div><label for="my-client-logouts" class="mb-1.5 block text-body-medium text-nya-text-primary">Post-logout Redirect URI <span class="text-small text-nya-text-tertiary">（每行一个，最多 {clientPolicy.max_post_logout_redirect_uris} 个）</span></label><textarea id="my-client-logouts" bind:value={newApp.post_logout_redirect_uris} rows="2" placeholder="https://app.example.com/signed-out" disabled={clientPolicy.max_post_logout_redirect_uris === 0} class="w-full rounded-nya-sm border border-nya-border bg-nya-surface px-3 py-2 font-mono text-small focus:border-nya-primary focus:outline-none focus:ring-2 focus:ring-nya-primary/24 disabled:opacity-50"></textarea></div>
+    <label class="flex cursor-pointer items-start gap-2 {clientPolicy.public_clients_enabled && authorizationCodeSelected ? '' : 'opacity-50'}"><input type="checkbox" bind:checked={newApp.is_public} disabled={!clientPolicy.public_clients_enabled || !authorizationCodeSelected} class="mt-0.5 rounded" /><span><span class="block text-body text-nya-text-primary">公共客户端</span><span class="block text-small text-nya-text-tertiary">仅用于无法安全保存 Secret 的原生应用；浏览器 SPA 暂不作为正式支持模式。</span></span></label>
+    <div class="flex justify-end gap-2 pt-2"><Button variant="secondary" onclick={() => (showCreate = false)} disabled={creating}>取消</Button><Button type="submit" variant="primary" requiredCapability="account_mutations" loading={creating} disabled={quotaReached || creationDisabled}>创建</Button></div>
   </form>
 </Modal>
 

@@ -28,6 +28,7 @@ const (
 	securityKey            = "security"
 	protectionKey          = "protection"
 	lifecycleKey           = "lifecycle"
+	oauthKey               = "oauth"
 	notificationChannel    = "nyauth_settings_changed"
 	reconciliationInterval = 60 * time.Second
 )
@@ -122,6 +123,7 @@ type Manager struct {
 	security           atomic.Pointer[Versioned[Security]]
 	protection         atomic.Pointer[Versioned[Protection]]
 	lifecycle          atomic.Pointer[Versioned[Lifecycle]]
+	oauth              atomic.Pointer[Versioned[OAuthPolicy]]
 	loadMu             sync.Mutex
 }
 
@@ -229,6 +231,17 @@ func (m *Manager) LifecycleSnapshot() Versioned[Lifecycle] {
 	return Versioned[Lifecycle]{Value: m.lifecycleDefaults()}
 }
 
+func (m *Manager) OAuthPolicy() OAuthPolicy {
+	return m.OAuthPolicySnapshot().Value
+}
+
+func (m *Manager) OAuthPolicySnapshot() Versioned[OAuthPolicy] {
+	if snapshot := m.oauth.Load(); snapshot != nil {
+		return *snapshot
+	}
+	return Versioned[OAuthPolicy]{Value: DefaultOAuthPolicy()}
+}
+
 func decodeLifecycle(raw []byte, defaults Lifecycle) (Lifecycle, error) {
 	value := defaults
 	var fields map[string]json.RawMessage
@@ -273,7 +286,7 @@ func (m *Manager) Load(ctx context.Context) error {
 		return nil
 	}
 	rows, err := m.db.Query(ctx, `SELECT key, value, revision FROM runtime_settings WHERE key = ANY($1)`,
-		[]string{brandingKey, registrationKey, securityKey, protectionKey, lifecycleKey})
+		[]string{brandingKey, registrationKey, securityKey, protectionKey, lifecycleKey, oauthKey})
 	if err != nil {
 		return fmt.Errorf("loading runtime settings: %w", err)
 	}
@@ -350,6 +363,19 @@ func (m *Manager) Load(ctx context.Context) error {
 		lifecycle = &Versioned[Lifecycle]{Revision: storedValue.revision, Value: value}
 	}
 
+	var oauthPolicy *Versioned[OAuthPolicy]
+	if storedValue, ok := stored[oauthKey]; ok {
+		value := DefaultOAuthPolicy()
+		if err := json.Unmarshal(storedValue.value, &value); err != nil {
+			return fmt.Errorf("decoding stored OAuth settings: %w", err)
+		}
+		value, err = NormalizeOAuthPolicy(value)
+		if err != nil {
+			return fmt.Errorf("decoding stored OAuth settings: %w", err)
+		}
+		oauthPolicy = &Versioned[OAuthPolicy]{Revision: storedValue.revision, Value: value}
+	}
+
 	// Publish only after every stored group decodes and validates, so a corrupt
 	// row cannot partially replace the last known-good process snapshot.
 	m.branding.Store(branding)
@@ -357,6 +383,7 @@ func (m *Manager) Load(ctx context.Context) error {
 	m.security.Store(security)
 	m.protection.Store(protection)
 	m.lifecycle.Store(lifecycle)
+	m.oauth.Store(oauthPolicy)
 	return nil
 }
 

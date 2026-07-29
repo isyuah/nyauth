@@ -2,6 +2,7 @@ package settings
 
 import (
 	"encoding/json"
+	"slices"
 	"testing"
 	"time"
 
@@ -21,6 +22,73 @@ func TestLifecycleDefaultsUseDeploymentAuthenticationFallbacks(t *testing.T) {
 	}
 	if value.SessionIdleTTL != value.SessionAbsoluteTTL || value.MaxConcurrentSessions != 0 {
 		t.Fatalf("session compatibility defaults = %#v", value)
+	}
+}
+
+func TestOAuthPolicyDefaultsAndNormalization(t *testing.T) {
+	defaults := DefaultOAuthPolicy()
+	if !defaults.SelfServiceClientCreationEnabled || !defaults.PublicClientsEnabled ||
+		!defaults.AllowsGrant(models.GrantClientCredentials) || !defaults.AllowsScope("offline_access") {
+		t.Fatalf("OAuth defaults = %#v", defaults)
+	}
+	shuffled := defaults
+	shuffled.AllowedGrantTypes = []string{models.GrantClientCredentials, models.GrantAuthorizationCode, models.GrantRefreshToken}
+	shuffled.AllowedScopes = []string{"email", "openid", "offline_access", "profile"}
+	normalized, err := NormalizeOAuthPolicy(shuffled)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !SameOAuthPolicy(normalized, defaults) {
+		t.Fatalf("normalized OAuth policy = %#v, want %#v", normalized, defaults)
+	}
+	custom := defaults
+	custom.AllowedScopes = []string{"tenant.write", "openid", "tenant.read"}
+	normalized, err = NormalizeOAuthPolicy(custom)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(normalized.AllowedScopes, []string{"openid", "tenant.read", "tenant.write"}) {
+		t.Fatalf("normalized custom scopes = %#v", normalized.AllowedScopes)
+	}
+	empty := defaults
+	empty.AllowedScopes = []string{}
+	if _, err := NormalizeOAuthPolicy(empty); err != nil {
+		t.Fatalf("empty allowed scope set rejected: %v", err)
+	}
+}
+
+func TestOAuthPolicyRejectsImpossibleCombinationsAndBounds(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*OAuthPolicy)
+	}{
+		{name: "empty grants", mutate: func(value *OAuthPolicy) { value.AllowedGrantTypes = nil }},
+		{name: "duplicate scope", mutate: func(value *OAuthPolicy) { value.AllowedScopes = []string{"openid", "openid"} }},
+		{name: "invalid scope", mutate: func(value *OAuthPolicy) { value.AllowedScopes = []string{"tenant read"} }},
+		{name: "unknown grant", mutate: func(value *OAuthPolicy) { value.AllowedGrantTypes = []string{"password"} }},
+		{name: "refresh without authorization code", mutate: func(value *OAuthPolicy) {
+			value.PublicClientsEnabled = false
+			value.AllowedGrantTypes = []string{models.GrantRefreshToken}
+			value.AllowedScopes = []string{"openid"}
+		}},
+		{name: "offline without refresh", mutate: func(value *OAuthPolicy) {
+			value.AllowedGrantTypes = []string{models.GrantAuthorizationCode}
+		}},
+		{name: "public without authorization code", mutate: func(value *OAuthPolicy) {
+			value.AllowedGrantTypes = []string{models.GrantClientCredentials}
+			value.AllowedScopes = []string{"openid"}
+		}},
+		{name: "redirect limit", mutate: func(value *OAuthPolicy) { value.MaxRedirectURIs = 0 }},
+		{name: "logout limit", mutate: func(value *OAuthPolicy) { value.MaxPostLogoutRedirectURIs = 101 }},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			value := DefaultOAuthPolicy()
+			test.mutate(&value)
+			if _, err := NormalizeOAuthPolicy(value); err == nil {
+				t.Fatalf("invalid OAuth policy accepted: %#v", value)
+			}
+		})
 	}
 }
 
@@ -148,6 +216,9 @@ func TestLoadWithoutDatabaseKeepsDefaults(t *testing.T) {
 	}
 	if security := manager.Security(); !security.TOTPEnabled || !security.PasskeysEnabled || security.RequireMFAForAdmins {
 		t.Fatalf("security = %#v", security)
+	}
+	if oauthPolicy := manager.OAuthPolicy(); !SameOAuthPolicy(oauthPolicy, DefaultOAuthPolicy()) {
+		t.Fatalf("OAuth policy = %#v", oauthPolicy)
 	}
 }
 

@@ -355,6 +355,30 @@ export interface ClientQuota {
 
 export interface ClientQuotaPage<T> extends PaginatedResponse<T>, ClientQuota {}
 
+export type OAuthGrantType = 'authorization_code' | 'refresh_token' | 'client_credentials';
+export type OAuthScope = string;
+
+export interface OAuthClientPolicy {
+  self_service_client_creation_enabled: boolean;
+  public_clients_enabled: boolean;
+  allowed_grant_types: OAuthGrantType[];
+  allowed_scopes: OAuthScope[];
+  max_redirect_uris: number;
+  max_post_logout_redirect_uris: number;
+}
+
+export interface OAuthSettings extends OAuthClientPolicy {
+  revision: number;
+}
+
+export interface UpdateOAuthSettingsInput extends OAuthClientPolicy {
+  expected_revision: number;
+}
+
+export interface MyClientPage extends ClientQuotaPage<OAuthClient> {
+  client_policy: OAuthClientPolicy;
+}
+
 export interface DashboardStats {
   user_count: number;
   app_count: number;
@@ -1037,6 +1061,8 @@ const API_ERROR_TRANSLATIONS: Record<string, string> = {
   'clear the current maintenance expiry before starting media migration': '迁移期间不能自动恢复媒体写入，请先清除当前维护状态的到期时间',
   'too many media settings operations': '媒体存储设置操作过于频繁，请稍后重试',
   'application limit reached': '已达到该账户的应用配额上限',
+  'self-service client creation is disabled': '管理员已关闭用户自助创建客户端',
+  'oauth client policy changed; reload and retry': 'OAuth 客户端策略已更新，请重新加载后再试',
   'service capability is paused': '该操作因服务维护而暂时停用',
   'service control revision conflict': '运行状态已被其他管理员修改，请重新加载后再试',
   'registration settings conflict with service control': '当前运行控制状态不允许启用该注册策略，请先调整注册或邮件投递能力',
@@ -1147,6 +1173,8 @@ const API_ERROR_MESSAGES_BY_CODE: Record<string, string> = {
   'service_control.rate_limited': 'too many service control operations',
   'settings.revision_conflict': 'settings revision conflict',
   'client.quota_exceeded': 'application limit reached',
+  'client.self_service_disabled': 'self-service client creation is disabled',
+  'client.policy_changed': 'oauth client policy changed; reload and retry',
 };
 
 export function localizeAPIErrorMessage(message: string, code = ''): string {
@@ -1388,7 +1416,7 @@ export const api = {
   },
 
   my: {
-    getClients: () => req<ClientQuotaPage<OAuthClient>>('/api/my/clients'),
+    getClients: () => req<MyClientPage>('/api/my/clients'),
     createClient: (data: CreateClientInput) => req<CreateClientResult>('/api/my/clients', { method: 'POST', body: JSON.stringify(data) }),
     deleteClient: (id: string) => req<void>(`/api/my/clients/${encodeURIComponent(id)}`, { method: 'DELETE' }),
     rotateClientSecret: (id: string) => req<RotateClientSecretResult>(`/api/my/clients/${encodeURIComponent(id)}/rotate-secret`, { method: 'POST' }),
@@ -1412,6 +1440,9 @@ export const api = {
     getLifecycleSettings: () => req<LifecycleSettings>('/api/admin/settings/lifecycle', { cache: 'no-store' }),
     updateLifecycleSettings: (settings: UpdateLifecycleSettingsInput) =>
       req<LifecycleSettings>('/api/admin/settings/lifecycle', { method: 'PUT', body: JSON.stringify(settings) }),
+    getOAuthSettings: () => req<OAuthSettings>('/api/admin/settings/oauth', { cache: 'no-store' }),
+    updateOAuthSettings: (settings: UpdateOAuthSettingsInput) =>
+      req<OAuthSettings>('/api/admin/settings/oauth', { method: 'PUT', body: JSON.stringify(settings) }),
     getBrandingSettings: () => req<BrandingSettings>('/api/admin/settings/branding', { cache: 'no-store' }),
     updateBranding: (branding: UpdateBrandingSettingsInput) =>
       req<BrandingSettings>('/api/admin/settings/branding', { method: 'PUT', body: JSON.stringify(branding) }),

@@ -62,6 +62,22 @@ func (s *Store) Create(ctx context.Context, c *models.OAuthClient) error {
 	return insertClient(ctx, s.db, c)
 }
 
+func (s *Store) CreateWithOAuthPolicy(ctx context.Context, c *models.OAuthClient, policy settings.Versioned[settings.OAuthPolicy]) error {
+	prepareSecretMetadata(c, time.Now().UTC())
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+	if err := requireOAuthPolicy(ctx, tx, policy); err != nil {
+		return err
+	}
+	if err := insertClient(ctx, tx, c); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 func insertClient(ctx context.Context, execer clientExecer, c *models.OAuthClient) error {
 	if c.AccessPolicy == "" {
 		c.AccessPolicy = models.ClientAccessOpen
@@ -80,6 +96,10 @@ func insertClient(ctx context.Context, execer clientExecer, c *models.OAuthClien
 }
 
 func (s *Store) CreateForOwner(ctx context.Context, c *models.OAuthClient, ownerID string) error {
+	return s.CreateForOwnerWithOAuthPolicy(ctx, c, ownerID, settings.Versioned[settings.OAuthPolicy]{Value: settings.DefaultOAuthPolicy()})
+}
+
+func (s *Store) CreateForOwnerWithOAuthPolicy(ctx context.Context, c *models.OAuthClient, ownerID string, policy settings.Versioned[settings.OAuthPolicy]) error {
 	prepareSecretMetadata(c, time.Now().UTC())
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
@@ -87,6 +107,9 @@ func (s *Store) CreateForOwner(ctx context.Context, c *models.OAuthClient, owner
 	}
 	defer tx.Rollback(ctx)
 	if err := runtimecoord.LockClientQuotaShared(ctx, tx); err != nil {
+		return err
+	}
+	if err := requireOAuthPolicy(ctx, tx, policy); err != nil {
 		return err
 	}
 	quota, err := lockActiveOwnerQuota(ctx, tx, ownerID)
@@ -104,6 +127,10 @@ func (s *Store) CreateForOwner(ctx context.Context, c *models.OAuthClient, owner
 }
 
 func (s *Store) CreateWithAudit(ctx context.Context, c *models.OAuthClient, ownerID *string, mutation audit.MutationAudit) error {
+	return s.CreateWithAuditAndOAuthPolicy(ctx, c, ownerID, mutation, settings.Versioned[settings.OAuthPolicy]{Value: settings.DefaultOAuthPolicy()})
+}
+
+func (s *Store) CreateWithAuditAndOAuthPolicy(ctx context.Context, c *models.OAuthClient, ownerID *string, mutation audit.MutationAudit, policy settings.Versioned[settings.OAuthPolicy]) error {
 	prepareSecretMetadata(c, time.Now().UTC())
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
@@ -115,6 +142,11 @@ func (s *Store) CreateWithAudit(ctx context.Context, c *models.OAuthClient, owne
 		if err := runtimecoord.LockClientQuotaShared(ctx, tx); err != nil {
 			return err
 		}
+	}
+	if err := requireOAuthPolicy(ctx, tx, policy); err != nil {
+		return err
+	}
+	if ownerID != nil {
 		quota, err := lockActiveOwnerQuota(ctx, tx, *ownerID)
 		if err != nil {
 			return err
@@ -145,23 +177,56 @@ func (s *Store) GetByID(ctx context.Context, id string) (*models.OAuthClient, er
 }
 
 func (s *Store) Update(ctx context.Context, c *models.OAuthClient, mutation audit.MutationAudit) error {
+	name, isPublic, accessPolicy := c.Name, c.IsPublic, c.AccessPolicy
+	_, err := s.UpdateRequestWithOAuthPolicy(ctx, c.ID, models.UpdateClientRequest{
+		Name: &name, RedirectURIs: c.RedirectURIs, PostLogoutRedirectURIs: c.PostLogoutRedirectURIs,
+		Grants: c.Grants, Scopes: c.Scopes, IsPublic: &isPublic, AccessPolicy: &accessPolicy, Metadata: c.Metadata,
+	}, mutation, settings.Versioned[settings.OAuthPolicy]{Value: settings.DefaultOAuthPolicy()})
+	return err
+}
+
+func (s *Store) UpdateRequestWithOAuthPolicy(ctx context.Context, id string, request models.UpdateClientRequest, mutation audit.MutationAudit, policy settings.Versioned[settings.OAuthPolicy]) (*models.OAuthClient, error) {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("starting client update: %w", err)
+		return nil, fmt.Errorf("starting client update: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	result, err := tx.Exec(ctx, `UPDATE oauth_clients SET name=$2,redirect_uris=$3,post_logout_redirect_uris=$4,grants=$5,scopes=$6,metadata=$7,access_policy=$8,updated_at=NOW() WHERE id=$1`, c.ID, c.Name, c.RedirectURIs, c.PostLogoutRedirectURIs, c.Grants, c.Scopes, c.Metadata, c.AccessPolicy)
+	if err := requireOAuthPolicy(ctx, tx, policy); err != nil {
+		return nil, err
+	}
+	current, err := scanClient(tx.QueryRow(ctx, `SELECT `+clientSelectCols+` FROM oauth_clients WHERE id=$1 FOR UPDATE`, id))
 	if err != nil {
-		return fmt.Errorf("updating client: %w", err)
+		return nil, err
+	}
+	updated := *current
+	if err := applyClientUpdate(&updated, request); err != nil {
+		return nil, err
+	}
+	if err := validateUpdatedClientPolicy(current, &updated, request, policy.Value); err != nil {
+		return nil, err
+	}
+	result, err := tx.Exec(ctx, `UPDATE oauth_clients SET name=$2,redirect_uris=$3,post_logout_redirect_uris=$4,grants=$5,scopes=$6,metadata=$7,access_policy=$8,updated_at=NOW() WHERE id=$1`, updated.ID, updated.Name, updated.RedirectURIs, updated.PostLogoutRedirectURIs, updated.Grants, updated.Scopes, updated.Metadata, updated.AccessPolicy)
+	if err != nil {
+		return nil, fmt.Errorf("updating client: %w", err)
 	}
 	if result.RowsAffected() == 0 {
-		return pgx.ErrNoRows
+		return nil, pgx.ErrNoRows
 	}
-	if err := audit.EnqueueMutationTx(ctx, tx, mutation.WithTarget("client", c.ID)); err != nil {
-		return fmt.Errorf("auditing client update: %w", err)
+	if err := audit.EnqueueMutationTx(ctx, tx, mutation.WithTarget("client", updated.ID)); err != nil {
+		return nil, fmt.Errorf("auditing client update: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("committing client update: %w", err)
+		return nil, fmt.Errorf("committing client update: %w", err)
+	}
+	return &updated, nil
+}
+
+func requireOAuthPolicy(ctx context.Context, tx pgx.Tx, expected settings.Versioned[settings.OAuthPolicy]) error {
+	if err := settings.RequireOAuthPolicyTx(ctx, tx, expected); err != nil {
+		if errors.Is(err, settings.ErrRevisionConflict) {
+			return ErrOAuthPolicyChanged
+		}
+		return err
 	}
 	return nil
 }

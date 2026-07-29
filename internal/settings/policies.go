@@ -3,8 +3,11 @@ package settings
 import (
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
+
+	"github.com/nyasharp/nyauth/pkg/models"
 )
 
 const (
@@ -32,6 +35,10 @@ const (
 	MaxConcurrentSessions         = 100
 	MinAuditRetentionDays         = 7
 	MaxAuditRetentionDays         = 3650
+	MinRedirectURILimit           = 1
+	MaxRedirectURILimit           = 100
+	MinPostLogoutRedirectURILimit = 0
+	MaxPostLogoutRedirectURILimit = 100
 )
 
 const (
@@ -157,6 +164,130 @@ func (p Protection) LoginWindow() time.Duration   { return mustDuration(p.Login.
 func (p Protection) AccountWindow() time.Duration { return mustDuration(p.Account.Window) }
 func (p Protection) AvatarWindow() time.Duration  { return mustDuration(p.Avatar.Window) }
 func (p Protection) MailWindow() time.Duration    { return mustDuration(p.Mail.Window) }
+
+var supportedOAuthScopes = []string{"openid", "profile", "email", "offline_access"}
+var supportedOAuthGrantTypes = []string{
+	models.GrantAuthorizationCode,
+	models.GrantRefreshToken,
+	models.GrantClientCredentials,
+}
+
+// OAuthPolicy controls future client registrations. Tightening it does not
+// mutate or disable clients that were valid when they were registered.
+type OAuthPolicy struct {
+	SelfServiceClientCreationEnabled bool     `json:"self_service_client_creation_enabled"`
+	PublicClientsEnabled             bool     `json:"public_clients_enabled"`
+	AllowedGrantTypes                []string `json:"allowed_grant_types"`
+	AllowedScopes                    []string `json:"allowed_scopes"`
+	MaxRedirectURIs                  int      `json:"max_redirect_uris"`
+	MaxPostLogoutRedirectURIs        int      `json:"max_post_logout_redirect_uris"`
+}
+
+func DefaultOAuthPolicy() OAuthPolicy {
+	return OAuthPolicy{
+		SelfServiceClientCreationEnabled: true,
+		PublicClientsEnabled:             true,
+		AllowedGrantTypes:                slices.Clone(supportedOAuthGrantTypes),
+		AllowedScopes:                    slices.Clone(supportedOAuthScopes),
+		MaxRedirectURIs:                  20,
+		MaxPostLogoutRedirectURIs:        20,
+	}
+}
+
+func SupportedOAuthGrantTypes() []string { return slices.Clone(supportedOAuthGrantTypes) }
+func SupportedOAuthScopes() []string     { return slices.Clone(supportedOAuthScopes) }
+
+func NormalizeOAuthPolicy(value OAuthPolicy) (OAuthPolicy, error) {
+	grants, err := normalizeAllowedValues("allowed_grant_types", value.AllowedGrantTypes, supportedOAuthGrantTypes)
+	if err != nil {
+		return OAuthPolicy{}, err
+	}
+	scopes, err := normalizeAllowedScopes(value.AllowedScopes)
+	if err != nil {
+		return OAuthPolicy{}, err
+	}
+	value.AllowedGrantTypes = grants
+	value.AllowedScopes = scopes
+	if value.MaxRedirectURIs < MinRedirectURILimit || value.MaxRedirectURIs > MaxRedirectURILimit {
+		return OAuthPolicy{}, fmt.Errorf("max_redirect_uris must be between %d and %d", MinRedirectURILimit, MaxRedirectURILimit)
+	}
+	if value.MaxPostLogoutRedirectURIs < MinPostLogoutRedirectURILimit || value.MaxPostLogoutRedirectURIs > MaxPostLogoutRedirectURILimit {
+		return OAuthPolicy{}, fmt.Errorf("max_post_logout_redirect_uris must be between %d and %d", MinPostLogoutRedirectURILimit, MaxPostLogoutRedirectURILimit)
+	}
+	if slices.Contains(grants, models.GrantRefreshToken) && !slices.Contains(grants, models.GrantAuthorizationCode) {
+		return OAuthPolicy{}, errors.New("allowing refresh_token requires authorization_code")
+	}
+	if slices.Contains(scopes, "offline_access") && !slices.Contains(grants, models.GrantRefreshToken) {
+		return OAuthPolicy{}, errors.New("allowing offline_access requires refresh_token")
+	}
+	if value.PublicClientsEnabled && !slices.Contains(grants, models.GrantAuthorizationCode) {
+		return OAuthPolicy{}, errors.New("allowing public clients requires authorization_code")
+	}
+	return value, nil
+}
+
+func normalizeAllowedValues(name string, values, supported []string) ([]string, error) {
+	if len(values) == 0 {
+		return nil, fmt.Errorf("%s must contain at least one value", name)
+	}
+	selected := make(map[string]bool, len(values))
+	for _, raw := range values {
+		value := strings.TrimSpace(raw)
+		if value == "" || !slices.Contains(supported, value) {
+			return nil, fmt.Errorf("%s contains unsupported value %q", name, raw)
+		}
+		if selected[value] {
+			return nil, fmt.Errorf("%s contains duplicate value %q", name, value)
+		}
+		selected[value] = true
+	}
+	ordered := make([]string, 0, len(values))
+	for _, value := range supported {
+		if selected[value] {
+			ordered = append(ordered, value)
+		}
+	}
+	return ordered, nil
+}
+
+func normalizeAllowedScopes(values []string) ([]string, error) {
+	selected := make(map[string]bool, len(values))
+	custom := make([]string, 0, len(values))
+	for _, scope := range values {
+		if !models.ValidOAuthScope(scope) {
+			return nil, fmt.Errorf("allowed_scopes contains invalid value %q", scope)
+		}
+		if selected[scope] {
+			return nil, fmt.Errorf("allowed_scopes contains duplicate value %q", scope)
+		}
+		selected[scope] = true
+		if !slices.Contains(supportedOAuthScopes, scope) {
+			custom = append(custom, scope)
+		}
+	}
+	ordered := make([]string, 0, len(values))
+	for _, scope := range supportedOAuthScopes {
+		if selected[scope] {
+			ordered = append(ordered, scope)
+		}
+	}
+	slices.Sort(custom)
+	return append(ordered, custom...), nil
+}
+
+func (p OAuthPolicy) AllowsGrant(grant string) bool {
+	return slices.Contains(p.AllowedGrantTypes, grant)
+}
+func (p OAuthPolicy) AllowsScope(scope string) bool { return slices.Contains(p.AllowedScopes, scope) }
+
+func SameOAuthPolicy(left, right OAuthPolicy) bool {
+	return left.SelfServiceClientCreationEnabled == right.SelfServiceClientCreationEnabled &&
+		left.PublicClientsEnabled == right.PublicClientsEnabled &&
+		slices.Equal(left.AllowedGrantTypes, right.AllowedGrantTypes) &&
+		slices.Equal(left.AllowedScopes, right.AllowedScopes) &&
+		left.MaxRedirectURIs == right.MaxRedirectURIs &&
+		left.MaxPostLogoutRedirectURIs == right.MaxPostLogoutRedirectURIs
+}
 
 type Lifecycle struct {
 	SessionAbsoluteTTL      string `json:"session_absolute_ttl"`

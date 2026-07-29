@@ -31,6 +31,16 @@ type updateLifecycleSettingsRequest struct {
 	settings.Lifecycle
 }
 
+type oauthSettingsResponse struct {
+	Revision int64 `json:"revision"`
+	settings.OAuthPolicy
+}
+
+type updateOAuthSettingsRequest struct {
+	ExpectedRevision int64 `json:"expected_revision"`
+	settings.OAuthPolicy
+}
+
 func (s *Server) handleGetProtectionSettings(w http.ResponseWriter, _ *http.Request) {
 	snapshot := s.settingsMgr.ProtectionSnapshot()
 	writeJSON(w, http.StatusOK, protectionSettingsResponse{Revision: snapshot.Revision, Protection: snapshot.Value})
@@ -103,6 +113,41 @@ func (s *Server) handleUpdateLifecycleSettings(w http.ResponseWriter, r *http.Re
 		return
 	}
 	writeJSON(w, http.StatusOK, lifecycleSettingsResponse{Revision: revision, Lifecycle: request.Lifecycle})
+}
+
+func (s *Server) handleGetOAuthSettings(w http.ResponseWriter, _ *http.Request) {
+	snapshot := s.settingsMgr.OAuthPolicySnapshot()
+	writeJSON(w, http.StatusOK, oauthSettingsResponse{Revision: snapshot.Revision, OAuthPolicy: snapshot.Value})
+}
+
+func (s *Server) handleUpdateOAuthSettings(w http.ResponseWriter, r *http.Request) {
+	current, mutation, ok := s.authorizePolicySettingsMutation(w, r)
+	if !ok {
+		return
+	}
+	var request updateOAuthSettingsRequest
+	if err := decodeJSON(w, r, &request); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	value, err := settings.NormalizeOAuthPolicy(request.OAuthPolicy)
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	revision, err := s.settingsMgr.SetOAuthPolicy(
+		r.Context(), value, request.ExpectedRevision, current.Username, mutation,
+	)
+	if err != nil {
+		switch {
+		case errors.Is(err, settings.ErrRevisionConflict):
+			writeAPIError(w, http.StatusConflict, "settings revision conflict")
+		default:
+			writeAPIError(w, http.StatusInternalServerError, "failed to store OAuth settings")
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, oauthSettingsResponse{Revision: revision, OAuthPolicy: value})
 }
 
 func (s *Server) authorizePolicySettingsMutation(

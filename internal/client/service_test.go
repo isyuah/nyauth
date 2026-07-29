@@ -6,6 +6,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nyasharp/nyauth/internal/settings"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
 
@@ -103,5 +104,116 @@ func TestBuildClientValidatesAccessPolicy(t *testing.T) {
 	invalid.AccessPolicy = "vip_only"
 	if _, _, err := service.buildClient(invalid); err == nil {
 		t.Fatal("invalid access policy was accepted")
+	}
+}
+
+func TestOAuthPolicyConstrainsNewClientsWithoutBreakingExistingEdits(t *testing.T) {
+	policy := settings.DefaultOAuthPolicy()
+	policy.PublicClientsEnabled = false
+	policy.AllowedGrantTypes = []string{models.GrantAuthorizationCode}
+	policy.AllowedScopes = []string{"openid"}
+	policy.MaxRedirectURIs = 1
+	policy.MaxPostLogoutRedirectURIs = 0
+
+	service := NewService(nil)
+	service.SetOAuthPolicySource(func() settings.Versioned[settings.OAuthPolicy] {
+		return settings.Versioned[settings.OAuthPolicy]{Revision: 3, Value: policy}
+	})
+	base := models.CreateClientRequest{
+		Name: "App", RedirectURIs: []string{"https://app.example/callback"},
+		Grants: []string{models.GrantAuthorizationCode}, Scopes: []string{"openid"},
+	}
+	if _, _, err := service.buildClient(base); err != nil {
+		t.Fatalf("policy-compliant client rejected: %v", err)
+	}
+	public := base
+	public.IsPublic = true
+	if _, _, err := service.buildClient(public); !errors.Is(err, ErrInvalidClient) {
+		t.Fatalf("public client error = %v", err)
+	}
+	tooMany := base
+	tooMany.RedirectURIs = append(tooMany.RedirectURIs, "https://app.example/other")
+	if _, _, err := service.buildClient(tooMany); !errors.Is(err, ErrInvalidClient) {
+		t.Fatalf("redirect limit error = %v", err)
+	}
+	forbiddenScope := base
+	forbiddenScope.Scopes = []string{"openid", "email"}
+	if _, _, err := service.buildClient(forbiddenScope); !errors.Is(err, ErrInvalidClient) {
+		t.Fatalf("scope policy error = %v", err)
+	}
+
+	previous := &models.OAuthClient{
+		RedirectURIs: []string{"https://app.example/one", "https://app.example/two"},
+		Grants:       []string{models.GrantAuthorizationCode, models.GrantRefreshToken},
+		Scopes:       []string{"openid", "email"},
+	}
+	replacement := *previous
+	replacement.RedirectURIs = []string{"https://app.example/new-one", "https://app.example/new-two"}
+	if err := validateUpdatedClientPolicy(previous, &replacement, models.UpdateClientRequest{RedirectURIs: replacement.RedirectURIs}, policy); err != nil {
+		t.Fatalf("same-size legacy URI replacement rejected: %v", err)
+	}
+	expanded := replacement
+	expanded.RedirectURIs = append(expanded.RedirectURIs, "https://app.example/three")
+	if err := validateUpdatedClientPolicy(previous, &expanded, models.UpdateClientRequest{RedirectURIs: expanded.RedirectURIs}, policy); !errors.Is(err, ErrInvalidClient) {
+		t.Fatalf("legacy URI expansion error = %v", err)
+	}
+	if err := validateUpdatedClientPolicy(previous, &replacement, models.UpdateClientRequest{Grants: replacement.Grants, Scopes: replacement.Scopes}, policy); err != nil {
+		t.Fatalf("unchanged legacy grant/scope rejected: %v", err)
+	}
+}
+
+func TestClientCredentialsDoesNotRequireRedirectURI(t *testing.T) {
+	service := NewService(nil)
+	machine, _, err := service.buildClient(models.CreateClientRequest{
+		Name: "Machine", Grants: []string{models.GrantClientCredentials}, Scopes: []string{"openid"},
+	})
+	if err != nil {
+		t.Fatalf("client_credentials without redirect URI rejected: %v", err)
+	}
+	if machine.RedirectURIs == nil || len(machine.RedirectURIs) != 0 {
+		t.Fatalf("machine redirect URIs = %#v, want non-nil empty slice", machine.RedirectURIs)
+	}
+	if _, _, err := service.buildClient(models.CreateClientRequest{
+		Name: "Browser", Grants: []string{models.GrantAuthorizationCode}, Scopes: []string{"openid"},
+	}); !errors.Is(err, ErrInvalidClient) {
+		t.Fatalf("authorization_code without redirect URI error = %v", err)
+	}
+}
+
+func TestOfflineAccessRequiresRefreshTokenForNewClientsButLegacyStateCanBeRepaired(t *testing.T) {
+	service := NewService(nil)
+	request := models.CreateClientRequest{
+		Name: "Offline", RedirectURIs: []string{"https://client.example/callback"},
+		Grants: []string{models.GrantAuthorizationCode}, Scopes: []string{"openid", "offline_access"},
+	}
+	if _, _, err := service.buildClient(request); !errors.Is(err, ErrInvalidClient) {
+		t.Fatalf("offline_access without refresh_token error = %v", err)
+	}
+
+	policy := settings.DefaultOAuthPolicy()
+	legacy := &models.OAuthClient{
+		RedirectURIs: request.RedirectURIs, Grants: request.Grants, Scopes: request.Scopes,
+	}
+	unchanged := *legacy
+	if err := validateUpdatedClientPolicy(legacy, &unchanged, models.UpdateClientRequest{}, policy); err != nil {
+		t.Fatalf("unchanged legacy offline_access state rejected: %v", err)
+	}
+	repaired := unchanged
+	repaired.Scopes = []string{"openid"}
+	if err := validateUpdatedClientPolicy(legacy, &repaired, models.UpdateClientRequest{Scopes: repaired.Scopes}, policy); err != nil {
+		t.Fatalf("legacy offline_access repair rejected: %v", err)
+	}
+}
+
+func TestSelfServiceCreationCanBeDisabled(t *testing.T) {
+	policy := settings.DefaultOAuthPolicy()
+	policy.SelfServiceClientCreationEnabled = false
+	service := NewService(nil)
+	service.SetOAuthPolicySource(func() settings.Versioned[settings.OAuthPolicy] {
+		return settings.Versioned[settings.OAuthPolicy]{Value: policy}
+	})
+	_, err := service.CreateForOwner(context.Background(), "2f1c9f8d-8fb2-4741-8a7c-3e9ce813e2ee", models.CreateClientRequest{})
+	if !errors.Is(err, ErrSelfServiceDisabled) {
+		t.Fatalf("disabled self-service error = %v", err)
 	}
 }

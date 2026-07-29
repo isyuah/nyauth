@@ -100,6 +100,16 @@ func TestHandlerMapsSafeClientErrors(t *testing.T) {
 			t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 		}
 	})
+	t.Run("stale OAuth policy", func(t *testing.T) {
+		handler := &Handler{service: &fakeHandlerService{createErr: ErrOAuthPolicyChanged}}
+		request := httptest.NewRequest(http.MethodPost, "/", strings.NewReader(`{"name":"test"}`))
+		request = withTestMutationAuditEvent(request, models.AuditClientCreated)
+		response := httptest.NewRecorder()
+		handler.Create(response, request)
+		if response.Code != http.StatusConflict || !strings.Contains(response.Body.String(), `"code":"client.policy_changed"`) {
+			t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+		}
+	})
 	t.Run("missing client", func(t *testing.T) {
 		handler := &Handler{service: &fakeHandlerService{getErr: fmt.Errorf("wrapped: %w", pgx.ErrNoRows)}}
 		request := httptest.NewRequest(http.MethodGet, "/missing", nil)

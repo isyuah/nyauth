@@ -141,6 +141,93 @@ func (m *Manager) SetLifecycle(
 	return revision, nil
 }
 
+func (m *Manager) SetOAuthPolicy(
+	ctx context.Context,
+	value OAuthPolicy,
+	expectedRevision int64,
+	updatedBy string,
+	mutation audit.MutationAudit,
+) (int64, error) {
+	value, err := NormalizeOAuthPolicy(value)
+	if err != nil {
+		return 0, err
+	}
+	m.loadMu.Lock()
+	defer m.loadMu.Unlock()
+	if m.db == nil {
+		return 0, errors.New("runtime settings storage is unavailable")
+	}
+	if err := mutation.ValidateEvent(models.AuditSettingsUpdated); err != nil {
+		return 0, fmt.Errorf("validating OAuth settings audit: %w", err)
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return 0, fmt.Errorf("encoding OAuth settings: %w", err)
+	}
+	tx, err := m.db.Begin(ctx)
+	if err != nil {
+		return 0, fmt.Errorf("starting OAuth settings transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	if err := runtimecoord.LockOAuthPolicyExclusive(ctx, tx); err != nil {
+		return 0, err
+	}
+	revision, err := storeSettingTx(ctx, tx, oauthKey, encoded, expectedRevision, updatedBy)
+	if err != nil {
+		return 0, err
+	}
+	mutation = mutation.WithTarget("settings", oauthKey).WithDetails(map[string]any{
+		"revision":                             revision,
+		"self_service_client_creation_enabled": value.SelfServiceClientCreationEnabled,
+		"public_clients_enabled":               value.PublicClientsEnabled,
+		"allowed_grant_types":                  value.AllowedGrantTypes,
+		"allowed_scopes":                       value.AllowedScopes,
+		"max_redirect_uris":                    value.MaxRedirectURIs,
+		"max_post_logout_redirect_uris":        value.MaxPostLogoutRedirectURIs,
+	})
+	if err := audit.EnqueueMutationTx(ctx, tx, mutation); err != nil {
+		return 0, fmt.Errorf("auditing OAuth settings: %w", err)
+	}
+	if err := notifySettingTx(ctx, tx, oauthKey); err != nil {
+		return 0, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, fmt.Errorf("committing OAuth settings: %w", err)
+	}
+	m.oauth.Store(&Versioned[OAuthPolicy]{Revision: revision, Value: value})
+	return revision, nil
+}
+
+// RequireOAuthPolicyTx verifies that a client write still uses the exact
+// policy snapshot validated by its caller. The shared advisory lock prevents
+// the policy update from committing across the client transaction.
+func RequireOAuthPolicyTx(ctx context.Context, tx pgx.Tx, expected Versioned[OAuthPolicy]) error {
+	if err := runtimecoord.LockOAuthPolicyShared(ctx, tx); err != nil {
+		return err
+	}
+	current := DefaultOAuthPolicy()
+	var raw []byte
+	var revision int64
+	err := tx.QueryRow(ctx, `SELECT value,revision FROM runtime_settings WHERE key=$1 FOR SHARE`, oauthKey).Scan(&raw, &revision)
+	if errors.Is(err, pgx.ErrNoRows) {
+		revision = 0
+	} else if err != nil {
+		return fmt.Errorf("locking OAuth settings: %w", err)
+	} else {
+		if err := json.Unmarshal(raw, &current); err != nil {
+			return fmt.Errorf("decoding OAuth settings: %w", err)
+		}
+		current, err = NormalizeOAuthPolicy(current)
+		if err != nil {
+			return fmt.Errorf("decoding OAuth settings: %w", err)
+		}
+	}
+	if revision != expected.Revision || !SameOAuthPolicy(current, expected.Value) {
+		return ErrRevisionConflict
+	}
+	return nil
+}
+
 func (m *Manager) storeAudited(
 	ctx context.Context,
 	key string,

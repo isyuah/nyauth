@@ -11,6 +11,7 @@ import type {
   MailConfig,
   MailSettings,
   MailTrend,
+  OAuthSettings,
   RegistrationTrend,
   StatsTrendDays,
   User,
@@ -170,6 +171,16 @@ const oauthClient = {
   owner_id: user.id as string | null,
   created_at: '2026-01-01T00:00:00Z',
   updated_at: '2026-01-01T00:00:00Z',
+};
+
+const oauthSettings: OAuthSettings = {
+  revision: 1,
+  self_service_client_creation_enabled: true,
+  public_clients_enabled: true,
+  allowed_grant_types: ['authorization_code', 'refresh_token', 'client_credentials'],
+  allowed_scopes: ['openid', 'profile', 'email', 'offline_access'],
+  max_redirect_uris: 20,
+  max_post_logout_redirect_uris: 20,
 };
 
 const externalProvider = {
@@ -686,7 +697,20 @@ async function installAPIMocks(page: Page, state: MockState) {
         quota_used: 1,
         quota_limit: 10,
         quota_override: null,
+        client_policy: {
+          self_service_client_creation_enabled: true,
+          public_clients_enabled: true,
+          allowed_grant_types: ['authorization_code', 'refresh_token', 'client_credentials'],
+          allowed_scopes: ['openid', 'profile', 'email', 'offline_access'],
+          max_redirect_uris: 20,
+          max_post_logout_redirect_uris: 20,
+        },
       });
+      return;
+    }
+
+    if (path === '/api/admin/settings/oauth' && request.method() === 'GET' && state.adminClients) {
+      await fulfillJSON(route, 200, oauthSettings);
       return;
     }
 
@@ -948,7 +972,7 @@ async function installAPIMocks(page: Page, state: MockState) {
         name: 'Renamed App',
         redirect_uris: ['https://new.example/callback', 'https://backup.example/callback'],
         post_logout_redirect_uris: ['https://new.example/signed-out'],
-        scopes: ['openid', 'email', 'custom'],
+        scopes: ['openid', 'email', 'profile'],
         metadata: { environment: 'production', team: 'identity' },
         updated_at: '2026-01-03T00:00:00Z',
       });
@@ -2345,12 +2369,12 @@ test('administrators can edit OAuth clients without mutating immutable ownership
   await page.getByRole('button', { name: '编辑', exact: true }).click();
   const dialog = page.getByRole('dialog');
   await dialog.getByLabel('应用名称').fill('Renamed App');
-  await dialog.getByLabel('Redirect URI（每行一个）', { exact: true }).fill([
+  await dialog.locator('#edit-client-redirects').fill([
     'https://new.example/callback',
     'https://backup.example/callback',
   ].join('\n'));
-  await dialog.getByLabel('Post-logout Redirect URI（每行一个）').fill('https://new.example/signed-out');
-  await dialog.getByLabel('Scopes（空格、逗号或换行分隔）').fill('openid email\ncustom');
+  await dialog.locator('#edit-client-logouts').fill('https://new.example/signed-out');
+  await dialog.getByLabel('Scopes（空格、逗号或换行分隔）').fill('openid email\nprofile');
   await dialog.getByLabel('Metadata（JSON 字符串键值）').fill(JSON.stringify({
     environment: 'production',
     team: 'identity',
@@ -2364,7 +2388,7 @@ test('administrators can edit OAuth clients without mutating immutable ownership
     redirect_uris: ['https://new.example/callback', 'https://backup.example/callback'],
     post_logout_redirect_uris: ['https://new.example/signed-out'],
     grants: ['authorization_code', 'refresh_token'],
-    scopes: ['openid', 'email', 'custom'],
+    scopes: ['openid', 'email', 'profile'],
     metadata: { environment: 'production', team: 'identity' },
     access_policy: 'open',
   });

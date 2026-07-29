@@ -159,6 +159,20 @@ func (c *OAuthClient) HasScope(scope string) bool {
 	return false
 }
 
+// ValidOAuthScope reports whether scope is an RFC 6749 scope-token.
+func ValidOAuthScope(scope string) bool {
+	if scope == "" {
+		return false
+	}
+	for index := 0; index < len(scope); index++ {
+		value := scope[index]
+		if value < 0x21 || value > 0x7e || value == 0x22 || value == 0x5c {
+			return false
+		}
+	}
+	return true
+}
+
 // HasRedirectURI checks if a client has a specific redirect URI.
 func (c *OAuthClient) HasRedirectURI(uri string) bool {
 	for _, u := range c.RedirectURIs {

@@ -2,8 +2,9 @@
   import { goto } from '$app/navigation';
   import { page as pageStore } from '$app/stores';
   import { onDestroy, onMount } from 'svelte';
-  import { api, type ClientAccessPolicy, type ClientAccessUser, type CreateClientInput, type OAuthClient, type UpdateClientInput, type User } from '$lib/api';
+  import { api, type ClientAccessPolicy, type ClientAccessUser, type CreateClientInput, type OAuthClient, type OAuthClientPolicy, type OAuthGrantType, type OAuthScope, type UpdateClientInput, type User } from '$lib/api';
   import { formatStringMetadata, parseLineList, parseStringMetadata, parseTokenList } from '$lib/admin-form-utils';
+  import { DEFAULT_OAUTH_SETTINGS, OAUTH_SCOPES } from '$lib/policy-settings';
   import PageHeader from '$lib/components/layout/PageHeader.svelte';
   import CopyField from '$lib/components/data-display/CopyField.svelte';
   import Pagination from '$lib/components/data-display/Pagination.svelte';
@@ -23,6 +24,8 @@
     post_logout_redirect_uris: string;
     is_public: boolean;
     owner_id: string | null;
+    grants: OAuthGrantType[];
+    scopes: OAuthScope[];
   };
 
   type ClientEditForm = {
@@ -44,7 +47,7 @@
     return accessPolicyOptions.find((option) => option.value === policy)?.label ?? '开放';
   }
 
-  const grantOptions = [
+  const grantOptions: Array<{ value: OAuthGrantType; label: string }> = [
     { value: 'authorization_code', label: 'Authorization Code' },
     { value: 'refresh_token', label: 'Refresh Token' },
     { value: 'client_credentials', label: 'Client Credentials' },
@@ -59,7 +62,15 @@
   let loading = $state(true);
   let showCreate = $state(false);
   let creating = $state(false);
-  let newClient = $state<ClientForm>({ name: '', redirect_uris: '', post_logout_redirect_uris: '', is_public: false, owner_id: null });
+  let clientPolicy = $state<OAuthClientPolicy>({
+    self_service_client_creation_enabled: DEFAULT_OAUTH_SETTINGS.self_service_client_creation_enabled,
+    public_clients_enabled: DEFAULT_OAUTH_SETTINGS.public_clients_enabled,
+    allowed_grant_types: [...DEFAULT_OAUTH_SETTINGS.allowed_grant_types],
+    allowed_scopes: [...DEFAULT_OAUTH_SETTINGS.allowed_scopes],
+    max_redirect_uris: DEFAULT_OAUTH_SETTINGS.max_redirect_uris,
+    max_post_logout_redirect_uris: DEFAULT_OAUTH_SETTINGS.max_post_logout_redirect_uris,
+  });
+  let newClient = $state<ClientForm>(defaultClientForm(DEFAULT_OAUTH_SETTINGS));
   let createdSecret = $state('');
   let rotatedSecret = $state('');
   let rotatedClientName = $state('');
@@ -106,6 +117,37 @@
   let ownerNotice = $state('');
   let currentURLKey = '';
   let listRequestVersion = 0;
+  let createAuthorizationCodeSelected = $derived(newClient.grants.includes('authorization_code'));
+
+  function defaultClientForm(policy: OAuthClientPolicy): ClientForm {
+    const grants: OAuthGrantType[] = [];
+    if (policy.allowed_grant_types.includes('authorization_code')) grants.push('authorization_code');
+    if (policy.allowed_grant_types.includes('refresh_token') && grants.includes('authorization_code')) grants.push('refresh_token');
+    if (grants.length === 0 && policy.allowed_grant_types[0]) grants.push(policy.allowed_grant_types[0]);
+    const scopes = policy.allowed_scopes.filter((scope) => OAUTH_SCOPES.some((standard) => standard === scope)
+      && (scope !== 'offline_access' || grants.includes('refresh_token')));
+    return { name: '', redirect_uris: '', post_logout_redirect_uris: '', is_public: false, owner_id: null, grants, scopes };
+  }
+
+  function toggleCreateGrant(grant: OAuthGrantType, checked: boolean) {
+    const selected = new Set(newClient.grants);
+    if (checked) selected.add(grant); else selected.delete(grant);
+    if (grant === 'authorization_code' && !checked) {
+      selected.delete('refresh_token');
+      newClient.is_public = false;
+      newClient.scopes = newClient.scopes.filter((scope) => scope !== 'offline_access');
+    }
+    if (grant === 'refresh_token' && checked) selected.add('authorization_code');
+    if (grant === 'refresh_token' && !checked) newClient.scopes = newClient.scopes.filter((scope) => scope !== 'offline_access');
+    newClient.grants = clientPolicy.allowed_grant_types.filter((item) => selected.has(item));
+  }
+
+  function toggleCreateScope(scope: OAuthScope, checked: boolean) {
+    const selected = new Set(newClient.scopes);
+    if (checked) selected.add(scope); else selected.delete(scope);
+    newClient.scopes = clientPolicy.allowed_scopes.filter((item) => selected.has(item));
+    if (scope === 'offline_access' && checked) toggleCreateGrant('refresh_token', true);
+  }
 
   function ownerDisplayName(user: User): string {
     return `${user.display_name || user.username} (@${user.username})`;
@@ -172,6 +214,7 @@
 
   async function openCreate() {
     createdSecret = '';
+    newClient = defaultClientForm(clientPolicy);
     resetOwnerPicker();
     showCreate = true;
     await loadOwnerCandidates();
@@ -215,10 +258,21 @@
     loading = true;
     pageError = '';
     try {
-      const response = await api.admin.getClients(currentPage, pageSize);
+      const [response, policy] = await Promise.all([
+        api.admin.getClients(currentPage, pageSize),
+        api.admin.getOAuthSettings(),
+      ]);
       if (requestVersion !== listRequestVersion) return;
       clients = response.items;
       total = response.total;
+      clientPolicy = {
+        self_service_client_creation_enabled: policy.self_service_client_creation_enabled,
+        public_clients_enabled: policy.public_clients_enabled,
+        allowed_grant_types: [...policy.allowed_grant_types],
+        allowed_scopes: [...policy.allowed_scopes],
+        max_redirect_uris: policy.max_redirect_uris,
+        max_post_logout_redirect_uris: policy.max_post_logout_redirect_uris,
+      };
       if (currentPage > Math.max(1, response.total_pages)) {
         currentPage = Math.max(1, response.total_pages);
         await syncListURL();
@@ -263,19 +317,25 @@
     rotatedSecret = '';
     rotatedClientName = '';
     try {
+      if (newClient.grants.length === 0) throw new Error('至少选择一种 Grant。');
+      const redirectURIs = parseLineList(newClient.redirect_uris);
+      const postLogoutRedirectURIs = parseLineList(newClient.post_logout_redirect_uris);
+      if (createAuthorizationCodeSelected && redirectURIs.length === 0) throw new Error('Authorization Code 客户端至少需要一个 Redirect URI。');
+      if (redirectURIs.length > clientPolicy.max_redirect_uris) throw new Error(`Redirect URI 不能超过 ${clientPolicy.max_redirect_uris} 个。`);
+      if (postLogoutRedirectURIs.length > clientPolicy.max_post_logout_redirect_uris) throw new Error(`Post-logout Redirect URI 不能超过 ${clientPolicy.max_post_logout_redirect_uris} 个。`);
       const payload: CreateClientInput = {
         name: newClient.name,
-        redirect_uris: newClient.redirect_uris.split('\n').map((uri) => uri.trim()).filter(Boolean),
-        post_logout_redirect_uris: newClient.post_logout_redirect_uris.split('\n').map((uri) => uri.trim()).filter(Boolean),
-        grants: ['authorization_code', 'refresh_token'],
-        scopes: ['openid', 'profile', 'email', 'offline_access'],
+        redirect_uris: redirectURIs,
+        post_logout_redirect_uris: postLogoutRedirectURIs,
+        grants: [...newClient.grants],
+        scopes: [...newClient.scopes],
         is_public: newClient.is_public,
         owner_id: newClient.owner_id,
       };
       const result = await api.admin.createClient(payload);
       createdSecret = result.secret || '';
       showCreate = false;
-      newClient = { name: '', redirect_uris: '', post_logout_redirect_uris: '', is_public: false, owner_id: null };
+      newClient = defaultClientForm(clientPolicy);
       await loadClients();
     } catch (cause) {
       createError = cause instanceof Error ? cause.message : '创建失败';
@@ -358,7 +418,7 @@
     const postLogoutRedirectURIs = parseLineList(editForm.post_logout_redirect_uris);
     const grants = [...new Set(editGrants)];
     if (!name) { editError = '应用名称不能为空。'; return; }
-    if (redirectURIs.length === 0) { editError = '至少需要一个 Redirect URI。'; return; }
+    if (grants.includes('authorization_code') && redirectURIs.length === 0) { editError = 'Authorization Code 客户端至少需要一个 Redirect URI。'; return; }
     if (grants.length === 0) { editError = '至少需要一个 Grant。'; return; }
     if (grants.includes('refresh_token') && !grants.includes('authorization_code')) {
       editError = 'Refresh Token 必须与 Authorization Code 同时启用。';
@@ -368,6 +428,19 @@
       editError = 'Public Client 不能使用 Client Credentials。';
       return;
     }
+    if (redirectURIs.length > clientPolicy.max_redirect_uris && redirectURIs.length > target.redirect_uris.length) {
+      editError = `Redirect URI 不能从 ${target.redirect_uris.length} 个增加到策略上限 ${clientPolicy.max_redirect_uris} 以上。`;
+      return;
+    }
+    if (postLogoutRedirectURIs.length > clientPolicy.max_post_logout_redirect_uris && postLogoutRedirectURIs.length > target.post_logout_redirect_uris.length) {
+      editError = `Post-logout Redirect URI 不能从 ${target.post_logout_redirect_uris.length} 个增加到策略上限 ${clientPolicy.max_post_logout_redirect_uris} 以上。`;
+      return;
+    }
+    const addedForbiddenGrant = grants.find((grant) => !target.grants.includes(grant) && !clientPolicy.allowed_grant_types.includes(grant as OAuthGrantType));
+    if (addedForbiddenGrant) { editError = `Grant ${addedForbiddenGrant} 已被当前策略禁用。`; return; }
+    const scopes = parseTokenList(editForm.scopes);
+    const addedForbiddenScope = scopes.find((scope) => !target.scopes.includes(scope) && !clientPolicy.allowed_scopes.includes(scope));
+    if (addedForbiddenScope) { editError = `Scope ${addedForbiddenScope} 已被当前策略禁用。`; return; }
 
     let metadata: Record<string, string>;
     try {
@@ -382,7 +455,7 @@
       redirect_uris: redirectURIs,
       post_logout_redirect_uris: postLogoutRedirectURIs,
       grants,
-      scopes: parseTokenList(editForm.scopes),
+      scopes,
       metadata,
       access_policy: editForm.access_policy,
     };
@@ -566,10 +639,12 @@
   <form onsubmit={handleCreate} class="space-y-4">
     {#if createError}<p class="rounded-nya-sm bg-nya-danger-soft px-3 py-2 text-small text-nya-danger" role="alert">{createError}</p>{/if}
     <Input id="client-name" label="应用名称" bind:value={newClient.name} required placeholder="我的应用" />
-    <div class="flex flex-col gap-1.5"><label for="admin-redirect-uris" class="text-body-medium text-nya-text-primary">Redirect URI <span class="text-small text-nya-text-tertiary">（每行一个）</span></label><textarea id="admin-redirect-uris" bind:value={newClient.redirect_uris} required rows="3" placeholder="https://app.example.com/callback" class="w-full rounded-nya-sm border border-nya-border bg-nya-surface px-3 py-2 font-mono text-small text-nya-text-primary focus:border-nya-primary focus:outline-none focus:ring-2 focus:ring-nya-primary/24"></textarea></div>
-    <div class="flex flex-col gap-1.5"><label for="admin-post-logout-uris" class="text-body-medium text-nya-text-primary">Post-logout Redirect URI <span class="text-small text-nya-text-tertiary">（每行一个）</span></label><textarea id="admin-post-logout-uris" bind:value={newClient.post_logout_redirect_uris} rows="2" placeholder="https://app.example.com/signed-out" class="w-full rounded-nya-sm border border-nya-border bg-nya-surface px-3 py-2 font-mono text-small text-nya-text-primary focus:border-nya-primary focus:outline-none focus:ring-2 focus:ring-nya-primary/24"></textarea></div>
+    <fieldset class="rounded-nya-sm border border-nya-border p-3"><legend class="px-1 text-body-medium text-nya-text-primary">Grant</legend><div class="grid gap-2 sm:grid-cols-2">{#each clientPolicy.allowed_grant_types as grant}<label class="flex items-center gap-2 text-small text-nya-text-primary"><input type="checkbox" checked={newClient.grants.includes(grant)} onchange={(event) => toggleCreateGrant(grant, event.currentTarget.checked)} /> {grant}</label>{/each}</div></fieldset>
+    <fieldset class="rounded-nya-sm border border-nya-border p-3"><legend class="px-1 text-body-medium text-nya-text-primary">Scope</legend><div class="grid gap-2 sm:grid-cols-2">{#each clientPolicy.allowed_scopes as scope}<label class="flex items-center gap-2 font-mono text-small text-nya-text-primary"><input type="checkbox" checked={newClient.scopes.includes(scope)} onchange={(event) => toggleCreateScope(scope, event.currentTarget.checked)} /> {scope}</label>{/each}</div></fieldset>
+    <div class="flex flex-col gap-1.5"><label for="admin-redirect-uris" class="text-body-medium text-nya-text-primary">Redirect URI <span class="text-small text-nya-text-tertiary">（每行一个，最多 {clientPolicy.max_redirect_uris} 个）</span></label><textarea id="admin-redirect-uris" bind:value={newClient.redirect_uris} required={createAuthorizationCodeSelected} rows="3" placeholder="https://app.example.com/callback" class="w-full rounded-nya-sm border border-nya-border bg-nya-surface px-3 py-2 font-mono text-small text-nya-text-primary focus:border-nya-primary focus:outline-none focus:ring-2 focus:ring-nya-primary/24"></textarea></div>
+    <div class="flex flex-col gap-1.5"><label for="admin-post-logout-uris" class="text-body-medium text-nya-text-primary">Post-logout Redirect URI <span class="text-small text-nya-text-tertiary">（每行一个，最多 {clientPolicy.max_post_logout_redirect_uris} 个）</span></label><textarea id="admin-post-logout-uris" bind:value={newClient.post_logout_redirect_uris} rows="2" placeholder="https://app.example.com/signed-out" disabled={clientPolicy.max_post_logout_redirect_uris === 0} class="w-full rounded-nya-sm border border-nya-border bg-nya-surface px-3 py-2 font-mono text-small text-nya-text-primary focus:border-nya-primary focus:outline-none focus:ring-2 focus:ring-nya-primary/24 disabled:opacity-50"></textarea></div>
     {@render ownerPicker(newClient.owner_id, selectCreateOwner, 'create-client-owner')}
-    <label class="flex cursor-pointer items-start gap-2"><input type="checkbox" bind:checked={newClient.is_public} class="mt-0.5 rounded" /><span><span class="block text-body text-nya-text-primary">公共客户端</span><span class="block text-small text-nya-text-tertiary">仅用于无法安全保存 Secret 的原生应用；浏览器 SPA 暂不作为正式支持模式。</span></span></label>
+    <label class="flex cursor-pointer items-start gap-2 {clientPolicy.public_clients_enabled && createAuthorizationCodeSelected ? '' : 'opacity-50'}"><input type="checkbox" bind:checked={newClient.is_public} disabled={!clientPolicy.public_clients_enabled || !createAuthorizationCodeSelected} class="mt-0.5 rounded" /><span><span class="block text-body text-nya-text-primary">公共客户端</span><span class="block text-small text-nya-text-tertiary">仅用于无法安全保存 Secret 的原生应用；浏览器 SPA 暂不作为正式支持模式。</span></span></label>
     <div class="flex justify-end gap-2 pt-2"><Button variant="secondary" onclick={() => (showCreate = false)} disabled={creating}>取消</Button><Button type="submit" variant="primary" requiredCapability="admin_mutations" loading={creating}>创建</Button></div>
   </form>
 </Modal>
@@ -578,11 +653,11 @@
   <form onsubmit={handleEdit} class="space-y-4">
     {#if editError}<p class="rounded-nya-sm bg-nya-danger-soft px-3 py-2 text-small text-nya-danger" role="alert">{editError}</p>{/if}
     <div class="grid gap-4 sm:grid-cols-2"><Input id="edit-client-name" label="应用名称" bind:value={editForm.name} required /><div><span class="mb-1.5 block text-body-medium text-nya-text-primary">Client 类型 / Owner</span><p class="rounded-nya-sm bg-nya-surface-muted px-3 py-2 text-small text-nya-text-secondary">{editTarget?.is_public ? 'Public' : 'Confidential'} · <code>{editTarget?.owner_id || '未分配'}</code></p></div></div>
-    <div><label for="edit-client-redirects" class="mb-1.5 block text-body-medium text-nya-text-primary">Redirect URI（每行一个）</label><textarea id="edit-client-redirects" bind:value={editForm.redirect_uris} required rows="3" class="w-full rounded-nya-sm border border-nya-border bg-nya-surface px-3 py-2 font-mono text-small focus:border-nya-primary focus:outline-none focus:ring-2 focus:ring-nya-primary/24"></textarea></div>
-    <div><label for="edit-client-logouts" class="mb-1.5 block text-body-medium text-nya-text-primary">Post-logout Redirect URI（每行一个）</label><textarea id="edit-client-logouts" bind:value={editForm.post_logout_redirect_uris} rows="2" class="w-full rounded-nya-sm border border-nya-border bg-nya-surface px-3 py-2 font-mono text-small focus:border-nya-primary focus:outline-none focus:ring-2 focus:ring-nya-primary/24"></textarea></div>
-    <fieldset><legend class="mb-2 text-body-medium text-nya-text-primary">Grants</legend><div class="grid gap-2 sm:grid-cols-3">{#each grantOptions as option}<label class="flex items-center gap-2 rounded-nya-sm border border-nya-border px-3 py-2 text-small text-nya-text-secondary"><input type="checkbox" value={option.value} bind:group={editGrants} disabled={editTarget?.is_public && option.value === 'client_credentials'} /> {option.label}</label>{/each}</div></fieldset>
+    <div><label for="edit-client-redirects" class="mb-1.5 block text-body-medium text-nya-text-primary">Redirect URI（每行一个；新策略上限 {clientPolicy.max_redirect_uris}）</label><textarea id="edit-client-redirects" bind:value={editForm.redirect_uris} required={editGrants.includes('authorization_code')} rows="3" class="w-full rounded-nya-sm border border-nya-border bg-nya-surface px-3 py-2 font-mono text-small focus:border-nya-primary focus:outline-none focus:ring-2 focus:ring-nya-primary/24"></textarea></div>
+    <div><label for="edit-client-logouts" class="mb-1.5 block text-body-medium text-nya-text-primary">Post-logout Redirect URI（每行一个；新策略上限 {clientPolicy.max_post_logout_redirect_uris}）</label><textarea id="edit-client-logouts" bind:value={editForm.post_logout_redirect_uris} rows="2" class="w-full rounded-nya-sm border border-nya-border bg-nya-surface px-3 py-2 font-mono text-small focus:border-nya-primary focus:outline-none focus:ring-2 focus:ring-nya-primary/24"></textarea></div>
+    <fieldset><legend class="mb-2 text-body-medium text-nya-text-primary">Grants</legend><div class="grid gap-2 sm:grid-cols-3">{#each grantOptions.filter((option) => clientPolicy.allowed_grant_types.includes(option.value) || editTarget?.grants.includes(option.value)) as option}<label class="flex items-center gap-2 rounded-nya-sm border border-nya-border px-3 py-2 text-small text-nya-text-secondary"><input type="checkbox" value={option.value} bind:group={editGrants} disabled={(editTarget?.is_public && option.value === 'client_credentials') || (!clientPolicy.allowed_grant_types.includes(option.value) && !editGrants.includes(option.value))} /> {option.label}{#if !clientPolicy.allowed_grant_types.includes(option.value)} <span class="text-micro text-nya-warning">策略已关闭</span>{/if}</label>{/each}</div></fieldset>
     <fieldset><legend class="mb-2 text-body-medium text-nya-text-primary">访问策略</legend><div class="grid gap-2 sm:grid-cols-3">{#each accessPolicyOptions as option}<label class="flex cursor-pointer items-start gap-2 rounded-nya-sm border border-nya-border px-3 py-2 {editForm.access_policy === option.value ? 'border-nya-primary bg-nya-primary-soft' : ''}"><input type="radio" name="edit-access-policy" value={option.value} bind:group={editForm.access_policy} class="mt-0.5" /><span><span class="block text-small font-semibold text-nya-text-primary">{option.label}</span><span class="block text-micro text-nya-text-tertiary">{option.description}</span></span></label>{/each}</div><p class="mt-1.5 text-micro text-nya-text-tertiary">策略只作用于用户授权流程；client_credentials 机器流程不受限制。切换为白名单后请在应用卡片上维护访问名单。</p></fieldset>
-    <div><label for="edit-client-scopes" class="mb-1.5 block text-body-medium text-nya-text-primary">Scopes（空格、逗号或换行分隔）</label><textarea id="edit-client-scopes" bind:value={editForm.scopes} rows="2" class="w-full rounded-nya-sm border border-nya-border bg-nya-surface px-3 py-2 font-mono text-small focus:border-nya-primary focus:outline-none focus:ring-2 focus:ring-nya-primary/24"></textarea></div>
+    <div><label for="edit-client-scopes" class="mb-1.5 block text-body-medium text-nya-text-primary">Scopes（空格、逗号或换行分隔）</label><textarea id="edit-client-scopes" bind:value={editForm.scopes} rows="2" class="w-full rounded-nya-sm border border-nya-border bg-nya-surface px-3 py-2 font-mono text-small focus:border-nya-primary focus:outline-none focus:ring-2 focus:ring-nya-primary/24"></textarea><p class="mt-1 text-micro text-nya-text-tertiary">当前允许新增：{clientPolicy.allowed_scopes.join('、')}。既有但已禁用的 Scope 可以保留或移除，不能重新新增。</p></div>
     <div><label for="edit-client-metadata" class="mb-1.5 block text-body-medium text-nya-text-primary">Metadata（JSON 字符串键值）</label><textarea id="edit-client-metadata" bind:value={editForm.metadata} rows="5" spellcheck="false" class="w-full rounded-nya-sm border border-nya-border bg-nya-surface px-3 py-2 font-mono text-small focus:border-nya-primary focus:outline-none focus:ring-2 focus:ring-nya-primary/24"></textarea></div>
     <div class="flex justify-end gap-2"><Button variant="secondary" onclick={() => (showEdit = false)} disabled={editing}>取消</Button><Button type="submit" variant="primary" requiredCapability="admin_mutations" loading={editing}>保存更改</Button></div>
   </form>

@@ -90,6 +90,32 @@ func TestRuntimePolicySettingsCASAuditRollbackAndRetention(t *testing.T) {
 		t.Fatalf("protection audit rows = %d, want 2", protectionAudits)
 	}
 
+	oauthPolicy := DefaultOAuthPolicy()
+	oauthPolicy.SelfServiceClientCreationEnabled = false
+	oauthPolicy.MaxRedirectURIs = 8
+	if revision, err := managerA.SetOAuthPolicy(ctx, oauthPolicy, 0, "policy-a", mutation("policy-a")); err != nil || revision != 1 {
+		t.Fatalf("store OAuth policy revision=%d err=%v", revision, err)
+	}
+	if _, err := managerB.SetOAuthPolicy(ctx, DefaultOAuthPolicy(), 0, "policy-b", mutation("policy-b")); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("stale OAuth policy update error = %v", err)
+	}
+	if err := managerB.Load(ctx); err != nil {
+		t.Fatalf("reload OAuth policy: %v", err)
+	}
+	if snapshot := managerB.OAuthPolicySnapshot(); snapshot.Revision != 1 || !SameOAuthPolicy(snapshot.Value, oauthPolicy) {
+		t.Fatalf("loaded OAuth policy = %#v", snapshot)
+	}
+	var oauthAudits int
+	if err := schema.pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM audit_event_outbox
+		WHERE event=$1 AND aggregate_type='settings' AND aggregate_id='oauth'
+	`, models.AuditSettingsUpdated).Scan(&oauthAudits); err != nil {
+		t.Fatalf("count OAuth policy audits: %v", err)
+	}
+	if oauthAudits != 1 {
+		t.Fatalf("OAuth policy audit rows = %d, want 1", oauthAudits)
+	}
+
 	lifecycle := DefaultLifecycle(365)
 	lifecycle.AuditRetentionDays = 90
 	if _, err := managerA.SetLifecycle(ctx, lifecycle, 0, "policy-a", "", mutation("policy-a")); !errors.Is(err, ErrRetentionConfirmation) {

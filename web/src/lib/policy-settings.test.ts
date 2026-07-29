@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
-import type { UpdateLifecycleSettingsInput, UpdateProtectionSettingsInput } from './api';
+import type { UpdateLifecycleSettingsInput, UpdateOAuthSettingsInput, UpdateProtectionSettingsInput } from './api';
 import {
+  DEFAULT_OAUTH_SETTINGS,
   DEFAULT_PROTECTION_SETTINGS,
   applyProtectionPreset,
   disabledProtectionGroups,
@@ -9,6 +10,7 @@ import {
   protectionValidationError,
   retentionConfirmation,
   lifecycleValidationError,
+  oauthPolicyValidationError,
   validateLifecycleSettings,
   validateProtectionSettings,
 } from './policy-settings';
@@ -101,5 +103,40 @@ describe('runtime policy validation', () => {
       .toBe('lifecycle-session-idle-ttl');
     expect(lifecycleValidationError({ ...lifecycle, access_token_ttl: '25h' })?.field)
       .toBe('lifecycle-access-token-ttl');
+  });
+
+  it('enforces OAuth grant, scope, public-client, and URI dependencies', () => {
+    const valid: UpdateOAuthSettingsInput = {
+      expected_revision: 3,
+      self_service_client_creation_enabled: DEFAULT_OAUTH_SETTINGS.self_service_client_creation_enabled,
+      public_clients_enabled: DEFAULT_OAUTH_SETTINGS.public_clients_enabled,
+      allowed_grant_types: [...DEFAULT_OAUTH_SETTINGS.allowed_grant_types],
+      allowed_scopes: [...DEFAULT_OAUTH_SETTINGS.allowed_scopes],
+      max_redirect_uris: DEFAULT_OAUTH_SETTINGS.max_redirect_uris,
+      max_post_logout_redirect_uris: DEFAULT_OAUTH_SETTINGS.max_post_logout_redirect_uris,
+    };
+    expect(oauthPolicyValidationError(valid)).toBeNull();
+    expect(oauthPolicyValidationError({ ...valid, allowed_scopes: ['openid', 'tenant.read'] })).toBeNull();
+    expect(oauthPolicyValidationError({ ...valid, allowed_scopes: [] })).toBeNull();
+    expect(oauthPolicyValidationError({ ...valid, allowed_scopes: ['tenant read'] })?.field).toBe('oauth-scopes');
+    expect(oauthPolicyValidationError({
+      ...valid,
+      public_clients_enabled: false,
+      allowed_grant_types: ['refresh_token'],
+      allowed_scopes: ['openid'],
+    })?.message).toContain('Authorization Code');
+    expect(oauthPolicyValidationError({
+      ...valid,
+      public_clients_enabled: false,
+      allowed_grant_types: ['authorization_code'],
+      allowed_scopes: ['openid', 'offline_access'],
+    })?.message).toContain('Refresh Token');
+    expect(oauthPolicyValidationError({
+      ...valid,
+      allowed_grant_types: ['client_credentials'],
+      allowed_scopes: ['openid'],
+    })?.field).toBe('oauth-public-clients');
+    expect(oauthPolicyValidationError({ ...valid, max_redirect_uris: 101 })?.field).toBe('oauth-max-redirects');
+    expect(oauthPolicyValidationError({ ...valid, max_post_logout_redirect_uris: -1 })?.field).toBe('oauth-max-logouts');
   });
 });

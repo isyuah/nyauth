@@ -30,6 +30,7 @@ const maxRequestBody = 1 << 20
 type clientQuotaPage[T any] struct {
 	*models.PaginatedResponse[T]
 	*client.OwnerQuota
+	ClientPolicy *settings.OAuthPolicy `json:"client_policy,omitempty"`
 }
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, target any) error {
@@ -489,7 +490,10 @@ func (s *Server) handleListMyClients(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusInternalServerError, "failed to load application quota")
 		return
 	}
-	writeJSON(w, http.StatusOK, clientQuotaPage[models.OAuthClient]{PaginatedResponse: result, OwnerQuota: quota})
+	policy := s.settingsMgr.OAuthPolicy()
+	writeJSON(w, http.StatusOK, clientQuotaPage[models.OAuthClient]{
+		PaginatedResponse: result, OwnerQuota: quota, ClientPolicy: &policy,
+	})
 }
 
 func (s *Server) handleRotateMyClientSecret(w http.ResponseWriter, r *http.Request) {
@@ -604,6 +608,10 @@ func (s *Server) handleCreateMyClient(w http.ResponseWriter, r *http.Request) {
 	result, err := s.clientService.CreateForOwner(r.Context(), current.ID.String(), request)
 	if err != nil {
 		switch {
+		case errors.Is(err, client.ErrSelfServiceDisabled):
+			writeAPIError(w, http.StatusForbidden, err.Error())
+		case errors.Is(err, client.ErrOAuthPolicyChanged):
+			writeAPIError(w, http.StatusConflict, "OAuth client policy changed; reload and retry")
 		case errors.Is(err, client.ErrClientQuotaExceeded):
 			writeAPIError(w, http.StatusForbidden, "application limit reached")
 		case client.IsInvalidClient(err):

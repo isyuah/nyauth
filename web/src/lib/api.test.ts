@@ -40,6 +40,8 @@ describe('localizeAPIErrorMessage', () => {
     ['MFA is required for active administrators', '管理员策略要求保留多因素验证，当前无法停用'],
     ['Passkey registered; please sign in again', 'Passkey 已注册，但当前会话无法继续使用，请重新登录'],
     ['Passkey removed; please sign in again', 'Passkey 已删除，但当前会话无法继续使用，请重新登录'],
+    ['self-service client creation is disabled', '管理员已关闭用户自助创建客户端'],
+    ['OAuth client policy changed; reload and retry', 'OAuth 客户端策略已更新，请重新加载后再试'],
   ])('maps stable authentication error %s', (message, expected) => {
     expect(localizeAPIErrorMessage(message)).toBe(expected);
   });
@@ -54,6 +56,7 @@ describe('localizeAPIErrorMessage', () => {
     expect(localizeAPIErrorMessage('wording changed', 'service_control.registration_conflict')).toBe('当前运行控制状态不允许启用该注册策略，请先调整注册或邮件投递能力');
     expect(localizeAPIErrorMessage('wording changed', 'settings.revision_conflict')).toBe('设置已被其他管理员修改，请加载最新设置后重试');
     expect(localizeAPIErrorMessage('wording changed', 'media.instances_not_ready')).toBe('仍有运行实例尚未加载候选配置，请稍后重试');
+    expect(localizeAPIErrorMessage('wording changed', 'client.policy_changed')).toBe('OAuth 客户端策略已更新，请重新加载后再试');
   });
 
   it('uses a Chinese fallback for an unknown coded backend error', () => {
@@ -524,7 +527,7 @@ describe('runtime policy settings API contract', () => {
     vi.unstubAllGlobals();
   });
 
-  it('uses the versioned protection and lifecycle revisions without changing the payload', async () => {
+  it('uses versioned protection, lifecycle, and OAuth revisions without changing the payload', async () => {
     const protection = {
       revision: 4,
       login: { enabled: true, window: '5m', identity_limit: 5, ip_limit: 30, passkey_ceremony_ip_limit: 120 },
@@ -544,7 +547,16 @@ describe('runtime policy settings API contract', () => {
       authorization_code_ttl: '5m',
       audit_retention_days: 365,
     };
-    const responses = [protection, { ...protection, revision: 5 }, lifecycle, { ...lifecycle, revision: 7 }];
+    const oauth = {
+      revision: 8,
+      self_service_client_creation_enabled: true,
+      public_clients_enabled: false,
+      allowed_grant_types: ['authorization_code', 'refresh_token'],
+      allowed_scopes: ['openid', 'profile', 'email'],
+      max_redirect_uris: 12,
+      max_post_logout_redirect_uris: 4,
+    };
+    const responses = [protection, { ...protection, revision: 5 }, lifecycle, { ...lifecycle, revision: 7 }, oauth, { ...oauth, revision: 9 }];
     const fetchMock = vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
       status: 200,
       headers: { 'Content-Type': 'application/json' },
@@ -575,6 +587,16 @@ describe('runtime policy settings API contract', () => {
       audit_retention_days: 90,
       retention_confirmation: 'RETENTION 90 DAYS',
     });
+    await api.admin.getOAuthSettings();
+    await api.admin.updateOAuthSettings({
+      expected_revision: oauth.revision,
+      self_service_client_creation_enabled: oauth.self_service_client_creation_enabled,
+      public_clients_enabled: oauth.public_clients_enabled,
+      allowed_grant_types: oauth.allowed_grant_types as Array<'authorization_code' | 'refresh_token'>,
+      allowed_scopes: oauth.allowed_scopes as Array<'openid' | 'profile' | 'email'>,
+      max_redirect_uris: oauth.max_redirect_uris,
+      max_post_logout_redirect_uris: oauth.max_post_logout_redirect_uris,
+    });
 
     const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit]>;
     expect(calls.map(([url]) => url)).toEqual([
@@ -582,10 +604,13 @@ describe('runtime policy settings API contract', () => {
       '/api/admin/settings/protection',
       '/api/admin/settings/lifecycle',
       '/api/admin/settings/lifecycle',
+      '/api/admin/settings/oauth',
+      '/api/admin/settings/oauth',
     ]);
     expect(calls[0][1].cache).toBe('no-store');
     expect(calls[2][1].cache).toBe('no-store');
-    for (const index of [1, 3]) {
+    expect(calls[4][1].cache).toBe('no-store');
+    for (const index of [1, 3, 5]) {
       expect(calls[index][1].method).toBe('PUT');
       expect(new Headers(calls[index][1].headers).get('X-CSRF-Token')).toBe('policy-csrf');
     }
@@ -604,6 +629,15 @@ describe('runtime policy settings API contract', () => {
       authorization_code_ttl: '5m',
       audit_retention_days: 90,
       retention_confirmation: 'RETENTION 90 DAYS',
+    });
+    expect(JSON.parse(String(calls[5][1].body))).toEqual({
+      expected_revision: 8,
+      self_service_client_creation_enabled: true,
+      public_clients_enabled: false,
+      allowed_grant_types: ['authorization_code', 'refresh_token'],
+      allowed_scopes: ['openid', 'profile', 'email'],
+      max_redirect_uris: 12,
+      max_post_logout_redirect_uris: 4,
     });
   });
 });

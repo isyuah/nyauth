@@ -93,6 +93,8 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 	result, err := h.service.CreateAdmin(r.Context(), req, mutation)
 	if err != nil {
 		switch {
+		case errors.Is(err, ErrOAuthPolicyChanged):
+			writeCodedError(w, http.StatusConflict, "client.policy_changed", "OAuth client policy changed; reload and retry")
 		case IsInvalidClient(err):
 			writeError(w, http.StatusBadRequest, err.Error())
 		case errors.Is(err, ErrClientQuotaExceeded):
@@ -139,6 +141,8 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 	client, err := h.service.Update(r.Context(), id, req, mutation)
 	if err != nil {
 		switch {
+		case errors.Is(err, ErrOAuthPolicyChanged):
+			writeCodedError(w, http.StatusConflict, "client.policy_changed", "OAuth client policy changed; reload and retry")
 		case IsInvalidClient(err):
 			writeError(w, http.StatusBadRequest, err.Error())
 		case errors.Is(err, pgx.ErrNoRows):
@@ -231,6 +235,10 @@ func writeJSON(w http.ResponseWriter, status int, v interface{}) {
 
 func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
+}
+
+func writeCodedError(w http.ResponseWriter, status int, code, message string) {
+	writeJSON(w, status, map[string]string{"code": code, "error": message})
 }
 
 // ListAccessUsers returns the allowlisted users for a client.

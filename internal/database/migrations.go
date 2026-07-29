@@ -13,7 +13,7 @@ import (
 	migrationfiles "github.com/nyasharp/nyauth/migrations"
 )
 
-const SchemaVersion int64 = 7
+const SchemaVersion int64 = 8
 
 // RunConfiguredMigrations applies the database TLS policy before invoking the
 // embedded migration runner. Keep RunMigrations(string) for isolated tests and

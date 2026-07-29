@@ -70,6 +70,18 @@ async function installAdminMocks(page: Page) {
       });
       return;
     }
+    if (url.pathname === '/api/admin/settings/oauth' && route.request().method() === 'GET') {
+      await fulfillJSON(route, 200, {
+        revision: 1,
+        self_service_client_creation_enabled: true,
+        public_clients_enabled: true,
+        allowed_grant_types: ['authorization_code', 'refresh_token', 'client_credentials'],
+        allowed_scopes: ['openid', 'profile', 'email', 'offline_access'],
+        max_redirect_uris: 20,
+        max_post_logout_redirect_uris: 20,
+      });
+      return;
+    }
     await fulfillJSON(route, 404, { error: 'not found' });
   });
 }

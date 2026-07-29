@@ -104,6 +104,8 @@ var apiErrorCodesByMessage = map[string]string{
 	"clear the current maintenance expiry before starting media migration":               "media.maintenance_expiry",
 	"too many media settings operations":                                                 "media.rate_limited",
 	"application limit reached":                                                          "client.quota_exceeded",
+	"self-service client creation is disabled":                                           "client.self_service_disabled",
+	"oauth client policy changed; reload and retry":                                      "client.policy_changed",
 	"service capability is paused":                                                       "service.capability_paused",
 	"settings revision conflict":                                                         "settings.revision_conflict",
 	"rate limit disable confirmation is required":                                        "settings.disable_confirmation_required",

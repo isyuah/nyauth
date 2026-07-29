@@ -33,6 +33,9 @@ const (
 	// ownership creation and transfer transactions. Per-user serialization is
 	// still provided by the users row lock.
 	clientQuotaLockKey int64 = 0x4e594151554f
+	// oauthPolicyLockKey prevents a client write validated against an old
+	// runtime OAuth policy from crossing the policy update's commit boundary.
+	oauthPolicyLockKey int64 = 0x4e59414f4155
 )
 
 var (
@@ -109,6 +112,20 @@ func LockClientQuotaShared(ctx context.Context, tx pgx.Tx) error {
 func LockClientQuotaExclusive(ctx context.Context, tx pgx.Tx) error {
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, clientQuotaLockKey); err != nil {
 		return fmt.Errorf("locking client quota policy exclusive: %w", err)
+	}
+	return nil
+}
+
+func LockOAuthPolicyShared(ctx context.Context, tx pgx.Tx) error {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared($1)`, oauthPolicyLockKey); err != nil {
+		return fmt.Errorf("locking OAuth client policy shared: %w", err)
+	}
+	return nil
+}
+
+func LockOAuthPolicyExclusive(ctx context.Context, tx pgx.Tx) error {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, oauthPolicyLockKey); err != nil {
+		return fmt.Errorf("locking OAuth client policy exclusive: %w", err)
 	}
 	return nil
 }

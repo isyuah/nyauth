@@ -1,16 +1,31 @@
 import type {
   LifecycleSettings,
+  OAuthSettings,
   ProtectionAccountSettings,
   ProtectionAvatarSettings,
   ProtectionLoginSettings,
   ProtectionMailSettings,
   ProtectionSettings,
   UpdateLifecycleSettingsInput,
+  UpdateOAuthSettingsInput,
   UpdateProtectionSettingsInput,
 } from './api';
 import { writable } from 'svelte/store';
 
 export const DISABLE_RATE_LIMITS_CONFIRMATION = 'DISABLE RATE LIMITS';
+
+export const OAUTH_GRANT_TYPES = ['authorization_code', 'refresh_token', 'client_credentials'] as const;
+export const OAUTH_SCOPES = ['openid', 'profile', 'email', 'offline_access'] as const;
+
+export const DEFAULT_OAUTH_SETTINGS: OAuthSettings = {
+  revision: 0,
+  self_service_client_creation_enabled: true,
+  public_clients_enabled: true,
+  allowed_grant_types: [...OAUTH_GRANT_TYPES],
+  allowed_scopes: [...OAUTH_SCOPES],
+  max_redirect_uris: 20,
+  max_post_logout_redirect_uris: 20,
+};
 
 export type ProtectionPreset = 'default' | 'strict' | 'relaxed';
 export type ProtectionGroup = 'login' | 'account' | 'avatar' | 'mail';
@@ -276,6 +291,52 @@ export function lifecycleValidationError(input: UpdateLifecycleSettingsInput): F
 
 export function validateLifecycleSettings(input: UpdateLifecycleSettingsInput): string {
   return lifecycleValidationError(input)?.message ?? '';
+}
+
+export function oauthPolicyValidationError(input: UpdateOAuthSettingsInput): FieldValidationError | null {
+  const grants = new Set(input.allowed_grant_types);
+  const scopes = new Set(input.allowed_scopes);
+  if (grants.size !== input.allowed_grant_types.length || input.allowed_grant_types.length === 0
+    || input.allowed_grant_types.some((grant) => !OAUTH_GRANT_TYPES.includes(grant))) {
+    return { field: 'oauth-grants', message: '至少选择一种受支持的 Grant，且不能重复。' };
+  }
+  if (scopes.size !== input.allowed_scopes.length
+    || input.allowed_scopes.some((scope) => !/^[\x21\x23-\x5B\x5D-\x7E]+$/.test(scope))) {
+    return { field: 'oauth-scopes', message: 'Scope 不能重复，且必须是符合 OAuth 2.0 的可见 ASCII scope-token。' };
+  }
+  if (grants.has('refresh_token') && !grants.has('authorization_code')) {
+    return { field: 'oauth-grants', message: '允许 Refresh Token 时必须同时允许 Authorization Code。' };
+  }
+  if (scopes.has('offline_access') && !grants.has('refresh_token')) {
+    return { field: 'oauth-scopes', message: '允许 offline_access 时必须同时允许 Refresh Token。' };
+  }
+  if (input.public_clients_enabled && !grants.has('authorization_code')) {
+    return { field: 'oauth-public-clients', message: '允许 Public Client 时必须同时允许 Authorization Code。' };
+  }
+  if (!Number.isSafeInteger(input.max_redirect_uris)
+    || input.max_redirect_uris < 1 || input.max_redirect_uris > 100) {
+    return { field: 'oauth-max-redirects', message: 'Redirect URI 上限须为 1 至 100 的整数。' };
+  }
+  if (!Number.isSafeInteger(input.max_post_logout_redirect_uris)
+    || input.max_post_logout_redirect_uris < 0 || input.max_post_logout_redirect_uris > 100) {
+    return { field: 'oauth-max-logouts', message: 'Post-logout Redirect URI 上限须为 0 至 100 的整数。' };
+  }
+  return null;
+}
+
+export function oauthSettingsFromInput(
+  input: UpdateOAuthSettingsInput,
+  revision = input.expected_revision,
+): OAuthSettings {
+  return {
+    revision,
+    self_service_client_creation_enabled: input.self_service_client_creation_enabled,
+    public_clients_enabled: input.public_clients_enabled,
+    allowed_grant_types: [...input.allowed_grant_types],
+    allowed_scopes: [...input.allowed_scopes],
+    max_redirect_uris: input.max_redirect_uris,
+    max_post_logout_redirect_uris: input.max_post_logout_redirect_uris,
+  };
 }
 
 export function protectionSettingsFromInput(

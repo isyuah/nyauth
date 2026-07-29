@@ -5,11 +5,14 @@ import type {
   ClientQuota,
   ClientQuotaPage,
   LifecycleSettings,
+  MyClientPage,
   OAuthClient,
+  OAuthSettings,
   ProtectionSettings,
   ServiceStatus,
   SessionInfo,
   UpdateLifecycleSettingsInput,
+  UpdateOAuthSettingsInput,
   UpdateProtectionSettingsInput,
   User,
 } from '../../src/lib/api';
@@ -89,6 +92,16 @@ const lifecycleSettings: LifecycleSettings = {
   refresh_token_ttl: '720h',
   authorization_code_ttl: '5m',
   audit_retention_days: 365,
+};
+
+const oauthSettings: OAuthSettings = {
+  revision: 5,
+  self_service_client_creation_enabled: true,
+  public_clients_enabled: true,
+  allowed_grant_types: ['authorization_code', 'refresh_token', 'client_credentials'],
+  allowed_scopes: ['openid', 'profile', 'email', 'offline_access'],
+  max_redirect_uris: 20,
+  max_post_logout_redirect_uris: 20,
 };
 
 const ownedClient: OAuthClient = {
@@ -437,8 +450,122 @@ test('lifecycle validation focuses the invalid field without moving the panel', 
   await expect(page.locator('#lifecycle-recent-auth-ttl')).toHaveAttribute('aria-invalid', 'true');
 });
 
+test('OAuth client policy saves a revisioned restricted policy', async ({ page }) => {
+  const bodies: UpdateOAuthSettingsInput[] = [];
+  await installAPIMocks(page, 'admin', async (route, path, method) => {
+    if (path !== '/api/admin/settings/oauth') return false;
+    if (method === 'GET') {
+      await json(route, 200, oauthSettings);
+      return true;
+    }
+    if (method === 'PUT') {
+      const body = route.request().postDataJSON() as UpdateOAuthSettingsInput;
+      bodies.push(body);
+      await json(route, 200, { ...body, revision: body.expected_revision + 1 });
+      return true;
+    }
+    return false;
+  });
+
+  await page.goto('/admin/settings/oauth');
+  await expect(page.getByRole('heading', { name: 'OAuth 客户端', exact: true })).toBeVisible();
+  await page.getByRole('switch', { name: '允许 Public Client' }).click();
+  await page.getByLabel('Client Credentials').uncheck();
+  await page.getByLabel('offline_access').uncheck();
+  await page.getByLabel(/自定义 Scope/).fill('tenant.read');
+  await page.locator('#oauth-max-redirects').fill('12');
+  await page.locator('#oauth-max-logouts').fill('4');
+  await page.getByRole('button', { name: '保存 OAuth 客户端策略' }).click();
+
+  await expect.poll(() => bodies.length).toBe(1);
+  expect(bodies[0]).toEqual({
+    expected_revision: 5,
+    self_service_client_creation_enabled: true,
+    public_clients_enabled: false,
+    allowed_grant_types: ['authorization_code', 'refresh_token'],
+    allowed_scopes: ['openid', 'profile', 'email', 'tenant.read'],
+    max_redirect_uris: 12,
+    max_post_logout_redirect_uris: 4,
+  });
+  await expect(page.getByText('OAuth 客户端策略已保存')).toBeVisible();
+});
+
+test('OAuth policy revision conflict keeps the draft until the administrator reloads', async ({ page }) => {
+  let getCount = 0;
+  await installAPIMocks(page, 'admin', async (route, path, method) => {
+    if (path !== '/api/admin/settings/oauth') return false;
+    if (method === 'GET') {
+      getCount++;
+      await json(route, 200, getCount === 1 ? oauthSettings : { ...oauthSettings, revision: 6, max_redirect_uris: 8 });
+      return true;
+    }
+    if (method === 'PUT') {
+      await json(route, 409, { code: 'settings.revision_conflict', error: 'settings revision conflict' });
+      return true;
+    }
+    return false;
+  });
+
+  await page.goto('/admin/settings/oauth');
+  const redirects = page.locator('#oauth-max-redirects');
+  await redirects.fill('12');
+  await page.getByRole('button', { name: '保存 OAuth 客户端策略' }).click();
+  await expect(page.getByText('设置已被其他管理员修改。当前草稿已保留，请加载最新设置后重新核对。')).toBeVisible();
+  await expect(redirects).toHaveValue('12');
+  await page.getByRole('button', { name: '加载最新设置' }).click();
+  await expect(redirects).toHaveValue('8');
+});
+
+test('my applications build new clients only from the current OAuth policy', async ({ page }) => {
+  const bodies: unknown[] = [];
+  const result: MyClientPage = {
+    items: [], total: 0, page: 1, page_size: 50, total_pages: 0,
+    quota_used: 0, quota_limit: 10, quota_override: null,
+    client_policy: {
+      self_service_client_creation_enabled: true,
+      public_clients_enabled: false,
+      allowed_grant_types: ['client_credentials'],
+      allowed_scopes: ['email'],
+      max_redirect_uris: 2,
+      max_post_logout_redirect_uris: 0,
+    },
+  };
+  await installAPIMocks(page, 'user', async (route, path, method) => {
+    if (path === '/api/my/clients' && method === 'GET') {
+      await json(route, 200, result);
+      return true;
+    }
+    if (path === '/api/my/clients' && method === 'POST') {
+      bodies.push(route.request().postDataJSON());
+      await json(route, 201, { id: 'machine-client', secret: 'visible-once' });
+      return true;
+    }
+    return false;
+  });
+
+  await page.goto('/dashboard/apps');
+  await page.getByRole('button', { name: '创建应用' }).first().click();
+  await expect(page.getByLabel('client_credentials')).toBeChecked();
+  await expect(page.getByLabel('email')).toBeChecked();
+  await expect(page.getByLabel('authorization_code')).toHaveCount(0);
+  await expect(page.getByLabel('offline_access')).toHaveCount(0);
+  await expect(page.getByLabel('公共客户端')).toBeDisabled();
+  await expect(page.getByLabel(/Post-logout Redirect URI/)).toBeDisabled();
+  await page.getByLabel('应用名称').fill('Machine Client');
+  await page.getByRole('button', { name: '创建', exact: true }).click();
+  await expect.poll(() => bodies.length).toBe(1);
+  expect(bodies[0]).toEqual({
+    name: 'Machine Client',
+    redirect_uris: [],
+    post_logout_redirect_uris: [],
+    grants: ['client_credentials'],
+    scopes: ['email'],
+    is_public: false,
+  });
+});
+
 test('my applications use the server quota and disable creation when it is full', async ({ page }) => {
-  const result: ClientQuotaPage<OAuthClient> = {
+  const result: MyClientPage = {
     items: [ownedClient],
     total: 1,
     page: 1,
@@ -447,6 +574,14 @@ test('my applications use the server quota and disable creation when it is full'
     quota_used: 3,
     quota_limit: 3,
     quota_override: null,
+    client_policy: {
+      self_service_client_creation_enabled: true,
+      public_clients_enabled: true,
+      allowed_grant_types: ['authorization_code', 'refresh_token', 'client_credentials'],
+      allowed_scopes: ['openid', 'profile', 'email', 'offline_access'],
+      max_redirect_uris: 20,
+      max_post_logout_redirect_uris: 20,
+    },
   };
   await installAPIMocks(page, 'user', async (route, path, method) => {
     if (path === '/api/my/clients' && method === 'GET') {

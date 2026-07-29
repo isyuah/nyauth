@@ -195,6 +195,121 @@ func TestClientOwnerAssignmentValidationAndAuditAreAtomic(t *testing.T) {
 	}
 }
 
+func TestOAuthPolicyCommitBoundaryRejectsStaleClientCreation(t *testing.T) {
+	schema := newPostgresTestSchema(t)
+	if err := database.RunMigrations(schema.migrationDSN); err != nil {
+		t.Fatalf("RunMigrations: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	ownerID := uuid.New()
+	insertClientOwnerUser(t, ctx, schema.pool, ownerID, "active")
+
+	manager := settings.NewManager(schema.pool, settings.Branding{Title: "Nya"})
+	policy := settings.DefaultOAuthPolicy()
+	policy.SelfServiceClientCreationEnabled = false
+	if _, err := manager.SetOAuthPolicy(ctx, policy, 0, "policy-admin", audit.MutationAudit{
+		Event: models.AuditSettingsUpdated, ActorID: uuid.New(), ActorName: "policy-admin",
+		Result: "success", RiskLevel: "high",
+	}); err != nil {
+		t.Fatalf("store OAuth policy: %v", err)
+	}
+
+	stale := client.NewService(client.NewStore(schema.pool))
+	stale.SetOAuthPolicySource(func() settings.Versioned[settings.OAuthPolicy] {
+		return settings.Versioned[settings.OAuthPolicy]{Value: settings.DefaultOAuthPolicy()}
+	})
+	_, err := stale.CreateForOwner(ctx, ownerID.String(), clientOwnerCreateRequest("Stale policy client", nil))
+	if !errors.Is(err, client.ErrOAuthPolicyChanged) {
+		t.Fatalf("stale policy create error = %v", err)
+	}
+	var created int
+	if err := schema.pool.QueryRow(ctx, `SELECT COUNT(*) FROM oauth_clients`).Scan(&created); err != nil {
+		t.Fatalf("count clients after stale create: %v", err)
+	}
+	if created != 0 {
+		t.Fatalf("stale policy committed %d clients", created)
+	}
+
+	fresh := client.NewService(client.NewStore(schema.pool))
+	fresh.SetOAuthPolicySource(manager.OAuthPolicySnapshot)
+	_, err = fresh.CreateForOwner(ctx, ownerID.String(), clientOwnerCreateRequest("Disabled self service", nil))
+	if !errors.Is(err, client.ErrSelfServiceDisabled) {
+		t.Fatalf("fresh disabled policy create error = %v", err)
+	}
+}
+
+func TestClientCredentialsWithoutRedirectAndConcurrentPatchUpdate(t *testing.T) {
+	schema := newPostgresTestSchema(t)
+	if err := database.RunMigrations(schema.migrationDSN); err != nil {
+		t.Fatalf("RunMigrations: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	service := client.NewService(client.NewStore(schema.pool))
+
+	machine, err := service.Create(ctx, models.CreateClientRequest{
+		Name: "Machine", Grants: []string{models.GrantClientCredentials}, Scopes: []string{},
+	})
+	if err != nil {
+		t.Fatalf("create client_credentials client without redirect URI: %v", err)
+	}
+	if len(machine.RedirectURIs) != 0 {
+		t.Fatalf("machine redirect URIs = %#v, want empty", machine.RedirectURIs)
+	}
+
+	created, err := service.Create(ctx, models.CreateClientRequest{
+		Name: "Concurrent update", RedirectURIs: []string{"https://client.example/one", "https://client.example/two"},
+		Grants: []string{models.GrantAuthorizationCode}, Scopes: []string{"openid"},
+	})
+	if err != nil {
+		t.Fatalf("create concurrent update client: %v", err)
+	}
+	lockTx, err := schema.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin concurrent redirect reduction: %v", err)
+	}
+	defer lockTx.Rollback(ctx)
+	if _, err := lockTx.Exec(ctx, `SELECT 1 FROM oauth_clients WHERE id=$1 FOR UPDATE`, created.ID); err != nil {
+		t.Fatalf("lock concurrent update client: %v", err)
+	}
+	if _, err := lockTx.Exec(ctx, `UPDATE oauth_clients SET redirect_uris=ARRAY['https://client.example/one']::text[] WHERE id=$1`, created.ID); err != nil {
+		t.Fatalf("stage redirect reduction: %v", err)
+	}
+	updatedName := "Renamed without stale overwrite"
+	updateResult := make(chan error, 1)
+	go func() {
+		_, updateErr := service.Update(ctx, created.ID, models.UpdateClientRequest{Name: &updatedName}, audit.MutationAudit{
+			Event: models.AuditClientUpdated, ActorID: uuid.New(), ActorName: "integration-admin",
+			Result: "success", RiskLevel: "medium",
+		})
+		updateResult <- updateErr
+	}()
+	select {
+	case updateErr := <-updateResult:
+		t.Fatalf("client patch did not wait for the row lock: %v", updateErr)
+	case <-time.After(150 * time.Millisecond):
+	}
+	if err := lockTx.Commit(ctx); err != nil {
+		t.Fatalf("commit redirect reduction: %v", err)
+	}
+	select {
+	case updateErr := <-updateResult:
+		if updateErr != nil {
+			t.Fatalf("rename after redirect reduction: %v", updateErr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("client patch remained blocked after row lock release")
+	}
+	final, err := service.GetByID(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("get concurrently updated client: %v", err)
+	}
+	if final.Name != updatedName || len(final.RedirectURIs) != 1 || final.RedirectURIs[0] != "https://client.example/one" {
+		t.Fatalf("concurrent patch result = %#v", final)
+	}
+}
+
 func TestConcurrentClientOwnerCreatesAndTransfersRespectQuota(t *testing.T) {
 	schema := newPostgresTestSchema(t)
 	if err := database.RunMigrations(schema.migrationDSN); err != nil {

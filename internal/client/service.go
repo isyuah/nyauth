@@ -6,29 +6,45 @@ import (
 	"fmt"
 	"net"
 	"net/url"
+	"slices"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/nyasharp/nyauth/internal/audit"
 	"github.com/nyasharp/nyauth/internal/crypto"
+	"github.com/nyasharp/nyauth/internal/settings"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
 
 var (
-	ErrInvalidClient      = errors.New("invalid OAuth client")
-	ErrPublicClientSecret = errors.New("public OAuth clients do not have a client secret")
-	ErrClientNotOwned     = errors.New("OAuth client is not owned by current user")
+	ErrInvalidClient       = errors.New("invalid OAuth client")
+	ErrPublicClientSecret  = errors.New("public OAuth clients do not have a client secret")
+	ErrClientNotOwned      = errors.New("OAuth client is not owned by current user")
+	ErrOAuthPolicyChanged  = errors.New("OAuth client policy changed")
+	ErrSelfServiceDisabled = errors.New("self-service client creation is disabled")
 )
 
 type Service struct {
 	store          *Store
 	generateSecret func() (string, error)
 	clock          func() time.Time
+	policySource   func() settings.Versioned[settings.OAuthPolicy]
 }
 
 func NewService(store *Store) *Service {
 	return &Service{store: store, generateSecret: crypto.GenerateClientSecret, clock: time.Now}
+}
+
+func (s *Service) SetOAuthPolicySource(source func() settings.Versioned[settings.OAuthPolicy]) {
+	s.policySource = source
+}
+
+func (s *Service) oauthPolicySnapshot() settings.Versioned[settings.OAuthPolicy] {
+	if s.policySource != nil {
+		return s.policySource()
+	}
+	return settings.Versioned[settings.OAuthPolicy]{Value: settings.DefaultOAuthPolicy()}
 }
 
 func validateRedirectURI(value string) error {
@@ -52,14 +68,6 @@ func validateRequest(req models.CreateClientRequest) error {
 	if strings.TrimSpace(req.Name) == "" || len(req.Name) > 128 {
 		return fmt.Errorf("%w: client name is required", ErrInvalidClient)
 	}
-	if len(req.RedirectURIs) == 0 {
-		return fmt.Errorf("%w: at least one redirect URI is required", ErrInvalidClient)
-	}
-	for _, value := range append(append([]string{}, req.RedirectURIs...), req.PostLogoutRedirectURIs...) {
-		if err := validateRedirectURI(value); err != nil {
-			return err
-		}
-	}
 	if len(req.Grants) == 0 {
 		return fmt.Errorf("%w: at least one grant is required", ErrInvalidClient)
 	}
@@ -81,22 +89,117 @@ func validateRequest(req models.CreateClientRequest) error {
 	if seen[models.GrantRefreshToken] && !seen[models.GrantAuthorizationCode] {
 		return fmt.Errorf("%w: refresh_token requires authorization_code", ErrInvalidClient)
 	}
+	if seen[models.GrantAuthorizationCode] && len(req.RedirectURIs) == 0 {
+		return fmt.Errorf("%w: authorization_code requires at least one redirect URI", ErrInvalidClient)
+	}
+	for _, value := range append(append([]string{}, req.RedirectURIs...), req.PostLogoutRedirectURIs...) {
+		if err := validateRedirectURI(value); err != nil {
+			return err
+		}
+	}
+	scopeSeen := make(map[string]bool, len(req.Scopes))
+	for _, scope := range req.Scopes {
+		if !models.ValidOAuthScope(scope) {
+			return fmt.Errorf("%w: invalid scope %q", ErrInvalidClient, scope)
+		}
+		if scopeSeen[scope] {
+			return fmt.Errorf("%w: duplicate scope %q", ErrInvalidClient, scope)
+		}
+		scopeSeen[scope] = true
+	}
 	if req.AccessPolicy != "" && !models.ValidClientAccessPolicy(req.AccessPolicy) {
 		return fmt.Errorf("%w: unsupported access policy %q", ErrInvalidClient, req.AccessPolicy)
 	}
 	return nil
 }
-func (s *Service) buildClient(req models.CreateClientRequest) (*models.OAuthClient, string, error) {
+func applyRequestDefaults(req *models.CreateClientRequest, policy settings.OAuthPolicy) {
+	if req.RedirectURIs == nil {
+		req.RedirectURIs = []string{}
+	}
 	if req.Grants == nil {
-		req.Grants = []string{models.GrantAuthorizationCode}
+		if policy.AllowsGrant(models.GrantAuthorizationCode) {
+			req.Grants = []string{models.GrantAuthorizationCode}
+		} else {
+			req.Grants = []string{policy.AllowedGrantTypes[0]}
+		}
 	}
 	if req.Scopes == nil {
-		req.Scopes = []string{"openid", "profile", "email"}
+		for _, scope := range []string{"openid", "profile", "email"} {
+			if policy.AllowsScope(scope) {
+				req.Scopes = append(req.Scopes, scope)
+			}
+		}
 	}
 	if req.PostLogoutRedirectURIs == nil {
 		req.PostLogoutRedirectURIs = []string{}
 	}
+}
+
+func validateNewClientPolicy(req models.CreateClientRequest, policy settings.OAuthPolicy) error {
+	if slices.Contains(req.Scopes, "offline_access") && !slices.Contains(req.Grants, models.GrantRefreshToken) {
+		return fmt.Errorf("%w: offline_access requires refresh_token", ErrInvalidClient)
+	}
+	if req.IsPublic && !policy.PublicClientsEnabled {
+		return fmt.Errorf("%w: public client creation is disabled by OAuth policy", ErrInvalidClient)
+	}
+	if len(req.RedirectURIs) > policy.MaxRedirectURIs {
+		return fmt.Errorf("%w: at most %d redirect URIs are allowed", ErrInvalidClient, policy.MaxRedirectURIs)
+	}
+	if len(req.PostLogoutRedirectURIs) > policy.MaxPostLogoutRedirectURIs {
+		return fmt.Errorf("%w: at most %d post-logout redirect URIs are allowed", ErrInvalidClient, policy.MaxPostLogoutRedirectURIs)
+	}
+	for _, grant := range req.Grants {
+		if !policy.AllowsGrant(grant) {
+			return fmt.Errorf("%w: grant %q is disabled by OAuth policy", ErrInvalidClient, grant)
+		}
+	}
+	for _, scope := range req.Scopes {
+		if !policy.AllowsScope(scope) {
+			return fmt.Errorf("%w: scope %q is disabled by OAuth policy", ErrInvalidClient, scope)
+		}
+	}
+	return nil
+}
+
+func validateUpdatedClientPolicy(previous, next *models.OAuthClient, request models.UpdateClientRequest, policy settings.OAuthPolicy) error {
+	previousHasInvalidOfflineAccess := slices.Contains(previous.Scopes, "offline_access") && !slices.Contains(previous.Grants, models.GrantRefreshToken)
+	nextHasInvalidOfflineAccess := slices.Contains(next.Scopes, "offline_access") && !slices.Contains(next.Grants, models.GrantRefreshToken)
+	if nextHasInvalidOfflineAccess && !previousHasInvalidOfflineAccess {
+		return fmt.Errorf("%w: offline_access requires refresh_token", ErrInvalidClient)
+	}
+	if request.RedirectURIs != nil && len(next.RedirectURIs) > policy.MaxRedirectURIs && len(next.RedirectURIs) > len(previous.RedirectURIs) {
+		return fmt.Errorf("%w: at most %d redirect URIs are allowed", ErrInvalidClient, policy.MaxRedirectURIs)
+	}
+	if request.PostLogoutRedirectURIs != nil && len(next.PostLogoutRedirectURIs) > policy.MaxPostLogoutRedirectURIs && len(next.PostLogoutRedirectURIs) > len(previous.PostLogoutRedirectURIs) {
+		return fmt.Errorf("%w: at most %d post-logout redirect URIs are allowed", ErrInvalidClient, policy.MaxPostLogoutRedirectURIs)
+	}
+	if request.Grants != nil {
+		for _, grant := range next.Grants {
+			if !slices.Contains(previous.Grants, grant) && !policy.AllowsGrant(grant) {
+				return fmt.Errorf("%w: grant %q is disabled by OAuth policy", ErrInvalidClient, grant)
+			}
+		}
+	}
+	if request.Scopes != nil {
+		for _, scope := range next.Scopes {
+			if !slices.Contains(previous.Scopes, scope) && !policy.AllowsScope(scope) {
+				return fmt.Errorf("%w: scope %q is disabled by OAuth policy", ErrInvalidClient, scope)
+			}
+		}
+	}
+	return nil
+}
+
+func (s *Service) buildClient(req models.CreateClientRequest, snapshots ...settings.Versioned[settings.OAuthPolicy]) (*models.OAuthClient, string, error) {
+	policySnapshot := s.oauthPolicySnapshot()
+	if len(snapshots) > 0 {
+		policySnapshot = snapshots[0]
+	}
+	applyRequestDefaults(&req, policySnapshot.Value)
 	if err := validateRequest(req); err != nil {
+		return nil, "", err
+	}
+	if err := validateNewClientPolicy(req, policySnapshot.Value); err != nil {
 		return nil, "", err
 	}
 	id, err := crypto.GenerateClientID()
@@ -136,11 +239,12 @@ func (s *Service) Create(ctx context.Context, req models.CreateClientRequest) (*
 	if req.OwnerID != nil {
 		return nil, fmt.Errorf("%w: owner_id requires the audited admin creation path", ErrInvalidClient)
 	}
-	c, secret, err := s.buildClient(req)
+	policy := s.oauthPolicySnapshot()
+	c, secret, err := s.buildClient(req, policy)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.store.Create(ctx, c); err != nil {
+	if err := s.store.CreateWithOAuthPolicy(ctx, c, policy); err != nil {
 		return nil, err
 	}
 	return response(c, secret), nil
@@ -153,11 +257,12 @@ func (s *Service) CreateAdmin(ctx context.Context, req models.CreateClientReques
 	if err != nil {
 		return nil, err
 	}
-	c, secret, err := s.buildClient(req)
+	policy := s.oauthPolicySnapshot()
+	c, secret, err := s.buildClient(req, policy)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.store.CreateWithAudit(ctx, c, ownerID, mutation); err != nil {
+	if err := s.store.CreateWithAuditAndOAuthPolicy(ctx, c, ownerID, mutation, policy); err != nil {
 		return nil, err
 	}
 	return response(c, secret), nil
@@ -170,11 +275,15 @@ func (s *Service) CreateForOwner(ctx context.Context, ownerID string, req models
 	if err != nil {
 		return nil, err
 	}
-	c, secret, err := s.buildClient(req)
+	policy := s.oauthPolicySnapshot()
+	if !policy.Value.SelfServiceClientCreationEnabled {
+		return nil, ErrSelfServiceDisabled
+	}
+	c, secret, err := s.buildClient(req, policy)
 	if err != nil {
 		return nil, err
 	}
-	if err := s.store.CreateForOwner(ctx, c, *normalizedOwnerID); err != nil {
+	if err := s.store.CreateForOwnerWithOAuthPolicy(ctx, c, *normalizedOwnerID, policy); err != nil {
 		return nil, err
 	}
 	return response(c, secret), nil
@@ -186,12 +295,13 @@ func (s *Service) Update(ctx context.Context, id string, req models.UpdateClient
 	if err := mutation.ValidateEvent(models.AuditClientUpdated); err != nil {
 		return nil, fmt.Errorf("invalid client update audit context: %w", err)
 	}
-	c, err := s.store.GetByID(ctx, id)
-	if err != nil {
-		return nil, err
-	}
+	policy := s.oauthPolicySnapshot()
+	return s.store.UpdateRequestWithOAuthPolicy(ctx, id, req, mutation, policy)
+}
+
+func applyClientUpdate(c *models.OAuthClient, req models.UpdateClientRequest) error {
 	if req.IsPublic != nil && *req.IsPublic != c.IsPublic {
-		return nil, fmt.Errorf("%w: client type cannot be changed", ErrInvalidClient)
+		return fmt.Errorf("%w: client type cannot be changed", ErrInvalidClient)
 	}
 	if req.Name != nil {
 		c.Name = strings.TrimSpace(*req.Name)
@@ -219,12 +329,9 @@ func (s *Service) Update(ctx context.Context, id string, req models.UpdateClient
 	}
 	check := models.CreateClientRequest{Name: c.Name, RedirectURIs: c.RedirectURIs, PostLogoutRedirectURIs: c.PostLogoutRedirectURIs, Grants: c.Grants, Scopes: c.Scopes, IsPublic: c.IsPublic, AccessPolicy: c.AccessPolicy, Metadata: c.Metadata}
 	if err := validateRequest(check); err != nil {
-		return nil, err
+		return err
 	}
-	if err := s.store.Update(ctx, c, mutation); err != nil {
-		return nil, err
-	}
-	return c, nil
+	return nil
 }
 func (s *Service) UpdateOwner(ctx context.Context, id string, req models.UpdateClientOwnerRequest, mutation audit.MutationAudit) (*models.OAuthClient, error) {
 	if err := mutation.ValidateEvent(models.AuditClientOwnerChanged); err != nil {
