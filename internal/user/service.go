@@ -267,6 +267,13 @@ func (s *Service) Update(ctx context.Context, id uuid.UUID, req models.UpdateUse
 }
 
 func (s *Service) AdminUpdate(ctx context.Context, id uuid.UUID, req models.AdminUpdateUserRequest, mutation audit.MutationAudit) (*models.User, error) {
+	if req.Username != nil {
+		trimmed := strings.TrimSpace(*req.Username)
+		if err := validateUsername(trimmed); err != nil {
+			return nil, err
+		}
+		req.Username = &trimmed
+	}
 	if req.Email != nil {
 		trimmed := strings.TrimSpace(*req.Email)
 		if err := validateEmail(trimmed); err != nil {
@@ -287,7 +294,7 @@ func (s *Service) AdminUpdate(ctx context.Context, id uuid.UUID, req models.Admi
 }
 
 func validateAdminUpdateAudit(req models.AdminUpdateUserRequest, mutation audit.MutationAudit) error {
-	profileFieldsPresent := req.Email != nil || req.DisplayName != nil || req.Metadata != nil
+	profileFieldsPresent := req.Username != nil || req.Email != nil || req.DisplayName != nil || req.Metadata != nil
 	switch mutation.Event {
 	case models.AuditUserUpdated:
 		if req.Role != nil || req.Status != nil {

@@ -507,6 +507,73 @@ func TestRoleChangeIncrementsAuthVersion(t *testing.T) {
 	}
 }
 
+func TestAdminUsernameChangePreservesIdentityAndAudits(t *testing.T) {
+	schema := newPostgresTestSchema(t)
+	if err := database.RunMigrations(schema.migrationDSN); err != nil {
+		t.Fatalf("RunMigrations: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	targetID, occupiedID := uuid.New(), uuid.New()
+	oldUsername := "rename-old-" + targetID.String()
+	newUsername := "rename-new-" + targetID.String()
+	occupiedUsername := "rename-taken-" + occupiedID.String()
+	if _, err := schema.pool.Exec(ctx, `
+		INSERT INTO users (id,username,status,role,auth_version,session_version,must_change_password,metadata,creation_source)
+		VALUES ($1,$2,'active','admin',7,3,FALSE,'{}'::jsonb,'legacy'),
+		       ($3,$4,'active','user',1,1,FALSE,'{}'::jsonb,'legacy')
+	`, targetID, oldUsername, occupiedID, occupiedUsername); err != nil {
+		t.Fatal(err)
+	}
+
+	store := user.NewStore(schema.pool)
+	actorID := uuid.New()
+	updated, err := store.UpdateAdmin(ctx, targetID, models.AdminUpdateUserRequest{Username: &newUsername}, audit.MutationAudit{
+		Event: models.AuditUserUpdated, ActorID: actorID, ActorName: oldUsername,
+		TargetType: "user", TargetID: targetID.String(), Result: "success", RiskLevel: "high",
+	})
+	if err != nil {
+		t.Fatalf("rename user: %v", err)
+	}
+	if updated.ID != targetID || updated.Username != newUsername || updated.AuthVersion != 7 || updated.SessionVersion != 3 {
+		t.Fatalf("renamed user changed stable identity or auth generations: %#v", updated)
+	}
+	if _, err := store.GetByUsername(ctx, oldUsername); !user.IsNotFound(err) {
+		t.Fatalf("old username lookup error=%v, want not found", err)
+	}
+	if loaded, err := store.GetByUsername(ctx, newUsername); err != nil || loaded.ID != targetID {
+		t.Fatalf("new username lookup user=%#v err=%v", loaded, err)
+	}
+
+	var payloadBytes []byte
+	if err := schema.pool.QueryRow(ctx, `
+		SELECT payload FROM audit_event_outbox
+		WHERE event=$1 AND aggregate_type='user' AND aggregate_id=$2
+	`, models.AuditUserUpdated, targetID.String()).Scan(&payloadBytes); err != nil {
+		t.Fatalf("read username-change audit: %v", err)
+	}
+	var payload struct {
+		Details map[string]any `json:"details"`
+	}
+	if err := json.Unmarshal(payloadBytes, &payload); err != nil {
+		t.Fatalf("decode username-change audit: %v", err)
+	}
+	if payload.Details["previous_username"] != oldUsername || payload.Details["username"] != newUsername {
+		t.Fatalf("username-change audit details=%v", payload.Details)
+	}
+
+	_, err = store.UpdateAdmin(ctx, targetID, models.AdminUpdateUserRequest{Username: &occupiedUsername}, audit.MutationAudit{
+		Event: models.AuditUserUpdated, ActorID: actorID, ActorName: newUsername,
+		TargetType: "user", TargetID: targetID.String(), Result: "success", RiskLevel: "high",
+	})
+	if !user.IsUsernameConflict(err) {
+		t.Fatalf("occupied username error=%v, want username conflict", err)
+	}
+	if loaded, err := store.GetByID(ctx, targetID); err != nil || loaded.Username != newUsername {
+		t.Fatalf("conflicting rename was not rolled back: user=%#v err=%v", loaded, err)
+	}
+}
+
 func TestAdminInvariantLockDoesNotBlockOrdinaryUserWrites(t *testing.T) {
 	schema := newPostgresTestSchema(t)
 	if err := database.RunMigrations(schema.migrationDSN); err != nil {

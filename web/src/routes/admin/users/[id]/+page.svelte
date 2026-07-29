@@ -1,10 +1,13 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
-  import { api, type User, type UserCreationSource, type UserRole } from '$lib/api';
+  import { onMount } from 'svelte';
+  import { api, isRecentAuthenticationError, type SessionInfo, type UpdateUserInput, type User, type UserCreationSource, type UserRole } from '$lib/api';
   import { useAdminUserDetailContext } from '$lib/admin-user-detail';
   import { formatStringMetadata, parseStringMetadata } from '$lib/admin-form-utils';
+  import { consumeProviderAuthError, sessionStore } from '$lib/stores';
   import { isCapabilityPaused, serviceStatusStore } from '$lib/service-control';
   import AvatarCropper from '$lib/components/account/AvatarCropper.svelte';
+  import ReauthenticationDialog from '$lib/components/account/ReauthenticationDialog.svelte';
   import Badge from '$lib/components/ui/Badge.svelte';
   import Button from '$lib/components/ui/Button.svelte';
   import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
@@ -14,16 +17,20 @@
   import { Ban, CheckCircle, Shield, Trash2 } from 'lucide-svelte';
 
   const detail = useAdminUserDetailContext();
+  const reauthenticationStorageKey = 'nyauth:reauth:admin-user-profile';
+  const returnTo = $derived(`/admin/users/${encodeURIComponent(detail.userID)}?return_to=${encodeURIComponent(detail.returnTo)}`);
   const sourceLabels: Record<UserCreationSource, string> = {
     bootstrap: '系统初始化', admin: '管理员创建', self_registration: '自助注册', provider: '外部身份首次登录', legacy: '历史数据',
   };
   let user = $derived(detail.overview?.user ?? null);
   let selectedRole = $state<UserRole>('user');
-  let profileForm = $state({ email: '', display_name: '', metadata: '{}' });
+  let profileForm = $state({ username: '', email: '', display_name: '', metadata: '{}' });
   let syncedUserID = '';
   let saving = $state(false);
   let error = $state('');
   let notice = $state('');
+  let pendingProfile = $state<UpdateUserInput | null>(null);
+  let reauthenticationOpen = $state(false);
   let roleSaving = $state(false);
   let roleError = $state('');
   let confirmAction = $state<'suspend' | 'activate' | 'delete' | null>(null);
@@ -38,14 +45,18 @@
     if (user && user.id !== syncedUserID) {
       syncedUserID = user.id;
       selectedRole = user.role;
-      profileForm = { email: user.email || '', display_name: user.display_name || '', metadata: formatStringMetadata(user.metadata) };
+      profileForm = { username: user.username, email: user.email || '', display_name: user.display_name || '', metadata: formatStringMetadata(user.metadata) };
     }
   });
 
   function applyUser(updated: User) {
     detail.updateUser(updated);
     selectedRole = updated.role;
-    profileForm = { email: updated.email || '', display_name: updated.display_name || '', metadata: formatStringMetadata(updated.metadata) };
+    profileForm = { username: updated.username, email: updated.email || '', display_name: updated.display_name || '', metadata: formatStringMetadata(updated.metadata) };
+    const currentSession = $sessionStore.session;
+    if (currentSession?.user.id === updated.id) {
+      sessionStore.setSession({ ...currentSession, user: updated });
+    }
   }
 
   async function saveProfile(event: SubmitEvent) {
@@ -60,16 +71,65 @@
       error = cause instanceof Error ? cause.message : 'Metadata 格式无效。';
       return;
     }
+    const input: UpdateUserInput = {
+      email: profileForm.email.trim(),
+      display_name: profileForm.display_name.trim(),
+      metadata,
+    };
+    const username = profileForm.username.trim();
+    if (username !== user.username) input.username = username;
+    pendingProfile = input;
+    await executeProfileSave(input, true);
+  }
+
+  async function executeProfileSave(input: UpdateUserInput, allowReauthentication: boolean) {
     saving = true;
     try {
-      applyUser(await api.admin.updateUser(user.id, { email: profileForm.email.trim(), display_name: profileForm.display_name.trim(), metadata }));
+      applyUser(await api.admin.updateUser(detail.userID, input));
+      pendingProfile = null;
       notice = '用户资料已更新。';
     } catch (cause) {
-      error = cause instanceof Error ? cause.message : '用户资料更新失败';
+      if (allowReauthentication && isRecentAuthenticationError(cause)) {
+        reauthenticationOpen = true;
+      } else {
+        error = cause instanceof Error ? cause.message : '用户资料更新失败';
+      }
     } finally {
       saving = false;
     }
   }
+
+  async function retryAfterReauthentication(_session: SessionInfo) {
+    if (pendingProfile) await executeProfileSave(pendingProfile, false);
+  }
+
+  function persistPendingProfile() {
+    if (pendingProfile) sessionStorage.setItem(reauthenticationStorageKey, JSON.stringify({ user_id: detail.userID, input: pendingProfile }));
+  }
+
+  async function restorePendingProfile() {
+    const raw = sessionStorage.getItem(reauthenticationStorageKey);
+    if (!raw) return;
+    sessionStorage.removeItem(reauthenticationStorageKey);
+    try {
+      const stored = JSON.parse(raw) as { user_id?: unknown; input?: UpdateUserInput };
+      const restored = stored?.input;
+      if (stored?.user_id !== detail.userID || !restored || typeof restored !== 'object' || ('username' in restored && typeof restored.username !== 'string')) throw new TypeError('invalid stored profile update');
+      await detail.reload();
+      pendingProfile = restored;
+      if (typeof restored.username === 'string') profileForm.username = restored.username;
+      const providerError = consumeProviderAuthError();
+      if (providerError) {
+        error = providerError.message;
+        return;
+      }
+      await executeProfileSave(restored, false);
+    } catch {
+      error = '无法恢复待保存的用户资料，请重新检查表单。';
+    }
+  }
+
+  onMount(restorePendingProfile);
 
   async function saveRole() {
     if (!user || selectedRole === user.role) return;
@@ -132,7 +192,7 @@
       {#if error}<p class="mb-3 rounded-nya-sm bg-nya-danger-soft px-3 py-2 text-small text-nya-danger" role="alert">{error}</p>{/if}
       {#if notice}<p class="mb-3 rounded-nya-sm bg-nya-success-soft px-3 py-2 text-small text-nya-success" role="status">{notice}</p>{/if}
       <form onsubmit={saveProfile} class="space-y-4">
-        <div class="grid gap-4 md:grid-cols-2"><Input id="admin-user-email" label="邮箱" type="email" bind:value={profileForm.email} autocomplete="email" placeholder="可选" /><Input id="admin-user-display-name" label="显示名称" bind:value={profileForm.display_name} placeholder="可选" /></div>
+        <div class="grid gap-4 md:grid-cols-3"><Input id="admin-user-username" label="登录名" bind:value={profileForm.username} required autocomplete="off" ignorePasswordManagers /><Input id="admin-user-email" label="邮箱" type="email" bind:value={profileForm.email} autocomplete="email" placeholder="可选" /><Input id="admin-user-display-name" label="显示名称" bind:value={profileForm.display_name} placeholder="可选" /></div>
         <div><p class="mb-2 text-body-medium text-nya-text-primary">头像</p><AvatarCropper currentUrl={user.avatar_url} disabled={avatarWritesPaused} onupload={uploadAvatar} onremove={removeAvatar} /></div>
         <div><label for="admin-user-metadata" class="mb-1.5 block text-body-medium text-nya-text-primary">高级扩展属性（JSON 字符串键值）</label><textarea id="admin-user-metadata" bind:value={profileForm.metadata} rows="5" spellcheck="false" class="w-full rounded-nya-sm border border-nya-border bg-nya-surface px-3 py-2 font-mono text-small focus:border-nya-primary focus:outline-none focus:ring-2 focus:ring-nya-primary/24"></textarea><p class="mt-1.5 text-small text-nya-text-tertiary">用于内部编号、同步来源等集成数据；不参与认证或授权，也不会自动写入 Access Token、ID Token 或 UserInfo。</p></div>
         <Button type="submit" variant="primary" requiredCapability="admin_mutations" loading={saving}>保存资料</Button>
@@ -177,4 +237,12 @@
   confirmationText={confirmAction === 'delete' ? user?.username || '' : ''}
   error={confirmError}
   onconfirm={runAction}
+/>
+
+<ReauthenticationDialog
+  bind:open={reauthenticationOpen}
+  {returnTo}
+  description="修改登录名前需要验证近期身份"
+  onauthenticated={retryAfterReauthentication}
+  onbeforeprovider={persistPendingProfile}
 />

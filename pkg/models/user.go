@@ -55,6 +55,7 @@ type UpdateUserRequest struct {
 
 // AdminUpdateUserRequest contains fields that only administrators may change.
 type AdminUpdateUserRequest struct {
+	Username    *string           `json:"username,omitempty"`
 	Email       *string           `json:"email,omitempty"`
 	DisplayName *string           `json:"display_name,omitempty"`
 	Status      *UserStatus       `json:"status,omitempty"`

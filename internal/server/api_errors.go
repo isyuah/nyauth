@@ -22,6 +22,8 @@ var apiErrorCodesByMessage = map[string]string{
 	"invite code is required":                                                            "registration.invite_required",
 	"invalid or expired invite code":                                                     "registration.invite_invalid",
 	"username or email is already taken":                                                 "registration.identity_conflict",
+	"username is already taken":                                                          "user.username_conflict",
+	"email is already taken":                                                             "user.email_conflict",
 	"email domain is not allowed":                                                        "registration.email_domain_not_allowed",
 	"too many registration attempts":                                                     "registration.rate_limited",
 	"registration is temporarily unavailable":                                            "registration.unavailable",

@@ -59,6 +59,8 @@ interface MockState {
   adminUserIdentities?: Array<typeof githubIdentity>;
   adminUserUpdateBody?: unknown;
   adminUserUpdateCSRF?: string | null;
+  adminUserUpdateRequests?: number;
+  adminUserUpdateRecentAuthenticationFailures?: number;
   adminUserIdentityDeleteCSRF?: string | null;
   adminUserRoleUpdateError?: string;
   adminProviders?: Array<typeof externalProvider>;
@@ -917,6 +919,16 @@ async function installAPIMocks(page: Page, state: MockState) {
       if (!endpoint && request.method() === 'PUT') {
         state.adminUserUpdateCSRF = await request.headerValue('x-csrf-token');
         state.adminUserUpdateBody = request.postDataJSON();
+        state.adminUserUpdateRequests = (state.adminUserUpdateRequests || 0) + 1;
+        const updateBody = state.adminUserUpdateBody as { username?: string };
+        if (updateBody.username && (state.adminUserUpdateRecentAuthenticationFailures || 0) > 0) {
+          state.adminUserUpdateRecentAuthenticationFailures = (state.adminUserUpdateRecentAuthenticationFailures || 0) - 1;
+          await fulfillJSON(route, 403, {
+            error: 'recent authentication is required',
+            code: 'auth.recent_authentication_required',
+          });
+          return;
+        }
         const updated = {
           ...candidate,
           ...(state.adminUserUpdateBody as object),
@@ -2574,6 +2586,43 @@ test('administrators can update user profiles and remove a confirmed identity fr
   await expect(page.getByText('已解绑 github 身份。')).toBeVisible();
   await expect(page.getByText('未绑定外部身份')).toBeVisible();
   expect(state.adminUserIdentityDeleteCSRF).toBe('csrf-admin');
+});
+
+test('administrators can rename an account after recent authentication and self-renames refresh the shell', async ({ page }) => {
+  const selfAdmin = { ...user, role: 'admin' as const, display_name: null };
+  const state: MockState = {
+    authenticated: true,
+    mustChangePassword: false,
+    role: 'admin',
+    csrfToken: 'csrf-admin-rename',
+    adminUsers: [selfAdmin],
+    adminUserIdentities: [],
+    adminUserUpdateRecentAuthenticationFailures: 1,
+  };
+  await installAPIMocks(page, state);
+
+  await page.goto(`/admin/users/${selfAdmin.id}?return_to=%2Fadmin%2Fusers`);
+  await page.getByLabel('登录名').fill('owner-admin');
+  await page.getByRole('button', { name: '保存资料' }).click();
+
+  const reauthentication = page.getByRole('dialog', { name: '重新验证身份' });
+  await expect(reauthentication).toBeVisible();
+  await reauthentication.getByLabel('当前密码').fill('correct-password');
+  await reauthentication.getByRole('button', { name: '使用密码验证' }).click();
+
+  await expect(reauthentication).toBeHidden();
+  await expect(page.getByText('用户资料已更新。')).toBeVisible();
+  await expect(page.getByText('@owner-admin')).toBeVisible();
+  await expect(page.locator('header').getByLabel('打开个人资料')).toContainText('owner-admin');
+  expect(state.adminUserUpdateRequests).toBe(2);
+  expect(state.adminUserUpdateBody).toEqual({
+    username: 'owner-admin',
+    email: selfAdmin.email,
+    display_name: '',
+    metadata: selfAdmin.metadata,
+  });
+  expect(state.adminUserUpdateCSRF).toBe('csrf-reauthenticated');
+  expect(state.reauthBody).toEqual({ password: 'correct-password' });
 });
 
 test('admin user details preserve the filtered list return path across every deep-link tab', async ({ page }) => {

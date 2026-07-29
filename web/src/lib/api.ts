@@ -892,6 +892,7 @@ export interface CreateUserInput {
 }
 
 export interface UpdateUserInput {
+  username?: string;
   email?: string | null;
   display_name?: string | null;
   status?: UserStatus;
@@ -946,6 +947,8 @@ const API_ERROR_TRANSLATIONS: Record<string, string> = {
   'invite code is required': '需要邀请码才能注册',
   'invalid or expired invite code': '邀请码无效或已失效',
   'username or email is already taken': '用户名或邮箱已被使用',
+  'username is already taken': '用户名已被其他账户使用',
+  'email is already taken': '邮箱已被其他账户使用',
   'email domain is not allowed': '该邮箱域名不允许注册',
   'too many registration attempts': '注册尝试过于频繁，请稍后再试',
   'registration is temporarily unavailable': '注册功能暂时不可用，请稍后重试',

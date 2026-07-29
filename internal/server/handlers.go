@@ -320,6 +320,11 @@ func (s *Server) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	if request.Username != nil {
+		if !s.requireRecentAuthentication(w, r) {
+			return
+		}
+	}
 	updated, err := s.userService.AdminUpdate(r.Context(), id, request, mutation)
 	if err != nil {
 		switch {
@@ -327,6 +332,10 @@ func (s *Server) handleAdminUpdateUser(w http.ResponseWriter, r *http.Request) {
 			writeAPIError(w, http.StatusConflict, err.Error())
 		case user.IsInvalidInput(err):
 			writeAPIError(w, http.StatusBadRequest, err.Error())
+		case user.IsUsernameConflict(err):
+			writeAPIError(w, http.StatusConflict, "username is already taken")
+		case user.IsConflict(err):
+			writeAPIError(w, http.StatusConflict, "email is already taken")
 		default:
 			writeAPIError(w, http.StatusInternalServerError, "failed to update user")
 		}

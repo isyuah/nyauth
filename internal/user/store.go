@@ -291,9 +291,10 @@ func (s *Store) UpdateAdmin(ctx context.Context, id uuid.UUID, req models.AdminU
 	if err := runtimecoord.LockAdminInvariant(ctx, tx); err != nil {
 		return nil, err
 	}
+	var currentUsername string
 	var currentStatus models.UserStatus
 	var currentRole string
-	if err := tx.QueryRow(ctx, `SELECT status, role FROM users WHERE id=$1 FOR UPDATE`, id).Scan(&currentStatus, &currentRole); err != nil {
+	if err := tx.QueryRow(ctx, `SELECT username, status, role FROM users WHERE id=$1 FOR UPDATE`, id).Scan(&currentUsername, &currentStatus, &currentRole); err != nil {
 		return nil, err
 	}
 	removesActiveAdmin := currentStatus == models.UserStatusActive && currentRole == "admin" &&
@@ -346,7 +347,10 @@ func (s *Store) UpdateAdmin(ctx context.Context, id uuid.UUID, req models.AdminU
 			return nil, err
 		}
 	}
-	var email, displayName any
+	var username, email, displayName any
+	if req.Username != nil && *req.Username != "" {
+		username = *req.Username
+	}
 	if req.Email != nil && *req.Email != "" {
 		email = *req.Email
 	}
@@ -355,20 +359,21 @@ func (s *Store) UpdateAdmin(ctx context.Context, id uuid.UUID, req models.AdminU
 	}
 	u, err := scanUser(tx.QueryRow(ctx, `
 		UPDATE users SET
-			email=CASE WHEN $2 THEN $3::text ELSE email END,
-			email_verified_at=CASE WHEN $2 AND LOWER(COALESCE($3::text, '')) <> LOWER(COALESCE(email, '')) THEN NULL ELSE email_verified_at END,
-			display_name=CASE WHEN $4 THEN $5::text ELSE display_name END,
+			username=CASE WHEN $2 THEN $3::text ELSE username END,
+			email=CASE WHEN $4 THEN $5::text ELSE email END,
+			email_verified_at=CASE WHEN $4 AND LOWER(COALESCE($5::text, '')) <> LOWER(COALESCE(email, '')) THEN NULL ELSE email_verified_at END,
+			display_name=CASE WHEN $6 THEN $7::text ELSE display_name END,
 			auth_version=CASE WHEN
-				($2 AND LOWER(COALESCE($3::text, '')) <> LOWER(COALESCE(email, '')))
-				OR ($6 AND $7::text <> status)
-				OR ($8 AND $9::text <> role)
+				($4 AND LOWER(COALESCE($5::text, '')) <> LOWER(COALESCE(email, '')))
+				OR ($8 AND $9::text <> status)
+				OR ($10 AND $11::text <> role)
 				THEN auth_version+1 ELSE auth_version END,
-			status=CASE WHEN $6 THEN $7::text ELSE status END,
-			role=CASE WHEN $8 THEN $9::text ELSE role END,
-			metadata=CASE WHEN $10 THEN $11::jsonb ELSE metadata END,
+			status=CASE WHEN $8 THEN $9::text ELSE status END,
+			role=CASE WHEN $10 THEN $11::text ELSE role END,
+			metadata=CASE WHEN $12 THEN $13::jsonb ELSE metadata END,
 			updated_at=NOW()
 		WHERE id=$1 RETURNING `+userSelectCols,
-		id, req.Email != nil, email, req.DisplayName != nil, displayName,
+		id, req.Username != nil, username, req.Email != nil, email, req.DisplayName != nil, displayName,
 		req.Status != nil, req.Status, req.Role != nil, req.Role,
 		req.Metadata != nil, req.Metadata,
 	))
@@ -387,7 +392,14 @@ func (s *Store) UpdateAdmin(ctx context.Context, id uuid.UUID, req models.AdminU
 			return nil, err
 		}
 	}
-	if err := audit.EnqueueMutationTx(ctx, tx, mutation.WithTarget("user", id.String())); err != nil {
+	mutation = mutation.WithTarget("user", id.String())
+	if req.Username != nil && *req.Username != currentUsername {
+		mutation = mutation.WithDetails(map[string]any{
+			"previous_username": currentUsername,
+			"username":          *req.Username,
+		})
+	}
+	if err := audit.EnqueueMutationTx(ctx, tx, mutation); err != nil {
 		return nil, fmt.Errorf("auditing user update: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
@@ -651,3 +663,17 @@ func (s *Store) RecordAuthentication(ctx context.Context, id uuid.UUID, authVers
 
 // IsNotFound reports whether a store error was caused by a missing row.
 func IsNotFound(err error) bool { return errors.Is(err, pgx.ErrNoRows) }
+
+// IsConflict reports a PostgreSQL uniqueness violation without exposing the
+// database error to an HTTP caller.
+func IsConflict(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}
+
+// IsUsernameConflict identifies the users.username unique constraint so the
+// management API can return an actionable rename error.
+func IsUsernameConflict(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505" && pgErr.ConstraintName == "users_username_key"
+}
