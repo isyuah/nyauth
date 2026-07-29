@@ -208,6 +208,8 @@ func describeMutation(r *http.Request, actor *models.User) (mutationAuditDescrip
 		return mutationAuditDescriptor{event: models.AuditUserActivated, targetType: "user", targetID: param("id"), riskLevel: "high", successAlreadyAudited: true}, true
 	case r.Method == http.MethodPost && strings.HasSuffix(path, "/reset-password") && strings.HasPrefix(path, "/api/admin/users/"):
 		return mutationAuditDescriptor{event: models.AuditUserPasswordReset, targetType: "user", targetID: param("id"), riskLevel: "high", successAlreadyAudited: true}, true
+	case r.Method == http.MethodPut && strings.HasSuffix(path, "/client-quota") && strings.HasPrefix(path, "/api/admin/users/"):
+		return mutationAuditDescriptor{event: models.AuditUserClientQuotaUpdated, targetType: "user", targetID: param("id"), riskLevel: "medium", successAlreadyAudited: true}, true
 	case r.Method == http.MethodDelete && strings.HasSuffix(path, "/sessions") && strings.HasPrefix(path, "/api/admin/users/"):
 		return mutationAuditDescriptor{event: models.AuditUserSessionsRevoked, targetType: "user", targetID: param("id"), riskLevel: "high", successAlreadyAudited: true}, true
 	case r.Method == http.MethodDelete && param("session_id") != "" && strings.Contains(path, "/sessions/") && strings.HasPrefix(path, "/api/admin/users/"):
@@ -236,12 +238,16 @@ func describeMutation(r *http.Request, actor *models.User) (mutationAuditDescrip
 	case r.Method == http.MethodDelete && strings.HasPrefix(path, "/api/admin/clients/"):
 		return mutationAuditDescriptor{event: models.AuditClientDeleted, targetType: "client", targetID: param("id"), riskLevel: "high", successAlreadyAudited: true}, true
 
-	case r.Method == http.MethodPut && path == "/api/admin/branding":
-		return mutationAuditDescriptor{event: models.AuditSettingsUpdated, targetType: "settings", targetID: "branding", riskLevel: "medium"}, true
+	case r.Method == http.MethodPut && path == "/api/admin/settings/branding":
+		return mutationAuditDescriptor{event: models.AuditSettingsUpdated, targetType: "settings", targetID: "branding", riskLevel: "medium", successAlreadyAudited: true}, true
 	case r.Method == http.MethodPut && path == "/api/admin/settings/registration":
-		return mutationAuditDescriptor{event: models.AuditSettingsUpdated, targetType: "settings", targetID: "registration", riskLevel: "high"}, true
+		return mutationAuditDescriptor{event: models.AuditSettingsUpdated, targetType: "settings", targetID: "registration", riskLevel: "high", successAlreadyAudited: true}, true
 	case r.Method == http.MethodPut && path == "/api/admin/settings/security":
 		return mutationAuditDescriptor{event: models.AuditSettingsUpdated, targetType: "settings", targetID: "security", riskLevel: "high", successAlreadyAudited: true}, true
+	case r.Method == http.MethodPut && path == "/api/admin/settings/protection":
+		return mutationAuditDescriptor{event: models.AuditSettingsUpdated, targetType: "settings", targetID: "protection", riskLevel: "critical", successAlreadyAudited: true}, true
+	case r.Method == http.MethodPut && path == "/api/admin/settings/lifecycle":
+		return mutationAuditDescriptor{event: models.AuditSettingsUpdated, targetType: "settings", targetID: "lifecycle", riskLevel: "high", successAlreadyAudited: true}, true
 	case r.Method == http.MethodPut && path == "/api/admin/settings/operations":
 		return mutationAuditDescriptor{event: models.AuditServiceControlUpdated, targetType: "settings", targetID: "operations", riskLevel: "critical", successAlreadyAudited: true}, true
 	case r.Method == http.MethodPut && path == "/api/admin/settings/mail/candidate":

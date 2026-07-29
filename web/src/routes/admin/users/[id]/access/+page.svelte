@@ -1,6 +1,6 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { api, type AdminUserAuthorization, type AdminUserClientSummary, type ExternalIdentity } from '$lib/api';
+  import { api, type AdminUserAuthorization, type AdminUserClientSummary, type ClientQuota, type ExternalIdentity } from '$lib/api';
   import { useAdminUserDetailContext } from '$lib/admin-user-detail';
   import ProviderIcon from '$lib/components/identity/ProviderIcon.svelte';
   import Badge from '$lib/components/ui/Badge.svelte';
@@ -13,6 +13,11 @@
   let identities = $state<ExternalIdentity[]>([]);
   let authorizations = $state<AdminUserAuthorization[]>([]);
   let clients = $state<AdminUserClientSummary[]>([]);
+  let clientQuota = $state<ClientQuota | null>(null);
+  let customQuota = $state(false);
+  let quotaOverride = $state(10);
+  let quotaSaving = $state(false);
+  let quotaError = $state('');
   let loading = $state(true);
   let error = $state('');
   let identityTarget = $state<ExternalIdentity | null>(null);
@@ -32,10 +37,37 @@
       identities = identityItems;
       authorizations = authorizationItems;
       clients = clientResult.items;
+      clientQuota = {
+        quota_used: clientResult.quota_used,
+        quota_limit: clientResult.quota_limit,
+        quota_override: clientResult.quota_override,
+      };
+      customQuota = clientResult.quota_override !== null;
+      quotaOverride = clientResult.quota_override ?? clientResult.quota_limit;
     } catch (cause) {
       error = cause instanceof Error ? cause.message : '访问关系加载失败';
     } finally {
       loading = false;
+    }
+  }
+
+  async function saveClientQuota() {
+    const override = customQuota ? quotaOverride : null;
+    if (override !== null && (!Number.isSafeInteger(override) || override < 0 || override > 1000)) {
+      quotaError = '用户配额必须是 0 至 1000 的整数';
+      return;
+    }
+    quotaSaving = true;
+    quotaError = '';
+    try {
+      clientQuota = await api.admin.updateUserClientQuota(detail.userID, override);
+      customQuota = clientQuota.quota_override !== null;
+      quotaOverride = clientQuota.quota_override ?? clientQuota.quota_limit;
+      notice = customQuota ? `已将用户应用配额设为 ${clientQuota.quota_limit}。` : `已恢复全局应用配额 ${clientQuota.quota_limit}。`;
+    } catch (cause) {
+      quotaError = cause instanceof Error ? cause.message : '用户应用配额保存失败';
+    } finally {
+      quotaSaving = false;
     }
   }
 
@@ -80,7 +112,23 @@
       </section>
 
       <section class="rounded-nya-card border border-nya-border bg-nya-surface p-5 shadow-nya-card xl:col-span-2">
-        <div class="mb-4 flex items-center gap-2"><AppWindow size={18} class="text-nya-primary" /><h2 class="text-card-title text-nya-text-primary">拥有的 OAuth / OIDC 客户端</h2></div>
+        <div class="mb-4 flex flex-wrap items-center justify-between gap-3">
+          <div class="flex items-center gap-2"><AppWindow size={18} class="text-nya-primary" /><h2 class="text-card-title text-nya-text-primary">拥有的 OAuth / OIDC 客户端</h2></div>
+          {#if clientQuota}<Badge variant={clientQuota.quota_used >= clientQuota.quota_limit ? 'warning' : 'default'}>{clientQuota.quota_used}/{clientQuota.quota_limit}</Badge>{/if}
+        </div>
+        {#if clientQuota}
+          <div class="mb-4 flex flex-col gap-3 rounded-nya-sm border border-nya-border bg-nya-surface-muted p-4 lg:flex-row lg:items-end lg:justify-between">
+            <div class="space-y-2">
+              <label class="flex cursor-pointer items-center gap-2 text-body text-nya-text-primary"><input type="checkbox" bind:checked={customQuota} class="rounded" /> 为该用户设置独立配额</label>
+              <p class="text-small text-nya-text-tertiary">关闭时继承全局值。降低配额不会删除现有客户端，只会阻止新建或转入。</p>
+            </div>
+            <div class="flex flex-wrap items-end gap-2">
+              <label class="flex flex-col gap-1 text-small text-nya-text-secondary" for="user-client-quota">配额上限<input id="user-client-quota" type="number" min="0" max="1000" step="1" bind:value={quotaOverride} disabled={!customQuota || quotaSaving} class="w-28 rounded-nya-sm border border-nya-border bg-nya-surface px-3 py-2 text-body text-nya-text-primary focus:border-nya-primary focus:outline-none focus:ring-2 focus:ring-nya-primary/24 disabled:cursor-not-allowed disabled:opacity-60" /></label>
+              <Button variant="secondary" requiredCapability="admin_mutations" loading={quotaSaving} onclick={saveClientQuota}>保存配额</Button>
+            </div>
+          </div>
+          {#if quotaError}<p class="mb-4 rounded-nya-sm bg-nya-danger-soft px-3 py-2 text-small text-nya-danger" role="alert">{quotaError}</p>{/if}
+        {/if}
         {#if clients.length === 0}<p class="rounded-nya-sm bg-nya-surface-muted p-3 text-body text-nya-text-tertiary">该用户没有创建客户端</p>{:else}<div class="overflow-x-auto rounded-nya-sm border border-nya-border"><table class="w-full"><thead><tr class="h-10 border-b border-nya-divider bg-nya-surface-subtle text-small text-nya-text-secondary"><th class="px-3 text-left">名称</th><th class="px-3 text-left">Client ID</th><th class="px-3 text-left">类型</th><th class="px-3 text-left">访问策略</th><th class="px-3 text-left">创建时间</th></tr></thead><tbody class="divide-y divide-nya-divider">{#each clients as client}<tr><td class="px-3 py-3 font-medium text-nya-text-primary">{client.name}</td><td class="px-3 py-3 font-mono text-small text-nya-text-secondary">{client.id}</td><td class="px-3 py-3 text-small">{client.is_public ? '公开客户端' : '机密客户端'}</td><td class="px-3 py-3 text-small">{client.access_policy}</td><td class="px-3 py-3 text-small text-nya-text-tertiary">{new Date(client.created_at).toLocaleString()}</td></tr>{/each}</tbody></table></div>{/if}
       </section>
     </div>

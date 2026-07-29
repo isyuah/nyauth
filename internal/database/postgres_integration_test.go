@@ -714,7 +714,7 @@ func TestClientQuotaIsAtomicAcrossConcurrentCreates(t *testing.T) {
 				PostLogoutRedirectURIs: []string{}, Grants: []string{models.GrantAuthorizationCode},
 				Scopes: []string{"openid"}, IsPublic: false, Metadata: map[string]string{},
 			}
-			results <- store.CreateForOwner(ctx, registered, ownerID.String(), 10)
+			results <- store.CreateForOwner(ctx, registered, ownerID.String())
 		}(i)
 	}
 	close(start)
@@ -761,7 +761,7 @@ func TestClientSecretRotationImmediatelyReplacesCredential(t *testing.T) {
 	}
 
 	service := client.NewService(client.NewStore(schema.pool))
-	created, err := service.CreateForOwner(ctx, ownerID.String(), 10, models.CreateClientRequest{
+	created, err := service.CreateForOwner(ctx, ownerID.String(), models.CreateClientRequest{
 		Name: "Confidential client", RedirectURIs: []string{"https://client.example/callback"},
 		Grants: []string{models.GrantAuthorizationCode}, Scopes: []string{"openid"},
 	})
@@ -834,7 +834,7 @@ func TestClientSecretRotationImmediatelyReplacesCredential(t *testing.T) {
 		t.Fatalf("cross-owner rotation error = %v", err)
 	}
 
-	publicClient, err := service.CreateForOwner(ctx, ownerID.String(), 10, models.CreateClientRequest{
+	publicClient, err := service.CreateForOwner(ctx, ownerID.String(), models.CreateClientRequest{
 		Name: "Public client", RedirectURIs: []string{"https://public.example/callback"},
 		Grants: []string{models.GrantAuthorizationCode}, Scopes: []string{"openid"}, IsPublic: true,
 	})
@@ -1141,7 +1141,7 @@ func TestOAuthAuthorizationStoreUpsertListRevokeAndReauthorize(t *testing.T) {
 		t.Fatalf("insert user: %v", err)
 	}
 	clientService := client.NewService(client.NewStore(schema.pool))
-	registered, err := clientService.CreateForOwner(ctx, userID.String(), 10, models.CreateClientRequest{
+	registered, err := clientService.CreateForOwner(ctx, userID.String(), models.CreateClientRequest{
 		Name: "Authorization client", RedirectURIs: []string{"https://authorization.example/callback"},
 		Grants: []string{models.GrantAuthorizationCode}, Scopes: []string{"openid", "profile"}, IsPublic: true,
 	})
@@ -1224,7 +1224,7 @@ func TestConsentPersistsAuthorizationAndBindsIssuedTimeToCode(t *testing.T) {
 	}
 	clientStore := client.NewStore(schema.pool)
 	clientService := client.NewService(clientStore)
-	registered, err := clientService.CreateForOwner(ctx, userID.String(), 10, models.CreateClientRequest{
+	registered, err := clientService.CreateForOwner(ctx, userID.String(), models.CreateClientRequest{
 		Name: "Consent client", RedirectURIs: []string{"https://consent.example/callback?tenant=one"},
 		Grants: []string{models.GrantAuthorizationCode, models.GrantRefreshToken},
 		Scopes: []string{"openid", "offline_access"}, IsPublic: true,

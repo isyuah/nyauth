@@ -259,7 +259,7 @@ func TestRegistrationLinearizesBeforeCloseOrMailDisable(t *testing.T) {
 		{
 			name: "close registration",
 			mutate: func(_ *postgresTestSchema, manager *settings.Manager, _ time.Time) error {
-				return manager.SetRegistration(context.Background(), settings.DefaultRegistration(), "coordination-admin", true)
+				return setRegistrationPolicy(context.Background(), manager, settings.DefaultRegistration(), "coordination-admin", true)
 			},
 		},
 		{
@@ -287,7 +287,7 @@ func TestRegistrationLinearizesBeforeCloseOrMailDisable(t *testing.T) {
 			policy := settings.DefaultRegistration()
 			policy.Mode = settings.RegistrationOpen
 			settingsManager := settings.NewManager(schema.pool, settings.Branding{})
-			if err := settingsManager.SetRegistration(context.Background(), policy, "coordination-admin", true); err != nil {
+			if err := setRegistrationPolicy(context.Background(), settingsManager, policy, "coordination-admin", true); err != nil {
 				t.Fatalf("open registration: %v", err)
 			}
 			pending := registrationTestUser("linearized-"+uuid.NewString()[:8], models.UserStatusPending)
@@ -343,7 +343,7 @@ func TestOpeningRegistrationAndDisablingMailCannotBothCommit(t *testing.T) {
 	go func() {
 		defer workers.Done()
 		<-start
-		settingsResult <- settingsManager.SetRegistration(context.Background(), openPolicy, "coordination-admin", true)
+		settingsResult <- setRegistrationPolicy(context.Background(), settingsManager, openPolicy, "coordination-admin", true)
 	}()
 	go func() {
 		defer workers.Done()

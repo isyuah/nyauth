@@ -161,9 +161,26 @@ func registrationHTTPDSNWithSearchPath(t *testing.T, dsn, schemaName string) str
 
 func (testApp *registrationHTTPTestApp) setRegistration(t *testing.T, value settings.Registration) {
 	t.Helper()
-	if err := testApp.app.settingsMgr.SetRegistration(context.Background(), value, "integration-admin", true); err != nil {
+	if err := setRegistrationPolicyForTest(context.Background(), testApp.app.settingsMgr, value, "integration-admin", true); err != nil {
 		t.Fatalf("set registration settings: %v", err)
 	}
+}
+
+func setRegistrationPolicyForTest(
+	ctx context.Context,
+	manager *settings.Manager,
+	value settings.Registration,
+	actorName string,
+	fallbackMailConfigured bool,
+) error {
+	_, err := manager.SetRegistration(
+		ctx, value, manager.RegistrationSnapshot().Revision, actorName, fallbackMailConfigured,
+		audit.MutationAudit{
+			Event: models.AuditSettingsUpdated, ActorID: uuid.New(), ActorName: actorName,
+			Result: "success", RiskLevel: "high",
+		},
+	)
+	return err
 }
 
 func registrationHTTPRequest(app *Server, method, path, body, origin, remoteAddress string) *httptest.ResponseRecorder {

@@ -244,7 +244,7 @@
 <ReauthenticationDialog
   bind:open={reauthOpen}
   returnTo="/admin/invites"
-  description="创建邀请码前需要验证最近 10 分钟内的身份"
+  description="创建邀请码前需要验证近期身份"
   onauthenticated={retryPendingCreate}
   onbeforeprovider={persistPendingCreate}
 />

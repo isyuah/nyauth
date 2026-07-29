@@ -59,6 +59,7 @@ const (
 	AuditAuthorizationRevoked   = "authorization.revoked"
 	AuditAuthorizeDenied        = "authorize.access_denied"
 	AuditClientAccessChanged    = "client.access_users_changed"
+	AuditUserClientQuotaUpdated = "user.client_quota_updated"
 	AuditUserRegistered         = "user.registered"
 	AuditInviteCreated          = "invite.created"
 	AuditInviteRevoked          = "invite.revoked"

@@ -91,6 +91,8 @@ export interface SessionInfo {
   has_password: boolean;
   email_verified: boolean;
   authenticated_at?: string;
+  session_expires_at?: string;
+  recent_authentication_expires_at?: string;
 }
 
 export type MFAMethod = 'totp' | 'recovery_code' | 'passkey';
@@ -134,9 +136,17 @@ export interface RecoveryCodesResult {
 }
 
 export interface SecuritySettings {
+	revision: number;
   totp_enabled: boolean;
   passkeys_enabled: boolean;
   require_mfa_for_admins: boolean;
+}
+
+export interface UpdateSecuritySettingsInput {
+	expected_revision: number;
+	totp_enabled: boolean;
+	passkeys_enabled: boolean;
+	require_mfa_for_admins: boolean;
 }
 
 export interface WebAuthnOptionsResponse<TPublicKey> {
@@ -336,6 +346,14 @@ export interface PaginatedResponse<T> {
   total_pages: number;
 }
 
+export interface ClientQuota {
+  quota_used: number;
+  quota_limit: number;
+  quota_override: number | null;
+}
+
+export interface ClientQuotaPage<T> extends PaginatedResponse<T>, ClientQuota {}
+
 export interface DashboardStats {
   user_count: number;
   app_count: number;
@@ -494,11 +512,21 @@ export interface BrowserSession {
   created_at: string;
   last_seen_at: string;
   authenticated_at: string;
+  session_expires_at: string;
+  recent_authentication_expires_at: string;
 }
 
 export interface Branding {
   title: string;
   logo_url: string;
+}
+
+export interface BrandingSettings extends Branding {
+	revision: number;
+}
+
+export interface UpdateBrandingSettingsInput extends Branding {
+	expected_revision: number;
 }
 
 export type RegistrationMode = 'closed' | 'invite_only' | 'open';
@@ -556,13 +584,91 @@ export interface UpdateOperationsSettingsInput {
   expires_at: string | null;
 }
 
+export interface ProtectionLoginSettings {
+  enabled: boolean;
+  window: string;
+  identity_limit: number;
+  ip_limit: number;
+  passkey_ceremony_ip_limit: number;
+}
+
+export interface ProtectionAccountSettings {
+  enabled: boolean;
+  window: string;
+  subject_limit: number;
+  ip_limit: number;
+}
+
+export interface ProtectionAvatarSettings {
+  enabled: boolean;
+  window: string;
+  user_limit: number;
+  ip_limit: number;
+}
+
+export interface ProtectionMailSettings {
+  enabled: boolean;
+  window: string;
+  save_limit: number;
+  test_limit: number;
+  activate_limit: number;
+  rollback_limit: number;
+  disable_limit: number;
+  ip_limit: number;
+}
+
+export interface ProtectionSettings {
+  revision: number;
+  login: ProtectionLoginSettings;
+  account: ProtectionAccountSettings;
+  avatar: ProtectionAvatarSettings;
+  mail: ProtectionMailSettings;
+  owned_client_default_limit: number;
+}
+
+export interface UpdateProtectionSettingsInput {
+  expected_revision: number;
+  login: ProtectionLoginSettings;
+  account: ProtectionAccountSettings;
+  avatar: ProtectionAvatarSettings;
+  mail: ProtectionMailSettings;
+  owned_client_default_limit: number;
+  disable_confirmation?: string;
+}
+
+export interface LifecycleSettings {
+  revision: number;
+  session_absolute_ttl: string;
+  recent_authentication_ttl: string;
+  audit_retention_days: number;
+}
+
+export interface UpdateLifecycleSettingsInput {
+  expected_revision: number;
+  session_absolute_ttl: string;
+  recent_authentication_ttl: string;
+  audit_retention_days: number;
+  retention_confirmation?: string;
+}
+
 export interface RegistrationSettings {
+	revision: number;
   mode: RegistrationMode;
   require_email_verification: boolean;
   allowed_email_domains: string[];
   pending_registration_ttl: string;
   invite_default_ttl: string;
   invite_default_max_uses: number;
+}
+
+export interface UpdateRegistrationSettingsInput {
+	expected_revision: number;
+	mode: RegistrationMode;
+	require_email_verification: boolean;
+	allowed_email_domains: string[];
+	pending_registration_ttl: string;
+	invite_default_ttl: string;
+	invite_default_max_uses: number;
 }
 
 export interface RegisterInput {
@@ -675,6 +781,7 @@ export interface SystemStatus {
   status: ComponentStatus;
   operating_state?: ServiceOperatingState;
   version: string;
+  disabled_rate_limit_groups: Array<'login' | 'account' | 'avatar' | 'mail'>;
   schema: {
     status: ComponentStatus;
     version: number;
@@ -840,6 +947,7 @@ const API_ERROR_TRANSLATIONS: Record<string, string> = {
   'too many avatar operations': '头像操作过于频繁，请稍后重试',
   'avatar operation is temporarily unavailable': '头像操作暂时不可用，请稍后重试',
   'avatar storage is temporarily unavailable': '头像存储暂时不可用，请稍后重试',
+  'application limit reached': '已达到该账户的应用配额上限',
   'service capability is paused': '该操作因服务维护而暂时停用',
   'service control revision conflict': '运行状态已被其他管理员修改，请重新加载后再试',
   'registration settings conflict with service control': '当前运行控制状态不允许启用该注册策略，请先调整注册或邮件投递能力',
@@ -847,6 +955,7 @@ const API_ERROR_TRANSLATIONS: Record<string, string> = {
   'invalid service control settings': '运行控制设置无效，请检查能力、原因和恢复时间',
   'service control is temporarily unavailable': '运行控制暂时不可用，请稍后重试',
   'too many service control operations': '运行控制操作过于频繁，请稍后重试',
+  'settings revision conflict': '设置已被其他管理员修改，请加载最新设置后重试',
 };
 
 const API_ERROR_MESSAGES_BY_CODE: Record<string, string> = {
@@ -935,6 +1044,8 @@ const API_ERROR_MESSAGES_BY_CODE: Record<string, string> = {
   'service_control.invalid_settings': 'invalid service control settings',
   'service_control.unavailable': 'service control is temporarily unavailable',
   'service_control.rate_limited': 'too many service control operations',
+  'settings.revision_conflict': 'settings revision conflict',
+  'client.quota_exceeded': 'application limit reached',
 };
 
 export function localizeAPIErrorMessage(message: string, code = ''): string {
@@ -1176,7 +1287,7 @@ export const api = {
   },
 
   my: {
-    getClients: () => req<PaginatedResponse<OAuthClient>>('/api/my/clients'),
+    getClients: () => req<ClientQuotaPage<OAuthClient>>('/api/my/clients'),
     createClient: (data: CreateClientInput) => req<CreateClientResult>('/api/my/clients', { method: 'POST', body: JSON.stringify(data) }),
     deleteClient: (id: string) => req<void>(`/api/my/clients/${encodeURIComponent(id)}`, { method: 'DELETE' }),
     rotateClientSecret: (id: string) => req<RotateClientSecretResult>(`/api/my/clients/${encodeURIComponent(id)}/rotate-secret`, { method: 'POST' }),
@@ -1194,13 +1305,20 @@ export const api = {
     getOperationsSettings: () => req<OperationsSettings>('/api/admin/settings/operations', { cache: 'no-store' }),
     updateOperationsSettings: (settings: UpdateOperationsSettingsInput) =>
       req<OperationsSettings>('/api/admin/settings/operations', { method: 'PUT', body: JSON.stringify(settings) }),
-    updateBranding: (branding: Branding) =>
-      req<Branding>('/api/admin/branding', { method: 'PUT', body: JSON.stringify(branding) }),
-    getRegistrationSettings: () => req<RegistrationSettings>('/api/admin/settings/registration'),
-    updateRegistrationSettings: (settings: RegistrationSettings) =>
+    getProtectionSettings: () => req<ProtectionSettings>('/api/admin/settings/protection', { cache: 'no-store' }),
+    updateProtectionSettings: (settings: UpdateProtectionSettingsInput) =>
+      req<ProtectionSettings>('/api/admin/settings/protection', { method: 'PUT', body: JSON.stringify(settings) }),
+    getLifecycleSettings: () => req<LifecycleSettings>('/api/admin/settings/lifecycle', { cache: 'no-store' }),
+    updateLifecycleSettings: (settings: UpdateLifecycleSettingsInput) =>
+      req<LifecycleSettings>('/api/admin/settings/lifecycle', { method: 'PUT', body: JSON.stringify(settings) }),
+    getBrandingSettings: () => req<BrandingSettings>('/api/admin/settings/branding', { cache: 'no-store' }),
+    updateBranding: (branding: UpdateBrandingSettingsInput) =>
+      req<BrandingSettings>('/api/admin/settings/branding', { method: 'PUT', body: JSON.stringify(branding) }),
+    getRegistrationSettings: () => req<RegistrationSettings>('/api/admin/settings/registration', { cache: 'no-store' }),
+    updateRegistrationSettings: (settings: UpdateRegistrationSettingsInput) =>
       req<RegistrationSettings>('/api/admin/settings/registration', { method: 'PUT', body: JSON.stringify(settings) }),
-    getSecuritySettings: () => req<SecuritySettings>('/api/admin/settings/security'),
-    updateSecuritySettings: (settings: SecuritySettings) =>
+    getSecuritySettings: () => req<SecuritySettings>('/api/admin/settings/security', { cache: 'no-store' }),
+    updateSecuritySettings: (settings: UpdateSecuritySettingsInput) =>
       req<SecuritySettings>('/api/admin/settings/security', { method: 'PUT', body: JSON.stringify(settings) }),
     getMailSettings: () => req<MailSettings>('/api/admin/settings/mail'),
     saveMailCandidate: (settings: SaveMailCandidateInput) =>
@@ -1237,7 +1355,11 @@ export const api = {
     getUserSecurity: (id: string) => req<AdminUserSecurity>(`/api/admin/users/${encodeURIComponent(id)}/security`),
     getUserAuthorizations: (id: string) => req<AdminUserAuthorization[]>(`/api/admin/users/${encodeURIComponent(id)}/authorizations`),
     getUserClients: (id: string, page = 1, pageSize = 20) =>
-      req<PaginatedResponse<AdminUserClientSummary>>(`/api/admin/users/${encodeURIComponent(id)}/clients?page=${page}&page_size=${pageSize}`),
+      req<ClientQuotaPage<AdminUserClientSummary>>(`/api/admin/users/${encodeURIComponent(id)}/clients?page=${page}&page_size=${pageSize}`),
+    updateUserClientQuota: (id: string, quotaOverride: number | null) =>
+      req<ClientQuota>(`/api/admin/users/${encodeURIComponent(id)}/client-quota`, {
+        method: 'PUT', body: JSON.stringify({ quota_override: quotaOverride }),
+      }),
     getUserActivity: (id: string, page = 1, pageSize = 20) =>
       req<PaginatedResponse<AuditLog>>(`/api/admin/users/${encodeURIComponent(id)}/activity?page=${page}&page_size=${pageSize}`),
     updateUser: (id: string, data: UpdateUserInput) => req<User>(`/api/admin/users/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(data) }),

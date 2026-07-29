@@ -37,7 +37,7 @@ func timeoutExcept(timeout time.Duration, excludedPaths ...string) func(http.Han
 
 func (s *Server) userAuthMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		authenticated, err := s.sessionMiddleware.GetSession(r)
+		authenticated, err := s.sessionMiddleware.GetSession(w, r)
 		switch {
 		case errors.Is(err, http.ErrNoCookie):
 			writeAPIError(w, http.StatusUnauthorized, "authentication required")

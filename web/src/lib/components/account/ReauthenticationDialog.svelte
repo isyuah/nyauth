@@ -31,7 +31,7 @@
   let {
     open = $bindable(false),
     returnTo,
-    description = '完成后，当前敏感操作将在 10 分钟内可用',
+    description = '完成后，当前敏感操作可在近期认证有效期内执行',
     onauthenticated,
     onbeforeprovider,
   }: Props = $props();

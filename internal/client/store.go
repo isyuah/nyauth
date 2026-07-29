@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sort"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -12,18 +11,31 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nyasharp/nyauth/internal/audit"
 	"github.com/nyasharp/nyauth/internal/crypto"
+	"github.com/nyasharp/nyauth/internal/runtimecoord"
+	"github.com/nyasharp/nyauth/internal/settings"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
 
 var (
 	ErrClientQuotaExceeded    = errors.New("OAuth client quota exceeded")
 	ErrClientOwnerUnavailable = errors.New("OAuth client owner is unavailable")
+	ErrInvalidClientQuota     = errors.New("OAuth client quota is invalid")
 	ErrAccessUserUnknown      = errors.New("access list contains unknown users")
 )
 
 type Store struct{ db *pgxpool.Pool }
 
 func NewStore(db *pgxpool.Pool) *Store { return &Store{db: db} }
+
+const protectionSettingKey = "protection"
+
+// OwnerQuota is the effective client quota for one user. Override is nil when
+// the deployment-wide protection setting supplies Limit.
+type OwnerQuota struct {
+	Used     int64 `json:"quota_used"`
+	Limit    int   `json:"quota_limit"`
+	Override *int  `json:"quota_override"`
+}
 
 const clientSelectCols = `id, secret_hash, secret_hint, secret_version, secret_rotated_at, secret_last_used_at, name, redirect_uris, post_logout_redirect_uris, grants, scopes, is_public, access_policy, owner_id, metadata, created_at, updated_at`
 
@@ -67,24 +79,21 @@ func insertClient(ctx context.Context, execer clientExecer, c *models.OAuthClien
 	return nil
 }
 
-func (s *Store) CreateForOwner(ctx context.Context, c *models.OAuthClient, ownerID string, limit int) error {
+func (s *Store) CreateForOwner(ctx context.Context, c *models.OAuthClient, ownerID string) error {
 	prepareSecretMetadata(c, time.Now().UTC())
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return err
 	}
 	defer tx.Rollback(ctx)
-	if _, err = tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, ownerID); err != nil {
-		return fmt.Errorf("locking client owner: %w", err)
-	}
-	if err = requireActiveOwner(ctx, tx, ownerID); err != nil {
+	if err := runtimecoord.LockClientQuotaShared(ctx, tx); err != nil {
 		return err
 	}
-	var count int
-	if err = tx.QueryRow(ctx, `SELECT COUNT(*) FROM oauth_clients WHERE owner_id=$1`, ownerID).Scan(&count); err != nil {
-		return fmt.Errorf("counting owner clients: %w", err)
+	quota, err := lockActiveOwnerQuota(ctx, tx, ownerID)
+	if err != nil {
+		return err
 	}
-	if count >= limit {
+	if quota.Used >= int64(quota.Limit) {
 		return ErrClientQuotaExceeded
 	}
 	c.OwnerID = &ownerID
@@ -94,7 +103,7 @@ func (s *Store) CreateForOwner(ctx context.Context, c *models.OAuthClient, owner
 	return tx.Commit(ctx)
 }
 
-func (s *Store) CreateWithAudit(ctx context.Context, c *models.OAuthClient, ownerID *string, limit int, mutation audit.MutationAudit) error {
+func (s *Store) CreateWithAudit(ctx context.Context, c *models.OAuthClient, ownerID *string, mutation audit.MutationAudit) error {
 	prepareSecretMetadata(c, time.Now().UTC())
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
@@ -103,17 +112,14 @@ func (s *Store) CreateWithAudit(ctx context.Context, c *models.OAuthClient, owne
 	defer tx.Rollback(ctx)
 	c.OwnerID = nil
 	if ownerID != nil {
-		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, *ownerID); err != nil {
-			return fmt.Errorf("locking client owner: %w", err)
-		}
-		if err := requireActiveOwner(ctx, tx, *ownerID); err != nil {
+		if err := runtimecoord.LockClientQuotaShared(ctx, tx); err != nil {
 			return err
 		}
-		var count int
-		if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM oauth_clients WHERE owner_id=$1`, *ownerID).Scan(&count); err != nil {
-			return fmt.Errorf("counting owner clients: %w", err)
+		quota, err := lockActiveOwnerQuota(ctx, tx, *ownerID)
+		if err != nil {
+			return err
 		}
-		if count >= limit {
+		if quota.Used >= int64(quota.Limit) {
 			return ErrClientQuotaExceeded
 		}
 		c.OwnerID = ownerID
@@ -160,7 +166,7 @@ func (s *Store) Update(ctx context.Context, c *models.OAuthClient, mutation audi
 	return nil
 }
 
-func (s *Store) UpdateOwner(ctx context.Context, clientID string, ownerID *string, limit int, mutation audit.MutationAudit) (*models.OAuthClient, error) {
+func (s *Store) UpdateOwner(ctx context.Context, clientID string, ownerID *string, mutation audit.MutationAudit) (*models.OAuthClient, error) {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("starting client owner update: %w", err)
@@ -173,31 +179,15 @@ func (s *Store) UpdateOwner(ctx context.Context, clientID string, ownerID *strin
 	}
 	oldOwnerID := current.OwnerID
 	oldValue, newValue := ownerIDValue(oldOwnerID), ownerIDValue(ownerID)
-	ownersToLock := make([]string, 0, 2)
-	if oldValue != "" {
-		ownersToLock = append(ownersToLock, oldValue)
-	}
 	if newValue != "" && newValue != oldValue {
-		ownersToLock = append(ownersToLock, newValue)
-	}
-	sort.Strings(ownersToLock)
-	for _, lockedOwnerID := range ownersToLock {
-		if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock(hashtextextended($1, 0))`, lockedOwnerID); err != nil {
-			return nil, fmt.Errorf("locking client owner: %w", err)
-		}
-	}
-
-	if ownerID != nil && newValue != oldValue {
-		if err := requireActiveOwner(ctx, tx, *ownerID); err != nil {
+		if err := runtimecoord.LockClientQuotaShared(ctx, tx); err != nil {
 			return nil, err
 		}
-	}
-	if newValue != "" && newValue != oldValue {
-		var count int
-		if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM oauth_clients WHERE owner_id=$1`, newValue).Scan(&count); err != nil {
-			return nil, fmt.Errorf("counting owner clients: %w", err)
+		quota, err := lockActiveOwnerQuota(ctx, tx, newValue)
+		if err != nil {
+			return nil, err
 		}
-		if count >= limit {
+		if quota.Used >= int64(quota.Limit) {
 			return nil, ErrClientQuotaExceeded
 		}
 	}
@@ -397,18 +387,37 @@ func prepareSecretMetadata(c *models.OAuthClient, now time.Time) {
 	}
 }
 
-func requireActiveOwner(ctx context.Context, tx pgx.Tx, ownerID string) error {
+func lockActiveOwnerQuota(ctx context.Context, tx pgx.Tx, ownerID string) (*OwnerQuota, error) {
+	quota := &OwnerQuota{}
 	var status string
-	if err := tx.QueryRow(ctx, `SELECT status FROM users WHERE id=$1 FOR SHARE`, ownerID).Scan(&status); err != nil {
+	if err := tx.QueryRow(ctx, `
+		SELECT u.status,
+		       u.owned_client_limit_override,
+		       COALESCE(
+		           u.owned_client_limit_override,
+		           (SELECT NULLIF(value->>'owned_client_default_limit', '')::integer
+		            FROM runtime_settings WHERE key=$2),
+		           $3
+		       )
+		FROM users u
+		WHERE u.id=$1
+		FOR UPDATE OF u
+	`, ownerID, protectionSettingKey, settings.DefaultOwnedClientLimit).Scan(&status, &quota.Override, &quota.Limit); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
-			return ErrClientOwnerUnavailable
+			return nil, ErrClientOwnerUnavailable
 		}
-		return fmt.Errorf("checking client owner: %w", err)
+		return nil, fmt.Errorf("locking client owner quota: %w", err)
 	}
 	if status != "active" {
-		return ErrClientOwnerUnavailable
+		return nil, ErrClientOwnerUnavailable
 	}
-	return nil
+	if err := validateOwnerQuota(quota.Limit); err != nil {
+		return nil, err
+	}
+	if err := tx.QueryRow(ctx, `SELECT COUNT(*) FROM oauth_clients WHERE owner_id=$1`, ownerID).Scan(&quota.Used); err != nil {
+		return nil, fmt.Errorf("counting owner clients: %w", err)
+	}
+	return quota, nil
 }
 
 func ownerIDValue(ownerID *string) string {
@@ -429,6 +438,109 @@ func (s *Store) CountByOwner(ctx context.Context, ownerID string) (int64, error)
 	var count int64
 	err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM oauth_clients WHERE owner_id=$1`, ownerID).Scan(&count)
 	return count, err
+}
+
+func (s *Store) GetOwnerQuota(ctx context.Context, ownerID string) (*OwnerQuota, error) {
+	quota := &OwnerQuota{}
+	err := s.db.QueryRow(ctx, `
+		SELECT (SELECT COUNT(*) FROM oauth_clients WHERE owner_id=u.id),
+		       COALESCE(
+		           u.owned_client_limit_override,
+		           (SELECT NULLIF(value->>'owned_client_default_limit', '')::integer
+		            FROM runtime_settings WHERE key=$2),
+		           $3
+		       ),
+		       u.owned_client_limit_override
+		FROM users u
+		WHERE u.id=$1
+	`, ownerID, protectionSettingKey, settings.DefaultOwnedClientLimit).Scan(&quota.Used, &quota.Limit, &quota.Override)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, ErrClientOwnerUnavailable
+	}
+	if err != nil {
+		return nil, fmt.Errorf("getting client owner quota: %w", err)
+	}
+	if err := validateOwnerQuota(quota.Limit); err != nil {
+		return nil, err
+	}
+	return quota, nil
+}
+
+func (s *Store) UpdateOwnerQuota(
+	ctx context.Context,
+	ownerID string,
+	override *int,
+	mutation audit.MutationAudit,
+) (*OwnerQuota, error) {
+	if override != nil {
+		if err := validateOwnerQuota(*override); err != nil {
+			return nil, err
+		}
+	}
+	if err := mutation.ValidateEvent(models.AuditUserClientQuotaUpdated); err != nil {
+		return nil, fmt.Errorf("validating client quota audit: %w", err)
+	}
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("starting client quota update: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	if err := runtimecoord.LockClientQuotaShared(ctx, tx); err != nil {
+		return nil, err
+	}
+	var previousOverride *int
+	if err := tx.QueryRow(ctx, `
+		SELECT owned_client_limit_override
+		FROM users
+		WHERE id=$1
+		FOR UPDATE
+	`, ownerID).Scan(&previousOverride); err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, ErrClientOwnerUnavailable
+		}
+		return nil, fmt.Errorf("locking client owner quota: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE users
+		SET owned_client_limit_override=$2,updated_at=now()
+		WHERE id=$1
+	`, ownerID, override); err != nil {
+		return nil, fmt.Errorf("updating client owner quota: %w", err)
+	}
+	quota := &OwnerQuota{Override: override}
+	if err := tx.QueryRow(ctx, `
+		SELECT COUNT(*),
+		       COALESCE(
+		           $2::integer,
+		           (SELECT NULLIF(value->>'owned_client_default_limit', '')::integer
+		            FROM runtime_settings WHERE key=$3),
+		           $4
+		       )
+		FROM oauth_clients
+		WHERE owner_id=$1
+	`, ownerID, override, protectionSettingKey, settings.DefaultOwnedClientLimit).Scan(&quota.Used, &quota.Limit); err != nil {
+		return nil, fmt.Errorf("reading updated client owner quota: %w", err)
+	}
+	mutation = mutation.WithTarget("user", ownerID).WithDetails(map[string]any{
+		"previous_override": previousOverride,
+		"quota_override":    override,
+		"quota_limit":       quota.Limit,
+		"quota_used":        quota.Used,
+	})
+	if err := audit.EnqueueMutationTx(ctx, tx, mutation); err != nil {
+		return nil, fmt.Errorf("auditing client owner quota: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("committing client owner quota: %w", err)
+	}
+	return quota, nil
+}
+
+func validateOwnerQuota(limit int) error {
+	if limit < settings.MinOwnedClientLimit || limit > settings.MaxOwnedClientLimit {
+		return fmt.Errorf("%w: %d is outside the supported range", ErrInvalidClientQuota, limit)
+	}
+	return nil
 }
 
 // UserMayAccess evaluates the client's access policy for a user. Unknown

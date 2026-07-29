@@ -9,7 +9,7 @@
 - 第一方后台仅使用 `HttpOnly + SameSite=Lax` 会话 Cookie，并对修改请求强制校验 CSRF。
 - OAuth 授权码客户端强制使用 PKCE S256；不支持 plain、implicit 或 hybrid 流程。
 - JWT 固定使用 RS256，refresh token 采用 family 轮换与重复使用检测。
-- 数据库以嵌入二进制的 `000001_baseline` 建立破坏性发布基线，并通过兼容的 `000002`、`000003` 和 `000004_runtime_service_control` 加法迁移演进；当前 `0.4.0-dev` 要求 schema version 4，可从正式 `0.3.0` 的 schema version 3 迁移。服务启动只校验 schema，不再隐式迁移。
+- 数据库以嵌入二进制的 `000001_baseline` 建立破坏性发布基线，并通过兼容的 `000002` 至 `000005_runtime_policy_settings` 加法迁移演进；当前 `0.4.0-dev` 要求 schema version 5，可从正式 `0.3.0` 的 schema version 3 依次迁移。服务启动只校验 schema，不再隐式迁移。
 - 旧数据库、session、token、JWK、Provider 凭据和 OAuth 客户端注册均不兼容。
 - 旧 Go/TypeScript SDK 已删除；OAuth/OIDC 集成以标准协议和成熟语言库为准。
 
@@ -30,6 +30,7 @@
 - 动态邮件：数据库版本化 SMTP 配置、真实测试邮件、免重启激活/回滚、共享熔断
 - 安全头像：浏览器 1:1 裁剪、服务端重编码、本地持久化或私有 S3、Provider 首次异步导入
 - 运行时服务控制：六类能力独立暂停、常用维护预设、多实例排空确认、定时恢复与 CLI 紧急解锁
+- 运行时运营策略：动态限流、会话与近期认证期限、审计保留和用户客户端配额，revision CAS 与多实例同步
 - 运维：严格 readiness、JSON 日志、内部 Prometheus、可选 OTLP 与审计 outbox
 - 集成方式：标准 OAuth/OIDC Discovery、成熟语言库与 BFF 会话模式
 
@@ -172,9 +173,9 @@ S3 override 要求 `NYAUTH_MEDIA_S3_REGION`、`NYAUTH_MEDIA_S3_BUCKET`、access 
 
 如果未提供 bootstrap 密码，空用户库会生成一次性随机管理员密码并只写入一次启动日志；如果通过环境变量提供密码，则不会回显。两种情况都要求首次登录修改密码。
 
-生产切换到此基线时必须使用全新的 PostgreSQL/Redis 空 volume；本地头像模式还必须建立并纳入备份新的 `media` volume。删除旧 volume 是人工运维动作，应用不会自动执行。运行账号只拥有业务表 DML 权限；迁移账号由一次性 `migrate` service 和受控的 `maintenance` 调度使用。生产 Compose 可按月运行 `docker compose -f docker-compose.prod.yml run --rm migrate maintenance`，不得把迁移 DSN 提供给常驻应用容器；使用 S3 override 时该命令也必须追加相同 override。审计保留期可通过 `NYAUTH_AUDIT_RETENTION` 配置，默认 8760 小时。
+生产切换到此基线时必须使用全新的 PostgreSQL/Redis 空 volume；本地头像模式还必须建立并纳入备份新的 `media` volume。删除旧 volume 是人工运维动作，应用不会自动执行。运行账号只拥有业务表 DML 权限；迁移账号由一次性 `migrate` service 和受控的 `maintenance` 调度使用。生产 Compose 可按月运行 `docker compose -f docker-compose.prod.yml run --rm migrate maintenance`，不得把迁移 DSN 提供给常驻应用容器；使用 S3 override 时该命令也必须追加相同 override。`NYAUTH_AUDIT_RETENTION` 仅是数据库尚无生命周期设置时的静态 fallback；保存运行时 `audit_retention_days` 后，`maintenance` 使用数据库中的权威值。缩短保留期只保存策略，真正删除仍由后续 maintenance 执行。
 
-Prometheus 指标默认由仅限内部网络访问的 `/metrics` 提供。除 HTTP、OAuth、依赖和连接池指标外，还包含注册结果、邮箱验证耗时、SMTP 错误类别、共享熔断状态、outbox backlog、最老待发邮件年龄，以及头像操作、处理耗时、存储错误和待清理记录；标签不会包含邮箱、用户名、用户 ID、邀请码、SMTP 主机、头像 object key 或原始错误。可选 OTLP HTTP 导出使用 `NYAUTH_TELEMETRY_OTLP_ENABLED`、`NYAUTH_TELEMETRY_OTLP_ENDPOINT`、`NYAUTH_TELEMETRY_OTLP_EXPORT_INTERVAL` 和 `NYAUTH_TELEMETRY_OTLP_TIMEOUT`；collector Authorization 建议通过 `NYAUTH_TELEMETRY_OTLP_AUTHORIZATION_FILE` 注入，生产 endpoint 必须使用 HTTPS。
+Prometheus 指标默认由仅限内部网络访问的 `/metrics` 提供。除 HTTP、OAuth、依赖和连接池指标外，还包含注册结果、邮箱验证耗时、SMTP 错误类别、共享熔断状态、outbox backlog、最老待发邮件年龄、头像处理，以及固定组名的限流启用状态和运行时设置 revision；标签不会包含邮箱、用户名、用户 ID、邀请码、SMTP 主机、头像 object key 或原始错误。可选 OTLP HTTP 导出使用 `NYAUTH_TELEMETRY_OTLP_ENABLED`、`NYAUTH_TELEMETRY_OTLP_ENDPOINT`、`NYAUTH_TELEMETRY_OTLP_EXPORT_INTERVAL` 和 `NYAUTH_TELEMETRY_OTLP_TIMEOUT`；collector Authorization 建议通过 `NYAUTH_TELEMETRY_OTLP_AUTHORIZATION_FILE` 注入，生产 endpoint 必须使用 HTTPS。
 
 Nyauth 只通过 SMTP 发送邮件，不读取邮箱，也不需要 IMAP。生产 SMTP 应在服务启动后写入数据库：管理员先保存不可变候选，向指定地址实际发送测试邮件，再在测试成功后的十分钟内激活；后续可免重启切换候选、回滚上一数据库版本或在关闭注册后禁用。所有配置操作要求管理员最近十分钟内重新认证，密码使用 master key envelope encryption，API 只返回 `password_configured`。`NYAUTH_MAIL_*`、单机 `docker/compose.prod.smtp-password-file.yml` 和 HA `docker/compose.ha.smtp-password-file.yml` 仅保留为首次 fallback/bootstrap。详见 [动态 SMTP 配置与故障处理](docs/operations/runtime-mail.md)。
 
@@ -192,7 +193,7 @@ Nyauth 只通过 SMTP 发送邮件，不读取邮箱，也不需要 IMAP。生�
 | POST | `/api/login/mfa/passkey/options` | 为当前 MFA challenge 创建 Passkey assertion options |
 | POST | `/api/login/mfa/passkey/verify` | 原子消费 Passkey ceremony 与 MFA challenge |
 | DELETE | `/api/login/mfa` | 取消当前 MFA challenge |
-| GET | `/api/session` | 返回用户、CSRF、`has_password`、`email_verified` 与最近认证时间 |
+| GET | `/api/session` | 返回用户、CSRF、认证状态、会话绝对截止与近期认证截止时间 |
 | POST | `/api/logout` | 销毁当前会话 |
 | GET | `/api/me` | 当前用户资料 |
 | PUT | `/api/me` | 修改 display name |
@@ -225,7 +226,7 @@ Nyauth 只通过 SMTP 发送邮件，不读取邮箱，也不需要 IMAP。生�
 | GET | `/api/me/identities` | 当前用户的外部身份 |
 | POST | `/api/me/identities/{provider}/bind` | 发起当前用户的身份绑定 |
 | DELETE | `/api/me/identities/{id}` | 在近期重新认证后解绑身份 |
-| GET/POST | `/api/my/clients` | 管理当前用户拥有的 OAuth 客户端 |
+| GET/POST | `/api/my/clients` | 管理当前用户拥有的 OAuth 客户端；列表返回权威 `quota_used/quota_limit/quota_override` |
 | POST | `/api/my/clients/{id}/rotate-secret` | 立即轮换 confidential client Secret，仅返回一次明文 |
 
 所有已认证修改请求都必须携带完整会话返回的 `X-CSRF-Token`。MFA pending 使用独立的 `nyauth_mfa_pending` HttpOnly Cookie 和 challenge 响应中的临时 CSRF；临时令牌不得覆盖正式会话 CSRF。WebAuthn options 返回独立、不透明的 `ceremony_id`，完成请求通过 `X-WebAuthn-Ceremony` 携带；Conditional UI、显式登录和多标签页 ceremony 因此不会互相覆盖。pending 与 WebAuthn ceremony 都只保留约 5 分钟，不进入设备会话列表或活跃会话统计。后台接口只接受会话 Cookie，不接受 OAuth Bearer token。
@@ -317,6 +318,9 @@ Provider 不再从 YAML 或环境变量静态加载，只能由管理员写入�
 
 - `GET /api/admin/system/status`：版本、schema、PostgreSQL/Redis/JWK/Provider、SMTP 与头像媒体状态。
 - `GET/PUT /api/admin/settings/operations`：六类能力的运行时暂停、恢复、到期和多实例应用进度；修改要求近期重新认证，使用 revision CAS 并与审计同事务提交。
+- `GET/PUT /api/admin/settings/branding`、`registration`、`security`、`protection`、`lifecycle`：五组运行时设置统一使用 revision CAS；写入要求近期重新认证、固定保护限流，并与 `settings.updated` 审计同事务提交。
+- `protection` 动态控制登录、账户操作、头像和 SMTP 管理限流，以及自助客户端全局默认配额。关闭限流组需要精确危险确认；每次 revision 都使用新的 Redis key namespace，旧计数自然过期。
+- `lifecycle` 动态控制浏览器会话绝对期限、近期认证期限和审计保留天数。缩短会话期限会在下一次请求时淘汰超龄会话；延长不会恢复 Redis 中已经过期的会话。
 - `GET /api/admin/stats`：快照化的用户、会话、注册、邮件 backlog、24 小时失败尝试和 SMTP 熔断摘要。
 - `GET /api/admin/stats/login-trend`、`registration-trend`、`mail-trend`：按 UTC 返回 7–90 天的补零趋势；注册趋势含邀请预占/消费/释放，邮件趋势区分其他失败尝试（不含永久拒收）、永久拒收与过期。
 - `GET /api/admin/audit-logs/options`：返回有界、静态的事件、结果、风险和目标类型筛选目录，不扫描审计分区。
@@ -324,6 +328,7 @@ Provider 不再从 YAML 或环境变量静态加载，只能由管理员写入�
 - `GET /api/admin/audit-logs/export`：复用列表的全部筛选语义，按最多 31 天、50,000 条流式导出 NDJSON 或 CEF；CEF 可导入常见 SIEM。
 - `POST /api/admin/clients/{id}/rotate-secret`：立即轮换客户端 Secret，新值仅展示一次。
 - `GET /api/admin/users/{id}/sessions`、`DELETE /api/admin/users/{id}/sessions`：查看或撤销用户会话。
+- `GET /api/admin/users/{id}/clients`、`PUT /api/admin/users/{id}/client-quota`：查看权威客户端配额，或设置 0–1000 的用户覆盖值；`null` 恢复继承全局默认，降低配额不删除已有客户端。
 - `POST /api/admin/users/{id}/avatar`、`DELETE /api/admin/users/{id}/avatar`：管理员上传或删除用户头像，受 CSRF、限流与审计保护。
 - `GET/PUT /api/admin/settings/registration`：注册模式、邮箱验证要求、域名白名单、待验证期限与邀请默认值（运行时设置，免重启生效；修改要求近期重新认证）。
 - `GET/PUT /api/admin/settings/security`：TOTP/Passkey 注册开关与管理员强制 MFA（运行时设置，免重启生效；修改要求近期重新认证）。开关只阻止新注册，不停用已有因素。开启强制策略前所有活动管理员必须在当前 RP 下至少配置 TOTP 或 Passkey；策略生效后，无因素用户不能被激活/晋升为管理员，活动管理员也不能删除其最后一个因素。

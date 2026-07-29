@@ -56,14 +56,14 @@ func TestPasskeyPoliciesAreScopedToCurrentRelyingParty(t *testing.T) {
 		security := settings.DefaultSecurity()
 		security.RequireMFAForAdmins = true
 
-		err := manager.SetSecurity(context.Background(), security, admin.Username, mfaSecuritySettingsMutation(admin))
+		err := setSecurityPolicy(context.Background(), manager, security, admin.Username, mfaSecuritySettingsMutation(admin))
 		var missing *settings.AdminsMissingMFAError
 		if !errors.As(err, &missing) || len(missing.Usernames) != 1 || missing.Usernames[0] != admin.Username {
 			t.Fatalf("other-RP credential satisfied administrator MFA policy: err=%v missing=%#v", err, missing)
 		}
 
 		insertSyntheticPasskey(t, schema, passkeyTestRPID, admin.ID, []byte("current-rp-admin-key"), "Current issuer")
-		if err := manager.SetSecurity(context.Background(), security, admin.Username, mfaSecuritySettingsMutation(admin)); err != nil {
+		if err := setSecurityPolicy(context.Background(), manager, security, admin.Username, mfaSecuritySettingsMutation(admin)); err != nil {
 			t.Fatalf("current-RP credential did not satisfy administrator MFA policy: %v", err)
 		}
 	})
@@ -231,7 +231,7 @@ func TestPasskeyDeletionMaintainsAuthenticationAndAdministratorInvariants(t *tes
 		manager := settings.NewManagerForRP(schema.pool, settings.Branding{Title: "Nyauth Test"}, passkeyTestRPID)
 		security := settings.DefaultSecurity()
 		security.RequireMFAForAdmins = true
-		if err := manager.SetSecurity(ctx, security, admin.Username, mfaSecuritySettingsMutation(admin)); err != nil {
+		if err := setSecurityPolicy(ctx, manager, security, admin.Username, mfaSecuritySettingsMutation(admin)); err != nil {
 			t.Fatalf("enable administrator MFA policy: %v", err)
 		}
 		service := newPasskeyTestService(t, schema, passkeyTestRPID)

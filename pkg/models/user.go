@@ -86,10 +86,12 @@ type ChangePasswordRequest struct {
 
 // SessionResponse is returned after login and when loading the browser session.
 type SessionResponse struct {
-	User               *User      `json:"user"`
-	CSRFToken          string     `json:"csrf_token"`
-	MustChangePassword bool       `json:"must_change_password"`
-	HasPassword        bool       `json:"has_password"`
-	EmailVerified      bool       `json:"email_verified"`
-	AuthenticatedAt    *time.Time `json:"authenticated_at"`
+	User                          *User      `json:"user"`
+	CSRFToken                     string     `json:"csrf_token"`
+	MustChangePassword            bool       `json:"must_change_password"`
+	HasPassword                   bool       `json:"has_password"`
+	EmailVerified                 bool       `json:"email_verified"`
+	AuthenticatedAt               *time.Time `json:"authenticated_at"`
+	SessionExpiresAt              *time.Time `json:"session_expires_at"`
+	RecentAuthenticationExpiresAt *time.Time `json:"recent_authentication_expires_at"`
 }

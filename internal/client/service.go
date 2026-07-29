@@ -21,8 +21,6 @@ var (
 	ErrClientNotOwned     = errors.New("OAuth client is not owned by current user")
 )
 
-const maxClientsPerOwner = 10
-
 type Service struct {
 	store          *Store
 	generateSecret func() (string, error)
@@ -159,12 +157,12 @@ func (s *Service) CreateAdmin(ctx context.Context, req models.CreateClientReques
 	if err != nil {
 		return nil, err
 	}
-	if err := s.store.CreateWithAudit(ctx, c, ownerID, maxClientsPerOwner, mutation); err != nil {
+	if err := s.store.CreateWithAudit(ctx, c, ownerID, mutation); err != nil {
 		return nil, err
 	}
 	return response(c, secret), nil
 }
-func (s *Service) CreateForOwner(ctx context.Context, ownerID string, limit int, req models.CreateClientRequest) (*models.CreateClientResponse, error) {
+func (s *Service) CreateForOwner(ctx context.Context, ownerID string, req models.CreateClientRequest) (*models.CreateClientResponse, error) {
 	if req.OwnerID != nil {
 		return nil, fmt.Errorf("%w: owner_id is managed by the self-service route", ErrInvalidClient)
 	}
@@ -176,7 +174,7 @@ func (s *Service) CreateForOwner(ctx context.Context, ownerID string, limit int,
 	if err != nil {
 		return nil, err
 	}
-	if err := s.store.CreateForOwner(ctx, c, *normalizedOwnerID, limit); err != nil {
+	if err := s.store.CreateForOwner(ctx, c, *normalizedOwnerID); err != nil {
 		return nil, err
 	}
 	return response(c, secret), nil
@@ -236,7 +234,7 @@ func (s *Service) UpdateOwner(ctx context.Context, id string, req models.UpdateC
 	if err != nil {
 		return nil, err
 	}
-	return s.store.UpdateOwner(ctx, id, ownerID, maxClientsPerOwner, mutation)
+	return s.store.UpdateOwner(ctx, id, ownerID, mutation)
 }
 func (s *Service) Delete(ctx context.Context, id string, mutation audit.MutationAudit) error {
 	if err := mutation.ValidateEvent(models.AuditClientDeleted); err != nil {
@@ -258,6 +256,20 @@ func (s *Service) ListByOwner(ctx context.Context, ownerID string, page, pageSiz
 }
 func (s *Service) CountByOwner(ctx context.Context, ownerID string) (int64, error) {
 	return s.store.CountByOwner(ctx, ownerID)
+}
+func (s *Service) GetOwnerQuota(ctx context.Context, ownerID string) (*OwnerQuota, error) {
+	normalizedOwnerID, err := normalizeOwnerID(&ownerID)
+	if err != nil {
+		return nil, err
+	}
+	return s.store.GetOwnerQuota(ctx, *normalizedOwnerID)
+}
+func (s *Service) UpdateOwnerQuota(ctx context.Context, ownerID string, override *int, mutation audit.MutationAudit) (*OwnerQuota, error) {
+	normalizedOwnerID, err := normalizeOwnerID(&ownerID)
+	if err != nil {
+		return nil, err
+	}
+	return s.store.UpdateOwnerQuota(ctx, *normalizedOwnerID, override, mutation)
 }
 func (s *Service) RotateSecret(ctx context.Context, clientID string, mutation audit.MutationAudit) (*models.RotateClientSecretResponse, error) {
 	if err := mutation.ValidateEvent(models.AuditClientSecretRotated); err != nil {

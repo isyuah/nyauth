@@ -39,7 +39,7 @@ func TestSetSecurityAuditFailureRollsBackSetting(t *testing.T) {
 	}
 
 	stored := Security{TOTPEnabled: false, RequireMFAForAdmins: false}
-	if err := manager.SetSecurity(ctx, stored, mutation.ActorName, mutation); err != nil {
+	if _, err := manager.SetSecurity(ctx, stored, 0, mutation.ActorName, mutation); err != nil {
 		t.Fatalf("store audited security settings: %v", err)
 	}
 	var auditCount int
@@ -57,7 +57,7 @@ func TestSetSecurityAuditFailureRollsBackSetting(t *testing.T) {
 		t.Fatalf("remove audit outbox failure fixture: %v", err)
 	}
 	desired := DefaultSecurity()
-	err := manager.SetSecurity(ctx, desired, mutation.ActorName, mutation)
+	_, err := manager.SetSecurity(ctx, desired, 1, mutation.ActorName, mutation)
 	if err == nil || !strings.Contains(err.Error(), "auditing security settings") {
 		t.Fatalf("SetSecurity audit failure error = %v", err)
 	}

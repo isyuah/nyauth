@@ -64,7 +64,8 @@ type systemStatusResponse struct {
 		Mail       systemMailStatus       `json:"mail"`
 		Media      systemMediaStatus      `json:"media"`
 	} `json:"services"`
-	ActiveSigningKey *systemSigningKeyStatus `json:"active_signing_key,omitempty"`
+	ActiveSigningKey        *systemSigningKeyStatus `json:"active_signing_key,omitempty"`
+	DisabledRateLimitGroups []string                `json:"disabled_rate_limit_groups"`
 }
 
 type systemSchemaSnapshot struct {
@@ -116,6 +117,21 @@ func (s *Server) handleSystemStatus(w http.ResponseWriter, r *http.Request) {
 			return derivedOperatingState(s.serviceControl.Snapshot().PausedCapabilities)
 		},
 	})
+	protection := s.settingsMgr.Protection()
+	response.DisabledRateLimitGroups = make([]string, 0, 4)
+	for _, group := range []struct {
+		name    string
+		enabled bool
+	}{
+		{"login", protection.Login.Enabled},
+		{"account", protection.Account.Enabled},
+		{"avatar", protection.Avatar.Enabled},
+		{"mail", protection.Mail.Enabled},
+	} {
+		if !group.enabled {
+			response.DisabledRateLimitGroups = append(response.DisabledRateLimitGroups, group.name)
+		}
+	}
 	writeJSON(w, http.StatusOK, response)
 }
 

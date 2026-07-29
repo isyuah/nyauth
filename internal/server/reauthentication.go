@@ -11,11 +11,22 @@ import (
 	"github.com/nyasharp/nyauth/pkg/models"
 )
 
-func isRecentAuthentication(authenticatedAt, now time.Time) bool {
+func isRecentAuthentication(authenticatedAt, now time.Time, configuredTTL ...time.Duration) bool {
+	ttl := account.DefaultReauthenticationTTL
+	if len(configuredTTL) > 0 && configuredTTL[0] > 0 {
+		ttl = configuredTTL[0]
+	}
 	if authenticatedAt.IsZero() || authenticatedAt.After(now.Add(time.Minute)) {
 		return false
 	}
-	return now.Sub(authenticatedAt) <= account.DefaultReauthenticationTTL
+	return now.Sub(authenticatedAt) <= ttl
+}
+
+func (s *Server) recentAuthenticationTTL() time.Duration {
+	if s.settingsMgr == nil {
+		return account.DefaultReauthenticationTTL
+	}
+	return s.settingsMgr.Lifecycle().RecentAuthenticationDuration()
 }
 
 func (s *Server) requireRecentAuthentication(w http.ResponseWriter, r *http.Request) bool {
@@ -24,7 +35,7 @@ func (s *Server) requireRecentAuthentication(w http.ResponseWriter, r *http.Requ
 		writeAPIError(w, http.StatusUnauthorized, "authentication required")
 		return false
 	}
-	if !isRecentAuthentication(authenticated.Data.AuthenticatedAt, time.Now().UTC()) {
+	if !isRecentAuthentication(authenticated.Data.AuthenticatedAt, time.Now().UTC(), s.recentAuthenticationTTL()) {
 		writeAPIError(w, http.StatusForbidden, "recent authentication is required")
 		return false
 	}
@@ -95,7 +106,7 @@ func (s *Server) handleSetPassword(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
-	if !isRecentAuthentication(authenticated.Data.AuthenticatedAt, time.Now().UTC()) {
+	if !isRecentAuthentication(authenticated.Data.AuthenticatedAt, time.Now().UTC(), s.recentAuthenticationTTL()) {
 		writeAPIError(w, http.StatusForbidden, "recent authentication is required")
 		return
 	}

@@ -14,6 +14,8 @@ import (
 	"github.com/nyasharp/nyauth/internal/audit"
 	"github.com/nyasharp/nyauth/internal/client"
 	"github.com/nyasharp/nyauth/internal/database"
+	"github.com/nyasharp/nyauth/internal/runtimecoord"
+	"github.com/nyasharp/nyauth/internal/settings"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
 
@@ -203,10 +205,13 @@ func TestConcurrentClientOwnerCreatesAndTransfersRespectQuota(t *testing.T) {
 
 	ownerID := uuid.New()
 	insertClientOwnerUser(t, ctx, schema.pool, ownerID, "active")
+	if _, err := schema.pool.Exec(ctx, `UPDATE users SET owned_client_limit_override=10 WHERE id=$1`, ownerID); err != nil {
+		t.Fatalf("set owner quota override: %v", err)
+	}
 	service := client.NewService(client.NewStore(schema.pool))
 	owner := ownerID.String()
 	for index := range 9 {
-		if _, err := service.CreateForOwner(ctx, owner, 10, clientOwnerCreateRequest(fmt.Sprintf("Owned %d", index), nil)); err != nil {
+		if _, err := service.CreateForOwner(ctx, owner, clientOwnerCreateRequest(fmt.Sprintf("Owned %d", index), nil)); err != nil {
 			t.Fatalf("seed owned client %d: %v", index, err)
 		}
 	}
@@ -275,6 +280,231 @@ func TestConcurrentClientOwnerCreatesAndTransfersRespectQuota(t *testing.T) {
 	}
 	if ownedCount != 10 || auditCount != 1 {
 		t.Fatalf("owned clients=%d audit rows=%d, want 10/1", ownedCount, auditCount)
+	}
+}
+
+func TestClientOwnerQuotaUsesRuntimeDefaultAndUserOverride(t *testing.T) {
+	schema := newPostgresTestSchema(t)
+	if err := database.RunMigrations(schema.migrationDSN); err != nil {
+		t.Fatalf("RunMigrations: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	inheritedOwnerID := uuid.New()
+	overriddenOwnerID := uuid.New()
+	zeroOwnerID := uuid.New()
+	for _, ownerID := range []uuid.UUID{inheritedOwnerID, overriddenOwnerID, zeroOwnerID} {
+		insertClientOwnerUser(t, ctx, schema.pool, ownerID, "active")
+	}
+	if _, err := schema.pool.Exec(ctx, `
+		INSERT INTO runtime_settings (key,value,revision,updated_by)
+		VALUES ('protection','{"owned_client_default_limit":2}'::jsonb,1,'client-quota-test')
+	`); err != nil {
+		t.Fatalf("store global client quota: %v", err)
+	}
+	if _, err := schema.pool.Exec(ctx, `
+		UPDATE users
+		SET owned_client_limit_override = CASE id WHEN $1 THEN 1 WHEN $2 THEN 0 END
+		WHERE id IN ($1,$2)
+	`, overriddenOwnerID, zeroOwnerID); err != nil {
+		t.Fatalf("store client quota overrides: %v", err)
+	}
+
+	service := client.NewService(client.NewStore(schema.pool))
+	inheritedOwner := inheritedOwnerID.String()
+	firstInherited, err := service.CreateForOwner(ctx, inheritedOwner, clientOwnerCreateRequest("Inherited quota 1", nil))
+	if err != nil {
+		t.Fatalf("create first inherited-quota client: %v", err)
+	}
+	if _, err := service.CreateForOwner(ctx, inheritedOwner, clientOwnerCreateRequest("Inherited quota 2", nil)); err != nil {
+		t.Fatalf("create second inherited-quota client: %v", err)
+	}
+	if _, err := service.CreateForOwner(ctx, inheritedOwner, clientOwnerCreateRequest("Inherited quota rejected", nil)); !errors.Is(err, client.ErrClientQuotaExceeded) {
+		t.Fatalf("third inherited-quota create error = %v, want quota exceeded", err)
+	}
+	quota, err := service.GetOwnerQuota(ctx, inheritedOwner)
+	if err != nil {
+		t.Fatalf("get inherited owner quota: %v", err)
+	}
+	if quota.Used != 2 || quota.Limit != 2 || quota.Override != nil {
+		t.Fatalf("inherited quota = %#v, want used=2 limit=2 override=nil", quota)
+	}
+
+	overriddenOwner := overriddenOwnerID.String()
+	if _, err := service.CreateAdmin(ctx, clientOwnerCreateRequest("Override quota 1", &overriddenOwner), clientCreatedMutation(inheritedOwnerID)); err != nil {
+		t.Fatalf("admin create within override: %v", err)
+	}
+	if _, err := service.CreateAdmin(ctx, clientOwnerCreateRequest("Override quota rejected", &overriddenOwner), clientCreatedMutation(inheritedOwnerID)); !errors.Is(err, client.ErrClientQuotaExceeded) {
+		t.Fatalf("admin create beyond override error = %v, want quota exceeded", err)
+	}
+	quota, err = service.GetOwnerQuota(ctx, overriddenOwner)
+	if err != nil {
+		t.Fatalf("get overridden owner quota: %v", err)
+	}
+	if quota.Used != 1 || quota.Limit != 1 || quota.Override == nil || *quota.Override != 1 {
+		t.Fatalf("overridden quota = %#v, want used=1 limit=1 override=1", quota)
+	}
+	updatedOverride := 3
+	quota, err = service.UpdateOwnerQuota(ctx, overriddenOwner, &updatedOverride, clientQuotaMutation(inheritedOwnerID))
+	if err != nil {
+		t.Fatalf("update owner quota override: %v", err)
+	}
+	if quota.Used != 1 || quota.Limit != 3 || quota.Override == nil || *quota.Override != 3 {
+		t.Fatalf("updated owner quota = %#v, want used=1 limit=3 override=3", quota)
+	}
+	var quotaAuditCount int
+	if err := schema.pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM audit_event_outbox
+		WHERE event=$1 AND aggregate_type='user' AND aggregate_id=$2
+	`, models.AuditUserClientQuotaUpdated, overriddenOwner).Scan(&quotaAuditCount); err != nil {
+		t.Fatalf("count client quota audit rows: %v", err)
+	}
+	if quotaAuditCount != 1 {
+		t.Fatalf("client quota audit rows = %d, want 1", quotaAuditCount)
+	}
+	badQuotaMutation := clientQuotaMutation(inheritedOwnerID)
+	badQuotaMutation.Details = map[string]any{"client_secret": "must-not-be-audited"}
+	if _, err := service.UpdateOwnerQuota(ctx, overriddenOwner, nil, badQuotaMutation); err == nil {
+		t.Fatal("quota override update succeeded after audit payload rejection")
+	}
+	quota, err = service.GetOwnerQuota(ctx, overriddenOwner)
+	if err != nil {
+		t.Fatalf("get owner quota after audit rollback: %v", err)
+	}
+	if quota.Override == nil || *quota.Override != 3 {
+		t.Fatalf("failed audit did not roll back quota override: %#v", quota)
+	}
+
+	zeroOwner := zeroOwnerID.String()
+	if _, err := service.CreateForOwner(ctx, zeroOwner, clientOwnerCreateRequest("Zero quota rejected", nil)); !errors.Is(err, client.ErrClientQuotaExceeded) {
+		t.Fatalf("zero-quota self-service create error = %v, want quota exceeded", err)
+	}
+	ownerless, err := service.CreateAdmin(ctx, clientOwnerCreateRequest("Ownerless admin client", nil), clientCreatedMutation(inheritedOwnerID))
+	if err != nil {
+		t.Fatalf("create ownerless admin client: %v", err)
+	}
+	if ownerless.OwnerID != nil {
+		t.Fatalf("ownerless admin client owner = %v, want nil", ownerless.OwnerID)
+	}
+	if _, err := service.UpdateOwner(ctx, ownerless.ID, models.UpdateClientOwnerRequest{OwnerID: &zeroOwner}, clientOwnerMutation(inheritedOwnerID)); !errors.Is(err, client.ErrClientQuotaExceeded) {
+		t.Fatalf("transfer into zero quota error = %v, want quota exceeded", err)
+	}
+
+	if _, err := schema.pool.Exec(ctx, `
+		UPDATE runtime_settings
+		SET value='{"owned_client_default_limit":0}'::jsonb,revision=revision+1,updated_at=now()
+		WHERE key='protection'
+	`); err != nil {
+		t.Fatalf("lower global client quota: %v", err)
+	}
+	unchanged, err := service.UpdateOwner(ctx, firstInherited.ID, models.UpdateClientOwnerRequest{OwnerID: &inheritedOwner}, clientOwnerMutation(inheritedOwnerID))
+	if err != nil {
+		t.Fatalf("keep unchanged owner above lowered quota: %v", err)
+	}
+	if unchanged.OwnerID == nil || *unchanged.OwnerID != inheritedOwner {
+		t.Fatalf("unchanged owner = %v, want %s", unchanged.OwnerID, inheritedOwner)
+	}
+	removed, err := service.UpdateOwner(ctx, firstInherited.ID, models.UpdateClientOwnerRequest{OwnerID: nil}, clientOwnerMutation(inheritedOwnerID))
+	if err != nil {
+		t.Fatalf("remove owner above lowered quota: %v", err)
+	}
+	if removed.OwnerID != nil {
+		t.Fatalf("removed owner = %v, want nil", removed.OwnerID)
+	}
+	quota, err = service.GetOwnerQuota(ctx, inheritedOwner)
+	if err != nil {
+		t.Fatalf("get lowered inherited quota: %v", err)
+	}
+	if quota.Used != 1 || quota.Limit != 0 || quota.Override != nil {
+		t.Fatalf("lowered inherited quota = %#v, want used=1 limit=0 override=nil", quota)
+	}
+}
+
+func TestClientQuotaPolicyCoordinatesWithOwnershipTransactions(t *testing.T) {
+	schema := newPostgresTestSchema(t)
+	if err := database.RunMigrations(schema.migrationDSN); err != nil {
+		t.Fatalf("RunMigrations: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	ownerID := uuid.New()
+	insertClientOwnerUser(t, ctx, schema.pool, ownerID, "active")
+	manager := settings.NewManager(schema.pool, settings.Branding{Title: "Quota coordination"})
+	desired := settings.DefaultProtection()
+	desired.OwnedClientDefaultLimit = 1
+
+	sharedTx, err := schema.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin shared quota lock: %v", err)
+	}
+	defer sharedTx.Rollback(ctx)
+	if err := runtimecoord.LockClientQuotaShared(ctx, sharedTx); err != nil {
+		t.Fatalf("hold shared quota lock: %v", err)
+	}
+	settingResult := make(chan error, 1)
+	go func() {
+		_, setErr := manager.SetProtection(ctx, desired, 0, "quota-admin", "", audit.MutationAudit{
+			Event: models.AuditSettingsUpdated, ActorID: uuid.New(), ActorName: "quota-admin",
+			Result: "success", RiskLevel: "critical",
+		})
+		settingResult <- setErr
+	}()
+	select {
+	case setErr := <-settingResult:
+		t.Fatalf("global quota update bypassed an in-flight ownership transaction: %v", setErr)
+	case <-time.After(150 * time.Millisecond):
+	}
+	if err := sharedTx.Commit(ctx); err != nil {
+		t.Fatalf("release shared quota lock: %v", err)
+	}
+	select {
+	case setErr := <-settingResult:
+		if setErr != nil {
+			t.Fatalf("global quota update after ownership drain: %v", setErr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("global quota update remained blocked after ownership drain")
+	}
+
+	exclusiveTx, err := schema.pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin exclusive quota change: %v", err)
+	}
+	defer exclusiveTx.Rollback(ctx)
+	if err := runtimecoord.LockClientQuotaExclusive(ctx, exclusiveTx); err != nil {
+		t.Fatalf("hold exclusive quota lock: %v", err)
+	}
+	if _, err := exclusiveTx.Exec(ctx, `
+		UPDATE runtime_settings
+		SET value=jsonb_set(value,'{owned_client_default_limit}','0'::jsonb),
+		    revision=revision+1,updated_at=now()
+		WHERE key='protection'
+	`); err != nil {
+		t.Fatalf("stage global quota reduction: %v", err)
+	}
+	service := client.NewService(client.NewStore(schema.pool))
+	createResult := make(chan error, 1)
+	go func() {
+		_, createErr := service.CreateForOwner(ctx, ownerID.String(), clientOwnerCreateRequest("Blocked by new quota", nil))
+		createResult <- createErr
+	}()
+	select {
+	case createErr := <-createResult:
+		t.Fatalf("client creation bypassed an in-flight global quota change: %v", createErr)
+	case <-time.After(150 * time.Millisecond):
+	}
+	if err := exclusiveTx.Commit(ctx); err != nil {
+		t.Fatalf("commit global quota reduction: %v", err)
+	}
+	select {
+	case createErr := <-createResult:
+		if !errors.Is(createErr, client.ErrClientQuotaExceeded) {
+			t.Fatalf("client creation after quota reduction error = %v, want quota exceeded", createErr)
+		}
+	case <-time.After(5 * time.Second):
+		t.Fatal("client creation remained blocked after global quota change")
 	}
 }
 
@@ -357,6 +587,13 @@ func clientCreatedMutation(actorID uuid.UUID) audit.MutationAudit {
 	return audit.MutationAudit{
 		Event: models.AuditClientCreated, ActorID: actorID, ActorName: "integration-admin",
 		Result: "success", RiskLevel: "low", IPAddress: "203.0.113.24", UserAgent: "nyauth-integration-test",
+	}
+}
+
+func clientQuotaMutation(actorID uuid.UUID) audit.MutationAudit {
+	return audit.MutationAudit{
+		Event: models.AuditUserClientQuotaUpdated, ActorID: actorID, ActorName: "integration-admin",
+		Result: "success", RiskLevel: "medium", IPAddress: "203.0.113.24", UserAgent: "nyauth-integration-test",
 	}
 }
 

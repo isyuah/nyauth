@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/nyasharp/nyauth/internal/settings"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -31,11 +32,9 @@ return {1, ttl}
 `)
 
 type LoginLimiter struct {
-	rdb           *redis.Client
-	window        time.Duration
-	identityLimit int
-	ipLimit       int
-	ceremonyLimit int
+	rdb                       *redis.Client
+	settings                  *settings.Manager
+	ceremonyLimitTestOverride int
 }
 
 // AccountActionLimiter bounds email-producing account actions without storing
@@ -43,10 +42,8 @@ type LoginLimiter struct {
 // targeted abuse while the per-IP limit caps distributed address probing from
 // one source.
 type AccountActionLimiter struct {
-	rdb          *redis.Client
-	window       time.Duration
-	subjectLimit int
-	ipLimit      int
+	rdb      *redis.Client
+	settings *settings.Manager
 }
 
 // MailSettingsLimiter protects trusted administrator mutations without
@@ -54,23 +51,28 @@ type AccountActionLimiter struct {
 // operation has its own bucket so troubleshooting a candidate does not block
 // activation, rollback, or disable operations.
 type MailSettingsLimiter struct {
-	rdb           *redis.Client
-	window        time.Duration
-	ipLimit       int
-	subjectLimits map[string]int
+	rdb      *redis.Client
+	settings *settings.Manager
 }
 
 type AvatarLimiter struct {
-	rdb          *redis.Client
-	window       time.Duration
-	subjectLimit int
-	ipLimit      int
+	rdb      *redis.Client
+	settings *settings.Manager
 }
 
 // OperationsSettingsLimiter bounds maintenance-control changes per
 // administrator and source address without making normal troubleshooting
 // impractical for trusted operators.
 type OperationsSettingsLimiter struct {
+	rdb          *redis.Client
+	window       time.Duration
+	subjectLimit int
+	ipLimit      int
+}
+
+// PolicySettingsLimiter is deliberately not configurable through C2. It
+// protects the policy settings that can disable other rate limit groups.
+type PolicySettingsLimiter struct {
 	rdb          *redis.Client
 	window       time.Duration
 	subjectLimit int
@@ -85,35 +87,46 @@ const (
 	mailSettingsActionDisable       = "disable"
 )
 
-func NewLoginLimiter(rdb *redis.Client) *LoginLimiter {
-	return &LoginLimiter{rdb: rdb, window: 5 * time.Minute, identityLimit: 5, ipLimit: 30, ceremonyLimit: 120}
+func NewLoginLimiter(rdb *redis.Client, managers ...*settings.Manager) *LoginLimiter {
+	return &LoginLimiter{rdb: rdb, settings: firstSettingsManager(managers)}
 }
 
-func NewAccountActionLimiter(rdb *redis.Client) *AccountActionLimiter {
-	return &AccountActionLimiter{rdb: rdb, window: 15 * time.Minute, subjectLimit: 5, ipLimit: 20}
+func NewAccountActionLimiter(rdb *redis.Client, managers ...*settings.Manager) *AccountActionLimiter {
+	return &AccountActionLimiter{rdb: rdb, settings: firstSettingsManager(managers)}
 }
 
-func NewMailSettingsLimiter(rdb *redis.Client) *MailSettingsLimiter {
-	return &MailSettingsLimiter{
-		rdb:     rdb,
-		window:  15 * time.Minute,
-		ipLimit: 200,
-		subjectLimits: map[string]int{
-			mailSettingsActionCandidateSave: 60,
-			mailSettingsActionCandidateTest: 30,
-			mailSettingsActionActivate:      30,
-			mailSettingsActionRollback:      30,
-			mailSettingsActionDisable:       30,
-		},
-	}
+func NewMailSettingsLimiter(rdb *redis.Client, managers ...*settings.Manager) *MailSettingsLimiter {
+	return &MailSettingsLimiter{rdb: rdb, settings: firstSettingsManager(managers)}
 }
 
-func NewAvatarLimiter(rdb *redis.Client) *AvatarLimiter {
-	return &AvatarLimiter{rdb: rdb, window: 15 * time.Minute, subjectLimit: 30, ipLimit: 200}
+func NewAvatarLimiter(rdb *redis.Client, managers ...*settings.Manager) *AvatarLimiter {
+	return &AvatarLimiter{rdb: rdb, settings: firstSettingsManager(managers)}
 }
 
 func NewOperationsSettingsLimiter(rdb *redis.Client) *OperationsSettingsLimiter {
 	return &OperationsSettingsLimiter{rdb: rdb, window: 15 * time.Minute, subjectLimit: 30, ipLimit: 100}
+}
+
+func NewPolicySettingsLimiter(rdb *redis.Client) *PolicySettingsLimiter {
+	return &PolicySettingsLimiter{rdb: rdb, window: 15 * time.Minute, subjectLimit: 30, ipLimit: 100}
+}
+
+func firstSettingsManager(managers []*settings.Manager) *settings.Manager {
+	if len(managers) == 0 {
+		return nil
+	}
+	return managers[0]
+}
+
+func protectionSnapshot(manager *settings.Manager) settings.Versioned[settings.Protection] {
+	if manager == nil {
+		return settings.Versioned[settings.Protection]{Value: settings.DefaultProtection()}
+	}
+	return manager.ProtectionSnapshot()
+}
+
+func rateLimitNamespace(group string, revision int64) string {
+	return fmt.Sprintf("nyauth:%s-limit:r%d", group, revision)
 }
 
 func limitDigest(value string) string {
@@ -122,8 +135,14 @@ func limitDigest(value string) string {
 }
 
 func (l *LoginLimiter) Reserve(ctx context.Context, ip, username string) (bool, time.Duration, error) {
-	keys := []string{"nyauth:login-limit:identity:" + limitDigest(ip+"\x00"+username), "nyauth:login-limit:ip:" + limitDigest(ip)}
-	values, err := loginLimitScript.Run(ctx, l.rdb, keys, l.identityLimit, l.ipLimit, l.window.Milliseconds()).Slice()
+	snapshot := protectionSnapshot(l.settings)
+	policy := snapshot.Value.Login
+	if !policy.Enabled {
+		return true, 0, nil
+	}
+	prefix := rateLimitNamespace("login", snapshot.Revision)
+	keys := []string{prefix + ":identity:" + limitDigest(username), prefix + ":ip:" + limitDigest(ip)}
+	values, err := loginLimitScript.Run(ctx, l.rdb, keys, policy.IdentityLimit, policy.IPLimit, snapshot.Value.LoginWindow().Milliseconds()).Slice()
 	if err != nil {
 		return false, 0, err
 	}
@@ -143,19 +162,39 @@ func (l *LoginLimiter) Reserve(ctx context.Context, ip, username string) (bool, 
 	}
 	return allowed == 1, time.Duration(millis) * time.Millisecond, nil
 }
-func (l *LoginLimiter) ResetIdentity(ctx context.Context, ip, username string) error {
-	return l.rdb.Del(ctx, "nyauth:login-limit:identity:"+limitDigest(ip+"\x00"+username)).Err()
+func (l *LoginLimiter) ResetIdentity(ctx context.Context, _ string, username string) error {
+	snapshot := protectionSnapshot(l.settings)
+	if !snapshot.Value.Login.Enabled {
+		return nil
+	}
+	return l.rdb.Del(ctx, rateLimitNamespace("login", snapshot.Revision)+":identity:"+limitDigest(username)).Err()
 }
 
 func (l *LoginLimiter) ReserveIP(ctx context.Context, ip string) (bool, time.Duration, error) {
+	snapshot := protectionSnapshot(l.settings)
+	policy := snapshot.Value.Login
+	if !policy.Enabled {
+		return true, 0, nil
+	}
 	return reserveSingleLimit(
-		ctx, l.rdb, "nyauth:login-limit:ip:"+limitDigest(ip), l.ipLimit, l.window,
+		ctx, l.rdb, rateLimitNamespace("login", snapshot.Revision)+":ip:"+limitDigest(ip),
+		policy.IPLimit, snapshot.Value.LoginWindow(),
 	)
 }
 
 func (l *LoginLimiter) ReservePasskeyCeremony(ctx context.Context, ip string) (bool, time.Duration, error) {
+	snapshot := protectionSnapshot(l.settings)
+	policy := snapshot.Value.Login
+	if !policy.Enabled {
+		return true, 0, nil
+	}
+	limit := policy.PasskeyCeremonyIPLimit
+	if l.ceremonyLimitTestOverride > 0 {
+		limit = l.ceremonyLimitTestOverride
+	}
 	return reserveSingleLimit(
-		ctx, l.rdb, "nyauth:passkey-ceremony-limit:ip:"+limitDigest(ip), l.ceremonyLimit, l.window,
+		ctx, l.rdb, rateLimitNamespace("passkey-ceremony", snapshot.Revision)+":ip:"+limitDigest(ip),
+		limit, snapshot.Value.LoginWindow(),
 	)
 }
 
@@ -188,20 +227,37 @@ func reserveSingleLimit(
 }
 
 func (l *AccountActionLimiter) Reserve(ctx context.Context, action, ip, subject string) (bool, time.Duration, error) {
+	snapshot := protectionSnapshot(l.settings)
+	policy := snapshot.Value.Account
+	if !policy.Enabled {
+		return true, 0, nil
+	}
 	return reserveSubjectIPLimit(
-		ctx, l.rdb, "nyauth:account-limit", action, ip, subject,
-		l.subjectLimit, l.ipLimit, l.window,
+		ctx, l.rdb, rateLimitNamespace("account", snapshot.Revision), action, ip, subject,
+		policy.SubjectLimit, policy.IPLimit, snapshot.Value.AccountWindow(),
 	)
 }
 
 func (l *MailSettingsLimiter) Reserve(ctx context.Context, action, ip, subject string) (bool, time.Duration, error) {
-	subjectLimit, ok := l.subjectLimits[action]
+	snapshot := protectionSnapshot(l.settings)
+	policy := snapshot.Value.Mail
+	if !policy.Enabled {
+		return true, 0, nil
+	}
+	limits := map[string]int{
+		mailSettingsActionCandidateSave: policy.SaveLimit,
+		mailSettingsActionCandidateTest: policy.TestLimit,
+		mailSettingsActionActivate:      policy.ActivateLimit,
+		mailSettingsActionRollback:      policy.RollbackLimit,
+		mailSettingsActionDisable:       policy.DisableLimit,
+	}
+	subjectLimit, ok := limits[action]
 	if !ok {
 		return false, 0, fmt.Errorf("unsupported mail settings rate limit action %q", action)
 	}
 	return reserveSubjectIPLimit(
-		ctx, l.rdb, "nyauth:mail-settings-limit", action, ip, subject,
-		subjectLimit, l.ipLimit, l.window,
+		ctx, l.rdb, rateLimitNamespace("mail-settings", snapshot.Revision), action, ip, subject,
+		subjectLimit, policy.IPLimit, snapshot.Value.MailWindow(),
 	)
 }
 
@@ -209,15 +265,27 @@ func (l *AvatarLimiter) Reserve(ctx context.Context, action, ip, subject string)
 	if action != "upload" && action != "delete" {
 		return false, 0, fmt.Errorf("unsupported avatar rate limit action %q", action)
 	}
+	snapshot := protectionSnapshot(l.settings)
+	policy := snapshot.Value.Avatar
+	if !policy.Enabled {
+		return true, 0, nil
+	}
 	return reserveSubjectIPLimit(
-		ctx, l.rdb, "nyauth:avatar-limit", action, ip, subject,
-		l.subjectLimit, l.ipLimit, l.window,
+		ctx, l.rdb, rateLimitNamespace("avatar", snapshot.Revision), action, ip, subject,
+		policy.UserLimit, policy.IPLimit, snapshot.Value.AvatarWindow(),
 	)
 }
 
 func (l *OperationsSettingsLimiter) Reserve(ctx context.Context, ip, subject string) (bool, time.Duration, error) {
 	return reserveSubjectIPLimit(
 		ctx, l.rdb, "nyauth:operations-settings-limit", "update", ip, subject,
+		l.subjectLimit, l.ipLimit, l.window,
+	)
+}
+
+func (l *PolicySettingsLimiter) Reserve(ctx context.Context, ip, subject string) (bool, time.Duration, error) {
+	return reserveSubjectIPLimit(
+		ctx, l.rdb, "nyauth:policy-settings-limit", "update", ip, subject,
 		l.subjectLimit, l.ipLimit, l.window,
 	)
 }
@@ -230,7 +298,7 @@ func reserveSubjectIPLimit(
 	window time.Duration,
 ) (bool, time.Duration, error) {
 	keys := []string{
-		keyPrefix + ":subject:" + action + ":" + limitDigest(ip+"\x00"+subject),
+		keyPrefix + ":subject:" + action + ":" + limitDigest(subject),
 		keyPrefix + ":ip:" + action + ":" + limitDigest(ip),
 	}
 	values, err := loginLimitScript.Run(ctx, rdb, keys, subjectLimit, ipLimit, window.Milliseconds()).Slice()

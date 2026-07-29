@@ -147,7 +147,10 @@ func configureRegistrationPolicy(t *testing.T, schema *postgresTestSchema, invit
 	t.Helper()
 	policy := registrationPolicyForInvite(inviteHash)
 	manager := settings.NewManager(schema.pool, settings.Branding{})
-	if err := manager.SetRegistration(context.Background(), policy, "registration-integration", true); err != nil {
+	if err := manager.Load(context.Background()); err != nil {
+		t.Fatalf("load registration policy: %v", err)
+	}
+	if err := setRegistrationPolicy(context.Background(), manager, policy, "registration-integration", true); err != nil {
 		t.Fatalf("configure registration policy: %v", err)
 	}
 	return policy
@@ -183,6 +186,20 @@ func registrationMutation(event string) audit.MutationAudit {
 		Event: event, ActorID: uuid.New(), ActorName: "integration-admin",
 		Result: "success", RiskLevel: "high", IPAddress: "192.0.2.10",
 	}
+}
+
+func setRegistrationPolicy(
+	ctx context.Context,
+	manager *settings.Manager,
+	value settings.Registration,
+	actorName string,
+	fallbackMailConfigured bool,
+) error {
+	_, err := manager.SetRegistration(
+		ctx, value, manager.RegistrationSnapshot().Revision, actorName,
+		fallbackMailConfigured, registrationMutation(models.AuditSettingsUpdated),
+	)
+	return err
 }
 
 func TestRegistrationInviteFinalCapacityIsSerialized(t *testing.T) {

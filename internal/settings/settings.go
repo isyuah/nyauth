@@ -26,6 +26,8 @@ const (
 	brandingKey            = "branding"
 	registrationKey        = "registration"
 	securityKey            = "security"
+	protectionKey          = "protection"
+	lifecycleKey           = "lifecycle"
 	notificationChannel    = "nyauth_settings_changed"
 	reconciliationInterval = 60 * time.Second
 )
@@ -108,17 +110,20 @@ func DefaultSecurity() Security {
 // instances with the same LISTEN/NOTIFY + reconciliation pattern the provider
 // manager uses. Config values act as defaults when nothing is stored yet.
 type Manager struct {
-	db               *pgxpool.Pool
-	brandingDefaults Branding
-	passkeyRPID      string
-	branding         atomic.Pointer[Branding]
-	registration     atomic.Pointer[Registration]
-	security         atomic.Pointer[Security]
-	loadMu           sync.Mutex
+	db                 *pgxpool.Pool
+	brandingDefaults   Branding
+	auditRetentionDays int
+	passkeyRPID        string
+	branding           atomic.Pointer[Versioned[Branding]]
+	registration       atomic.Pointer[Versioned[Registration]]
+	security           atomic.Pointer[Versioned[Security]]
+	protection         atomic.Pointer[Versioned[Protection]]
+	lifecycle          atomic.Pointer[Versioned[Lifecycle]]
+	loadMu             sync.Mutex
 }
 
 func NewManager(db *pgxpool.Pool, brandingDefaults Branding) *Manager {
-	return &Manager{db: db, brandingDefaults: brandingDefaults}
+	return &Manager{db: db, brandingDefaults: brandingDefaults, auditRetentionDays: 365}
 }
 
 // NewManagerForRP scopes factor-policy checks to Passkeys that are usable by
@@ -126,33 +131,78 @@ func NewManager(db *pgxpool.Pool, brandingDefaults Branding) *Manager {
 func NewManagerForRP(db *pgxpool.Pool, brandingDefaults Branding, passkeyRPID string) *Manager {
 	return &Manager{
 		db: db, brandingDefaults: brandingDefaults,
-		passkeyRPID: strings.ToLower(strings.TrimSpace(passkeyRPID)),
+		auditRetentionDays: 365,
+		passkeyRPID:        strings.ToLower(strings.TrimSpace(passkeyRPID)),
+	}
+}
+
+// SetAuditRetentionFallback sets the deployment fallback used only while no
+// lifecycle row exists. Call it during process construction, before Load or
+// request handling starts.
+func (m *Manager) SetAuditRetentionFallback(retention time.Duration) {
+	days := int(retention / (24 * time.Hour))
+	if days >= MinAuditRetentionDays && days <= MaxAuditRetentionDays {
+		m.auditRetentionDays = days
 	}
 }
 
 // Branding returns the stored branding, or the config defaults before the
 // first successful load and when nothing has been stored.
 func (m *Manager) Branding() Branding {
+	return m.BrandingSnapshot().Value
+}
+
+func (m *Manager) BrandingSnapshot() Versioned[Branding] {
 	if snapshot := m.branding.Load(); snapshot != nil {
 		return *snapshot
 	}
-	return m.brandingDefaults
+	return Versioned[Branding]{Value: m.brandingDefaults}
 }
 
 // Registration returns the stored registration settings or the safe defaults.
 func (m *Manager) Registration() Registration {
+	return m.RegistrationSnapshot().Value
+}
+
+func (m *Manager) RegistrationSnapshot() Versioned[Registration] {
 	if snapshot := m.registration.Load(); snapshot != nil {
 		return *snapshot
 	}
-	return DefaultRegistration()
+	return Versioned[Registration]{Value: DefaultRegistration()}
 }
 
 // Security returns the stored security policy or the safe defaults.
 func (m *Manager) Security() Security {
+	return m.SecuritySnapshot().Value
+}
+
+func (m *Manager) SecuritySnapshot() Versioned[Security] {
 	if snapshot := m.security.Load(); snapshot != nil {
 		return *snapshot
 	}
-	return DefaultSecurity()
+	return Versioned[Security]{Value: DefaultSecurity()}
+}
+
+func (m *Manager) Protection() Protection {
+	return m.ProtectionSnapshot().Value
+}
+
+func (m *Manager) ProtectionSnapshot() Versioned[Protection] {
+	if snapshot := m.protection.Load(); snapshot != nil {
+		return *snapshot
+	}
+	return Versioned[Protection]{Value: DefaultProtection()}
+}
+
+func (m *Manager) Lifecycle() Lifecycle {
+	return m.LifecycleSnapshot().Value
+}
+
+func (m *Manager) LifecycleSnapshot() Versioned[Lifecycle] {
+	if snapshot := m.lifecycle.Load(); snapshot != nil {
+		return *snapshot
+	}
+	return Versioned[Lifecycle]{Value: DefaultLifecycle(m.auditRetentionDays)}
 }
 
 // Load refreshes every settings group from the database. Missing rows reset
@@ -163,68 +213,116 @@ func (m *Manager) Load(ctx context.Context) error {
 	if m.db == nil {
 		return nil
 	}
-	rows, err := m.db.Query(ctx, `SELECT key, value FROM runtime_settings WHERE key = ANY($1)`,
-		[]string{brandingKey, registrationKey, securityKey})
+	rows, err := m.db.Query(ctx, `SELECT key, value, revision FROM runtime_settings WHERE key = ANY($1)`,
+		[]string{brandingKey, registrationKey, securityKey, protectionKey, lifecycleKey})
 	if err != nil {
 		return fmt.Errorf("loading runtime settings: %w", err)
 	}
 	defer rows.Close()
-	stored := map[string][]byte{}
+	type storedSetting struct {
+		value    []byte
+		revision int64
+	}
+	stored := map[string]storedSetting{}
 	for rows.Next() {
 		var key string
 		var value []byte
-		if err := rows.Scan(&key, &value); err != nil {
+		var revision int64
+		if err := rows.Scan(&key, &value, &revision); err != nil {
 			return fmt.Errorf("scanning runtime setting: %w", err)
 		}
-		stored[key] = value
+		if revision < 1 {
+			return fmt.Errorf("runtime setting %s has invalid revision %d", key, revision)
+		}
+		stored[key] = storedSetting{value: value, revision: revision}
 	}
 	if err := rows.Err(); err != nil {
 		return fmt.Errorf("reading runtime settings: %w", err)
 	}
 
-	if raw, ok := stored[brandingKey]; ok {
-		branding := m.brandingDefaults
-		if err := json.Unmarshal(raw, &branding); err != nil {
+	var branding *Versioned[Branding]
+	if storedValue, ok := stored[brandingKey]; ok {
+		value := m.brandingDefaults
+		if err := json.Unmarshal(storedValue.value, &value); err != nil {
 			return fmt.Errorf("decoding stored branding: %w", err)
 		}
-		m.branding.Store(&branding)
-	} else {
-		m.branding.Store(nil)
+		branding = &Versioned[Branding]{Revision: storedValue.revision, Value: value}
 	}
 
-	if raw, ok := stored[registrationKey]; ok {
-		registration := DefaultRegistration()
-		if err := json.Unmarshal(raw, &registration); err != nil {
+	var registration *Versioned[Registration]
+	if storedValue, ok := stored[registrationKey]; ok {
+		value := DefaultRegistration()
+		if err := json.Unmarshal(storedValue.value, &value); err != nil {
 			return fmt.Errorf("decoding stored registration settings: %w", err)
 		}
-		m.registration.Store(&registration)
-	} else {
-		m.registration.Store(nil)
+		if !ValidRegistrationMode(value.Mode) {
+			return fmt.Errorf("decoding stored registration settings: unsupported mode %q", value.Mode)
+		}
+		registration = &Versioned[Registration]{Revision: storedValue.revision, Value: value}
 	}
 
-	if raw, ok := stored[securityKey]; ok {
-		security := DefaultSecurity()
-		if err := json.Unmarshal(raw, &security); err != nil {
+	var security *Versioned[Security]
+	if storedValue, ok := stored[securityKey]; ok {
+		value := DefaultSecurity()
+		if err := json.Unmarshal(storedValue.value, &value); err != nil {
 			return fmt.Errorf("decoding stored security settings: %w", err)
 		}
-		m.security.Store(&security)
-	} else {
-		m.security.Store(nil)
+		security = &Versioned[Security]{Revision: storedValue.revision, Value: value}
 	}
+
+	var protection *Versioned[Protection]
+	if storedValue, ok := stored[protectionKey]; ok {
+		value := DefaultProtection()
+		if err := json.Unmarshal(storedValue.value, &value); err != nil {
+			return fmt.Errorf("decoding stored protection settings: %w", err)
+		}
+		if err := ValidateProtection(value); err != nil {
+			return fmt.Errorf("decoding stored protection settings: %w", err)
+		}
+		protection = &Versioned[Protection]{Revision: storedValue.revision, Value: value}
+	}
+
+	var lifecycle *Versioned[Lifecycle]
+	if storedValue, ok := stored[lifecycleKey]; ok {
+		value := DefaultLifecycle(m.auditRetentionDays)
+		if err := json.Unmarshal(storedValue.value, &value); err != nil {
+			return fmt.Errorf("decoding stored lifecycle settings: %w", err)
+		}
+		if err := ValidateLifecycle(value); err != nil {
+			return fmt.Errorf("decoding stored lifecycle settings: %w", err)
+		}
+		lifecycle = &Versioned[Lifecycle]{Revision: storedValue.revision, Value: value}
+	}
+
+	// Publish only after every stored group decodes and validates, so a corrupt
+	// row cannot partially replace the last known-good process snapshot.
+	m.branding.Store(branding)
+	m.registration.Store(registration)
+	m.security.Store(security)
+	m.protection.Store(protection)
+	m.lifecycle.Store(lifecycle)
 	return nil
 }
 
 // SetBranding persists the branding, refreshes the local snapshot, and
 // notifies other instances. Validation is the caller's responsibility.
-func (m *Manager) SetBranding(ctx context.Context, branding Branding, updatedBy string) error {
+func (m *Manager) SetBranding(
+	ctx context.Context,
+	branding Branding,
+	expectedRevision int64,
+	updatedBy string,
+	mutation audit.MutationAudit,
+) (int64, error) {
 	m.loadMu.Lock()
 	defer m.loadMu.Unlock()
-	if err := m.store(ctx, brandingKey, branding, updatedBy); err != nil {
-		return err
+	revision, err := m.storeAudited(ctx, brandingKey, branding, expectedRevision, updatedBy, mutation, map[string]any{
+		"title": branding.Title, "logo_url": branding.LogoURL,
+	})
+	if err != nil {
+		return 0, err
 	}
-	m.branding.Store(&branding)
-	m.notify(ctx, brandingKey)
-	return nil
+	m.branding.Store(&Versioned[Branding]{Revision: revision, Value: branding})
+	return revision, nil
 }
 
 // SetRegistration persists the registration settings, refreshes the local
@@ -233,54 +331,65 @@ func (m *Manager) SetBranding(ctx context.Context, branding Branding, updatedBy 
 func (m *Manager) SetRegistration(
 	ctx context.Context,
 	registration Registration,
+	expectedRevision int64,
 	updatedBy string,
 	fallbackMailConfigured bool,
-) error {
+	mutation audit.MutationAudit,
+) (int64, error) {
 	m.loadMu.Lock()
 	defer m.loadMu.Unlock()
 	if m.db == nil {
-		return errors.New("runtime settings storage is unavailable")
+		return 0, errors.New("runtime settings storage is unavailable")
+	}
+	if err := mutation.ValidateEvent(models.AuditSettingsUpdated); err != nil {
+		return 0, fmt.Errorf("validating registration settings audit: %w", err)
 	}
 	encoded, err := json.Marshal(registration)
 	if err != nil {
-		return fmt.Errorf("encoding %s settings: %w", registrationKey, err)
+		return 0, fmt.Errorf("encoding %s settings: %w", registrationKey, err)
 	}
 	tx, err := m.db.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("starting registration settings transaction: %w", err)
+		return 0, fmt.Errorf("starting registration settings transaction: %w", err)
 	}
 	defer tx.Rollback(ctx)
 	if err := runtimecoord.LockRegistrationExclusive(ctx, tx); err != nil {
-		return err
+		return 0, err
 	}
 	if registration.Mode != RegistrationClosed {
 		configured, configuredErr := runtimecoord.MailConfigured(ctx, tx, fallbackMailConfigured)
 		if configuredErr != nil {
-			return configuredErr
+			return 0, configuredErr
 		}
 		if !configured {
-			return ErrMailConfigurationNeeded
+			return 0, ErrMailConfigurationNeeded
 		}
 	}
 	if err := validateRegistrationServiceControlTx(ctx, tx, registration.Mode); err != nil {
-		return err
+		return 0, err
 	}
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO runtime_settings (key, value, updated_by, updated_at)
-		VALUES ($1, $2, $3, now())
-		ON CONFLICT (key) DO UPDATE SET
-			value = EXCLUDED.value, updated_by = EXCLUDED.updated_by, updated_at = EXCLUDED.updated_at
-	`, registrationKey, encoded, updatedBy); err != nil {
-		return fmt.Errorf("storing %s settings: %w", registrationKey, err)
+	revision, err := storeSettingTx(ctx, tx, registrationKey, encoded, expectedRevision, updatedBy)
+	if err != nil {
+		return 0, err
 	}
-	if _, err := tx.Exec(ctx, `SELECT pg_notify($1, $2)`, notificationChannel, registrationKey); err != nil {
-		return fmt.Errorf("notifying registration settings change: %w", err)
+	mutation = mutation.WithTarget("settings", registrationKey).WithDetails(map[string]any{
+		"revision": revision, "mode": registration.Mode,
+		"require_email_verification": registration.RequireEmailVerification,
+		"pending_registration_ttl":   registration.PendingRegistrationTTL,
+		"invite_default_ttl":         registration.InviteDefaultTTL,
+		"invite_default_max_uses":    registration.InviteDefaultMaxUses,
+	})
+	if err := audit.EnqueueMutationTx(ctx, tx, mutation); err != nil {
+		return 0, fmt.Errorf("auditing registration settings: %w", err)
+	}
+	if err := notifySettingTx(ctx, tx, registrationKey); err != nil {
+		return 0, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("committing registration settings: %w", err)
+		return 0, fmt.Errorf("committing registration settings: %w", err)
 	}
-	m.registration.Store(&registration)
-	return nil
+	m.registration.Store(&Versioned[Registration]{Revision: revision, Value: registration})
+	return revision, nil
 }
 
 func validateRegistrationServiceControlTx(ctx context.Context, tx pgx.Tx, mode string) error {
@@ -320,16 +429,17 @@ func validateRegistrationServiceControlTx(ctx context.Context, tx pgx.Tx, mode s
 func (m *Manager) SetSecurity(
 	ctx context.Context,
 	security Security,
+	expectedRevision int64,
 	updatedBy string,
 	mutation audit.MutationAudit,
-) error {
+) (int64, error) {
 	m.loadMu.Lock()
 	defer m.loadMu.Unlock()
 	if m.db == nil {
-		return errors.New("runtime settings storage is unavailable")
+		return 0, errors.New("runtime settings storage is unavailable")
 	}
 	if err := mutation.ValidateEvent(models.AuditSettingsUpdated); err != nil {
-		return fmt.Errorf("validating security settings audit: %w", err)
+		return 0, fmt.Errorf("validating security settings audit: %w", err)
 	}
 	mutation = mutation.WithTarget("settings", securityKey).WithDetails(map[string]any{
 		"totp_enabled":           security.TOTPEnabled,
@@ -338,15 +448,15 @@ func (m *Manager) SetSecurity(
 	})
 	encoded, err := json.Marshal(security)
 	if err != nil {
-		return fmt.Errorf("encoding %s settings: %w", securityKey, err)
+		return 0, fmt.Errorf("encoding %s settings: %w", securityKey, err)
 	}
 	tx, err := m.db.Begin(ctx)
 	if err != nil {
-		return fmt.Errorf("starting security settings transaction: %w", err)
+		return 0, fmt.Errorf("starting security settings transaction: %w", err)
 	}
 	defer tx.Rollback(ctx)
 	if err := runtimecoord.LockSecurityExclusive(ctx, tx); err != nil {
-		return err
+		return 0, err
 	}
 	if security.RequireMFAForAdmins {
 		rows, err := tx.Query(ctx, `
@@ -364,44 +474,45 @@ func (m *Manager) SetSecurity(
 			ORDER BY u.username
 		`, m.passkeyRPID)
 		if err != nil {
-			return fmt.Errorf("checking administrator MFA enrollment: %w", err)
+			return 0, fmt.Errorf("checking administrator MFA enrollment: %w", err)
 		}
 		var missing []string
 		for rows.Next() {
 			var username string
 			if err := rows.Scan(&username); err != nil {
 				rows.Close()
-				return fmt.Errorf("reading administrator MFA enrollment: %w", err)
+				return 0, fmt.Errorf("reading administrator MFA enrollment: %w", err)
 			}
 			missing = append(missing, username)
 		}
 		rows.Close()
 		if err := rows.Err(); err != nil {
-			return fmt.Errorf("checking administrator MFA enrollment: %w", err)
+			return 0, fmt.Errorf("checking administrator MFA enrollment: %w", err)
 		}
 		if len(missing) > 0 {
-			return &AdminsMissingMFAError{Usernames: missing}
+			return 0, &AdminsMissingMFAError{Usernames: missing}
 		}
 	}
-	if _, err := tx.Exec(ctx, `
-		INSERT INTO runtime_settings (key, value, updated_by, updated_at)
-		VALUES ($1, $2, $3, now())
-		ON CONFLICT (key) DO UPDATE SET
-			value=EXCLUDED.value, updated_by=EXCLUDED.updated_by, updated_at=EXCLUDED.updated_at
-	`, securityKey, encoded, updatedBy); err != nil {
-		return fmt.Errorf("storing %s settings: %w", securityKey, err)
+	revision, err := storeSettingTx(ctx, tx, securityKey, encoded, expectedRevision, updatedBy)
+	if err != nil {
+		return 0, err
 	}
+	mutation = mutation.WithDetails(map[string]any{
+		"revision": revision, "totp_enabled": security.TOTPEnabled,
+		"passkeys_enabled":       security.PasskeysEnabled,
+		"require_mfa_for_admins": security.RequireMFAForAdmins,
+	})
 	if err := audit.EnqueueMutationTx(ctx, tx, mutation); err != nil {
-		return fmt.Errorf("auditing security settings: %w", err)
+		return 0, fmt.Errorf("auditing security settings: %w", err)
 	}
-	if _, err := tx.Exec(ctx, `SELECT pg_notify($1, $2)`, notificationChannel, securityKey); err != nil {
-		return fmt.Errorf("notifying security settings change: %w", err)
+	if err := notifySettingTx(ctx, tx, securityKey); err != nil {
+		return 0, err
 	}
 	if err := tx.Commit(ctx); err != nil {
-		return fmt.Errorf("committing security settings: %w", err)
+		return 0, fmt.Errorf("committing security settings: %w", err)
 	}
-	m.security.Store(&security)
-	return nil
+	m.security.Store(&Versioned[Security]{Revision: revision, Value: security})
+	return revision, nil
 }
 
 // LoadSecurityTx reads the authoritative security policy while the caller's
@@ -465,32 +576,6 @@ func sameRegistration(left, right Registration) bool {
 		left.PendingRegistrationTTL == right.PendingRegistrationTTL &&
 		left.InviteDefaultTTL == right.InviteDefaultTTL &&
 		left.InviteDefaultMaxUses == right.InviteDefaultMaxUses
-}
-
-func (m *Manager) store(ctx context.Context, key string, value any, updatedBy string) error {
-	if m.db == nil {
-		return errors.New("runtime settings storage is unavailable")
-	}
-	encoded, err := json.Marshal(value)
-	if err != nil {
-		return fmt.Errorf("encoding %s settings: %w", key, err)
-	}
-	_, err = m.db.Exec(ctx, `
-		INSERT INTO runtime_settings (key, value, updated_by, updated_at)
-		VALUES ($1, $2, $3, now())
-		ON CONFLICT (key) DO UPDATE SET
-			value = EXCLUDED.value, updated_by = EXCLUDED.updated_by, updated_at = EXCLUDED.updated_at
-	`, key, encoded, updatedBy)
-	if err != nil {
-		return fmt.Errorf("storing %s settings: %w", key, err)
-	}
-	return nil
-}
-
-func (m *Manager) notify(ctx context.Context, key string) {
-	if _, err := m.db.Exec(ctx, `SELECT pg_notify($1, $2)`, notificationChannel, key); err != nil {
-		slog.ErrorContext(ctx, "settings change notification failed", "key", key, "error", err)
-	}
 }
 
 // StartSynchronization keeps the snapshot consistent across instances:

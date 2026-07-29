@@ -399,7 +399,7 @@
 <ReauthenticationDialog
   bind:open={reauthOpen}
   {returnTo}
-  description="修改运行控制前需要验证最近 10 分钟内的身份"
+  description="修改运行控制前需要验证近期身份"
   onauthenticated={retryAfterReauthentication}
   onbeforeprovider={persistPendingInput}
 />

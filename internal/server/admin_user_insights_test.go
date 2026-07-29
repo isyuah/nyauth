@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/nyasharp/nyauth/internal/audit"
+	"github.com/nyasharp/nyauth/internal/client"
 	"github.com/nyasharp/nyauth/internal/user"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
@@ -166,9 +167,35 @@ func TestAdminUserInsightsHTTPContract(t *testing.T) {
 	response = cluster.request(t, 1, http.MethodGet, basePath+"/clients?page=1&page_size=20", nil, adminLogin.cookie, "", "198.51.100.90")
 	assertAdminInsightsNoStore(t, response)
 	var clients models.PaginatedResponse[adminUserClientSummary]
-	decodeHAResponse(t, response, &clients)
+	var clientPage clientQuotaPage[adminUserClientSummary]
+	decodeHAResponse(t, response, &clientPage)
+	clients = *clientPage.PaginatedResponse
 	if clients.Total != 2 || len(clients.Items) != 2 {
 		t.Fatalf("owned clients = %#v", clients)
+	}
+	if clientPage.OwnerQuota == nil || clientPage.Used != 2 || clientPage.Limit != 10 || clientPage.Override != nil {
+		t.Fatalf("client quota = %#v", clientPage.OwnerQuota)
+	}
+
+	response = cluster.request(t, 0, http.MethodPut, basePath+"/client-quota", strings.NewReader(`{"quota_override":1}`), adminLogin.cookie, adminLogin.session.CSRFToken, "198.51.100.90")
+	if response.StatusCode != http.StatusOK {
+		body := readHAResponse(t, response)
+		t.Fatalf("update client quota status=%d body=%s", response.StatusCode, body)
+	}
+	var updatedQuota client.OwnerQuota
+	decodeHAResponse(t, response, &updatedQuota)
+	if updatedQuota.Used != 2 || updatedQuota.Limit != 1 || updatedQuota.Override == nil || *updatedQuota.Override != 1 {
+		t.Fatalf("updated client quota = %#v", updatedQuota)
+	}
+	var quotaAuditCount int
+	if err := cluster.apps[0].db.QueryRow(ctx, `
+		SELECT COUNT(*) FROM audit_event_outbox
+		WHERE event=$1 AND aggregate_type='user' AND aggregate_id=$2
+	`, models.AuditUserClientQuotaUpdated, created.ID.String()).Scan(&quotaAuditCount); err != nil {
+		t.Fatalf("count quota audit rows: %v", err)
+	}
+	if quotaAuditCount != 1 {
+		t.Fatalf("quota audit rows = %d, want 1", quotaAuditCount)
 	}
 
 	response = cluster.request(t, 0, http.MethodGet, basePath+"/activity?page=1&page_size=20", nil, adminLogin.cookie, "", "198.51.100.90")

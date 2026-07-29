@@ -257,7 +257,7 @@ func providerSessionDigest(sessionID string) string {
 }
 
 func (s *Server) finishIdentityBind(w http.ResponseWriter, r *http.Request, providerName, expectedUserID, expectedSessionDigest, returnTo string, external *models.ExternalUser) {
-	authenticated, err := s.sessionMiddleware.GetSession(r)
+	authenticated, err := s.sessionMiddleware.GetSession(w, r)
 	actualSessionDigest := ""
 	if err == nil {
 		actualSessionDigest = providerSessionDigest(authenticated.ID)
@@ -308,7 +308,7 @@ func (s *Server) finishIdentityBind(w http.ResponseWriter, r *http.Request, prov
 }
 
 func (s *Server) finishExternalReauthentication(w http.ResponseWriter, r *http.Request, providerName, expectedUserID, expectedSessionDigest, returnTo string, external *models.ExternalUser) {
-	authenticated, err := s.sessionMiddleware.GetSession(r)
+	authenticated, err := s.sessionMiddleware.GetSession(w, r)
 	actualSessionDigest := ""
 	if err == nil {
 		actualSessionDigest = providerSessionDigest(authenticated.ID)

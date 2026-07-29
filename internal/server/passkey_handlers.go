@@ -145,7 +145,7 @@ func (s *Server) handleBeginMFAPasskey(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusForbidden, "invalid request origin")
 		return
 	}
-	pending, current, methods, _, err := s.loadMFAPendingUser(r)
+	pending, current, methods, _, err := s.loadMFAPendingUser(w, r)
 	if err != nil {
 		s.writeMFAChallengeUnavailable(w, r, err)
 		return
@@ -194,7 +194,7 @@ func (s *Server) handleFinishMFAPasskey(w http.ResponseWriter, r *http.Request) 
 		writeAPIError(w, http.StatusForbidden, "invalid request origin")
 		return
 	}
-	pending, current, methods, authenticated, err := s.loadMFAPendingUser(r)
+	pending, current, methods, authenticated, err := s.loadMFAPendingUser(w, r)
 	if err != nil {
 		s.writeMFAChallengeUnavailable(w, r, err)
 		return

@@ -61,7 +61,7 @@ func TestBeginPasskeyLoginOptionsEnforceOriginAndReturnSecureContract(t *testing
 func TestBeginPasskeyLoginOptionsRateLimitAndHideInfrastructureErrors(t *testing.T) {
 	t.Run("rate limit", func(t *testing.T) {
 		testApp := newRegistrationHTTPTestApp(t)
-		testApp.app.loginLimiter.ceremonyLimit = 1
+		testApp.app.loginLimiter.ceremonyLimitTestOverride = 1
 		first := mfaHTTPRequest(testApp.app, http.MethodPost, "/api/login/passkey/options", `{"conditional":false}`, "", "")
 		if first.Code != http.StatusOK {
 			t.Fatalf("first options request=%d body=%s", first.Code, first.Body.String())

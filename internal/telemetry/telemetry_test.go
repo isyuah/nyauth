@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/nyasharp/nyauth/internal/settings"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -153,6 +154,29 @@ func TestPoolObserversExportOnlyBoundedConnectionStates(t *testing.T) {
 	}
 }
 
+func TestPolicyObserversExposeOnlyBoundedGroups(t *testing.T) {
+	runtime, err := New(context.Background(), Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = runtime.Shutdown(t.Context()) })
+	manager := settings.NewManager(nil, settings.Branding{Title: "Nya"})
+	if err := runtime.BindPolicySettingsObservers(manager); err != nil {
+		t.Fatal(err)
+	}
+	body := scrapeMetrics(t, runtime)
+	for _, group := range []string{"login", "account", "avatar", "mail"} {
+		if !metricHasLabelAndValue(body, "nyauth_rate_limit_enabled", `group="`+group+`"`, "1") {
+			t.Fatalf("missing enabled state for %s:\n%s", group, body)
+		}
+	}
+	for _, group := range []string{"branding", "registration", "security", "protection", "lifecycle"} {
+		if !metricHasLabelAndValue(body, "nyauth_settings_revision", `group="`+group+`"`, "0") {
+			t.Fatalf("missing revision for %s:\n%s", group, body)
+		}
+	}
+}
+
 func scrapeMetrics(t *testing.T, runtime *Runtime) string {
 	t.Helper()
 	recorder := httptest.NewRecorder()
@@ -166,6 +190,15 @@ func scrapeMetrics(t *testing.T, runtime *Runtime) string {
 func metricHasValue(body, name, value string) bool {
 	for _, line := range strings.Split(body, "\n") {
 		if (strings.HasPrefix(line, name+"{") || strings.HasPrefix(line, name+" ")) && strings.HasSuffix(line, " "+value) {
+			return true
+		}
+	}
+	return false
+}
+
+func metricHasLabelAndValue(body, name, label, value string) bool {
+	for _, line := range strings.Split(body, "\n") {
+		if strings.HasPrefix(line, name+"{") && strings.Contains(line, label) && strings.HasSuffix(line, " "+value) {
 			return true
 		}
 	}

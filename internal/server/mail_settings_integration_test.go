@@ -404,7 +404,7 @@ func TestMailSettingsHandlersRequireReauthenticationRedactSecretsAndEnforceLifec
 	openRegistration := settings.DefaultRegistration()
 	openRegistration.Mode = settings.RegistrationOpen
 	openRegistration.RequireEmailVerification = true
-	if err := testApp.app.settingsMgr.SetRegistration(context.Background(), openRegistration, admin.Username, true); err != nil {
+	if err := setRegistrationPolicyForTest(context.Background(), testApp.app.settingsMgr, openRegistration, admin.Username, true); err != nil {
 		t.Fatalf("open registration before disable conflict: %v", err)
 	}
 	disableBody := fmt.Sprintf(`{"expected_revision":%d}`, rolledBack.StateRevision)
@@ -415,7 +415,7 @@ func TestMailSettingsHandlersRequireReauthenticationRedactSecretsAndEnforceLifec
 	if disableConflict.Code != http.StatusConflict {
 		t.Fatalf("disable with open registration status=%d body=%s", disableConflict.Code, disableConflict.Body.String())
 	}
-	if err := testApp.app.settingsMgr.SetRegistration(context.Background(), settings.DefaultRegistration(), admin.Username, true); err != nil {
+	if err := setRegistrationPolicyForTest(context.Background(), testApp.app.settingsMgr, settings.DefaultRegistration(), admin.Username, true); err != nil {
 		t.Fatalf("close registration before disable: %v", err)
 	}
 	disabled := invokeMailSettingsHandler(

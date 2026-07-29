@@ -1,5 +1,11 @@
 import { expect, test, type CDPSession, type Page, type Route } from '@playwright/test';
-import type { ExternalIdentity, MFAMethod, PasskeyCredential, SecuritySettings } from '../../src/lib/api';
+import type {
+  ExternalIdentity,
+  MFAMethod,
+  PasskeyCredential,
+  SecuritySettings,
+  UpdateSecuritySettingsInput,
+} from '../../src/lib/api';
 
 type Role = 'admin' | 'user';
 
@@ -27,7 +33,7 @@ interface PasskeyMockState {
   reauthCredentialRawID: string;
   security: SecuritySettings;
   securitySaveAttempts: number;
-  securitySaveBodies: SecuritySettings[];
+  securitySaveBodies: UpdateSecuritySettingsInput[];
   securitySaveCSRF: Array<string | null>;
 }
 
@@ -85,7 +91,7 @@ function newState(overrides: Partial<PasskeyMockState> = {}): PasskeyMockState {
     reauthenticated: false,
     deleteAttempts: 0,
     reauthCredentialRawID: '',
-    security: { totp_enabled: true, passkeys_enabled: true, require_mfa_for_admins: false },
+    security: { revision: 1, totp_enabled: true, passkeys_enabled: true, require_mfa_for_admins: false },
     securitySaveAttempts: 0,
     securitySaveBodies: [],
     securitySaveCSRF: [],
@@ -94,13 +100,16 @@ function newState(overrides: Partial<PasskeyMockState> = {}): PasskeyMockState {
 }
 
 function sessionResponse(state: PasskeyMockState) {
+  const authenticatedAt = state.authenticatedAt;
   return {
     user: { ...user, role: state.role },
     csrf_token: state.csrfToken,
     must_change_password: false,
     has_password: true,
     email_verified: true,
-    authenticated_at: state.authenticatedAt,
+    authenticated_at: authenticatedAt,
+    session_expires_at: new Date(Date.parse(authenticatedAt) + 24 * 60 * 60_000).toISOString(),
+    recent_authentication_expires_at: new Date(Date.parse(authenticatedAt) + 10 * 60_000).toISOString(),
   };
 }
 
@@ -398,7 +407,9 @@ async function installPasskeyMocks(page: Page, state: PasskeyMockState) {
     if (path === '/api/admin/system/status' && method === 'GET') {
       await fulfillJSON(route, 200, {
         status: 'ok',
+        operating_state: 'normal',
         version: '0.3.0-test',
+        disabled_rate_limit_groups: [],
         schema: { status: 'ok', version: 8, required_version: 8 },
         services: {
           postgresql: { status: 'ok', latency_ms: 1 },
@@ -438,7 +449,7 @@ async function installPasskeyMocks(page: Page, state: PasskeyMockState) {
       return;
     }
     if (path === '/api/admin/settings/security' && method === 'PUT') {
-      const body = request.postDataJSON() as SecuritySettings;
+      const body = request.postDataJSON() as UpdateSecuritySettingsInput;
       state.securitySaveAttempts += 1;
       state.securitySaveBodies.push(body);
       state.securitySaveCSRF.push(await request.headerValue('x-csrf-token'));
@@ -449,7 +460,12 @@ async function installPasskeyMocks(page: Page, state: PasskeyMockState) {
         });
         return;
       }
-      state.security = body;
+      state.security = {
+        revision: state.security.revision + 1,
+        totp_enabled: body.totp_enabled,
+        passkeys_enabled: body.passkeys_enabled,
+        require_mfa_for_admins: body.require_mfa_for_admins,
+      };
       await fulfillJSON(route, 200, state.security);
       return;
     }
@@ -723,11 +739,11 @@ test('administrators can hot-update the Passkey enrollment switch after reauthen
   await reauthDialog.getByLabel('当前密码').fill('admin-password');
   await reauthDialog.getByRole('button', { name: '使用密码验证' }).click();
 
-  await expect(securitySection.getByText('登录安全策略已保存，立即对所有实例生效。')).toBeVisible();
+  await expect(page.getByText('登录安全策略已保存，立即对所有实例生效。')).toBeVisible();
   expect(state.securitySaveAttempts).toBe(2);
   expect(state.securitySaveBodies).toEqual([
-    { totp_enabled: true, passkeys_enabled: false, require_mfa_for_admins: false },
-    { totp_enabled: true, passkeys_enabled: false, require_mfa_for_admins: false },
+    { expected_revision: 1, totp_enabled: true, passkeys_enabled: false, require_mfa_for_admins: false },
+    { expected_revision: 1, totp_enabled: true, passkeys_enabled: false, require_mfa_for_admins: false },
   ]);
   expect(state.securitySaveCSRF).toEqual(['csrf-session', 'csrf-password-reauthenticated']);
 });

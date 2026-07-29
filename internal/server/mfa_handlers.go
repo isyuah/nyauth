@@ -10,7 +10,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/nyasharp/nyauth/internal/audit"
 	"github.com/nyasharp/nyauth/internal/mfa"
 	"github.com/nyasharp/nyauth/internal/session"
 	"github.com/nyasharp/nyauth/internal/settings"
@@ -119,7 +118,7 @@ func (s *Server) beginReauthenticationMFAPending(
 	}, true, nil
 }
 
-func (s *Server) loadMFAPendingUser(r *http.Request) (*MFAPendingSession, *models.User, []string, *AuthenticatedSession, error) {
+func (s *Server) loadMFAPendingUser(w http.ResponseWriter, r *http.Request) (*MFAPendingSession, *models.User, []string, *AuthenticatedSession, error) {
 	pending, err := s.sessionMiddleware.GetMFAPending(r)
 	if err != nil {
 		return nil, nil, nil, nil, err
@@ -148,7 +147,7 @@ func (s *Server) loadMFAPendingUser(r *http.Request) (*MFAPendingSession, *model
 	switch pending.Data.Purpose {
 	case mfaPurposeLogin:
 	case mfaPurposeReauthentication:
-		authenticated, err = s.sessionMiddleware.GetSession(r)
+		authenticated, err = s.sessionMiddleware.GetSession(w, r)
 		if err != nil || authenticated.Data.UserID != current.ID.String() ||
 			authenticated.Data.AuthVersion != current.AuthVersion ||
 			authenticated.Data.SessionVersion != current.SessionVersion ||
@@ -177,7 +176,7 @@ func (s *Server) handleGetMFAChallenge(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusForbidden, "invalid request origin")
 		return
 	}
-	pending, _, methods, _, err := s.loadMFAPendingUser(r)
+	pending, _, methods, _, err := s.loadMFAPendingUser(w, r)
 	if err != nil {
 		s.writeMFAChallengeUnavailable(w, r, err)
 		return
@@ -219,7 +218,7 @@ func (s *Server) handleVerifyMFAChallenge(w http.ResponseWriter, r *http.Request
 		writeAPIError(w, http.StatusForbidden, "invalid request origin")
 		return
 	}
-	pending, current, methods, authenticated, err := s.loadMFAPendingUser(r)
+	pending, current, methods, authenticated, err := s.loadMFAPendingUser(w, r)
 	if err != nil {
 		s.writeMFAChallengeUnavailable(w, r, err)
 		return
@@ -560,28 +559,34 @@ func (s *Server) handleDisableTOTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetSecuritySettings(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.settingsMgr.Security())
+	snapshot := s.settingsMgr.SecuritySnapshot()
+	writeJSON(w, http.StatusOK, struct {
+		Revision int64 `json:"revision"`
+		settings.Security
+	}{Revision: snapshot.Revision, Security: snapshot.Value})
 }
 
 func (s *Server) handleUpdateSecuritySettings(w http.ResponseWriter, r *http.Request) {
-	current := currentUserFromContext(r)
-	if !s.requireRecentAuthentication(w, r) {
+	current, mutation, ok := s.authorizePolicySettingsMutation(w, r)
+	if !ok {
 		return
 	}
-	var request settings.Security
+	var request struct {
+		ExpectedRevision int64 `json:"expected_revision"`
+		settings.Security
+	}
 	if err := decodeJSON(w, r, &request); err != nil {
 		writeAPIError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	mutation, ok := audit.MutationAuditFromContext(r.Context())
-	if !ok {
-		writeAPIError(w, http.StatusInternalServerError, "audit context unavailable")
-		return
-	}
-	err := s.settingsMgr.SetSecurity(r.Context(), request, current.Username, mutation)
+	revision, err := s.settingsMgr.SetSecurity(
+		r.Context(), request.Security, request.ExpectedRevision, current.Username, mutation,
+	)
 	if err != nil {
 		var missing *settings.AdminsMissingMFAError
 		switch {
+		case errors.Is(err, settings.ErrRevisionConflict):
+			writeAPIError(w, http.StatusConflict, "settings revision conflict")
 		case errors.As(err, &missing):
 			writeJSON(w, http.StatusConflict, map[string]any{
 				"error":          "all active administrators must enroll MFA before it can be required",
@@ -592,7 +597,10 @@ func (s *Server) handleUpdateSecuritySettings(w http.ResponseWriter, r *http.Req
 		}
 		return
 	}
-	writeJSON(w, http.StatusOK, request)
+	writeJSON(w, http.StatusOK, struct {
+		Revision int64 `json:"revision"`
+		settings.Security
+	}{Revision: revision, Security: request.Security})
 }
 
 func (s *Server) mfaAuditContext(r *http.Request, current *models.User) mfa.AuditContext {

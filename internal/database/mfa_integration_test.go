@@ -119,7 +119,7 @@ func TestTOTPMFALifecyclePolicyAndAuditIntegration(t *testing.T) {
 	security := settings.DefaultSecurity()
 	security.RequireMFAForAdmins = true
 	settingsMutation := mfaSecuritySettingsMutation(admin)
-	if err := settingsManager.SetSecurity(ctx, security, admin.Username, settingsMutation); err != nil {
+	if err := setSecurityPolicy(ctx, settingsManager, security, admin.Username, settingsMutation); err != nil {
 		t.Fatalf("require administrator MFA: %v", err)
 	}
 	mutation := audit.MutationAudit{
@@ -139,7 +139,7 @@ func TestTOTPMFALifecyclePolicyAndAuditIntegration(t *testing.T) {
 	}
 
 	security.RequireMFAForAdmins = false
-	if err := settingsManager.SetSecurity(ctx, security, admin.Username, settingsMutation); err != nil {
+	if err := setSecurityPolicy(ctx, settingsManager, security, admin.Username, settingsMutation); err != nil {
 		t.Fatalf("relax administrator MFA policy: %v", err)
 	}
 	if err := service.Disable(ctx, admin.ID, mfa.AuthenticationBinding{
@@ -157,7 +157,7 @@ func TestTOTPMFALifecyclePolicyAndAuditIntegration(t *testing.T) {
 	}
 
 	security.RequireMFAForAdmins = true
-	err = settingsManager.SetSecurity(ctx, security, admin.Username, settingsMutation)
+	err = setSecurityPolicy(ctx, settingsManager, security, admin.Username, settingsMutation)
 	var missing *settings.AdminsMissingMFAError
 	if !errors.As(err, &missing) || len(missing.Usernames) != 1 || missing.Usernames[0] != admin.Username {
 		t.Fatalf("missing administrator error=%v details=%#v", err, missing)
@@ -236,7 +236,7 @@ func TestAdministratorMFAPolicyRacesMaintainInvariant(t *testing.T) {
 		}()
 		go func() {
 			ready <- struct{}{}
-			policyResult <- manager.SetSecurity(ctx, security, admin.Username, mfaSecuritySettingsMutation(admin))
+			policyResult <- setSecurityPolicy(ctx, manager, security, admin.Username, mfaSecuritySettingsMutation(admin))
 		}()
 		<-ready
 		<-ready
@@ -330,7 +330,7 @@ func TestAdministratorMFAPolicyRacesMaintainInvariant(t *testing.T) {
 		}()
 		go func() {
 			ready <- struct{}{}
-			policyResult <- manager.SetSecurity(ctx, security, admin.Username, mfaSecuritySettingsMutation(admin))
+			policyResult <- setSecurityPolicy(ctx, manager, security, admin.Username, mfaSecuritySettingsMutation(admin))
 		}()
 		<-ready
 		<-ready
@@ -369,6 +369,19 @@ func mfaSecuritySettingsMutation(actor *models.User) audit.MutationAudit {
 		Result: "success", RiskLevel: "high", IPAddress: "192.0.2.10",
 		UserAgent: "mfa-integration-test",
 	}
+}
+
+func setSecurityPolicy(
+	ctx context.Context,
+	manager *settings.Manager,
+	value settings.Security,
+	actorName string,
+	mutation audit.MutationAudit,
+) error {
+	_, err := manager.SetSecurity(
+		ctx, value, manager.SecuritySnapshot().Revision, actorName, mutation,
+	)
+	return err
 }
 
 func integrationTOTPCode(secret []byte, step int64) string {

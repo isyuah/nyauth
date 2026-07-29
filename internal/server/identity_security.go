@@ -19,7 +19,7 @@ func (s *Server) handleDeleteMyIdentity(w http.ResponseWriter, r *http.Request) 
 		writeAPIError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
-	if !isRecentAuthentication(authenticated.Data.AuthenticatedAt, time.Now().UTC()) {
+	if !isRecentAuthentication(authenticated.Data.AuthenticatedAt, time.Now().UTC(), s.recentAuthenticationTTL()) {
 		writeAPIError(w, http.StatusForbidden, "recent authentication is required")
 		return
 	}

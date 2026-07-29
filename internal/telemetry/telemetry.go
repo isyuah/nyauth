@@ -12,6 +12,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/nyasharp/nyauth/internal/settings"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
 	"go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp"
@@ -54,6 +55,8 @@ type Runtime struct {
 	avatarDuration       metric.Float64Histogram
 	avatarStorageErrors  metric.Int64Counter
 	avatarCleanupPending metric.Int64Gauge
+	rateLimitEnabled     metric.Int64ObservableGauge
+	settingsRevision     metric.Int64ObservableGauge
 	postgresPool         metric.Int64ObservableGauge
 	redisPool            metric.Int64ObservableGauge
 	registrationMu       sync.Mutex
@@ -199,6 +202,14 @@ func New(ctx context.Context, options Options) (*Runtime, error) {
 	if err != nil {
 		return nil, err
 	}
+	rateLimitEnabled, err := meter.Int64ObservableGauge("nyauth.rate_limit.enabled", metric.WithDescription("Runtime rate-limit group state, where disabled is 0 and enabled is 1"))
+	if err != nil {
+		return nil, err
+	}
+	settingsRevision, err := meter.Int64ObservableGauge("nyauth.settings.revision", metric.WithDescription("Last loaded runtime settings revision by bounded group"))
+	if err != nil {
+		return nil, err
+	}
 	postgresPool, err := meter.Int64ObservableGauge("nyauth.postgresql.pool.connections", metric.WithDescription("PostgreSQL pool connections by bounded state"))
 	if err != nil {
 		return nil, err
@@ -218,8 +229,50 @@ func New(ctx context.Context, options Options) (*Runtime, error) {
 		smtpBacklog: smtpBacklog, smtpOldestAge: smtpOldestAge, smtpCircuitOpen: smtpCircuitOpen,
 		avatarOperations: avatarOperations, avatarDuration: avatarDuration, avatarStorageErrors: avatarStorageErrors,
 		avatarCleanupPending: avatarCleanupPending,
+		rateLimitEnabled:     rateLimitEnabled,
+		settingsRevision:     settingsRevision,
 		postgresPool:         postgresPool, redisPool: redisPool,
 	}, nil
+}
+
+// BindPolicySettingsObservers exports only fixed setting-group labels and
+// reads atomic manager snapshots, so collection never queries PostgreSQL.
+func (r *Runtime) BindPolicySettingsObservers(manager *settings.Manager) error {
+	if r == nil || r.meter == nil || manager == nil {
+		return nil
+	}
+	registration, err := r.meter.RegisterCallback(func(ctx context.Context, observer metric.Observer) error {
+		protection := manager.ProtectionSnapshot()
+		for group, enabled := range map[string]bool{
+			"login":   protection.Value.Login.Enabled,
+			"account": protection.Value.Account.Enabled,
+			"avatar":  protection.Value.Avatar.Enabled,
+			"mail":    protection.Value.Mail.Enabled,
+		} {
+			value := int64(0)
+			if enabled {
+				value = 1
+			}
+			observer.ObserveInt64(r.rateLimitEnabled, value, metric.WithAttributes(attribute.String("group", group)))
+		}
+		for group, revision := range map[string]int64{
+			"branding":     manager.BrandingSnapshot().Revision,
+			"registration": manager.RegistrationSnapshot().Revision,
+			"security":     manager.SecuritySnapshot().Revision,
+			"protection":   protection.Revision,
+			"lifecycle":    manager.LifecycleSnapshot().Revision,
+		} {
+			observer.ObserveInt64(r.settingsRevision, revision, metric.WithAttributes(attribute.String("group", group)))
+		}
+		return nil
+	}, r.rateLimitEnabled, r.settingsRevision)
+	if err != nil {
+		return fmt.Errorf("registering runtime policy metrics: %w", err)
+	}
+	r.registrationMu.Lock()
+	r.registrations = append(r.registrations, registration)
+	r.registrationMu.Unlock()
+	return nil
 }
 
 func (r *Runtime) Shutdown(ctx context.Context) error {
@@ -425,8 +478,8 @@ func (r *Runtime) RecordRateLimit(ctx context.Context, limiter, action, result s
 	if r == nil {
 		return
 	}
-	limiter = boundedValue(limiter, "other", "login", "account_action", "avatar")
-	action = boundedValue(action, "other", "login", "register", "password_reset", "email_verification", "pending_email_verification", "email_change", "upload", "delete")
+	limiter = boundedValue(limiter, "other", "login", "account_action", "avatar", "mail_settings", "settings")
+	action = boundedValue(action, "other", "login", "register", "password_reset", "email_verification", "pending_email_verification", "email_change", "upload", "delete", "update")
 	result = boundedValue(result, "error", "allowed", "rejected", "error")
 	r.rateLimitEvents.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("rate_limit.limiter", limiter),

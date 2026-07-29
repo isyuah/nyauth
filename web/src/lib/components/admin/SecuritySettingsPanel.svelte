@@ -2,14 +2,17 @@
   import { onMount } from 'svelte';
   import {
     api,
+    isAPIErrorCode,
     isRecentAuthenticationError,
     missingAdminsFromError,
     type SecuritySettings,
+    type UpdateSecuritySettingsInput,
   } from '$lib/api';
   import { consumeProviderAuthError } from '$lib/stores';
   import ReauthenticationDialog from '$lib/components/account/ReauthenticationDialog.svelte';
   import Button from '$lib/components/ui/Button.svelte';
   import Switch from '$lib/components/ui/Switch.svelte';
+  import { toast } from '$lib/toast';
   import { ShieldCheck } from 'lucide-svelte';
 
   let { returnTo = '/admin/settings/security' }: { returnTo?: string } = $props();
@@ -19,14 +22,15 @@
   let totpEnabled = $state(true);
   let passkeysEnabled = $state(true);
   let requireMFAForAdmins = $state(false);
+  let revision = $state(0);
   let loaded = $state(false);
   let loading = $state(true);
   let saving = $state(false);
   let error = $state('');
-  let saved = $state(false);
+  let conflict = $state(false);
   let missingAdmins = $state<string[]>([]);
   let reauthOpen = $state(false);
-  let pendingSettings = $state<SecuritySettings | null>(null);
+  let pendingSettings = $state<UpdateSecuritySettingsInput | null>(null);
 
   onMount(async () => {
     await loadSettings();
@@ -38,6 +42,7 @@
     error = '';
     try {
       const current = await api.admin.getSecuritySettings();
+      revision = current.revision;
       totpEnabled = current.totp_enabled;
       passkeysEnabled = current.passkeys_enabled;
       requireMFAForAdmins = current.require_mfa_for_admins;
@@ -52,7 +57,8 @@
 
   async function saveSettings(event: SubmitEvent) {
     event.preventDefault();
-    const payload: SecuritySettings = {
+    const payload: UpdateSecuritySettingsInput = {
+      expected_revision: revision,
       totp_enabled: totpEnabled,
       passkeys_enabled: passkeysEnabled,
       require_mfa_for_admins: requireMFAForAdmins,
@@ -61,25 +67,33 @@
     await executeSave(payload, true);
   }
 
-  async function executeSave(payload: SecuritySettings, allowReauthentication: boolean) {
+  async function executeSave(payload: UpdateSecuritySettingsInput, allowReauthentication: boolean) {
     saving = true;
     error = '';
-    saved = false;
+    conflict = false;
     missingAdmins = [];
     try {
       const updated = await api.admin.updateSecuritySettings(payload);
       pendingSettings = null;
+      revision = updated.revision;
       totpEnabled = updated.totp_enabled;
       passkeysEnabled = updated.passkeys_enabled;
       requireMFAForAdmins = updated.require_mfa_for_admins;
-      saved = true;
+      toast.success('登录安全策略已保存，立即对所有实例生效。');
     } catch (cause) {
       if (allowReauthentication && isRecentAuthenticationError(cause)) {
         reauthOpen = true;
         return;
       }
+      if (isAPIErrorCode(cause, 'settings.revision_conflict')) {
+        conflict = true;
+        error = '设置已被其他管理员修改。当前表单草稿已保留，请加载最新设置后重新核对。';
+        return;
+      }
       missingAdmins = missingAdminsFromError(cause);
-      error = cause instanceof Error ? cause.message : '登录安全策略保存失败';
+      const message = cause instanceof Error ? cause.message : '登录安全策略保存失败';
+      if (missingAdmins.length > 0) error = message;
+      else toast.error(message);
     } finally {
       saving = false;
     }
@@ -98,29 +112,32 @@
     if (!raw) return;
     sessionStorage.removeItem(pendingSettingsStorageKey);
     try {
-      const restored = JSON.parse(raw) as Partial<SecuritySettings>;
+      const restored = JSON.parse(raw) as Partial<UpdateSecuritySettingsInput>;
       if (typeof restored.totp_enabled !== 'boolean'
         || typeof restored.passkeys_enabled !== 'boolean'
-        || typeof restored.require_mfa_for_admins !== 'boolean') {
+        || typeof restored.require_mfa_for_admins !== 'boolean'
+        || !Number.isSafeInteger(restored.expected_revision)) {
         throw new TypeError('invalid stored security settings');
       }
-      const validated: SecuritySettings = {
+      const validated: UpdateSecuritySettingsInput = {
+        expected_revision: restored.expected_revision as number,
         totp_enabled: restored.totp_enabled,
         passkeys_enabled: restored.passkeys_enabled,
         require_mfa_for_admins: restored.require_mfa_for_admins,
       };
       pendingSettings = validated;
+      revision = validated.expected_revision;
       totpEnabled = validated.totp_enabled;
       passkeysEnabled = validated.passkeys_enabled;
       requireMFAForAdmins = validated.require_mfa_for_admins;
       const providerError = consumeProviderAuthError();
       if (providerError) {
-        error = providerError.message;
+        toast.error(providerError.message);
         return;
       }
       await executeSave(validated, false);
     } catch {
-      error = '无法恢复待保存的登录安全策略，请重新检查设置。';
+      toast.error('无法恢复待保存的登录安全策略，请重新检查设置。');
     }
   }
 </script>
@@ -144,6 +161,7 @@
       {#if error}
         <div class="rounded-nya-sm bg-nya-danger-soft px-3 py-2 text-small text-nya-danger" role="alert">
           <p>{error}</p>
+          {#if conflict}<Button variant="secondary" size="sm" onclick={loadSettings}>加载最新设置</Button>{/if}
           {#if missingAdmins.length > 0}
             <p class="mt-2 font-semibold">以下活动管理员尚未启用 MFA：</p>
             <ul class="mt-1 list-inside list-disc font-mono">
@@ -152,7 +170,6 @@
           {/if}
         </div>
       {/if}
-      {#if saved}<p class="rounded-nya-sm bg-nya-success-soft px-3 py-2 text-small text-nya-success" role="status">登录安全策略已保存，立即对所有实例生效。</p>{/if}
 
       <div class="space-y-4 rounded-nya-sm bg-nya-surface-muted p-4">
         <div class="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
@@ -193,7 +210,7 @@
 <ReauthenticationDialog
   bind:open={reauthOpen}
   {returnTo}
-  description="修改登录安全策略前需要验证最近 10 分钟内的身份"
+  description="修改登录安全策略前需要验证近期身份"
   onauthenticated={retrySave}
   onbeforeprovider={persistPendingSettings}
 />

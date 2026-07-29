@@ -230,30 +230,40 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleGetRegistrationSettings(w http.ResponseWriter, r *http.Request) {
-	writeJSON(w, http.StatusOK, s.settingsMgr.Registration())
+	snapshot := s.settingsMgr.RegistrationSnapshot()
+	writeJSON(w, http.StatusOK, struct {
+		Revision int64 `json:"revision"`
+		settings.Registration
+	}{Revision: snapshot.Revision, Registration: snapshot.Value})
 }
 
 func (s *Server) handleUpdateRegistrationSettings(w http.ResponseWriter, r *http.Request) {
-	current := currentUserFromContext(r)
-	if current == nil {
-		writeAPIError(w, http.StatusUnauthorized, "authentication required")
+	current, mutation, ok := s.authorizePolicySettingsMutation(w, r)
+	if !ok {
 		return
 	}
-	if !s.requireRecentAuthentication(w, r) {
-		return
+	var request struct {
+		ExpectedRevision int64 `json:"expected_revision"`
+		settings.Registration
 	}
-	var request settings.Registration
 	if err := decodeJSON(w, r, &request); err != nil {
 		writeAPIError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	validated, err := s.validateRegistrationSettings(request)
+	validated, err := s.validateRegistrationSettings(request.Registration)
 	if err != nil {
 		writeAPIError(w, http.StatusBadRequest, err.Error())
 		return
 	}
 	fallbackConfigured := s.mailManager != nil && s.mailManager.FallbackConfigured()
-	if err := s.settingsMgr.SetRegistration(r.Context(), validated, current.Username, fallbackConfigured); err != nil {
+	revision, err := s.settingsMgr.SetRegistration(
+		r.Context(), validated, request.ExpectedRevision, current.Username, fallbackConfigured, mutation,
+	)
+	if err != nil {
+		if errors.Is(err, settings.ErrRevisionConflict) {
+			writeAPIError(w, http.StatusConflict, "settings revision conflict")
+			return
+		}
 		if errors.Is(err, settings.ErrMailConfigurationNeeded) {
 			writeAPIError(w, http.StatusConflict, "mail configuration changed; reload and try again")
 			return
@@ -265,7 +275,10 @@ func (s *Server) handleUpdateRegistrationSettings(w http.ResponseWriter, r *http
 		writeAPIError(w, http.StatusInternalServerError, "failed to store registration settings")
 		return
 	}
-	writeJSON(w, http.StatusOK, validated)
+	writeJSON(w, http.StatusOK, struct {
+		Revision int64 `json:"revision"`
+		settings.Registration
+	}{Revision: revision, Registration: validated})
 }
 
 func (s *Server) registrationMailState() (runtimecoord.MailDeliveryGate, mailruntime.RuntimeStatus, bool) {

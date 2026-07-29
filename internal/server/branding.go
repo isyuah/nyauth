@@ -1,6 +1,7 @@
 package server
 
 import (
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -16,8 +17,14 @@ const (
 )
 
 type brandingUpdateRequest struct {
-	Title   string `json:"title"`
-	LogoURL string `json:"logo_url"`
+	ExpectedRevision int64  `json:"expected_revision"`
+	Title            string `json:"title"`
+	LogoURL          string `json:"logo_url"`
+}
+
+type brandingSettingsResponse struct {
+	Revision int64 `json:"revision"`
+	settings.Branding
 }
 
 func (s *Server) handleGetBranding(w http.ResponseWriter, r *http.Request) {
@@ -25,9 +32,8 @@ func (s *Server) handleGetBranding(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) handleUpdateBranding(w http.ResponseWriter, r *http.Request) {
-	current := currentUserFromContext(r)
-	if current == nil {
-		writeAPIError(w, http.StatusUnauthorized, "authentication required")
+	current, mutation, ok := s.authorizePolicySettingsMutation(w, r)
+	if !ok {
 		return
 	}
 	var request brandingUpdateRequest
@@ -40,11 +46,23 @@ func (s *Server) handleUpdateBranding(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, err.Error())
 		return
 	}
-	if err := s.settingsMgr.SetBranding(r.Context(), branding, current.Username); err != nil {
+	revision, err := s.settingsMgr.SetBranding(
+		r.Context(), branding, request.ExpectedRevision, current.Username, mutation,
+	)
+	if err != nil {
+		if errors.Is(err, settings.ErrRevisionConflict) {
+			writeAPIError(w, http.StatusConflict, "settings revision conflict")
+			return
+		}
 		writeAPIError(w, http.StatusInternalServerError, "failed to store branding settings")
 		return
 	}
-	writeJSON(w, http.StatusOK, branding)
+	writeJSON(w, http.StatusOK, brandingSettingsResponse{Revision: revision, Branding: branding})
+}
+
+func (s *Server) handleGetBrandingSettings(w http.ResponseWriter, _ *http.Request) {
+	snapshot := s.settingsMgr.BrandingSnapshot()
+	writeJSON(w, http.StatusOK, brandingSettingsResponse{Revision: snapshot.Revision, Branding: snapshot.Value})
 }
 
 func validateBranding(title, logoURL string) (settings.Branding, error) {

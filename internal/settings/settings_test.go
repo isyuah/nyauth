@@ -3,6 +3,10 @@ package settings
 import (
 	"testing"
 	"time"
+
+	"github.com/google/uuid"
+	"github.com/nyasharp/nyauth/internal/audit"
+	"github.com/nyasharp/nyauth/pkg/models"
 )
 
 func TestBrandingFallsBackToDefaults(t *testing.T) {
@@ -16,7 +20,7 @@ func TestBrandingFallsBackToDefaults(t *testing.T) {
 func TestBrandingUsesStoredSnapshot(t *testing.T) {
 	manager := NewManager(nil, Branding{Title: "Nya"})
 	stored := Branding{Title: "Custom", LogoURL: ""}
-	manager.branding.Store(&stored)
+	manager.branding.Store(&Versioned[Branding]{Revision: 2, Value: stored})
 	if branding := manager.Branding(); branding.Title != "Custom" || branding.LogoURL != "" {
 		t.Fatalf("branding = %#v", branding)
 	}
@@ -37,7 +41,7 @@ func TestRegistrationFallsBackToSafeDefaults(t *testing.T) {
 	}
 
 	stored := Registration{Mode: RegistrationOpen, RequireEmailVerification: true, InviteDefaultTTL: "24h", InviteDefaultMaxUses: 5}
-	manager.registration.Store(&stored)
+	manager.registration.Store(&Versioned[Registration]{Revision: 3, Value: stored})
 	if got := manager.Registration(); got.Mode != RegistrationOpen || got.InviteDefaultMaxUses != 5 {
 		t.Fatalf("registration = %#v", got)
 	}
@@ -50,7 +54,7 @@ func TestSecurityFallsBackToEnrollmentEnabledAndOptionalAdminMFA(t *testing.T) {
 		t.Fatalf("security defaults = %#v", security)
 	}
 	stored := Security{TOTPEnabled: false, PasskeysEnabled: false, RequireMFAForAdmins: false}
-	manager.security.Store(&stored)
+	manager.security.Store(&Versioned[Security]{Revision: 4, Value: stored})
 	if got := manager.Security(); got.TOTPEnabled || got.PasskeysEnabled || got.RequireMFAForAdmins {
 		t.Fatalf("security snapshot = %#v", got)
 	}
@@ -90,7 +94,10 @@ func TestSettingsLoadsAndWritesShareOnePublicationLock(t *testing.T) {
 	writeDone := make(chan error, 1)
 	go func() { loadDone <- manager.Load(t.Context()) }()
 	go func() {
-		writeDone <- manager.SetRegistration(t.Context(), DefaultRegistration(), "test", false)
+		_, err := manager.SetRegistration(
+			t.Context(), DefaultRegistration(), 0, "test", false, testSettingsMutation("test"),
+		)
+		writeDone <- err
 	}()
 	for _, operation := range []struct {
 		name   string
@@ -112,5 +119,12 @@ func TestSettingsLoadsAndWritesShareOnePublicationLock(t *testing.T) {
 	}
 	if err := <-writeDone; err == nil {
 		t.Fatal("SetRegistration without database unexpectedly succeeded")
+	}
+}
+
+func testSettingsMutation(actor string) audit.MutationAudit {
+	return audit.MutationAudit{
+		Event: models.AuditSettingsUpdated, ActorID: uuid.New(), ActorName: actor,
+		Result: "success", RiskLevel: "high",
 	}
 }

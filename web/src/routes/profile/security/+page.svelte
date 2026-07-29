@@ -33,14 +33,12 @@
   let mfaFactorsRevision = $state(0);
 
   let hasPassword = $derived(session?.has_password ?? false);
-  let recentAuthenticationValid = $derived(hasRecentAuthentication(session?.authenticated_at, authenticationClock));
+  let recentAuthenticationValid = $derived(hasRecentAuthentication(session?.recent_authentication_expires_at, authenticationClock));
 
-  function hasRecentAuthentication(value: string | undefined, now: number): boolean {
-    if (!value) return false;
-    const authenticatedAt = Date.parse(value);
-    if (!Number.isFinite(authenticatedAt)) return false;
-    const age = now - authenticatedAt;
-    return age >= -60_000 && age <= 10 * 60_000;
+  function hasRecentAuthentication(expiresAt: string | undefined, now: number): boolean {
+    if (!expiresAt) return false;
+    const expiry = Date.parse(expiresAt);
+    return Number.isFinite(expiry) && now <= expiry;
   }
 
   function applySession(next: SessionInfo) {
@@ -74,7 +72,7 @@
   function handleReauthenticated(next: SessionInfo) {
     applySession(next);
     actionError = '';
-    notice = '身份验证已刷新，敏感操作将在 10 分钟内可用。';
+    notice = '身份验证已刷新，敏感操作可在当前近期认证有效期内完成。';
   }
 
   async function beginProviderReauthentication(provider: string) {
@@ -99,7 +97,7 @@
   async function handleSetPassword(event: SubmitEvent) {
     event.preventDefault();
     authenticationClock = Date.now();
-    if (!hasRecentAuthentication(session?.authenticated_at, authenticationClock)) {
+    if (!hasRecentAuthentication(session?.recent_authentication_expires_at, authenticationClock)) {
       setPasswordError = '请先通过已绑定的外部身份完成重新认证。';
       return;
     }
@@ -168,7 +166,7 @@
     <div class="flex flex-col justify-between gap-4 border-b border-nya-divider px-7 py-5 sm:flex-row sm:items-center">
       <div>
         <h2 class="text-card-title text-nya-text-primary">近期重新认证</h2>
-        <p class="mt-1 text-body text-nya-text-secondary">邮箱变更、设置密码和身份解绑要求最近 10 分钟内重新验证身份。</p>
+        <p class="mt-1 text-body text-nya-text-secondary">邮箱变更、设置密码和身份解绑要求在当前近期认证有效期内完成。</p>
       </div>
       <Badge variant={recentAuthenticationValid ? 'success' : 'warning'}>{recentAuthenticationValid ? '认证有效' : '需要重新认证'}</Badge>
     </div>
@@ -190,7 +188,7 @@
 <ReauthenticationDialog
   bind:open={reauthOpen}
   {returnTo}
-  description="成功后，敏感账户操作将在 10 分钟内可用"
+  description="成功后，敏感账户操作可在当前近期认证有效期内完成"
   onauthenticated={handleReauthenticated}
 />
 

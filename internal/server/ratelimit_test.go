@@ -10,6 +10,39 @@ import (
 	"github.com/redis/go-redis/v9"
 )
 
+func TestLoginLimiterEnforcesIdentityLimitAcrossIPsAndResetsByIdentity(t *testing.T) {
+	t.Parallel()
+	mini := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mini.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+	limiter := NewLoginLimiter(rdb)
+	ctx := context.Background()
+	const username = "same-user"
+
+	for attempt := 0; attempt < 5; attempt++ {
+		ip := fmt.Sprintf("192.0.2.%d", attempt+1)
+		allowed, _, err := limiter.Reserve(ctx, ip, username)
+		if err != nil || !allowed {
+			t.Fatalf("cross-IP login attempt %d: allowed=%v err=%v", attempt+1, allowed, err)
+		}
+	}
+	allowed, retry, err := limiter.Reserve(ctx, "198.51.100.1", username)
+	if err != nil {
+		t.Fatalf("limited cross-IP login: %v", err)
+	}
+	if allowed || retry <= 0 {
+		t.Fatalf("cross-IP identity limit: allowed=%v retry=%v", allowed, retry)
+	}
+
+	if err := limiter.ResetIdentity(ctx, "203.0.113.9", username); err != nil {
+		t.Fatalf("reset identity: %v", err)
+	}
+	allowed, _, err = limiter.Reserve(ctx, "203.0.113.10", username)
+	if err != nil || !allowed {
+		t.Fatalf("login after identity reset: allowed=%v err=%v", allowed, err)
+	}
+}
+
 func TestMailSettingsLimiterUsesRelaxedIndependentOperationBuckets(t *testing.T) {
 	t.Parallel()
 	mini := miniredis.RunT(t)
@@ -85,6 +118,31 @@ func TestMailSettingsLimiterEnforcesSharedIPLimit(t *testing.T) {
 	}
 	if allowed || retry <= 0 {
 		t.Fatalf("shared IP limit: allowed=%v retry=%v", allowed, retry)
+	}
+}
+
+func TestMailSettingsLimiterEnforcesSubjectLimitAcrossIPs(t *testing.T) {
+	t.Parallel()
+	mini := miniredis.RunT(t)
+	rdb := redis.NewClient(&redis.Options{Addr: mini.Addr()})
+	t.Cleanup(func() { _ = rdb.Close() })
+	limiter := NewMailSettingsLimiter(rdb)
+	ctx := context.Background()
+	const adminID = "admin-user-id"
+
+	for attempt := 0; attempt < 30; attempt++ {
+		ip := fmt.Sprintf("192.0.2.%d", attempt+1)
+		allowed, _, err := limiter.Reserve(ctx, mailSettingsActionCandidateTest, ip, adminID)
+		if err != nil || !allowed {
+			t.Fatalf("cross-IP subject attempt %d: allowed=%v err=%v", attempt+1, allowed, err)
+		}
+	}
+	allowed, retry, err := limiter.Reserve(ctx, mailSettingsActionCandidateTest, "198.51.100.1", adminID)
+	if err != nil {
+		t.Fatalf("limited cross-IP subject request: %v", err)
+	}
+	if allowed || retry <= 0 {
+		t.Fatalf("cross-IP subject limit: allowed=%v retry=%v", allowed, retry)
 	}
 }
 

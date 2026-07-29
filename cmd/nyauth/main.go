@@ -23,6 +23,7 @@ import (
 	"github.com/nyasharp/nyauth/internal/registration"
 	"github.com/nyasharp/nyauth/internal/server"
 	"github.com/nyasharp/nyauth/internal/servicecontrol"
+	"github.com/nyasharp/nyauth/internal/settings"
 	"github.com/nyasharp/nyauth/internal/telemetry"
 )
 
@@ -192,7 +193,11 @@ func runAuditMaintenance(cfg *config.Config, includeAvatarMedia bool) error {
 	if err := store.EnsureMonthlyPartitions(ctx, now, 18); err != nil {
 		return err
 	}
-	retention, err := store.ApplyRetention(ctx, now.Add(-cfg.Audit.Retention))
+	retentionDuration, err := settings.ResolveAuditRetention(ctx, db, cfg.Audit.Retention)
+	if err != nil {
+		return err
+	}
+	retention, err := store.ApplyRetention(ctx, now.Add(-retentionDuration))
 	if err != nil {
 		return err
 	}

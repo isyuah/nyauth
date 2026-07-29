@@ -1,13 +1,17 @@
 package server
 
 import (
+	"encoding/json"
+	"errors"
 	"net/http"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/nyasharp/nyauth/internal/audit"
+	"github.com/nyasharp/nyauth/internal/client"
 	"github.com/nyasharp/nyauth/internal/user"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
@@ -170,6 +174,11 @@ func (s *Server) handleAdminUserClients(w http.ResponseWriter, r *http.Request) 
 		writeAPIError(w, http.StatusInternalServerError, "failed to load user clients")
 		return
 	}
+	quota, err := s.clientService.GetOwnerQuota(r.Context(), id.String())
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "failed to load user client quota")
+		return
+	}
 	result := &models.PaginatedResponse[adminUserClientSummary]{
 		Items: make([]adminUserClientSummary, 0, len(items.Items)), Total: items.Total,
 		Page: items.Page, PageSize: items.PageSize, TotalPages: items.TotalPages,
@@ -182,7 +191,51 @@ func (s *Server) handleAdminUserClients(w http.ResponseWriter, r *http.Request) 
 			SecretLastUsedAt: item.SecretLastUsedAt, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt,
 		})
 	}
-	writeJSON(w, http.StatusOK, result)
+	writeJSON(w, http.StatusOK, clientQuotaPage[adminUserClientSummary]{PaginatedResponse: result, OwnerQuota: quota})
+}
+
+type updateAdminUserClientQuotaRequest struct {
+	QuotaOverride json.RawMessage `json:"quota_override"`
+}
+
+func (s *Server) handleUpdateAdminUserClientQuota(w http.ResponseWriter, r *http.Request) {
+	setSessionNoStoreHeaders(w)
+	id, ok := adminUserInsightsID(w, r)
+	if !ok {
+		return
+	}
+	var request updateAdminUserClientQuotaRequest
+	if err := decodeJSON(w, r, &request); err != nil || len(request.QuotaOverride) == 0 {
+		writeAPIError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	var override *int
+	if strings.TrimSpace(string(request.QuotaOverride)) != "null" {
+		var value int
+		if err := json.Unmarshal(request.QuotaOverride, &value); err != nil {
+			writeAPIError(w, http.StatusBadRequest, "client quota override must be an integer or null")
+			return
+		}
+		override = &value
+	}
+	mutation, ok := audit.MutationAuditFromContext(r.Context())
+	if !ok {
+		writeAPIError(w, http.StatusInternalServerError, "audit context unavailable")
+		return
+	}
+	quota, err := s.clientService.UpdateOwnerQuota(r.Context(), id.String(), override, mutation)
+	if err != nil {
+		switch {
+		case errors.Is(err, client.ErrClientOwnerUnavailable):
+			writeAPIError(w, http.StatusNotFound, "user not found")
+		case errors.Is(err, client.ErrInvalidClientQuota):
+			writeAPIError(w, http.StatusBadRequest, "client quota override must be between 0 and 1000")
+		default:
+			writeAPIError(w, http.StatusInternalServerError, "failed to update user client quota")
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, quota)
 }
 
 func (s *Server) handleAdminUserActivity(w http.ResponseWriter, r *http.Request) {

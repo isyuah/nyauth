@@ -52,6 +52,7 @@ describe('localizeAPIErrorMessage', () => {
     expect(localizeAPIErrorMessage('wording changed', 'auth.recent_authentication_required')).toBe('请先完成近期身份验证');
     expect(localizeAPIErrorMessage('wording changed', 'account.password_change_required')).toBe('请先修改密码后再继续');
     expect(localizeAPIErrorMessage('wording changed', 'service_control.registration_conflict')).toBe('当前运行控制状态不允许启用该注册策略，请先调整注册或邮件投递能力');
+    expect(localizeAPIErrorMessage('wording changed', 'settings.revision_conflict')).toBe('设置已被其他管理员修改，请加载最新设置后重试');
   });
 
   it('uses a Chinese fallback for an unknown coded backend error', () => {
@@ -161,7 +162,7 @@ describe('MFA API contract', () => {
 
     let caught: unknown;
     try {
-      await api.admin.updateSecuritySettings({ totp_enabled: true, passkeys_enabled: true, require_mfa_for_admins: true });
+      await api.admin.updateSecuritySettings({ expected_revision: 3, totp_enabled: true, passkeys_enabled: true, require_mfa_for_admins: true });
     } catch (cause) {
       caught = cause;
     }
@@ -361,6 +362,8 @@ describe('admin user insights API contract', () => {
     await api.admin.getUserSecurity(id);
     await api.admin.getUserAuthorizations(id);
     await api.admin.getUserClients(id, 2, 10);
+    await api.admin.updateUserClientQuota(id, 25);
+    await api.admin.updateUserClientQuota(id, null);
     await api.admin.getUserActivity(id, 3, 25);
 
     expect(fetchMock.mock.calls.map(([url]) => url)).toEqual([
@@ -368,8 +371,14 @@ describe('admin user insights API contract', () => {
       '/api/admin/users/user%20id%2Fwith%20separators/security',
       '/api/admin/users/user%20id%2Fwith%20separators/authorizations',
       '/api/admin/users/user%20id%2Fwith%20separators/clients?page=2&page_size=10',
+      '/api/admin/users/user%20id%2Fwith%20separators/client-quota',
+      '/api/admin/users/user%20id%2Fwith%20separators/client-quota',
       '/api/admin/users/user%20id%2Fwith%20separators/activity?page=3&page_size=25',
     ]);
+    const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit]>;
+    expect(calls[4][1].method).toBe('PUT');
+    expect(calls[4][1].body).toBe(JSON.stringify({ quota_override: 25 }));
+    expect(calls[5][1].body).toBe(JSON.stringify({ quota_override: null }));
   });
 });
 
@@ -504,6 +513,81 @@ describe('service control API contract', () => {
       public_message: 'Maintenance',
       internal_reason: 'Database maintenance',
       expires_at: '2026-07-28T12:00:00Z',
+    });
+  });
+});
+
+describe('runtime policy settings API contract', () => {
+  afterEach(() => {
+    setCsrfToken('');
+    vi.unstubAllGlobals();
+  });
+
+  it('uses the versioned protection and lifecycle revisions without changing the payload', async () => {
+    const protection = {
+      revision: 4,
+      login: { enabled: true, window: '5m', identity_limit: 5, ip_limit: 30, passkey_ceremony_ip_limit: 120 },
+      account: { enabled: true, window: '15m', subject_limit: 5, ip_limit: 20 },
+      avatar: { enabled: true, window: '15m', user_limit: 30, ip_limit: 200 },
+      mail: { enabled: true, window: '15m', save_limit: 60, test_limit: 30, activate_limit: 30, rollback_limit: 30, disable_limit: 30, ip_limit: 200 },
+      owned_client_default_limit: 10,
+    };
+    const lifecycle = {
+      revision: 6,
+      session_absolute_ttl: '24h',
+      recent_authentication_ttl: '10m',
+      audit_retention_days: 365,
+    };
+    const responses = [protection, { ...protection, revision: 5 }, lifecycle, { ...lifecycle, revision: 7 }];
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    setCsrfToken('policy-csrf');
+
+    await api.admin.getProtectionSettings();
+    await api.admin.updateProtectionSettings({
+      expected_revision: protection.revision,
+      login: protection.login,
+      account: protection.account,
+      avatar: protection.avatar,
+      mail: protection.mail,
+      owned_client_default_limit: protection.owned_client_default_limit,
+      disable_confirmation: 'DISABLE RATE LIMITS',
+    });
+    await api.admin.getLifecycleSettings();
+    await api.admin.updateLifecycleSettings({
+      expected_revision: lifecycle.revision,
+      session_absolute_ttl: lifecycle.session_absolute_ttl,
+      recent_authentication_ttl: lifecycle.recent_authentication_ttl,
+      audit_retention_days: 90,
+      retention_confirmation: 'RETENTION 90 DAYS',
+    });
+
+    const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit]>;
+    expect(calls.map(([url]) => url)).toEqual([
+      '/api/admin/settings/protection',
+      '/api/admin/settings/protection',
+      '/api/admin/settings/lifecycle',
+      '/api/admin/settings/lifecycle',
+    ]);
+    expect(calls[0][1].cache).toBe('no-store');
+    expect(calls[2][1].cache).toBe('no-store');
+    for (const index of [1, 3]) {
+      expect(calls[index][1].method).toBe('PUT');
+      expect(new Headers(calls[index][1].headers).get('X-CSRF-Token')).toBe('policy-csrf');
+    }
+    expect(JSON.parse(String(calls[1][1].body))).toMatchObject({
+      expected_revision: 4,
+      disable_confirmation: 'DISABLE RATE LIMITS',
+    });
+    expect(JSON.parse(String(calls[3][1].body))).toEqual({
+      expected_revision: 6,
+      session_absolute_ttl: '24h',
+      recent_authentication_ttl: '10m',
+      audit_retention_days: 90,
+      retention_confirmation: 'RETENTION 90 DAYS',
     });
   });
 });

@@ -12,9 +12,9 @@
   import SecretReveal from '$lib/components/ui/SecretReveal.svelte';
   import { AppWindow, Plus, RefreshCw } from 'lucide-svelte';
 
-  const clientLimit = 10;
   let clients = $state<OAuthClient[]>([]);
   let clientTotal = $state<number | null>(null);
+  let clientLimit = $state<number | null>(null);
   let loading = $state(true);
   let showCreate = $state(false);
   let creating = $state(false);
@@ -30,7 +30,7 @@
   let rotateTarget = $state<OAuthClient | null>(null);
   let rotateOpen = $state(false);
   let rotateError = $state('');
-  let quotaReached = $derived(clientTotal !== null && clientTotal >= clientLimit);
+  let quotaReached = $derived(clientTotal !== null && clientLimit !== null && clientTotal >= clientLimit);
 
   async function loadApps() {
     loading = true;
@@ -38,7 +38,8 @@
     try {
       const result = await api.my.getClients();
       clients = result.items;
-      clientTotal = result.total;
+      clientTotal = result.quota_used;
+      clientLimit = result.quota_limit;
     } catch (cause) {
       pageError = cause instanceof Error ? cause.message : '应用列表加载失败';
     } finally {
@@ -130,7 +131,7 @@
 <PageHeader title="我的应用" description="管理你创建的 OAuth / OIDC 客户端">
   {#snippet action()}
     <div class="flex items-center gap-3">
-      <span title="已创建应用 / 配额上限"><Badge variant={quotaReached ? 'warning' : 'default'}>{clientTotal === null ? `—/${clientLimit}` : `${clientTotal}/${clientLimit}`}</Badge></span>
+      <span title="已创建应用 / 配额上限"><Badge variant={quotaReached ? 'warning' : 'default'}>{clientTotal === null || clientLimit === null ? '—/—' : `${clientTotal}/${clientLimit}`}</Badge></span>
       <Button variant="primary" requiredCapability="account_mutations" disabled={quotaReached} onclick={() => { createdSecret = ''; showCreate = true; }}><Plus size={16} /> 创建应用</Button>
     </div>
   {/snippet}
@@ -140,7 +141,7 @@
 {#if rotatedSecret}<div class="mb-4 rounded-nya-md border border-nya-warning/20 bg-nya-warning-soft px-5 py-4"><p class="mb-2 text-body-medium text-nya-warning">“{rotatedClientName}”的旧 Secret 已立即失效。新 Secret 仅在当前页面显示，请现在保存。</p><SecretReveal value={rotatedSecret} label="新 Client Secret" /></div>{/if}
 
 <ResourceState {loading} error={pageError} empty={clients.length === 0} emptyTitle="还没有创建应用" emptyDescription="创建第一个 OAuth / OIDC 客户端后即可接入项目。" onretry={loadApps}>
-  {#snippet emptyAction()}<Button variant="primary" requiredCapability="account_mutations" onclick={() => (showCreate = true)}>创建应用</Button>{/snippet}
+  {#snippet emptyAction()}<Button variant="primary" requiredCapability="account_mutations" disabled={quotaReached} onclick={() => (showCreate = true)}>创建应用</Button>{/snippet}
   {#snippet children()}
     <div class="space-y-3">
       {#each clients as client}
@@ -165,7 +166,7 @@
     <div><label for="my-client-redirects" class="mb-1.5 block text-body-medium text-nya-text-primary">Redirect URI <span class="text-small text-nya-text-tertiary">（每行一个）</span></label><textarea id="my-client-redirects" bind:value={newApp.redirect_uris} required rows="3" placeholder="https://app.example.com/callback" class="w-full rounded-nya-sm border border-nya-border bg-nya-surface px-3 py-2 font-mono text-small focus:border-nya-primary focus:outline-none focus:ring-2 focus:ring-nya-primary/24"></textarea></div>
     <div><label for="my-client-logouts" class="mb-1.5 block text-body-medium text-nya-text-primary">Post-logout Redirect URI <span class="text-small text-nya-text-tertiary">（每行一个）</span></label><textarea id="my-client-logouts" bind:value={newApp.post_logout_redirect_uris} rows="2" placeholder="https://app.example.com/signed-out" class="w-full rounded-nya-sm border border-nya-border bg-nya-surface px-3 py-2 font-mono text-small focus:border-nya-primary focus:outline-none focus:ring-2 focus:ring-nya-primary/24"></textarea></div>
     <label class="flex cursor-pointer items-start gap-2"><input type="checkbox" bind:checked={newApp.is_public} class="mt-0.5 rounded" /><span><span class="block text-body text-nya-text-primary">公共客户端</span><span class="block text-small text-nya-text-tertiary">仅用于无法安全保存 Secret 的原生应用；浏览器 SPA 暂不作为正式支持模式。</span></span></label>
-    <div class="flex justify-end gap-2 pt-2"><Button variant="secondary" onclick={() => (showCreate = false)} disabled={creating}>取消</Button><Button type="submit" variant="primary" requiredCapability="account_mutations" loading={creating}>创建</Button></div>
+    <div class="flex justify-end gap-2 pt-2"><Button variant="secondary" onclick={() => (showCreate = false)} disabled={creating}>取消</Button><Button type="submit" variant="primary" requiredCapability="account_mutations" loading={creating} disabled={quotaReached}>创建</Button></div>
   </form>
 </Modal>
 

@@ -26,19 +26,17 @@
   let confirmError = $state('');
   let reauthOpen = $state(false);
 
-  function hasRecentAuthentication(value?: string): boolean {
-    if (!value) return false;
-    const authenticatedAt = Date.parse(value);
-    if (!Number.isFinite(authenticatedAt)) return false;
-    const age = Date.now() - authenticatedAt;
-    return age >= -60_000 && age <= 10 * 60_000;
+  function hasRecentAuthentication(expiresAt?: string): boolean {
+    if (!expiresAt) return false;
+    const expiry = Date.parse(expiresAt);
+    return Number.isFinite(expiry) && Date.now() <= expiry;
   }
 
   function applySession(next: SessionInfo) {
     sessionStore.setSession(next);
   }
 
-  function promptForReauthentication(message = '此操作需要最近 10 分钟内重新验证身份。') {
+  function promptForReauthentication(message = '此操作需要重新验证近期身份。') {
     actionError = message;
     reauthOpen = true;
   }
@@ -85,7 +83,7 @@
   }
 
   function requestIdentityRemoval(identity: ExternalIdentity) {
-    if (!hasRecentAuthentication(session?.authenticated_at)) {
+    if (!hasRecentAuthentication(session?.recent_authentication_expires_at)) {
       promptForReauthentication();
       return;
     }
@@ -188,6 +186,6 @@
 <ReauthenticationDialog
   bind:open={reauthOpen}
   {returnTo}
-  description="解绑外部身份前需要验证最近 10 分钟内的身份"
+  description="解绑外部身份前需要验证近期身份"
   onauthenticated={handleReauthenticated}
 />

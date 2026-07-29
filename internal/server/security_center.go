@@ -10,27 +10,32 @@ import (
 	"github.com/google/uuid"
 	"github.com/nyasharp/nyauth/internal/audit"
 	"github.com/nyasharp/nyauth/internal/session"
+	"github.com/nyasharp/nyauth/internal/settings"
 	"github.com/nyasharp/nyauth/internal/user"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
 
 type browserSessionResponse struct {
-	ID              string    `json:"id"`
-	Current         bool      `json:"current"`
-	IPAddress       string    `json:"ip_address,omitempty"`
-	UserAgent       string    `json:"user_agent,omitempty"`
-	CreatedAt       time.Time `json:"created_at"`
-	LastSeenAt      time.Time `json:"last_seen_at"`
-	AuthenticatedAt time.Time `json:"authenticated_at"`
+	ID                            string    `json:"id"`
+	Current                       bool      `json:"current"`
+	IPAddress                     string    `json:"ip_address,omitempty"`
+	UserAgent                     string    `json:"user_agent,omitempty"`
+	CreatedAt                     time.Time `json:"created_at"`
+	LastSeenAt                    time.Time `json:"last_seen_at"`
+	AuthenticatedAt               time.Time `json:"authenticated_at"`
+	SessionExpiresAt              time.Time `json:"session_expires_at"`
+	RecentAuthenticationExpiresAt time.Time `json:"recent_authentication_expires_at"`
 }
 
-func mapBrowserSessions(items []session.SessionData, currentPublicID string) []browserSessionResponse {
+func mapBrowserSessions(items []session.SessionData, currentPublicID string, lifecycle settings.Lifecycle) []browserSessionResponse {
 	result := make([]browserSessionResponse, 0, len(items))
 	for _, item := range items {
 		result = append(result, browserSessionResponse{
 			ID: item.PublicID, Current: item.PublicID == currentPublicID,
 			IPAddress: item.IPAddress, UserAgent: item.UserAgent,
 			CreatedAt: item.CreatedAt, LastSeenAt: item.LastSeenAt, AuthenticatedAt: item.AuthenticatedAt,
+			SessionExpiresAt:              item.CreatedAt.Add(lifecycle.SessionAbsoluteDuration()),
+			RecentAuthenticationExpiresAt: item.AuthenticatedAt.Add(lifecycle.RecentAuthenticationDuration()),
 		})
 	}
 	return result
@@ -44,7 +49,7 @@ func (s *Server) handleListMySessions(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusServiceUnavailable, "failed to list sessions")
 		return
 	}
-	writeJSON(w, http.StatusOK, mapBrowserSessions(items, authenticated.Data.PublicID))
+	writeJSON(w, http.StatusOK, mapBrowserSessions(items, authenticated.Data.PublicID, s.settingsMgr.Lifecycle()))
 }
 
 func (s *Server) handleDeleteMySession(w http.ResponseWriter, r *http.Request) {
@@ -99,7 +104,7 @@ func (s *Server) handleAdminListUserSessions(w http.ResponseWriter, r *http.Requ
 	if actor != nil && actor.ID == id && authenticated != nil {
 		currentPublicID = authenticated.Data.PublicID
 	}
-	writeJSON(w, http.StatusOK, mapBrowserSessions(items, currentPublicID))
+	writeJSON(w, http.StatusOK, mapBrowserSessions(items, currentPublicID, s.settingsMgr.Lifecycle()))
 }
 
 func (s *Server) handleAdminDeleteUserSession(w http.ResponseWriter, r *http.Request) {

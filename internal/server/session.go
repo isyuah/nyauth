@@ -8,6 +8,7 @@ import (
 
 	"github.com/nyasharp/nyauth/internal/crypto"
 	"github.com/nyasharp/nyauth/internal/session"
+	"github.com/nyasharp/nyauth/internal/settings"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
 
@@ -19,10 +20,15 @@ const mfaPendingTTL = 5 * time.Minute
 type SessionMiddleware struct {
 	sessionStore *session.Store
 	secureCookie bool
+	settings     *settings.Manager
 }
 
-func NewSessionMiddleware(store *session.Store, secureCookie bool) *SessionMiddleware {
-	return &SessionMiddleware{sessionStore: store, secureCookie: secureCookie}
+func NewSessionMiddleware(store *session.Store, secureCookie bool, managers ...*settings.Manager) *SessionMiddleware {
+	var manager *settings.Manager
+	if len(managers) > 0 {
+		manager = managers[0]
+	}
+	return &SessionMiddleware{sessionStore: store, secureCookie: secureCookie, settings: manager}
 }
 
 type AuthenticatedSession struct {
@@ -41,15 +47,18 @@ func (m *SessionMiddleware) CreateSession(w http.ResponseWriter, r *http.Request
 		return nil, err
 	}
 	now := time.Now().UTC()
+	policy := m.lifecycleSnapshot()
+	ttl := policy.Value.SessionAbsoluteDuration()
 	data := &session.SessionData{
 		UserID: user.ID.String(), Username: user.Username, AuthVersion: user.AuthVersion, SessionVersion: user.SessionVersion,
 		IPAddress: requestIP(r), UserAgent: truncateAuditValue(r.UserAgent(), maxAuditUserAgentLength),
-		CreatedAt: now, LastSeenAt: now, AuthenticatedAt: now,
+		CreatedAt: now, LastSeenAt: now, AuthenticatedAt: now, PolicyRevision: policy.Revision,
 	}
-	if err := m.sessionStore.SaveSession(r.Context(), sessionID, data, sessionTTL); err != nil {
+	m.applyDeadlines(data, policy.Value)
+	if err := m.sessionStore.SaveSession(r.Context(), sessionID, data, ttl); err != nil {
 		return nil, err
 	}
-	m.setCookie(w, sessionID, int(sessionTTL.Seconds()))
+	m.setCookieUntil(w, sessionID, data.SessionExpiresAt, now)
 	return &AuthenticatedSession{ID: sessionID, Data: data}, nil
 }
 
@@ -74,15 +83,23 @@ func (m *SessionMiddleware) MarkReauthenticated(r *http.Request, user *models.Us
 	expectedAuthVersion := authenticated.Data.AuthVersion
 	expectedSessionVersion := authenticated.Data.SessionVersion
 	now := time.Now().UTC()
+	policy := m.lifecycleSnapshot()
 	updatedData := *authenticated.Data
 	updatedData.AuthenticatedAt = now
 	updatedData.LastSeenAt = now
 	updatedData.Username = user.Username
 	updatedData.AuthVersion = user.AuthVersion
 	updatedData.SessionVersion = user.SessionVersion
+	updatedData.PolicyRevision = policy.Revision
+	m.applyDeadlines(&updatedData, policy.Value)
+	remaining := updatedData.SessionExpiresAt.Sub(now)
+	if remaining <= 0 {
+		_ = m.sessionStore.DeleteSession(r.Context(), authenticated.ID)
+		return nil, session.ErrNotFound
+	}
 	if err := m.sessionStore.UpdateSession(
 		r.Context(), authenticated.ID, &updatedData,
-		expectedAuthVersion, expectedSessionVersion, sessionTTL,
+		expectedAuthVersion, expectedSessionVersion, remaining,
 	); err != nil {
 		return nil, err
 	}
@@ -97,7 +114,7 @@ func (m *SessionMiddleware) DestroySession(w http.ResponseWriter, r *http.Reques
 	m.clearCookie(w)
 }
 
-func (m *SessionMiddleware) GetSession(r *http.Request) (*AuthenticatedSession, error) {
+func (m *SessionMiddleware) GetSession(w http.ResponseWriter, r *http.Request) (*AuthenticatedSession, error) {
 	cookie, err := r.Cookie(sessionCookieName)
 	if err != nil {
 		return nil, err
@@ -106,8 +123,29 @@ func (m *SessionMiddleware) GetSession(r *http.Request) (*AuthenticatedSession, 
 	if err != nil {
 		return nil, err
 	}
-	if data.LastSeenAt.IsZero() || time.Since(data.LastSeenAt) >= 5*time.Minute {
-		now := time.Now().UTC()
+	now := time.Now().UTC()
+	policy := m.lifecycleSnapshot()
+	m.applyDeadlines(data, policy.Value)
+	remaining := data.SessionExpiresAt.Sub(now)
+	if remaining <= 0 {
+		_ = m.sessionStore.DeleteSession(r.Context(), cookie.Value)
+		m.clearCookie(w)
+		return nil, session.ErrNotFound
+	}
+	shouldTouch := data.LastSeenAt.IsZero() || now.Sub(data.LastSeenAt) >= 5*time.Minute
+	if data.PolicyRevision != policy.Revision {
+		expectedAuthVersion, expectedSessionVersion := data.AuthVersion, data.SessionVersion
+		data.PolicyRevision = policy.Revision
+		if shouldTouch {
+			data.LastSeenAt = now
+		}
+		if err := m.sessionStore.UpdateSession(
+			r.Context(), cookie.Value, data, expectedAuthVersion, expectedSessionVersion, remaining,
+		); err != nil {
+			return nil, err
+		}
+		m.setCookieUntil(w, cookie.Value, data.SessionExpiresAt, now)
+	} else if shouldTouch {
 		if err := m.sessionStore.TouchSession(r.Context(), cookie.Value, now); err == nil {
 			data.LastSeenAt = now
 		}
@@ -165,6 +203,18 @@ func (m *SessionMiddleware) DestroyMFAPending(w http.ResponseWriter, r *http.Req
 func (m *SessionMiddleware) setCookie(w http.ResponseWriter, value string, maxAge int) {
 	m.setNamedCookie(w, sessionCookieName, value, maxAge)
 }
+
+func (m *SessionMiddleware) setCookieUntil(w http.ResponseWriter, value string, expiresAt, now time.Time) {
+	maxAge := int((expiresAt.Sub(now) + time.Second - 1) / time.Second)
+	if maxAge < 1 {
+		maxAge = 1
+	}
+	http.SetCookie(w, &http.Cookie{
+		Name: sessionCookieName, Value: value, Path: "/", HttpOnly: true,
+		Secure: m.secureCookie, SameSite: http.SameSiteLaxMode,
+		MaxAge: maxAge, Expires: expiresAt,
+	})
+}
 func (m *SessionMiddleware) clearCookie(w http.ResponseWriter) {
 	m.clearNamedCookie(w, sessionCookieName)
 }
@@ -173,6 +223,18 @@ func (m *SessionMiddleware) setNamedCookie(w http.ResponseWriter, name, value st
 }
 func (m *SessionMiddleware) clearNamedCookie(w http.ResponseWriter, name string) {
 	http.SetCookie(w, &http.Cookie{Name: name, Value: "", Path: "/", HttpOnly: true, Secure: m.secureCookie, SameSite: http.SameSiteLaxMode, MaxAge: -1, Expires: time.Unix(1, 0)})
+}
+
+func (m *SessionMiddleware) lifecycleSnapshot() settings.Versioned[settings.Lifecycle] {
+	if m.settings == nil {
+		return settings.Versioned[settings.Lifecycle]{Value: settings.DefaultLifecycle(365)}
+	}
+	return m.settings.LifecycleSnapshot()
+}
+
+func (m *SessionMiddleware) applyDeadlines(data *session.SessionData, lifecycle settings.Lifecycle) {
+	data.SessionExpiresAt = data.CreatedAt.Add(lifecycle.SessionAbsoluteDuration())
+	data.RecentAuthenticationExpiresAt = data.AuthenticatedAt.Add(lifecycle.RecentAuthenticationDuration())
 }
 
 type contextKey string

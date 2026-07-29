@@ -20,12 +20,17 @@ import (
 	"github.com/nyasharp/nyauth/internal/client"
 	"github.com/nyasharp/nyauth/internal/identity"
 	"github.com/nyasharp/nyauth/internal/session"
+	"github.com/nyasharp/nyauth/internal/settings"
 	"github.com/nyasharp/nyauth/internal/user"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
 
 const maxRequestBody = 1 << 20
-const maxClientsPerUser = 10
+
+type clientQuotaPage[T any] struct {
+	*models.PaginatedResponse[T]
+	*client.OwnerQuota
+}
 
 func decodeJSON(w http.ResponseWriter, r *http.Request, target any) error {
 	r.Body = http.MaxBytesReader(w, r.Body, maxRequestBody)
@@ -49,10 +54,19 @@ func writeAPIError(w http.ResponseWriter, status int, message string) {
 }
 func sessionResponse(current *models.User, data *session.SessionData) *models.SessionResponse {
 	authenticatedAt := data.AuthenticatedAt
+	sessionExpiresAt := data.SessionExpiresAt
+	recentAuthenticationExpiresAt := data.RecentAuthenticationExpiresAt
+	if sessionExpiresAt.IsZero() || recentAuthenticationExpiresAt.IsZero() {
+		fallback := settings.DefaultLifecycle(365)
+		sessionExpiresAt = data.CreatedAt.Add(fallback.SessionAbsoluteDuration())
+		recentAuthenticationExpiresAt = data.AuthenticatedAt.Add(fallback.RecentAuthenticationDuration())
+	}
 	return &models.SessionResponse{
 		User: current, CSRFToken: data.CSRFToken, MustChangePassword: current.MustChangePassword,
 		HasPassword: current.PasswordHash != nil, EmailVerified: current.EmailVerifiedAt != nil,
-		AuthenticatedAt: &authenticatedAt,
+		AuthenticatedAt:               &authenticatedAt,
+		SessionExpiresAt:              &sessionExpiresAt,
+		RecentAuthenticationExpiresAt: &recentAuthenticationExpiresAt,
 	}
 }
 
@@ -458,7 +472,12 @@ func (s *Server) handleListMyClients(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusInternalServerError, "failed to list applications")
 		return
 	}
-	writeJSON(w, http.StatusOK, result)
+	quota, err := s.clientService.GetOwnerQuota(r.Context(), current.ID.String())
+	if err != nil {
+		writeAPIError(w, http.StatusInternalServerError, "failed to load application quota")
+		return
+	}
+	writeJSON(w, http.StatusOK, clientQuotaPage[models.OAuthClient]{PaginatedResponse: result, OwnerQuota: quota})
 }
 
 func (s *Server) handleRotateMyClientSecret(w http.ResponseWriter, r *http.Request) {
@@ -557,11 +576,11 @@ func (s *Server) handleCreateMyClient(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	result, err := s.clientService.CreateForOwner(r.Context(), current.ID.String(), maxClientsPerUser, request)
+	result, err := s.clientService.CreateForOwner(r.Context(), current.ID.String(), request)
 	if err != nil {
 		switch {
 		case errors.Is(err, client.ErrClientQuotaExceeded):
-			writeAPIError(w, http.StatusForbidden, fmt.Sprintf("application limit reached (%d)", maxClientsPerUser))
+			writeAPIError(w, http.StatusForbidden, "application limit reached")
 		case client.IsInvalidClient(err):
 			writeAPIError(w, http.StatusBadRequest, err.Error())
 		default:

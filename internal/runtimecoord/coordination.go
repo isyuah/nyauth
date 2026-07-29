@@ -29,6 +29,10 @@ const (
 	// "at least one active administrator" invariant without blocking ordinary
 	// writes to the users table.
 	adminInvariantLockKey int64 = 0x4e594141444d
+	// clientQuotaLockKey separates global client-quota policy changes from
+	// ownership creation and transfer transactions. Per-user serialization is
+	// still provided by the users row lock.
+	clientQuotaLockKey int64 = 0x4e594151554f
 )
 
 var (
@@ -86,6 +90,25 @@ func LockSecurityExclusive(ctx context.Context, tx pgx.Tx) error {
 func LockAdminInvariant(ctx context.Context, tx pgx.Tx) error {
 	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, adminInvariantLockKey); err != nil {
 		return fmt.Errorf("locking administrator invariant: %w", err)
+	}
+	return nil
+}
+
+// LockClientQuotaShared lets independent users create or receive clients in
+// parallel while preventing a global quota change from committing across an
+// in-flight transaction that read the previous limit.
+func LockClientQuotaShared(ctx context.Context, tx pgx.Tx) error {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock_shared($1)`, clientQuotaLockKey); err != nil {
+		return fmt.Errorf("locking client quota policy shared: %w", err)
+	}
+	return nil
+}
+
+// LockClientQuotaExclusive establishes the commit boundary for changes to the
+// deployment-wide owned-client limit.
+func LockClientQuotaExclusive(ctx context.Context, tx pgx.Tx) error {
+	if _, err := tx.Exec(ctx, `SELECT pg_advisory_xact_lock($1)`, clientQuotaLockKey); err != nil {
+		return fmt.Errorf("locking client quota policy exclusive: %w", err)
 	}
 	return nil
 }

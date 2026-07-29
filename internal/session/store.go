@@ -74,18 +74,21 @@ type TokenData struct {
 	AuthorizationIssuedAt int64    `json:"authorization_issued_at,omitempty"`
 }
 type SessionData struct {
-	PublicID        string    `json:"public_id"`
-	UserID          string    `json:"user_id"`
-	Username        string    `json:"username"`
-	AuthVersion     int64     `json:"auth_version"`
-	SessionVersion  int64     `json:"session_version"`
-	CSRFToken       string    `json:"csrf_token"`
-	UserKey         string    `json:"user_key,omitempty"`
-	IPAddress       string    `json:"ip_address,omitempty"`
-	UserAgent       string    `json:"user_agent,omitempty"`
-	CreatedAt       time.Time `json:"created_at"`
-	LastSeenAt      time.Time `json:"last_seen_at"`
-	AuthenticatedAt time.Time `json:"authenticated_at"`
+	PublicID                      string    `json:"public_id"`
+	UserID                        string    `json:"user_id"`
+	Username                      string    `json:"username"`
+	AuthVersion                   int64     `json:"auth_version"`
+	SessionVersion                int64     `json:"session_version"`
+	CSRFToken                     string    `json:"csrf_token"`
+	UserKey                       string    `json:"user_key,omitempty"`
+	IPAddress                     string    `json:"ip_address,omitempty"`
+	UserAgent                     string    `json:"user_agent,omitempty"`
+	CreatedAt                     time.Time `json:"created_at"`
+	LastSeenAt                    time.Time `json:"last_seen_at"`
+	AuthenticatedAt               time.Time `json:"authenticated_at"`
+	PolicyRevision                int64     `json:"policy_revision,omitempty"`
+	SessionExpiresAt              time.Time `json:"-"`
+	RecentAuthenticationExpiresAt time.Time `json:"-"`
 }
 type ConsentData struct {
 	ClientID        string   `json:"client_id"`

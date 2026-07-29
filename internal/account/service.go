@@ -41,30 +41,32 @@ type serviceStore interface {
 }
 
 type ServiceOptions struct {
-	PublicBaseURL       string
-	ActiveKeyID         string
-	MasterKeys          map[string][]byte
-	PasswordResetTTL    time.Duration
-	EmailActionTTL      time.Duration
-	EmailOutboxTTL      time.Duration
-	ReauthenticationTTL time.Duration
-	Clock               func() time.Time
-	GenerateToken       func() (string, error)
-	OnEmailVerified     func(context.Context, time.Duration)
+	PublicBaseURL               string
+	ActiveKeyID                 string
+	MasterKeys                  map[string][]byte
+	PasswordResetTTL            time.Duration
+	EmailActionTTL              time.Duration
+	EmailOutboxTTL              time.Duration
+	ReauthenticationTTL         time.Duration
+	ReauthenticationTTLProvider func() time.Duration
+	Clock                       func() time.Time
+	GenerateToken               func() (string, error)
+	OnEmailVerified             func(context.Context, time.Duration)
 }
 
 type Service struct {
-	store               serviceStore
-	publicBaseURL       atomic.Pointer[url.URL]
-	activeKeyID         string
-	masterKeys          map[string][]byte
-	passwordResetTTL    time.Duration
-	emailActionTTL      time.Duration
-	emailOutboxTTL      time.Duration
-	reauthenticationTTL time.Duration
-	clock               func() time.Time
-	generateToken       func() (string, error)
-	onEmailVerified     func(context.Context, time.Duration)
+	store                       serviceStore
+	publicBaseURL               atomic.Pointer[url.URL]
+	activeKeyID                 string
+	masterKeys                  map[string][]byte
+	passwordResetTTL            time.Duration
+	emailActionTTL              time.Duration
+	emailOutboxTTL              time.Duration
+	reauthenticationTTL         time.Duration
+	reauthenticationTTLProvider func() time.Duration
+	clock                       func() time.Time
+	generateToken               func() (string, error)
+	onEmailVerified             func(context.Context, time.Duration)
 }
 
 func NewService(store *Store, options ServiceOptions) (*Service, error) {
@@ -117,7 +119,8 @@ func newService(store serviceStore, options ServiceOptions) (*Service, error) {
 		store: store, activeKeyID: options.ActiveKeyID, masterKeys: keys,
 		passwordResetTTL: options.PasswordResetTTL, emailActionTTL: options.EmailActionTTL,
 		emailOutboxTTL: options.EmailOutboxTTL, reauthenticationTTL: options.ReauthenticationTTL,
-		clock: options.Clock, generateToken: options.GenerateToken, onEmailVerified: options.OnEmailVerified,
+		reauthenticationTTLProvider: options.ReauthenticationTTLProvider,
+		clock:                       options.Clock, generateToken: options.GenerateToken, onEmailVerified: options.OnEmailVerified,
 	}
 	service.publicBaseURL.Store(baseURL)
 	return service, nil
@@ -284,7 +287,7 @@ func (s *Service) ConfirmEmailVerification(ctx context.Context, rawToken string)
 
 func (s *Service) RequestEmailChange(ctx context.Context, userID uuid.UUID, newEmail string, authenticatedAt time.Time, metadata RequestMetadata) error {
 	now := s.clock().UTC()
-	if authenticatedAt.IsZero() || authenticatedAt.After(now.Add(time.Minute)) || now.Sub(authenticatedAt) > s.reauthenticationTTL {
+	if authenticatedAt.IsZero() || authenticatedAt.After(now.Add(time.Minute)) || now.Sub(authenticatedAt) > s.currentReauthenticationTTL() {
 		return ErrRecentAuthenticationRequired
 	}
 	normalized, err := normalizeEmail(newEmail)
@@ -316,6 +319,15 @@ func (s *Service) RequestEmailChange(ctx context.Context, userID uuid.UUID, newE
 		return ErrEmailInUse
 	}
 	return s.createActionEmail(ctx, accountUser, ActionEmailChange, actionClaims{Email: normalized, PreviousEmail: previousEmail}, metadata, s.clock().UTC().Add(s.emailActionTTL))
+}
+
+func (s *Service) currentReauthenticationTTL() time.Duration {
+	if s.reauthenticationTTLProvider != nil {
+		if value := s.reauthenticationTTLProvider(); value > 0 {
+			return value
+		}
+	}
+	return s.reauthenticationTTL
 }
 
 func (s *Service) ConfirmEmailChange(ctx context.Context, rawToken string) (*models.User, error) {

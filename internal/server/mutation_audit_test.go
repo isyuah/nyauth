@@ -172,8 +172,12 @@ func TestDescribeRegistrationAdministrationMutations(t *testing.T) {
 		riskLevel               string
 		successAlreadyAudited   bool
 	}{
-		{http.MethodPut, "/api/admin/settings/registration", "/api/admin/settings/registration", "", models.AuditSettingsUpdated, "settings", "high", false},
+		{http.MethodPut, "/api/admin/settings/branding", "/api/admin/settings/branding", "", models.AuditSettingsUpdated, "settings", "medium", true},
+		{http.MethodPut, "/api/admin/settings/registration", "/api/admin/settings/registration", "", models.AuditSettingsUpdated, "settings", "high", true},
 		{http.MethodPut, "/api/admin/settings/security", "/api/admin/settings/security", "", models.AuditSettingsUpdated, "settings", "high", true},
+		{http.MethodPut, "/api/admin/settings/protection", "/api/admin/settings/protection", "", models.AuditSettingsUpdated, "settings", "critical", true},
+		{http.MethodPut, "/api/admin/settings/lifecycle", "/api/admin/settings/lifecycle", "", models.AuditSettingsUpdated, "settings", "high", true},
+		{http.MethodPut, "/api/admin/users/user-1/client-quota", "/api/admin/users/{id}/client-quota", "user-1", models.AuditUserClientQuotaUpdated, "user", "medium", true},
 		{http.MethodPost, "/api/admin/invites", "/api/admin/invites", "", models.AuditInviteCreated, "invite", "medium", true},
 		{http.MethodDelete, "/api/admin/invites/invite-1", "/api/admin/invites/{id}", "invite-1", models.AuditInviteRevoked, "invite", "medium", true},
 	} {

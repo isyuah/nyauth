@@ -5,23 +5,27 @@
   import PageHeader from '$lib/components/layout/PageHeader.svelte';
   import ResourceState from '$lib/components/ui/ResourceState.svelte';
   import StatusBadge from '$lib/components/data-display/StatusBadge.svelte';
-  import { Activity, Database, HardDrive, KeyRound, Mail, Network, Server } from 'lucide-svelte';
+  import { Activity, AlertTriangle, Database, HardDrive, KeyRound, Mail, Network, Server } from 'lucide-svelte';
 
   let systemStatus = $state<SystemStatus | null>(null);
   let loading = $state(true);
   let error = $state('');
   let operatingState = $derived(systemStatus?.operating_state ?? $serviceStatusStore.value.status);
 
-  async function loadSystemStatus() {
-    loading = true;
-    error = '';
+  async function loadSystemStatus(silent = false) {
+    if (!silent) {
+      loading = true;
+      error = '';
+    }
     try {
       systemStatus = await api.admin.getSystemStatus();
     } catch (cause) {
-      systemStatus = null;
-      error = cause instanceof Error ? cause.message : '系统状态加载失败';
+      if (!silent) {
+        systemStatus = null;
+        error = cause instanceof Error ? cause.message : '系统状态加载失败';
+      }
     } finally {
-      loading = false;
+      if (!silent) loading = false;
     }
   }
 
@@ -34,7 +38,21 @@
     return Number.isNaN(date.getTime()) ? value : date.toLocaleString('zh-CN');
   }
 
-  onMount(loadSystemStatus);
+  const rateLimitLabels: Record<string, string> = { login: '登录', account: '账户操作', avatar: '头像', mail: 'SMTP 管理' };
+
+  onMount(() => {
+    void loadSystemStatus();
+    const refreshWhenFocused = () => void loadSystemStatus(true);
+    const refreshWhenVisible = () => {
+      if (document.visibilityState === 'visible') void loadSystemStatus(true);
+    };
+    window.addEventListener('focus', refreshWhenFocused);
+    document.addEventListener('visibilitychange', refreshWhenVisible);
+    return () => {
+      window.removeEventListener('focus', refreshWhenFocused);
+      document.removeEventListener('visibilitychange', refreshWhenVisible);
+    };
+  });
 </script>
 
 <svelte:head><title>系统状态 - Nya</title></svelte:head>
@@ -52,6 +70,11 @@
   {#snippet children()}
     {#if systemStatus}
       <div class="space-y-4">
+        {#if systemStatus.disabled_rate_limit_groups.length > 0}
+          <section class="rounded-nya-card border border-nya-warning/30 bg-nya-warning-soft p-4 text-nya-warning" role="status">
+            <div class="flex items-start gap-2"><AlertTriangle size={18} class="mt-0.5 shrink-0" /><div><h2 class="text-body-medium font-semibold">部分访问保护已关闭</h2><p class="mt-1 text-small">{systemStatus.disabled_rate_limit_groups.map((group) => rateLimitLabels[group] || group).join('、')}限流当前不生效。此状态不会改变 readiness。</p><a href="/admin/settings/protection" class="mt-2 inline-block text-small font-semibold underline">查看访问保护设置</a></div></div>
+          </section>
+        {/if}
         <section class="rounded-nya-card border border-nya-border bg-nya-surface p-5 shadow-nya-card">
           <div class="flex flex-wrap items-start justify-between gap-4">
             <div class="flex items-start gap-3">

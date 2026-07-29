@@ -7,6 +7,8 @@
     value = $bindable(''),
     type = 'text',
     error = '',
+    hint = '',
+    help = '',
     disabled = false,
     readonly = false,
     mono = false,
@@ -22,6 +24,8 @@
     value?: string;
     type?: string;
     error?: string;
+    hint?: string;
+    help?: string;
     disabled?: boolean;
     readonly?: boolean;
     mono?: boolean;
@@ -35,10 +39,10 @@
 
   const componentId = $props.id();
   let resolvedId = $derived(id || `${componentId}-input`);
-  let describedBy = $derived(error ? `${resolvedId}-error` : undefined);
+  let describedBy = $derived(error ? `${resolvedId}-error` : hint ? `${resolvedId}-hint` : undefined);
 </script>
 
-<FormField id={resolvedId} {label} {required} {error}>
+<FormField id={resolvedId} {label} {required} {error} {hint} {help}>
   {#snippet children()}
   <input
     id={resolvedId}

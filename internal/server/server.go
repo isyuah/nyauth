@@ -78,6 +78,7 @@ type Server struct {
 	accountLimiter            *AccountActionLimiter
 	mailSettingsLimiter       *MailSettingsLimiter
 	operationsSettingsLimiter *OperationsSettingsLimiter
+	policySettingsLimiter     *PolicySettingsLimiter
 	avatarLimiter             *AvatarLimiter
 	mailManager               *mailruntime.Manager
 	mfaService                *mfa.Service
@@ -146,7 +147,29 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 	if err != nil {
 		return nil, fmt.Errorf("configuring MFA service: %w", err)
 	}
-	s := &Server{cfg: cfg, db: db, rdb: rdb, webFS: webFS, trustedProxies: parseTrustedProxyCIDRs(cfg.Server.TrustedProxyCIDRs), userService: userService, clientService: clientService, providerMgr: providerMgr, identityStore: identityStore, sessionStore: sessionStore, tokenService: tokenService, jwkManager: jwkManager, authHandler: authHandler, consentHandler: consentHandler, sessionMiddleware: NewSessionMiddleware(sessionStore, cfg.Server.SecureCookie), loginLimiter: NewLoginLimiter(rdb), accountLimiter: NewAccountActionLimiter(rdb), mailSettingsLimiter: NewMailSettingsLimiter(rdb), operationsSettingsLimiter: NewOperationsSettingsLimiter(rdb), avatarLimiter: NewAvatarLimiter(rdb), auditStore: audit.NewStore(db), authorizationStore: authorizationStore, statsHandler: stats.NewHandler(db, rdb), settingsMgr: settings.NewManagerForRP(db, settings.Branding{Title: cfg.Web.Title, LogoURL: cfg.Web.LogoURL}, passkeyRPID), inviteStore: invite.NewStore(db), registrationStore: registration.NewStore(db), telemetry: telemetryRuntime, mfaService: mfaService, avatarService: avatarService, avatarRepository: avatarRepository, avatarStore: avatarStore, avatarProcessing: make(chan struct{}, 1)}
+	settingsMgr := settings.NewManagerForRP(
+		db, settings.Branding{Title: cfg.Web.Title, LogoURL: cfg.Web.LogoURL}, passkeyRPID,
+	)
+	settingsMgr.SetAuditRetentionFallback(cfg.Audit.Retention)
+	s := &Server{
+		cfg: cfg, db: db, rdb: rdb, webFS: webFS,
+		trustedProxies: parseTrustedProxyCIDRs(cfg.Server.TrustedProxyCIDRs),
+		userService:    userService, clientService: clientService, providerMgr: providerMgr,
+		identityStore: identityStore, sessionStore: sessionStore, tokenService: tokenService,
+		jwkManager: jwkManager, authHandler: authHandler, consentHandler: consentHandler,
+		sessionMiddleware:         NewSessionMiddleware(sessionStore, cfg.Server.SecureCookie, settingsMgr),
+		loginLimiter:              NewLoginLimiter(rdb, settingsMgr),
+		accountLimiter:            NewAccountActionLimiter(rdb, settingsMgr),
+		mailSettingsLimiter:       NewMailSettingsLimiter(rdb, settingsMgr),
+		operationsSettingsLimiter: NewOperationsSettingsLimiter(rdb),
+		policySettingsLimiter:     NewPolicySettingsLimiter(rdb),
+		avatarLimiter:             NewAvatarLimiter(rdb, settingsMgr), auditStore: audit.NewStore(db),
+		authorizationStore: authorizationStore, statsHandler: stats.NewHandler(db, rdb),
+		settingsMgr: settingsMgr, inviteStore: invite.NewStore(db),
+		registrationStore: registration.NewStore(db), telemetry: telemetryRuntime,
+		mfaService: mfaService, avatarService: avatarService, avatarRepository: avatarRepository,
+		avatarStore: avatarStore, avatarProcessing: make(chan struct{}, 1),
+	}
 	serviceControlStore, err := servicecontrol.NewStore(db)
 	if err != nil {
 		return nil, fmt.Errorf("configuring runtime service control storage: %w", err)
@@ -169,6 +192,9 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 	}
 	if err := telemetryRuntime.BindPoolObservers(db, rdb); err != nil {
 		return nil, fmt.Errorf("configuring dependency pool metrics: %w", err)
+	}
+	if err := telemetryRuntime.BindPolicySettingsObservers(settingsMgr); err != nil {
+		return nil, fmt.Errorf("configuring runtime policy metrics: %w", err)
 	}
 	authHandler.SetGrantMetricSink(telemetryRuntime.RecordOAuthGrant)
 	providerMgr.SetTelemetrySink(telemetryRuntime.RecordProviderEvent)
@@ -253,6 +279,9 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 		PublicBaseURL: publicBaseURL, ActiveKeyID: "primary",
 		MasterKeys:      map[string][]byte{"primary": cfg.Auth.MasterKey},
 		OnEmailVerified: telemetryRuntime.RecordEmailVerificationDuration,
+		ReauthenticationTTLProvider: func() time.Duration {
+			return settingsMgr.Lifecycle().RecentAuthenticationDuration()
+		},
 	})
 	if err != nil {
 		return nil, fmt.Errorf("configuring account recovery: %w", err)
@@ -422,11 +451,16 @@ func (s *Server) buildRouter() *chi.Mux {
 			r.Get("/admin/system/status", s.handleSystemStatus)
 			r.Get("/admin/settings/operations", s.handleGetOperationsSettings)
 			r.Put("/admin/settings/operations", s.handleUpdateOperationsSettings)
-			r.With(adminMutations).Put("/admin/branding", s.handleUpdateBranding)
+			r.Get("/admin/settings/branding", s.handleGetBrandingSettings)
+			r.With(adminMutations).Put("/admin/settings/branding", s.handleUpdateBranding)
 			r.Get("/admin/settings/registration", s.handleGetRegistrationSettings)
 			r.With(adminMutations).Put("/admin/settings/registration", s.handleUpdateRegistrationSettings)
 			r.Get("/admin/settings/security", s.handleGetSecuritySettings)
 			r.With(adminMutations).Put("/admin/settings/security", s.handleUpdateSecuritySettings)
+			r.Get("/admin/settings/protection", s.handleGetProtectionSettings)
+			r.With(adminMutations).Put("/admin/settings/protection", s.handleUpdateProtectionSettings)
+			r.Get("/admin/settings/lifecycle", s.handleGetLifecycleSettings)
+			r.With(adminMutations).Put("/admin/settings/lifecycle", s.handleUpdateLifecycleSettings)
 			r.Get("/admin/settings/mail", s.handleGetMailSettings)
 			r.With(adminMutations).Put("/admin/settings/mail/candidate", s.handleSaveMailCandidate)
 			r.With(adminMutations).Post("/admin/settings/mail/candidate/test", s.handleTestMailCandidate)
@@ -452,6 +486,7 @@ func (s *Server) buildRouter() *chi.Mux {
 			r.Get("/admin/users/{id}/security", s.handleAdminUserSecurity)
 			r.Get("/admin/users/{id}/authorizations", s.handleAdminUserAuthorizations)
 			r.Get("/admin/users/{id}/clients", s.handleAdminUserClients)
+			r.With(adminMutations).Put("/admin/users/{id}/client-quota", s.handleUpdateAdminUserClientQuota)
 			r.Get("/admin/users/{id}/activity", s.handleAdminUserActivity)
 			r.With(adminMutations).Put("/admin/users/{id}", s.handleAdminUpdateUser)
 			r.With(adminMutations).Delete("/admin/users/{id}", userHandler.Delete)

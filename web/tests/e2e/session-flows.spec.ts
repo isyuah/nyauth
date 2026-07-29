@@ -193,7 +193,9 @@ const externalProvider = {
 
 const systemStatus = {
   status: 'ok',
+  operating_state: 'normal',
   version: '0.3.0-test',
+  disabled_rate_limit_groups: [],
   schema: {
     status: 'ok',
     version: 2,
@@ -432,13 +434,16 @@ function adminClientSummaryFor(client: typeof oauthClient): AdminUserClientSumma
 }
 
 function sessionResponse(state: MockState) {
+  const authenticatedAt = state.authenticatedAt || '2026-01-02T00:00:00Z';
   return {
     user: { ...user, role: state.role },
     csrf_token: state.csrfToken,
     must_change_password: state.mustChangePassword,
     has_password: state.hasPassword ?? true,
     email_verified: true,
-    authenticated_at: state.authenticatedAt || '2026-01-02T00:00:00Z',
+    authenticated_at: authenticatedAt,
+    session_expires_at: new Date(Date.parse(authenticatedAt) + 24 * 60 * 60_000).toISOString(),
+    recent_authentication_expires_at: new Date(Date.parse(authenticatedAt) + 10 * 60_000).toISOString(),
   };
 }
 
@@ -670,7 +675,16 @@ async function installAPIMocks(page: Page, state: MockState) {
     }
 
     if (path === '/api/my/clients') {
-      await fulfillJSON(route, 200, { items: [oauthClient], total: 1, page: 1, page_size: 50, total_pages: 1 });
+      await fulfillJSON(route, 200, {
+        items: [oauthClient],
+        total: 1,
+        page: 1,
+        page_size: 50,
+        total_pages: 1,
+        quota_used: 1,
+        quota_limit: 10,
+        quota_override: null,
+      });
       return;
     }
 
@@ -1417,7 +1431,7 @@ test('password reauthentication refreshes the session and CSRF token', async ({ 
   await dialog.getByRole('button', { name: '使用密码验证' }).click();
 
   await expect(dialog).toBeHidden();
-  await expect(page.getByText('认证有效')).toBeVisible();
+  await expect(page.getByText('认证有效', { exact: true })).toBeVisible();
   expect(state.reauthCSRF).toBe('csrf-user');
   expect(state.reauthBody).toEqual({ password: 'current-password' });
 });
@@ -1477,7 +1491,7 @@ test('password reauthentication completes MFA inline and promotes the formal CSR
   await dialog.getByRole('button', { name: '完成重新认证' }).click();
 
   await expect(dialog).toBeHidden();
-  await expect(page.getByText('认证有效')).toBeVisible();
+  await expect(page.getByText('认证有效', { exact: true })).toBeVisible();
   await page.goto('/profile/sessions');
   await page.getByRole('button', { name: '退出其他设备' }).click();
   const revokeDialog = page.getByRole('dialog');
@@ -2783,10 +2797,14 @@ test('runtime branding propagates to the sidebar and saves with CSRF', async ({ 
     systemStatus,
   });
   await page.route('**/api/branding', (route) => fulfillJSON(route, 200, { title: 'Acme ID', logo_url: '' }));
-  await page.route('**/api/admin/branding', async (route) => {
+  await page.route('**/api/admin/settings/branding', async (route) => {
+    if (route.request().method() === 'GET') {
+      await fulfillJSON(route, 200, { revision: 1, title: 'Acme ID', logo_url: '' });
+      return;
+    }
     updateCSRF = route.request().headers()['x-csrf-token'] ?? null;
     updateBody = route.request().postDataJSON();
-    await fulfillJSON(route, 200, { title: 'Acme SSO', logo_url: 'https://cdn.example.com/logo.png' });
+    await fulfillJSON(route, 200, { revision: 2, title: 'Acme SSO', logo_url: 'https://cdn.example.com/logo.png' });
   });
 
   await page.goto('/admin/settings/branding');
@@ -2803,7 +2821,7 @@ test('runtime branding propagates to the sidebar and saves with CSRF', async ({ 
   await page.getByRole('button', { name: '保存品牌设置' }).click();
 
   await expect(page.getByText('品牌设置已保存，立即对所有实例生效。')).toBeVisible();
-  expect(updateBody).toEqual({ title: 'Acme SSO', logo_url: 'https://cdn.example.com/logo.png' });
+  expect(updateBody).toEqual({ expected_revision: 1, title: 'Acme SSO', logo_url: 'https://cdn.example.com/logo.png' });
   expect(updateCSRF).toBe('csrf-brand');
   await expect(sidebar.getByText('Acme SSO')).toBeVisible();
 });

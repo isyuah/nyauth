@@ -340,7 +340,7 @@
       {/if}
 
       <div class="flex flex-wrap items-center justify-between gap-3">
-        <p class="text-small text-nya-text-tertiary">注册和删除要求最近 10 分钟内完成身份验证。</p>
+        <p class="text-small text-nya-text-tertiary">注册和删除要求在当前近期认证有效期内完成身份验证。</p>
         <Button variant="primary" requiredCapability="account_mutations" disabled={!status?.passkeys_available || actionLoading} onclick={openRegistration}><Plus size={16} /> 注册 Passkey</Button>
       </div>
       {#if status && !status.passkeys_available}<p class="text-small text-nya-warning">管理员当前已关闭新的 Passkey 注册；已有凭据仍可正常使用。</p>{/if}
@@ -383,7 +383,7 @@
 <ReauthenticationDialog
   bind:open={reauthOpen}
   {returnTo}
-  description="注册或删除 Passkey 前，需要验证最近 10 分钟内的身份"
+  description="注册或删除 Passkey 前，需要验证近期身份"
   onauthenticated={retryProtectedAction}
   onbeforeprovider={persistPendingAction}
 />
