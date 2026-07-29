@@ -84,10 +84,12 @@ type SessionData struct {
 	IPAddress                     string    `json:"ip_address,omitempty"`
 	UserAgent                     string    `json:"user_agent,omitempty"`
 	CreatedAt                     time.Time `json:"created_at"`
+	CreatedAtUnixMilli            int64     `json:"created_at_unix_milli,omitempty"`
 	LastSeenAt                    time.Time `json:"last_seen_at"`
 	AuthenticatedAt               time.Time `json:"authenticated_at"`
 	PolicyRevision                int64     `json:"policy_revision,omitempty"`
 	SessionExpiresAt              time.Time `json:"-"`
+	SessionIdleExpiresAt          time.Time `json:"-"`
 	RecentAuthenticationExpiresAt time.Time `json:"-"`
 }
 type ConsentData struct {
@@ -335,7 +337,44 @@ if currentTTL < tonumber(ARGV[2]) then redis.call("PEXPIRE", KEYS[2], ARGV[2]) e
 local redisTime = redis.call("TIME")
 local now = (tonumber(redisTime[1]) * 1000) + math.floor(tonumber(redisTime[2]) / 1000)
 redis.call("ZADD", KEYS[3], now + tonumber(ARGV[2]), KEYS[1])
-return 1
+local limit = tonumber(ARGV[3])
+if not limit or limit <= 0 then return 0 end
+
+local active = {}
+local members = redis.call("SMEMBERS", KEYS[2])
+for _, member in ipairs(members) do
+    local encoded = redis.call("GET", member)
+    if not encoded then
+        redis.call("SREM", KEYS[2], member)
+        redis.call("ZREM", KEYS[3], member)
+    else
+        local decoded, value = pcall(cjson.decode, encoded)
+        if not decoded or type(value) ~= "table" then
+            redis.call("DEL", member)
+            redis.call("SREM", KEYS[2], member)
+            redis.call("ZREM", KEYS[3], member)
+        else
+            table.insert(active, {
+                key = member,
+                created = tonumber(value["created_at_unix_milli"]) or 0
+            })
+        end
+    end
+end
+
+table.sort(active, function(left, right)
+    if left.created == right.created then return left.key < right.key end
+    return left.created < right.created
+end)
+local removeCount = #active - limit
+for index = 1, removeCount do
+    local member = active[index].key
+    redis.call("DEL", member)
+    redis.call("SREM", KEYS[2], member)
+    redis.call("ZREM", KEYS[3], member)
+end
+if redis.call("SCARD", KEYS[2]) == 0 then redis.call("DEL", KEYS[2]) end
+return math.max(removeCount, 0)
 `)
 var updateSessionScript = redis.NewScript(`
 local current = redis.call("GET", KEYS[1])
@@ -869,23 +908,37 @@ func authorizationClockKey(userID, clientID string) string {
 }
 
 func (s *Store) SaveSession(ctx context.Context, sessionID string, data *SessionData, ttl time.Duration) error {
+	_, err := s.SaveSessionWithLimit(ctx, sessionID, data, ttl, 0)
+	return err
+}
+
+// SaveSessionWithLimit atomically stores a session and, when maxSessions is
+// non-zero, removes the oldest sessions for the same user until the limit is
+// satisfied. Existing callers use SaveSession and retain unlimited behavior.
+func (s *Store) SaveSessionWithLimit(ctx context.Context, sessionID string, data *SessionData, ttl time.Duration, maxSessions int) (int64, error) {
+	if data == nil || data.UserID == "" || sessionID == "" || maxSessions < 0 {
+		return 0, ErrInvalidTokenData
+	}
 	if data.CSRFToken == "" {
 		token, err := randomSecret(32)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		data.CSRFToken = token
 	}
 	if data.PublicID == "" {
 		publicID, err := randomSecret(16)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		data.PublicID = publicID
 	}
 	now := time.Now().UTC()
 	if data.CreatedAt.IsZero() {
 		data.CreatedAt = now
+	}
+	if data.CreatedAtUnixMilli == 0 {
+		data.CreatedAtUnixMilli = data.CreatedAt.UnixMilli()
 	}
 	if data.LastSeenAt.IsZero() {
 		data.LastSeenAt = data.CreatedAt
@@ -896,15 +949,19 @@ func (s *Store) SaveSession(ctx context.Context, sessionID string, data *Session
 	data.UserKey = digest(data.UserID)
 	encoded, err := json.Marshal(data)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	ttlMillis, err := ttlMilliseconds(ttl)
 	if err != nil {
-		return err
+		return 0, err
 	}
 	sessionKey := secretKey(sessionPrefix, sessionID)
 	userSet := userSessionsPrefix + data.UserKey
-	return saveSessionScript.Run(ctx, s.rdb, []string{sessionKey, userSet, allSessionsKey}, encoded, ttlMillis).Err()
+	removed, err := saveSessionScript.Run(ctx, s.rdb, []string{sessionKey, userSet, allSessionsKey}, encoded, ttlMillis, maxSessions).Int64()
+	if err != nil {
+		return 0, err
+	}
+	return removed, nil
 }
 
 // UpdateSession refreshes an existing session atomically without recreating or

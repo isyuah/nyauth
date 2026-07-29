@@ -95,6 +95,7 @@
               <div class="min-w-0">
                 <p class="text-body-medium font-semibold text-nya-text-primary">{deviceLabel(item.user_agent)} {#if item.current}<Badge variant="success">当前设备</Badge>{/if}</p>
                 <p class="mt-1 text-small text-nya-text-tertiary">IP {item.ip_address || '未知'} · 最后活动 {new Date(item.last_seen_at).toLocaleString()}</p>
+                <p class="mt-0.5 text-micro text-nya-text-tertiary">空闲截止 {new Date(item.session_idle_expires_at).toLocaleString()} · 绝对截止 {new Date(item.session_expires_at).toLocaleString()}</p>
                 <p class="mt-0.5 truncate text-micro text-nya-text-tertiary" title={item.user_agent}>{item.user_agent || '未提供 User-Agent'}</p>
               </div>
             </div>

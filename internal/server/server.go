@@ -105,6 +105,13 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 	}
 	passkeyRPID := strings.ToLower(issuerURL.Hostname())
 	rpOrigin := (&url.URL{Scheme: issuerURL.Scheme, Host: issuerURL.Host}).String()
+	settingsMgr := settings.NewManagerForRP(
+		db, settings.Branding{Title: cfg.Web.Title, LogoURL: cfg.Web.LogoURL}, passkeyRPID,
+	)
+	settingsMgr.SetAuditRetentionFallback(cfg.Audit.Retention)
+	settingsMgr.SetAuthenticationFallbacks(
+		cfg.Auth.AccessTokenTTL, cfg.Auth.RefreshTokenTTL, cfg.Auth.AuthorizationCodeTTL,
+	)
 	userStore := user.NewStoreForRP(db, passkeyRPID)
 	clientStore := client.NewStore(db)
 	authorizationStore := authorization.NewStore(db)
@@ -114,6 +121,14 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 	clientService := client.NewService(clientStore)
 	jwkManager := auth.NewJWKManager(db, cfg.Auth.JWK.KeySize, cfg.Auth.JWK.RotationInterval)
 	tokenService := auth.NewTokenService(jwkManager, sessionStore, cfg.Auth.Issuer, cfg.Auth.AccessTokenTTL, cfg.Auth.RefreshTokenTTL)
+	tokenService.SetAuthorizationCodeFallback(cfg.Auth.AuthorizationCodeTTL)
+	tokenService.SetLifetimeSource(func() auth.TokenLifetimes {
+		lifecycle := settingsMgr.Lifecycle()
+		return auth.TokenLifetimes{
+			AccessToken: lifecycle.AccessTokenDuration(), RefreshToken: lifecycle.RefreshTokenDuration(),
+			AuthorizationCode: lifecycle.AuthorizationCodeDuration(),
+		}
+	}, settings.MaxAccessTokenTTL, settings.MaxRefreshTokenTTL, settings.MaxAuthorizationCodeTTL)
 	providerMgr := provider.NewManager(db, cfg.Auth.MasterKey, cfg.IsProduction())
 	avatarRepository := avatar.NewRepository(db)
 	var avatarStore avatar.BlobStore
@@ -151,7 +166,7 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 	if err != nil {
 		return nil, fmt.Errorf("configuring avatar media service: %w", err)
 	}
-	authHandler := auth.NewHandler(tokenService, jwkManager, userService, clientStore, sessionStore, cfg)
+	authHandler := auth.NewHandler(tokenService, jwkManager, userService, clientStore, sessionStore, cfg, settings.MaxAccessTokenTTL)
 	consentHandler := auth.NewConsentHandler(sessionStore, tokenService, clientStore, authorizationStore, cfg)
 	mfaService, err := mfa.NewService(db, mfa.Options{
 		ActiveKeyID: "primary", MasterKeys: map[string][]byte{"primary": cfg.Auth.MasterKey},
@@ -163,10 +178,6 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 	if err != nil {
 		return nil, fmt.Errorf("configuring MFA service: %w", err)
 	}
-	settingsMgr := settings.NewManagerForRP(
-		db, settings.Branding{Title: cfg.Web.Title, LogoURL: cfg.Web.LogoURL}, passkeyRPID,
-	)
-	settingsMgr.SetAuditRetentionFallback(cfg.Audit.Retention)
 	s := &Server{
 		cfg: cfg, db: db, rdb: rdb, webFS: webFS,
 		trustedProxies: parseTrustedProxyCIDRs(cfg.Server.TrustedProxyCIDRs),
@@ -186,6 +197,15 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 		mfaService: mfaService, avatarService: avatarService, avatarRepository: avatarRepository,
 		avatarStore: avatarStore, mediaManager: mediaManager, avatarProcessing: make(chan struct{}, 1),
 	}
+	browserSessionResolver := func(w http.ResponseWriter, r *http.Request) (*session.SessionData, error) {
+		authenticated, err := s.sessionMiddleware.GetSession(w, r)
+		if err != nil {
+			return nil, err
+		}
+		return authenticated.Data, nil
+	}
+	authHandler.SetBrowserSessionResolver(browserSessionResolver)
+	consentHandler.SetBrowserSessionResolver(browserSessionResolver)
 	serviceControlStore, err := servicecontrol.NewStore(db)
 	if err != nil {
 		return nil, fmt.Errorf("configuring runtime service control storage: %w", err)
@@ -274,7 +294,7 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 	revocationDispatcher, err := securityrevocation.NewDispatcher(
 		securityrevocation.NewStore(db), sessionStore, securityrevocation.DispatcherOptions{
 			WorkerID:        workerPrefix + "-security-revocation",
-			RefreshTokenTTL: cfg.Auth.RefreshTokenTTL,
+			RefreshTokenTTL: tokenService.RevocationTTL(),
 			OnError: func(ctx context.Context, task securityrevocation.Task, err error) {
 				slog.ErrorContext(ctx, "durable security revocation failed",
 					"user_id", task.UserID, "revision", task.Revision,

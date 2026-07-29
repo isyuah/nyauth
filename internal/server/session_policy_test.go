@@ -20,12 +20,14 @@ func TestSessionPolicyAppliesRuntimeLifecycleChanges(t *testing.T) {
 	testApp := newRegistrationHTTPTestApp(t)
 	ctx := context.Background()
 
-	setLifecycle := func(t *testing.T, absoluteTTL, recentTTL string) int64 {
+	setLifecycle := func(t *testing.T, absoluteTTL, recentTTL string, configure ...func(*settings.Lifecycle)) int64 {
 		t.Helper()
-		value := settings.Lifecycle{
-			SessionAbsoluteTTL:      absoluteTTL,
-			RecentAuthenticationTTL: recentTTL,
-			AuditRetentionDays:      365,
+		value := settings.DefaultLifecycle(365)
+		value.SessionAbsoluteTTL = absoluteTTL
+		value.SessionIdleTTL = absoluteTTL
+		value.RecentAuthenticationTTL = recentTTL
+		for _, apply := range configure {
+			apply(&value)
 		}
 		revision, err := testApp.app.settingsMgr.SetLifecycle(
 			ctx,
@@ -181,6 +183,83 @@ func TestSessionPolicyAppliesRuntimeLifecycleChanges(t *testing.T) {
 		}
 		if isRecentAuthentication(after.Data.AuthenticatedAt, now, testApp.app.settingsMgr.Lifecycle().RecentAuthenticationDuration()) {
 			t.Fatal("authentication remained recent after shortening the policy")
+		}
+	})
+
+	t.Run("idle timeout invalidates an inactive session", func(t *testing.T) {
+		flushSessions(t)
+		revision := setLifecycle(t, "2h", "10m", func(value *settings.Lifecycle) {
+			value.SessionIdleTTL = "5m"
+		})
+		now := time.Now().UTC().Truncate(time.Millisecond)
+		data := &session.SessionData{
+			UserID: "idle-user", Username: "idle", AuthVersion: 1, SessionVersion: 1,
+			CreatedAt: now.Add(-30 * time.Minute), LastSeenAt: now.Add(-6 * time.Minute), AuthenticatedAt: now,
+			PolicyRevision: revision,
+		}
+		if err := testApp.app.sessionStore.SaveSession(ctx, "idle-session", data, time.Hour); err != nil {
+			t.Fatalf("save idle session: %v", err)
+		}
+		response, authenticated, err := requestSession("idle-session")
+		if !errors.Is(err, session.ErrNotFound) || authenticated != nil {
+			t.Fatalf("idle session = %#v, err=%v; want expired", authenticated, err)
+		}
+		if !strings.Contains(response.Header().Get("Set-Cookie"), "Max-Age=0") {
+			t.Fatalf("idle session cookie was not cleared: %q", response.Header().Get("Set-Cookie"))
+		}
+	})
+
+	t.Run("activity refreshes idle deadline without extending absolute deadline", func(t *testing.T) {
+		flushSessions(t)
+		revision := setLifecycle(t, "2h", "10m", func(value *settings.Lifecycle) {
+			value.SessionIdleTTL = "10m"
+		})
+		now := time.Now().UTC().Truncate(time.Millisecond)
+		createdAt := now.Add(-30 * time.Minute)
+		data := &session.SessionData{
+			UserID: "touch-user", Username: "touch", AuthVersion: 1, SessionVersion: 1,
+			CreatedAt: createdAt, LastSeenAt: now.Add(-6 * time.Minute), AuthenticatedAt: now,
+			PolicyRevision: revision,
+		}
+		if err := testApp.app.sessionStore.SaveSession(ctx, "touch-session", data, 4*time.Minute); err != nil {
+			t.Fatalf("save touch session: %v", err)
+		}
+		response, authenticated, err := requestSession("touch-session")
+		if err != nil {
+			t.Fatalf("touch active session: %v", err)
+		}
+		if authenticated.Data.LastSeenAt.Before(now.Add(-time.Second)) {
+			t.Fatalf("last seen was not refreshed: %s", authenticated.Data.LastSeenAt)
+		}
+		if want := createdAt.Add(2 * time.Hour); !authenticated.Data.SessionExpiresAt.Equal(want) {
+			t.Fatalf("absolute deadline=%s, want %s", authenticated.Data.SessionExpiresAt, want)
+		}
+		cookies := response.Result().Cookies()
+		if len(cookies) != 1 || cookies[0].MaxAge < 9*60 || cookies[0].MaxAge > 11*60 {
+			t.Fatalf("refreshed idle cookie = %#v", cookies)
+		}
+	})
+
+	t.Run("OAuth issuance reads the current runtime lifecycle snapshot", func(t *testing.T) {
+		flushSessions(t)
+		setLifecycle(t, "24h", "10m", func(value *settings.Lifecycle) {
+			value.AccessTokenTTL = "7m"
+			value.RefreshTokenTTL = "48h"
+			value.AuthorizationCodeTTL = "90s"
+		})
+		if err := testApp.app.jwkManager.EnsureActiveKey(ctx); err != nil {
+			t.Fatalf("ensure signing key: %v", err)
+		}
+		pair, err := testApp.app.tokenService.GenerateClientTokenPair(ctx, "runtime-policy-client", []string{"openid"})
+		if err != nil {
+			t.Fatalf("issue token under runtime policy: %v", err)
+		}
+		if pair.ExpiresIn != 7*60 {
+			t.Fatalf("access token expires_in=%d, want %d", pair.ExpiresIn, 7*60)
+		}
+		lifetimes := testApp.app.tokenService.Lifetimes()
+		if lifetimes.RefreshToken != 48*time.Hour || lifetimes.AuthorizationCode != 90*time.Second {
+			t.Fatalf("runtime token lifetimes = %#v", lifetimes)
 		}
 	})
 }

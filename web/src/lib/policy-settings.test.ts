@@ -84,7 +84,12 @@ describe('runtime policy validation', () => {
     const lifecycle: UpdateLifecycleSettingsInput = {
       expected_revision: 2,
       session_absolute_ttl: '24h',
+      session_idle_ttl: '12h',
+      max_concurrent_sessions: 5,
       recent_authentication_ttl: '10m',
+      access_token_ttl: '1h',
+      refresh_token_ttl: '720h',
+      authorization_code_ttl: '5m',
       audit_retention_days: 90,
     };
     expect(validateLifecycleSettings(lifecycle)).toBe('');
@@ -92,5 +97,9 @@ describe('runtime policy validation', () => {
     expect(validateLifecycleSettings({ ...lifecycle, recent_authentication_ttl: '61m' })).toContain('1 小时');
     expect(lifecycleValidationError({ ...lifecycle, recent_authentication_ttl: '61m' })?.field)
       .toBe('lifecycle-recent-auth-ttl');
+    expect(lifecycleValidationError({ ...lifecycle, session_idle_ttl: '25h' })?.field)
+      .toBe('lifecycle-session-idle-ttl');
+    expect(lifecycleValidationError({ ...lifecycle, access_token_ttl: '25h' })?.field)
+      .toBe('lifecycle-access-token-ttl');
   });
 });

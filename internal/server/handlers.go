@@ -55,10 +55,12 @@ func writeAPIError(w http.ResponseWriter, status int, message string) {
 func sessionResponse(current *models.User, data *session.SessionData) *models.SessionResponse {
 	authenticatedAt := data.AuthenticatedAt
 	sessionExpiresAt := data.SessionExpiresAt
+	sessionIdleExpiresAt := data.SessionIdleExpiresAt
 	recentAuthenticationExpiresAt := data.RecentAuthenticationExpiresAt
-	if sessionExpiresAt.IsZero() || recentAuthenticationExpiresAt.IsZero() {
+	if sessionExpiresAt.IsZero() || sessionIdleExpiresAt.IsZero() || recentAuthenticationExpiresAt.IsZero() {
 		fallback := settings.DefaultLifecycle(365)
 		sessionExpiresAt = data.CreatedAt.Add(fallback.SessionAbsoluteDuration())
+		sessionIdleExpiresAt = data.LastSeenAt.Add(fallback.SessionIdleDuration())
 		recentAuthenticationExpiresAt = data.AuthenticatedAt.Add(fallback.RecentAuthenticationDuration())
 	}
 	return &models.SessionResponse{
@@ -66,6 +68,7 @@ func sessionResponse(current *models.User, data *session.SessionData) *models.Se
 		HasPassword: current.PasswordHash != nil, EmailVerified: current.EmailVerifiedAt != nil,
 		AuthenticatedAt:               &authenticatedAt,
 		SessionExpiresAt:              &sessionExpiresAt,
+		SessionIdleExpiresAt:          &sessionIdleExpiresAt,
 		RecentAuthenticationExpiresAt: &recentAuthenticationExpiresAt,
 	}
 }
@@ -468,7 +471,7 @@ func (s *Server) revokeUserSecurityState(ctx context.Context, userID uuid.UUID, 
 		slog.ErrorContext(ctx, "user session cleanup failed", "operation", operation, "error_class", "redis_error")
 	}
 	if _, err := s.sessionStore.RevokeRefreshFamiliesBeforeAuthVersion(
-		ctx, userID.String(), authVersion, s.cfg.Auth.RefreshTokenTTL,
+		ctx, userID.String(), authVersion, s.tokenRevocationTTL(),
 	); err != nil {
 		slog.ErrorContext(ctx, "refresh family cleanup failed", "operation", operation, "error_class", "redis_error")
 	}
@@ -554,11 +557,7 @@ func (s *Server) handleRevokeMyAuthorization(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	tokenTTL := s.cfg.Auth.RefreshTokenTTL
-	if s.cfg.Auth.AccessTokenTTL > tokenTTL {
-		tokenTTL = s.cfg.Auth.AccessTokenTTL
-	}
-	revokedAt, err := s.sessionStore.RevokeUserClientAuthorization(r.Context(), current.ID.String(), clientID, tokenTTL+5*time.Minute)
+	revokedAt, err := s.sessionStore.RevokeUserClientAuthorization(r.Context(), current.ID.String(), clientID, s.tokenRevocationTTL()+5*time.Minute)
 	if err != nil {
 		writeAPIError(w, http.StatusServiceUnavailable, "authorization revocation temporarily unavailable")
 		return
@@ -576,6 +575,23 @@ func (s *Server) handleRevokeMyAuthorization(w http.ResponseWriter, r *http.Requ
 	}
 	s.enqueueAuditTargetResult(r.Context(), models.AuditAuthorizationRevoked, &current.ID, current.Username, "client", clientID, "success", "medium", requestIP(r), truncateAuditValue(r.UserAgent(), maxAuditUserAgentLength), nil)
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) tokenRevocationTTL() time.Duration {
+	if s.tokenService != nil {
+		return s.tokenService.RevocationTTL()
+	}
+	if s.cfg == nil {
+		return 30 * 24 * time.Hour
+	}
+	ttl := s.cfg.Auth.RefreshTokenTTL
+	if s.cfg.Auth.AccessTokenTTL > ttl {
+		ttl = s.cfg.Auth.AccessTokenTTL
+	}
+	if ttl <= 0 {
+		return 30 * 24 * time.Hour
+	}
+	return ttl
 }
 
 func (s *Server) handleCreateMyClient(w http.ResponseWriter, r *http.Request) {

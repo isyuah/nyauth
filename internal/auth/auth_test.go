@@ -92,12 +92,62 @@ func TestRefreshRejectsRemovedScopesBeforeRotation(t *testing.T) {
 	if err := store.SaveRefreshToken(ctx, "refresh", data, time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	service := &TokenService{session: store, refreshTTL: time.Hour}
+	service := NewTokenService(nil, store, "", time.Minute, time.Hour)
 	if _, err := service.RefreshToken(ctx, "refresh", "client", []string{"openid"}); err == nil {
 		t.Fatal("refresh token retained a removed scope")
 	}
 	if _, err := store.GetRefreshToken(ctx, "refresh"); err == nil {
 		t.Fatal("scope-invalid refresh family was not revoked")
+	}
+}
+
+func TestTokenServicePublishesRuntimeLifetimeSnapshotsAndSafeRetention(t *testing.T) {
+	service := NewTokenService(nil, nil, "https://auth.example.test", time.Hour, 30*24*time.Hour)
+	service.SetAuthorizationCodeFallback(5 * time.Minute)
+	current := TokenLifetimes{
+		AccessToken: 15 * time.Minute, RefreshToken: 7 * 24 * time.Hour, AuthorizationCode: time.Minute,
+	}
+	service.SetLifetimeSource(func() TokenLifetimes { return current }, 24*time.Hour, 365*24*time.Hour, 10*time.Minute)
+	if got := service.Lifetimes(); got != current {
+		t.Fatalf("runtime lifetimes = %#v, want %#v", got, current)
+	}
+	current = TokenLifetimes{
+		AccessToken: 30 * time.Minute, RefreshToken: 14 * 24 * time.Hour, AuthorizationCode: 2 * time.Minute,
+	}
+	if got := service.Lifetimes(); got != current {
+		t.Fatalf("updated runtime lifetimes = %#v, want %#v", got, current)
+	}
+	if service.RevocationTTL() != 365*24*time.Hour {
+		t.Fatalf("revocation retention = %s", service.RevocationTTL())
+	}
+	if service.AuthorizationCodeRetention() != 10*time.Minute {
+		t.Fatalf("authorization code reuse retention = %s", service.AuthorizationCodeRetention())
+	}
+}
+
+func TestBrowserOAuthEntryPointsUseConfiguredSessionResolver(t *testing.T) {
+	resolverErr := errors.New("session expired by runtime policy")
+	resolverCalls := 0
+	resolver := func(http.ResponseWriter, *http.Request) (*session.SessionData, error) {
+		resolverCalls++
+		return nil, resolverErr
+	}
+	recorder := httptest.NewRecorder()
+	request := httptest.NewRequest(http.MethodGet, "/authorize", nil)
+
+	handler := &Handler{}
+	handler.SetBrowserSessionResolver(resolver)
+	if authenticated, currentUser := handler.currentSessionUser(recorder, request); authenticated != nil || currentUser != nil {
+		t.Fatal("authorize accepted a session rejected by the runtime policy resolver")
+	}
+
+	consentHandler := &ConsentHandler{}
+	consentHandler.SetBrowserSessionResolver(resolver)
+	if authenticated, ok := consentHandler.authenticatedSession(recorder, request); ok || authenticated != nil {
+		t.Fatal("consent accepted a session rejected by the runtime policy resolver")
+	}
+	if resolverCalls != 2 {
+		t.Fatalf("session resolver calls = %d, want 2", resolverCalls)
 	}
 }
 
@@ -111,7 +161,7 @@ func TestRefreshWrongClientDoesNotMutateToken(t *testing.T) {
 	if err := store.SaveRefreshToken(ctx, "refresh", data, time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	service := &TokenService{session: store, refreshTTL: time.Hour}
+	service := NewTokenService(nil, store, "", time.Minute, time.Hour)
 	if _, err := service.RefreshToken(ctx, "refresh", "attacker", []string{"offline_access"}); !errors.Is(err, ErrClientMismatch) {
 		t.Fatalf("wrong-client refresh error = %v", err)
 	}
@@ -150,10 +200,8 @@ func TestRevokeAccessTokenReportsMetadataStoreFailure(t *testing.T) {
 		t.Fatal(err)
 	}
 	client.AddHook(tokenMetadataFailureHook{})
-	service := &TokenService{
-		session: store, issuer: issuer, refreshTTL: time.Hour,
-		publicKeyLoader: func(context.Context, string) (*rsa.PublicKey, error) { return &privateKey.PublicKey, nil },
-	}
+	service := NewTokenService(nil, store, issuer, time.Minute, time.Hour)
+	service.publicKeyLoader = func(context.Context, string) (*rsa.PublicKey, error) { return &privateKey.PublicKey, nil }
 
 	err = service.RevokeTokenForClient(ctx, signed, clientID)
 	if !errors.Is(err, ErrTokenValidationUnavailable) {
@@ -174,7 +222,7 @@ func TestRefreshReuseIsReportedDistinctly(t *testing.T) {
 	if _, err := store.RotateRefreshToken(ctx, "old-refresh", "current-refresh", data, time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	service := &TokenService{session: store, refreshTTL: time.Hour}
+	service := NewTokenService(nil, store, "", time.Minute, time.Hour)
 	if _, err := service.RefreshToken(ctx, "old-refresh", "client", []string{"offline_access"}); !errors.Is(err, ErrRefreshTokenReuse) {
 		t.Fatalf("refresh reuse error = %v", err)
 	}

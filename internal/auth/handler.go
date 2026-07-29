@@ -52,6 +52,7 @@ type SecurityAuditEvent struct {
 
 type SecurityAuditSink func(context.Context, SecurityAuditEvent) error
 type GrantMetricSink func(context.Context, string, string, string)
+type BrowserSessionResolver func(http.ResponseWriter, *http.Request) (*session.SessionData, error)
 
 type Handler struct {
 	tokenService       *TokenService
@@ -63,12 +64,20 @@ type Handler struct {
 	auditSink          SecurityAuditSink
 	metricSink         GrantMetricSink
 	issuanceMiddleware func(http.Handler) http.Handler
+	sessionResolver    BrowserSessionResolver
 }
 
-func NewHandler(tokenService *TokenService, jwkManager *JWKManager, userService *user.Service, clientStore *client.Store, sessionStore *session.Store, cfg *config.Config) *Handler {
+func NewHandler(tokenService *TokenService, jwkManager *JWKManager, userService *user.Service, clientStore *client.Store, sessionStore *session.Store, cfg *config.Config, maximumAccessTTLs ...time.Duration) *Handler {
 	tokenService.SetUserService(userService)
 	tokenService.SetAccessPolicyChecker(clientStore)
-	if err := jwkManager.Configure(cfg.Auth.MasterKey, cfg.Auth.AccessTokenTTL); err != nil {
+	tokenService.SetAuthorizationCodeFallback(cfg.Auth.AuthorizationCodeTTL)
+	verificationTTL := cfg.Auth.AccessTokenTTL
+	for _, candidate := range maximumAccessTTLs {
+		if candidate > verificationTTL {
+			verificationTTL = candidate
+		}
+	}
+	if err := jwkManager.Configure(cfg.Auth.MasterKey, verificationTTL); err != nil {
 		panic("invalid validated JWK configuration: " + err.Error())
 	}
 	return &Handler{tokenService: tokenService, jwkManager: jwkManager, userService: userService, clientStore: clientStore, sessionStore: sessionStore, config: cfg}
@@ -78,6 +87,9 @@ func (h *Handler) SetSecurityAuditSink(sink SecurityAuditSink) { h.auditSink = s
 func (h *Handler) SetGrantMetricSink(sink GrantMetricSink)     { h.metricSink = sink }
 func (h *Handler) SetIssuanceMiddleware(middleware func(http.Handler) http.Handler) {
 	h.issuanceMiddleware = middleware
+}
+func (h *Handler) SetBrowserSessionResolver(resolver BrowserSessionResolver) {
+	h.sessionResolver = resolver
 }
 
 func (h *Handler) absolutePictureURL(value string) string {
@@ -316,7 +328,7 @@ func (h *Handler) Authorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	sess, currentUser := h.currentSessionUser(r)
+	sess, currentUser := h.currentSessionUser(w, r)
 	if sess == nil || currentUser == nil {
 		loginURL := "/login?return_to=" + url.QueryEscape(r.URL.RequestURI())
 		http.Redirect(w, r, loginURL, http.StatusFound)
@@ -428,7 +440,7 @@ func (h *Handler) handleAuthorizationCodeGrant(w http.ResponseWriter, r *http.Re
 		writeTokenError(w, http.StatusBadRequest, "invalid_grant", "authorization subject is no longer active")
 		return
 	}
-	if _, err := h.sessionStore.ConsumeAuthorizationCodeIfMatch(r.Context(), code, stored, h.config.Auth.AuthorizationCodeTTL); err != nil {
+	if _, err := h.sessionStore.ConsumeAuthorizationCodeIfMatch(r.Context(), code, stored, h.tokenService.AuthorizationCodeRetention()); err != nil {
 		if errors.Is(err, session.ErrAuthorizationCodeReuse) {
 			h.rejectAuthorizationCodeReuse(w, r, stored)
 			return
@@ -479,11 +491,7 @@ func (h *Handler) handleAuthorizationCodeGrant(w http.ResponseWriter, r *http.Re
 }
 
 func (h *Handler) rejectAuthorizationCodeReuse(w http.ResponseWriter, r *http.Request, stored *session.AuthorizationData) {
-	tokenTTL := h.config.Auth.RefreshTokenTTL
-	if h.config.Auth.AccessTokenTTL > tokenTTL {
-		tokenTTL = h.config.Auth.AccessTokenTTL
-	}
-	if _, err := h.sessionStore.RevokeUserClientAuthorization(r.Context(), stored.UserID, stored.ClientID, tokenTTL+5*time.Minute); err != nil {
+	if _, err := h.sessionStore.RevokeUserClientAuthorization(r.Context(), stored.UserID, stored.ClientID, h.tokenService.RevocationTTL()+5*time.Minute); err != nil {
 		h.recordGrantAudit(r.Context(), models.AuditTokenGrantFailed, models.GrantAuthorizationCode, stored.ClientID, "failure", "critical", "code_reuse_revocation_failed")
 		writeTokenError(w, http.StatusInternalServerError, "server_error", "authorization code reuse could not be contained")
 		return
@@ -778,12 +786,18 @@ func (h *Handler) authenticateTokenClient(r *http.Request, expectedID string, al
 	return authed, clientID, err == nil
 }
 
-func (h *Handler) currentSessionUser(r *http.Request) (*session.SessionData, *models.User) {
-	cookie, err := r.Cookie(oauthSessionCookie)
-	if err != nil {
-		return nil, nil
+func (h *Handler) currentSessionUser(w http.ResponseWriter, r *http.Request) (*session.SessionData, *models.User) {
+	var sess *session.SessionData
+	var err error
+	if h.sessionResolver != nil {
+		sess, err = h.sessionResolver(w, r)
+	} else {
+		var cookie *http.Cookie
+		cookie, err = r.Cookie(oauthSessionCookie)
+		if err == nil {
+			sess, err = h.sessionStore.GetSession(r.Context(), cookie.Value)
+		}
 	}
-	sess, err := h.sessionStore.GetSession(r.Context(), cookie.Value)
 	if err != nil {
 		return nil, nil
 	}

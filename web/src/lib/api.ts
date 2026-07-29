@@ -92,6 +92,7 @@ export interface SessionInfo {
   email_verified: boolean;
   authenticated_at?: string;
   session_expires_at?: string;
+  session_idle_expires_at?: string;
   recent_authentication_expires_at?: string;
 }
 
@@ -513,6 +514,7 @@ export interface BrowserSession {
   last_seen_at: string;
   authenticated_at: string;
   session_expires_at: string;
+  session_idle_expires_at: string;
   recent_authentication_expires_at: string;
 }
 
@@ -639,14 +641,24 @@ export interface UpdateProtectionSettingsInput {
 export interface LifecycleSettings {
   revision: number;
   session_absolute_ttl: string;
+  session_idle_ttl: string;
+  max_concurrent_sessions: number;
   recent_authentication_ttl: string;
+  access_token_ttl: string;
+  refresh_token_ttl: string;
+  authorization_code_ttl: string;
   audit_retention_days: number;
 }
 
 export interface UpdateLifecycleSettingsInput {
   expected_revision: number;
   session_absolute_ttl: string;
+  session_idle_ttl: string;
+  max_concurrent_sessions: number;
   recent_authentication_ttl: string;
+  access_token_ttl: string;
+  refresh_token_ttl: string;
+  authorization_code_ttl: string;
   audit_retention_days: number;
   retention_confirmation?: string;
 }

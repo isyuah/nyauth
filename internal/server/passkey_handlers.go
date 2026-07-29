@@ -356,7 +356,7 @@ func (s *Server) handleFinishPasskeyReauthentication(w http.ResponseWriter, r *h
 		}
 		return
 	}
-	marked, err := s.sessionMiddleware.MarkReauthenticated(r, updated)
+	marked, err := s.sessionMiddleware.MarkReauthenticated(w, r, updated)
 	if err != nil {
 		writeAPIError(w, http.StatusServiceUnavailable, "reauthentication session could not be updated")
 		return

@@ -48,17 +48,19 @@ func (m *SessionMiddleware) CreateSession(w http.ResponseWriter, r *http.Request
 	}
 	now := time.Now().UTC()
 	policy := m.lifecycleSnapshot()
-	ttl := policy.Value.SessionAbsoluteDuration()
 	data := &session.SessionData{
 		UserID: user.ID.String(), Username: user.Username, AuthVersion: user.AuthVersion, SessionVersion: user.SessionVersion,
 		IPAddress: requestIP(r), UserAgent: truncateAuditValue(r.UserAgent(), maxAuditUserAgentLength),
 		CreatedAt: now, LastSeenAt: now, AuthenticatedAt: now, PolicyRevision: policy.Revision,
 	}
 	m.applyDeadlines(data, policy.Value)
-	if err := m.sessionStore.SaveSession(r.Context(), sessionID, data, ttl); err != nil {
+	expiresAt := effectiveSessionExpiry(data)
+	if _, err := m.sessionStore.SaveSessionWithLimit(
+		r.Context(), sessionID, data, expiresAt.Sub(now), policy.Value.MaxConcurrentSessions,
+	); err != nil {
 		return nil, err
 	}
-	m.setCookieUntil(w, sessionID, data.SessionExpiresAt, now)
+	m.setCookieUntil(w, sessionID, expiresAt, now)
 	return &AuthenticatedSession{ID: sessionID, Data: data}, nil
 }
 
@@ -75,7 +77,7 @@ func (m *SessionMiddleware) RotateSession(w http.ResponseWriter, r *http.Request
 	return created, nil
 }
 
-func (m *SessionMiddleware) MarkReauthenticated(r *http.Request, user *models.User) (*AuthenticatedSession, error) {
+func (m *SessionMiddleware) MarkReauthenticated(w http.ResponseWriter, r *http.Request, user *models.User) (*AuthenticatedSession, error) {
 	authenticated := sessionFromContext(r.Context())
 	if authenticated == nil || authenticated.Data == nil {
 		return nil, errors.New("authenticated session is unavailable")
@@ -92,7 +94,8 @@ func (m *SessionMiddleware) MarkReauthenticated(r *http.Request, user *models.Us
 	updatedData.SessionVersion = user.SessionVersion
 	updatedData.PolicyRevision = policy.Revision
 	m.applyDeadlines(&updatedData, policy.Value)
-	remaining := updatedData.SessionExpiresAt.Sub(now)
+	expiresAt := effectiveSessionExpiry(&updatedData)
+	remaining := expiresAt.Sub(now)
 	if remaining <= 0 {
 		_ = m.sessionStore.DeleteSession(r.Context(), authenticated.ID)
 		return nil, session.ErrNotFound
@@ -104,6 +107,7 @@ func (m *SessionMiddleware) MarkReauthenticated(r *http.Request, user *models.Us
 		return nil, err
 	}
 	authenticated.Data = &updatedData
+	m.setCookieUntil(w, authenticated.ID, expiresAt, now)
 	return authenticated, nil
 }
 
@@ -126,29 +130,41 @@ func (m *SessionMiddleware) GetSession(w http.ResponseWriter, r *http.Request) (
 	now := time.Now().UTC()
 	policy := m.lifecycleSnapshot()
 	m.applyDeadlines(data, policy.Value)
-	remaining := data.SessionExpiresAt.Sub(now)
+	expiresAt := effectiveSessionExpiry(data)
+	remaining := expiresAt.Sub(now)
 	if remaining <= 0 {
 		_ = m.sessionStore.DeleteSession(r.Context(), cookie.Value)
 		m.clearCookie(w)
 		return nil, session.ErrNotFound
 	}
-	shouldTouch := data.LastSeenAt.IsZero() || now.Sub(data.LastSeenAt) >= 5*time.Minute
+	shouldTouch := data.LastSeenAt.IsZero() || now.Sub(data.LastSeenAt) >= sessionTouchInterval(policy.Value)
 	if data.PolicyRevision != policy.Revision {
 		expectedAuthVersion, expectedSessionVersion := data.AuthVersion, data.SessionVersion
 		data.PolicyRevision = policy.Revision
 		if shouldTouch {
 			data.LastSeenAt = now
+			m.applyDeadlines(data, policy.Value)
+			expiresAt = effectiveSessionExpiry(data)
+			remaining = expiresAt.Sub(now)
 		}
 		if err := m.sessionStore.UpdateSession(
 			r.Context(), cookie.Value, data, expectedAuthVersion, expectedSessionVersion, remaining,
 		); err != nil {
 			return nil, err
 		}
-		m.setCookieUntil(w, cookie.Value, data.SessionExpiresAt, now)
+		m.setCookieUntil(w, cookie.Value, expiresAt, now)
 	} else if shouldTouch {
-		if err := m.sessionStore.TouchSession(r.Context(), cookie.Value, now); err == nil {
-			data.LastSeenAt = now
+		expectedAuthVersion, expectedSessionVersion := data.AuthVersion, data.SessionVersion
+		data.LastSeenAt = now
+		m.applyDeadlines(data, policy.Value)
+		expiresAt = effectiveSessionExpiry(data)
+		remaining = expiresAt.Sub(now)
+		if err := m.sessionStore.UpdateSession(
+			r.Context(), cookie.Value, data, expectedAuthVersion, expectedSessionVersion, remaining,
+		); err != nil {
+			return nil, err
 		}
+		m.setCookieUntil(w, cookie.Value, expiresAt, now)
 	}
 	return &AuthenticatedSession{ID: cookie.Value, Data: data}, nil
 }
@@ -234,7 +250,26 @@ func (m *SessionMiddleware) lifecycleSnapshot() settings.Versioned[settings.Life
 
 func (m *SessionMiddleware) applyDeadlines(data *session.SessionData, lifecycle settings.Lifecycle) {
 	data.SessionExpiresAt = data.CreatedAt.Add(lifecycle.SessionAbsoluteDuration())
+	data.SessionIdleExpiresAt = data.LastSeenAt.Add(lifecycle.SessionIdleDuration())
 	data.RecentAuthenticationExpiresAt = data.AuthenticatedAt.Add(lifecycle.RecentAuthenticationDuration())
+}
+
+func effectiveSessionExpiry(data *session.SessionData) time.Time {
+	if data.SessionIdleExpiresAt.Before(data.SessionExpiresAt) {
+		return data.SessionIdleExpiresAt
+	}
+	return data.SessionExpiresAt
+}
+
+func sessionTouchInterval(lifecycle settings.Lifecycle) time.Duration {
+	interval := lifecycle.SessionIdleDuration() / 2
+	if interval > 5*time.Minute {
+		return 5 * time.Minute
+	}
+	if interval < time.Second {
+		return time.Second
+	}
+	return interval
 }
 
 type contextKey string

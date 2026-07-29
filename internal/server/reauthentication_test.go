@@ -54,7 +54,7 @@ func TestMarkReauthenticatedPreservesSessionIdentity(t *testing.T) {
 	request = request.WithContext(withAuthenticatedSession(request.Context(), &AuthenticatedSession{ID: "session-id", Data: data}))
 	updated := &models.User{ID: userID, Username: "after", AuthVersion: 4}
 
-	marked, err := middleware.MarkReauthenticated(request, updated)
+	marked, err := middleware.MarkReauthenticated(httptest.NewRecorder(), request, updated)
 	if err != nil {
 		t.Fatalf("MarkReauthenticated error = %v", err)
 	}

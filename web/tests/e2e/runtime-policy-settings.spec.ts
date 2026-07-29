@@ -82,7 +82,12 @@ const protectionSettings: ProtectionSettings = {
 const lifecycleSettings: LifecycleSettings = {
   revision: 4,
   session_absolute_ttl: '24h',
+  session_idle_ttl: '12h',
+  max_concurrent_sessions: 5,
   recent_authentication_ttl: '10m',
+  access_token_ttl: '1h',
+  refresh_token_ttl: '720h',
+  authorization_code_ttl: '5m',
   audit_retention_days: 365,
 };
 
@@ -327,7 +332,12 @@ test('lifecycle retention shortening requires the exact phrase and preserves the
       await json(route, 200, {
         revision: body.expected_revision + 1,
         session_absolute_ttl: body.session_absolute_ttl,
+        session_idle_ttl: body.session_idle_ttl,
+        max_concurrent_sessions: body.max_concurrent_sessions,
         recent_authentication_ttl: body.recent_authentication_ttl,
+        access_token_ttl: body.access_token_ttl,
+        refresh_token_ttl: body.refresh_token_ttl,
+        authorization_code_ttl: body.authorization_code_ttl,
         audit_retention_days: body.audit_retention_days,
       } satisfies LifecycleSettings);
       return true;
@@ -348,9 +358,64 @@ test('lifecycle retention shortening requires the exact phrase and preserves the
   expect(bodies[0]).toEqual({
     expected_revision: 4,
     session_absolute_ttl: '24h',
+    session_idle_ttl: '12h',
+    max_concurrent_sessions: 5,
     recent_authentication_ttl: '10m',
+    access_token_ttl: '1h',
+    refresh_token_ttl: '720h',
+    authorization_code_ttl: '5m',
     audit_retention_days: 90,
     retention_confirmation: 'RETENTION 90 DAYS',
+  });
+});
+
+test('lifecycle page saves browser-session and OAuth credential policies together', async ({ page }) => {
+  const bodies: UpdateLifecycleSettingsInput[] = [];
+  await installAPIMocks(page, 'admin', async (route, path, method) => {
+    if (path !== '/api/admin/settings/lifecycle') return false;
+    if (method === 'GET') {
+      await json(route, 200, lifecycleSettings);
+      return true;
+    }
+    if (method === 'PUT') {
+      const body = route.request().postDataJSON() as UpdateLifecycleSettingsInput;
+      bodies.push(body);
+      await json(route, 200, {
+        revision: body.expected_revision + 1,
+        session_absolute_ttl: body.session_absolute_ttl,
+        session_idle_ttl: body.session_idle_ttl,
+        max_concurrent_sessions: body.max_concurrent_sessions,
+        recent_authentication_ttl: body.recent_authentication_ttl,
+        access_token_ttl: body.access_token_ttl,
+        refresh_token_ttl: body.refresh_token_ttl,
+        authorization_code_ttl: body.authorization_code_ttl,
+        audit_retention_days: body.audit_retention_days,
+      } satisfies LifecycleSettings);
+      return true;
+    }
+    return false;
+  });
+
+  await page.goto('/admin/settings/lifecycle');
+  await page.getByRole('textbox', { name: '会话绝对有效期', exact: true }).fill('48h');
+  await page.getByRole('textbox', { name: '会话空闲有效期', exact: true }).fill('2h');
+  await page.getByRole('spinbutton', { name: '每位用户并发会话上限', exact: true }).fill('3');
+  await page.getByRole('textbox', { name: '近期认证有效期', exact: true }).fill('15m');
+  await page.getByRole('textbox', { name: 'Access Token 有效期', exact: true }).fill('30m');
+  await page.getByRole('textbox', { name: 'Refresh Token 有效期', exact: true }).fill('168h');
+  await page.getByRole('textbox', { name: '授权码有效期', exact: true }).fill('2m');
+  await page.getByRole('button', { name: '保存生命周期设置' }).click();
+
+  await expect.poll(() => bodies.length).toBe(1);
+  expect(bodies[0]).toMatchObject({
+    expected_revision: 4,
+    session_absolute_ttl: '48h',
+    session_idle_ttl: '2h',
+    max_concurrent_sessions: 3,
+    recent_authentication_ttl: '15m',
+    access_token_ttl: '30m',
+    refresh_token_ttl: '168h',
+    authorization_code_ttl: '2m',
   });
 });
 

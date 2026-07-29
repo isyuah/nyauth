@@ -18,10 +18,28 @@ const (
 	maxRateLimitWindow            = 24 * time.Hour
 	minSessionAbsoluteTTL         = 15 * time.Minute
 	maxSessionAbsoluteTTL         = 720 * time.Hour
+	minSessionIdleTTL             = 5 * time.Minute
+	maxSessionIdleTTL             = 720 * time.Hour
 	minRecentAuthenticationTTL    = time.Minute
 	maxRecentAuthenticationTTL    = time.Hour
+	minAccessTokenTTL             = 5 * time.Minute
+	maxAccessTokenTTL             = 24 * time.Hour
+	minRefreshTokenTTL            = time.Hour
+	maxRefreshTokenTTL            = 8760 * time.Hour
+	minAuthorizationCodeTTL       = 30 * time.Second
+	maxAuthorizationCodeTTL       = 10 * time.Minute
+	MinConcurrentSessions         = 0
+	MaxConcurrentSessions         = 100
 	MinAuditRetentionDays         = 7
 	MaxAuditRetentionDays         = 3650
+)
+
+const (
+	// MaxAccessTokenTTL and MaxRefreshTokenTTL are exported so signing-key and
+	// revocation retention can cover every value accepted at runtime.
+	MaxAccessTokenTTL       = maxAccessTokenTTL
+	MaxRefreshTokenTTL      = maxRefreshTokenTTL
+	MaxAuthorizationCodeTTL = maxAuthorizationCodeTTL
 )
 
 var (
@@ -142,17 +160,45 @@ func (p Protection) MailWindow() time.Duration    { return mustDuration(p.Mail.W
 
 type Lifecycle struct {
 	SessionAbsoluteTTL      string `json:"session_absolute_ttl"`
+	SessionIdleTTL          string `json:"session_idle_ttl"`
+	MaxConcurrentSessions   int    `json:"max_concurrent_sessions"`
 	RecentAuthenticationTTL string `json:"recent_authentication_ttl"`
+	AccessTokenTTL          string `json:"access_token_ttl"`
+	RefreshTokenTTL         string `json:"refresh_token_ttl"`
+	AuthorizationCodeTTL    string `json:"authorization_code_ttl"`
 	AuditRetentionDays      int    `json:"audit_retention_days"`
 }
 
 func DefaultLifecycle(auditRetentionDays int) Lifecycle {
+	return DefaultLifecycleWithAuthentication(
+		auditRetentionDays, time.Hour, 30*24*time.Hour, 5*time.Minute,
+	)
+}
+
+func DefaultLifecycleWithAuthentication(
+	auditRetentionDays int,
+	accessTokenTTL time.Duration,
+	refreshTokenTTL time.Duration,
+	authorizationCodeTTL time.Duration,
+) Lifecycle {
 	if auditRetentionDays < MinAuditRetentionDays || auditRetentionDays > MaxAuditRetentionDays {
 		auditRetentionDays = 365
 	}
+	if accessTokenTTL <= 0 {
+		accessTokenTTL = time.Hour
+	}
+	if refreshTokenTTL <= 0 {
+		refreshTokenTTL = 30 * 24 * time.Hour
+	}
+	if authorizationCodeTTL <= 0 {
+		authorizationCodeTTL = 5 * time.Minute
+	}
 	return Lifecycle{
-		SessionAbsoluteTTL: "24h", RecentAuthenticationTTL: "10m",
-		AuditRetentionDays: auditRetentionDays,
+		SessionAbsoluteTTL: "24h", SessionIdleTTL: "24h", MaxConcurrentSessions: 0,
+		RecentAuthenticationTTL: "10m",
+		AccessTokenTTL:          accessTokenTTL.String(), RefreshTokenTTL: refreshTokenTTL.String(),
+		AuthorizationCodeTTL: authorizationCodeTTL.String(),
+		AuditRetentionDays:   auditRetentionDays,
 	}
 }
 
@@ -160,7 +206,26 @@ func ValidateLifecycle(value Lifecycle) error {
 	if _, err := parseBoundedDuration("session_absolute_ttl", value.SessionAbsoluteTTL, minSessionAbsoluteTTL, maxSessionAbsoluteTTL); err != nil {
 		return err
 	}
+	idleTTL, err := parseBoundedDuration("session_idle_ttl", value.SessionIdleTTL, minSessionIdleTTL, maxSessionIdleTTL)
+	if err != nil {
+		return err
+	}
+	if idleTTL > value.SessionAbsoluteDuration() {
+		return fmt.Errorf("session_idle_ttl must not exceed session_absolute_ttl")
+	}
+	if value.MaxConcurrentSessions < MinConcurrentSessions || value.MaxConcurrentSessions > MaxConcurrentSessions {
+		return fmt.Errorf("max_concurrent_sessions must be between %d and %d", MinConcurrentSessions, MaxConcurrentSessions)
+	}
 	if _, err := parseBoundedDuration("recent_authentication_ttl", value.RecentAuthenticationTTL, minRecentAuthenticationTTL, maxRecentAuthenticationTTL); err != nil {
+		return err
+	}
+	if _, err := parseBoundedDuration("access_token_ttl", value.AccessTokenTTL, minAccessTokenTTL, maxAccessTokenTTL); err != nil {
+		return err
+	}
+	if _, err := parseBoundedDuration("refresh_token_ttl", value.RefreshTokenTTL, minRefreshTokenTTL, maxRefreshTokenTTL); err != nil {
+		return err
+	}
+	if _, err := parseBoundedDuration("authorization_code_ttl", value.AuthorizationCodeTTL, minAuthorizationCodeTTL, maxAuthorizationCodeTTL); err != nil {
 		return err
 	}
 	if value.AuditRetentionDays < MinAuditRetentionDays || value.AuditRetentionDays > MaxAuditRetentionDays {
@@ -173,8 +238,24 @@ func (l Lifecycle) SessionAbsoluteDuration() time.Duration {
 	return mustDuration(l.SessionAbsoluteTTL)
 }
 
+func (l Lifecycle) SessionIdleDuration() time.Duration {
+	return mustDuration(l.SessionIdleTTL)
+}
+
 func (l Lifecycle) RecentAuthenticationDuration() time.Duration {
 	return mustDuration(l.RecentAuthenticationTTL)
+}
+
+func (l Lifecycle) AccessTokenDuration() time.Duration {
+	return mustDuration(l.AccessTokenTTL)
+}
+
+func (l Lifecycle) RefreshTokenDuration() time.Duration {
+	return mustDuration(l.RefreshTokenTTL)
+}
+
+func (l Lifecycle) AuthorizationCodeDuration() time.Duration {
+	return mustDuration(l.AuthorizationCodeTTL)
 }
 
 func RetentionConfirmation(days int) string {

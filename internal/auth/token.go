@@ -34,9 +34,19 @@ type TokenService struct {
 	users           *user.Service
 	accessPolicy    AccessPolicyChecker
 	issuer          string
-	accessTTL       time.Duration
-	refreshTTL      time.Duration
+	fallback        TokenLifetimes
+	lifetimeSource  func() TokenLifetimes
+	revocationTTL   time.Duration
+	codeRetention   time.Duration
 	publicKeyLoader func(context.Context, string) (*rsa.PublicKey, error)
+}
+
+// TokenLifetimes is an immutable snapshot used for one issuance operation.
+// Existing credentials keep the expiration encoded or stored when issued.
+type TokenLifetimes struct {
+	AccessToken       time.Duration
+	RefreshToken      time.Duration
+	AuthorizationCode time.Duration
 }
 
 // AccessPolicyChecker evaluates whether a user may use a client under its
@@ -46,7 +56,64 @@ type AccessPolicyChecker interface {
 }
 
 func NewTokenService(jwkManager *JWKManager, sessionStore *session.Store, issuer string, accessTTL, refreshTTL time.Duration) *TokenService {
-	return &TokenService{jwkManager: jwkManager, session: sessionStore, issuer: strings.TrimRight(issuer, "/"), accessTTL: accessTTL, refreshTTL: refreshTTL}
+	return &TokenService{
+		jwkManager: jwkManager, session: sessionStore, issuer: strings.TrimRight(issuer, "/"),
+		fallback:      TokenLifetimes{AccessToken: accessTTL, RefreshToken: refreshTTL},
+		revocationTTL: maxDuration(accessTTL, refreshTTL),
+	}
+}
+
+// SetLifetimeSource installs the runtime policy source and the hard maxima
+// used for security-state and consumed-code retention. It must be called
+// during server construction, before request handling starts.
+func (ts *TokenService) SetLifetimeSource(source func() TokenLifetimes, maximumAccessTTL, maximumRefreshTTL, maximumCodeTTL time.Duration) {
+	ts.lifetimeSource = source
+	ts.revocationTTL = maxDuration(ts.revocationTTL, maximumAccessTTL, maximumRefreshTTL)
+	ts.codeRetention = maxDuration(ts.fallback.AuthorizationCode, maximumCodeTTL)
+}
+
+func (ts *TokenService) SetAuthorizationCodeFallback(ttl time.Duration) {
+	if ttl <= 0 {
+		return
+	}
+	ts.fallback.AuthorizationCode = ttl
+	ts.codeRetention = maxDuration(ts.codeRetention, ttl)
+}
+
+func (ts *TokenService) Lifetimes() TokenLifetimes {
+	value := ts.fallback
+	if ts.lifetimeSource != nil {
+		candidate := ts.lifetimeSource()
+		if candidate.AccessToken > 0 {
+			value.AccessToken = candidate.AccessToken
+		}
+		if candidate.RefreshToken > 0 {
+			value.RefreshToken = candidate.RefreshToken
+		}
+		if candidate.AuthorizationCode > 0 {
+			value.AuthorizationCode = candidate.AuthorizationCode
+		}
+	}
+	return value
+}
+
+func (ts *TokenService) RevocationTTL() time.Duration { return ts.revocationTTL }
+
+func (ts *TokenService) AuthorizationCodeRetention() time.Duration {
+	if ts.codeRetention > 0 {
+		return ts.codeRetention
+	}
+	return ts.Lifetimes().AuthorizationCode
+}
+
+func maxDuration(values ...time.Duration) time.Duration {
+	var maximum time.Duration
+	for _, value := range values {
+		if value > maximum {
+			maximum = value
+		}
+	}
+	return maximum
 }
 
 // SetUserService enables active-state and auth_version checks for user tokens.
@@ -92,7 +159,8 @@ func (ts *TokenService) GenerateClientTokenPair(ctx context.Context, clientID st
 }
 
 func (ts *TokenService) generateTokenPair(ctx context.Context, clientID, subject string, scopes []string, authVersion int64, issueRefresh bool, familyKey string, authorizationIssuedAt int64) (*TokenPair, error) {
-	access, jti, err := ts.signAccessToken(ctx, clientID, subject, scopes, authVersion)
+	lifetimes := ts.Lifetimes()
+	access, jti, err := ts.signAccessToken(ctx, clientID, subject, scopes, authVersion, lifetimes.AccessToken)
 	if err != nil {
 		return nil, err
 	}
@@ -103,7 +171,7 @@ func (ts *TokenService) generateTokenPair(ctx context.Context, clientID, subject
 			return nil, fmt.Errorf("generating refresh token: %w", err)
 		}
 		refreshData := &session.TokenData{ClientID: clientID, UserID: subject, Scopes: scopes, TokenUse: "refresh", AuthVersion: authVersion, AuthorizationIssuedAt: authorizationIssuedAt}
-		if err := ts.session.SaveRefreshToken(ctx, refresh, refreshData, ts.refreshTTL); err != nil {
+		if err := ts.session.SaveRefreshToken(ctx, refresh, refreshData, lifetimes.RefreshToken); err != nil {
 			return nil, fmt.Errorf("storing refresh token: %w", err)
 		}
 		familyKey = refreshData.FamilyKey
@@ -111,17 +179,17 @@ func (ts *TokenService) generateTokenPair(ctx context.Context, clientID, subject
 	data := &session.TokenData{ClientID: clientID, UserID: subject, Scopes: scopes, TokenUse: "access", AuthVersion: authVersion, FamilyKey: familyKey, AuthorizationIssuedAt: authorizationIssuedAt}
 	var saveErr error
 	if familyKey == "" {
-		saveErr = ts.session.SaveToken(ctx, jti, data, ts.accessTTL)
+		saveErr = ts.session.SaveToken(ctx, jti, data, lifetimes.AccessToken)
 	} else {
-		saveErr = ts.session.SaveTokenForRefreshFamily(ctx, jti, data, familyKey, ts.accessTTL)
+		saveErr = ts.session.SaveTokenForRefreshFamily(ctx, jti, data, familyKey, lifetimes.AccessToken)
 	}
 	if saveErr != nil {
 		if refresh != "" {
-			_ = ts.session.RevokeRefreshTokenForClient(ctx, refresh, clientID, ts.refreshTTL)
+			_ = ts.session.RevokeRefreshTokenForClient(ctx, refresh, clientID, ts.revocationTTL)
 		}
 		return nil, fmt.Errorf("storing access token metadata: %w", saveErr)
 	}
-	result := &TokenPair{AccessToken: access, TokenType: "Bearer", ExpiresIn: int(ts.accessTTL.Seconds()), Scope: joinScopes(scopes)}
+	result := &TokenPair{AccessToken: access, TokenType: "Bearer", ExpiresIn: int(lifetimes.AccessToken.Seconds()), Scope: joinScopes(scopes)}
 	if !issueRefresh {
 		return result, nil
 	}
@@ -129,7 +197,7 @@ func (ts *TokenService) generateTokenPair(ctx context.Context, clientID, subject
 	return result, nil
 }
 
-func (ts *TokenService) signAccessToken(ctx context.Context, clientID, subject string, scopes []string, authVersion int64) (string, string, error) {
+func (ts *TokenService) signAccessToken(ctx context.Context, clientID, subject string, scopes []string, authVersion int64, accessTTL time.Duration) (string, string, error) {
 	privateKey, kid, err := ts.jwkManager.GetPrivateKey(ctx)
 	if err != nil {
 		return "", "", fmt.Errorf("getting signing key: %w", err)
@@ -138,7 +206,7 @@ func (ts *TokenService) signAccessToken(ctx context.Context, clientID, subject s
 	jti := uuid.NewString()
 	claims := &Claims{RegisteredClaims: jwt.RegisteredClaims{
 		Issuer: ts.issuer, Subject: subject, Audience: jwt.ClaimStrings{clientID},
-		ExpiresAt: jwt.NewNumericDate(now.Add(ts.accessTTL)), IssuedAt: jwt.NewNumericDate(now), NotBefore: jwt.NewNumericDate(now), ID: jti,
+		ExpiresAt: jwt.NewNumericDate(now.Add(accessTTL)), IssuedAt: jwt.NewNumericDate(now), NotBefore: jwt.NewNumericDate(now), ID: jti,
 	}, Scope: joinScopes(scopes), TokenUse: "access", AuthVersion: authVersion}
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
 	token.Header["kid"] = kid
@@ -163,8 +231,9 @@ func (ts *TokenService) GenerateIDToken(ctx context.Context, clientID, userID st
 		return "", fmt.Errorf("getting signing key: %w", err)
 	}
 	now := time.Now().UTC()
+	accessTTL := ts.Lifetimes().AccessToken
 	claims := jwt.MapClaims{
-		"iss": ts.issuer, "sub": userID, "aud": clientID, "exp": now.Add(ts.accessTTL).Unix(),
+		"iss": ts.issuer, "sub": userID, "aud": clientID, "exp": now.Add(accessTTL).Unix(),
 		"iat": now.Unix(), "nbf": now.Unix(), "jti": uuid.NewString(), "token_use": "id", "auth_version": authVersion,
 	}
 	if nonce != "" {
@@ -255,6 +324,7 @@ func (ts *TokenService) parseSignedToken(ctx context.Context, tokenString string
 }
 
 func (ts *TokenService) RefreshToken(ctx context.Context, refreshToken, clientID string, allowedScopes []string) (*TokenPair, error) {
+	lifetimes := ts.Lifetimes()
 	data, used, err := ts.session.GetRefreshTokenState(ctx, refreshToken)
 	if err != nil {
 		return nil, ErrInvalidToken
@@ -263,32 +333,32 @@ func (ts *TokenService) RefreshToken(ctx context.Context, refreshToken, clientID
 		return nil, ErrClientMismatch
 	}
 	if !scopesAreSubset(data.Scopes, allowedScopes) {
-		_ = ts.session.RevokeRefreshTokenForClient(ctx, refreshToken, clientID, ts.refreshTTL)
+		_ = ts.session.RevokeRefreshTokenForClient(ctx, refreshToken, clientID, ts.revocationTTL)
 		return nil, ErrInvalidToken
 	}
 	if used {
-		if err := ts.session.RevokeRefreshTokenForClient(ctx, refreshToken, clientID, ts.refreshTTL); err != nil && !errors.Is(err, session.ErrNotFound) {
+		if err := ts.session.RevokeRefreshTokenForClient(ctx, refreshToken, clientID, ts.revocationTTL); err != nil && !errors.Is(err, session.ErrNotFound) {
 			return nil, fmt.Errorf("revoking reused refresh token family: %w", err)
 		}
 		return nil, ErrRefreshTokenReuse
 	}
 	if err := ts.validateUser(ctx, data.UserID, data.AuthVersion); err != nil {
-		_ = ts.session.RevokeRefreshTokenForClient(ctx, refreshToken, clientID, ts.refreshTTL)
+		_ = ts.session.RevokeRefreshTokenForClient(ctx, refreshToken, clientID, ts.revocationTTL)
 		return nil, err
 	}
 	if err := ts.validateAuthorization(ctx, data); err != nil {
-		_ = ts.session.RevokeRefreshTokenForClient(ctx, refreshToken, clientID, ts.refreshTTL)
+		_ = ts.session.RevokeRefreshTokenForClient(ctx, refreshToken, clientID, ts.revocationTTL)
 		return nil, err
 	}
 	if err := ts.validateAccessPolicy(ctx, data); err != nil {
-		_ = ts.session.RevokeRefreshTokenForClient(ctx, refreshToken, clientID, ts.refreshTTL)
+		_ = ts.session.RevokeRefreshTokenForClient(ctx, refreshToken, clientID, ts.revocationTTL)
 		return nil, err
 	}
 	newRefresh, err := internalcrypto.GenerateRandomString(32)
 	if err != nil {
 		return nil, fmt.Errorf("generating refresh token: %w", err)
 	}
-	access, jti, err := ts.signAccessToken(ctx, data.ClientID, data.UserID, data.Scopes, data.AuthVersion)
+	access, jti, err := ts.signAccessToken(ctx, data.ClientID, data.UserID, data.Scopes, data.AuthVersion, lifetimes.AccessToken)
 	if err != nil {
 		return nil, err
 	}
@@ -297,7 +367,7 @@ func (ts *TokenService) RefreshToken(ctx context.Context, refreshToken, clientID
 		AuthVersion: data.AuthVersion, FamilyKey: data.FamilyKey, AuthorizationIssuedAt: data.AuthorizationIssuedAt,
 	}
 	_, err = ts.session.RotateRefreshTokenAndStoreAccess(
-		ctx, refreshToken, newRefresh, jti, data, accessData, ts.refreshTTL, ts.accessTTL,
+		ctx, refreshToken, newRefresh, jti, data, accessData, lifetimes.RefreshToken, lifetimes.AccessToken,
 	)
 	if err != nil {
 		if errors.Is(err, session.ErrRefreshTokenReuse) {
@@ -306,14 +376,14 @@ func (ts *TokenService) RefreshToken(ctx context.Context, refreshToken, clientID
 		return nil, ErrInvalidToken
 	}
 	return &TokenPair{
-		AccessToken: access, TokenType: "Bearer", ExpiresIn: int(ts.accessTTL.Seconds()),
+		AccessToken: access, TokenType: "Bearer", ExpiresIn: int(lifetimes.AccessToken.Seconds()),
 		RefreshToken: newRefresh, Scope: joinScopes(data.Scopes),
 	}, nil
 }
 
 // RevokeTokenForClient revokes only tokens owned by the authenticated client.
 func (ts *TokenService) RevokeTokenForClient(ctx context.Context, token, clientID string) error {
-	if err := ts.session.RevokeRefreshTokenForClient(ctx, token, clientID, ts.refreshTTL); err == nil {
+	if err := ts.session.RevokeRefreshTokenForClient(ctx, token, clientID, ts.revocationTTL); err == nil {
 		return nil
 	} else if errors.Is(err, session.ErrTokenBindingMismatch) {
 		return ErrClientMismatch

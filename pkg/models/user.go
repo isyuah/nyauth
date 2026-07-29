@@ -94,5 +94,6 @@ type SessionResponse struct {
 	EmailVerified                 bool       `json:"email_verified"`
 	AuthenticatedAt               *time.Time `json:"authenticated_at"`
 	SessionExpiresAt              *time.Time `json:"session_expires_at"`
+	SessionIdleExpiresAt          *time.Time `json:"session_idle_expires_at"`
 	RecentAuthenticationExpiresAt *time.Time `json:"recent_authentication_expires_at"`
 }

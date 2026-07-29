@@ -238,9 +238,33 @@ export function lifecycleValidationError(input: UpdateLifecycleSettingsInput): F
   if (absoluteTTL === null || absoluteTTL < 15 * 60_000 || absoluteTTL > 720 * 3_600_000) {
     return { field: 'lifecycle-session-ttl', message: '会话绝对有效期须在 15 分钟至 720 小时之间。' };
   }
+  const idleTTL = parseDurationMilliseconds(input.session_idle_ttl);
+  if (idleTTL === null || idleTTL < 5 * 60_000 || idleTTL > 720 * 3_600_000) {
+    return { field: 'lifecycle-session-idle-ttl', message: '会话空闲有效期须在 5 分钟至 720 小时之间。' };
+  }
+  if (idleTTL > absoluteTTL) {
+    return { field: 'lifecycle-session-idle-ttl', message: '会话空闲有效期不能超过绝对有效期。' };
+  }
+  if (!Number.isSafeInteger(input.max_concurrent_sessions)
+    || input.max_concurrent_sessions < 0
+    || input.max_concurrent_sessions > 100) {
+    return { field: 'lifecycle-max-concurrent-sessions', message: '并发会话上限须为 0 至 100 的整数。' };
+  }
   const recentTTL = parseDurationMilliseconds(input.recent_authentication_ttl);
   if (recentTTL === null || recentTTL < 60_000 || recentTTL > 3_600_000) {
     return { field: 'lifecycle-recent-auth-ttl', message: '近期认证有效期须在 1 分钟至 1 小时之间。' };
+  }
+  const accessTokenTTL = parseDurationMilliseconds(input.access_token_ttl);
+  if (accessTokenTTL === null || accessTokenTTL < 5 * 60_000 || accessTokenTTL > 24 * 3_600_000) {
+    return { field: 'lifecycle-access-token-ttl', message: 'Access Token 有效期须在 5 分钟至 24 小时之间。' };
+  }
+  const refreshTokenTTL = parseDurationMilliseconds(input.refresh_token_ttl);
+  if (refreshTokenTTL === null || refreshTokenTTL < 3_600_000 || refreshTokenTTL > 8_760 * 3_600_000) {
+    return { field: 'lifecycle-refresh-token-ttl', message: 'Refresh Token 有效期须在 1 小时至 8760 小时之间。' };
+  }
+  const authorizationCodeTTL = parseDurationMilliseconds(input.authorization_code_ttl);
+  if (authorizationCodeTTL === null || authorizationCodeTTL < 30_000 || authorizationCodeTTL > 10 * 60_000) {
+    return { field: 'lifecycle-authorization-code-ttl', message: '授权码有效期须在 30 秒至 10 分钟之间。' };
   }
   if (!Number.isSafeInteger(input.audit_retention_days)
     || input.audit_retention_days < 7
@@ -275,7 +299,12 @@ export function lifecycleSettingsFromInput(
   return {
     revision,
     session_absolute_ttl: input.session_absolute_ttl,
+    session_idle_ttl: input.session_idle_ttl,
+    max_concurrent_sessions: input.max_concurrent_sessions,
     recent_authentication_ttl: input.recent_authentication_ttl,
+    access_token_ttl: input.access_token_ttl,
+    refresh_token_ttl: input.refresh_token_ttl,
+    authorization_code_ttl: input.authorization_code_ttl,
     audit_retention_days: input.audit_retention_days,
   };
 }

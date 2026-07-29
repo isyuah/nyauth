@@ -362,7 +362,7 @@ func (s *Server) finishExternalReauthentication(w http.ResponseWriter, r *http.R
 		s.providerCallbackFailure(w, r, "reauth", returnTo, code, status)
 		return
 	}
-	if _, err := s.sessionMiddleware.MarkReauthenticated(requestWithSession, updated); err != nil {
+	if _, err := s.sessionMiddleware.MarkReauthenticated(w, requestWithSession, updated); err != nil {
 		s.providerCallbackFailure(w, r, "reauth", returnTo, "session_failed", http.StatusServiceUnavailable)
 		return
 	}

@@ -536,7 +536,12 @@ describe('runtime policy settings API contract', () => {
     const lifecycle = {
       revision: 6,
       session_absolute_ttl: '24h',
+      session_idle_ttl: '12h',
+      max_concurrent_sessions: 5,
       recent_authentication_ttl: '10m',
+      access_token_ttl: '1h',
+      refresh_token_ttl: '720h',
+      authorization_code_ttl: '5m',
       audit_retention_days: 365,
     };
     const responses = [protection, { ...protection, revision: 5 }, lifecycle, { ...lifecycle, revision: 7 }];
@@ -561,7 +566,12 @@ describe('runtime policy settings API contract', () => {
     await api.admin.updateLifecycleSettings({
       expected_revision: lifecycle.revision,
       session_absolute_ttl: lifecycle.session_absolute_ttl,
+      session_idle_ttl: lifecycle.session_idle_ttl,
+      max_concurrent_sessions: lifecycle.max_concurrent_sessions,
       recent_authentication_ttl: lifecycle.recent_authentication_ttl,
+      access_token_ttl: lifecycle.access_token_ttl,
+      refresh_token_ttl: lifecycle.refresh_token_ttl,
+      authorization_code_ttl: lifecycle.authorization_code_ttl,
       audit_retention_days: 90,
       retention_confirmation: 'RETENTION 90 DAYS',
     });
@@ -586,7 +596,12 @@ describe('runtime policy settings API contract', () => {
     expect(JSON.parse(String(calls[3][1].body))).toEqual({
       expected_revision: 6,
       session_absolute_ttl: '24h',
+      session_idle_ttl: '12h',
+      max_concurrent_sessions: 5,
       recent_authentication_ttl: '10m',
+      access_token_ttl: '1h',
+      refresh_token_ttl: '720h',
+      authorization_code_ttl: '5m',
       audit_retention_days: 90,
       retention_confirmation: 'RETENTION 90 DAYS',
     });

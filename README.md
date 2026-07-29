@@ -331,7 +331,7 @@ Provider 不再从 YAML 或环境变量静态加载，只能由管理员写入�
 - `GET /api/admin/settings/media`、候选保存/测试、迁移及 `fallback/migrate` 接口：私有 S3 运行时配置、迁回已配置本地 fallback、真实对象测试、迁移进度和失败重试；凭据只加密保存且永不回显。
 - `GET/PUT /api/admin/settings/branding`、`registration`、`security`、`protection`、`lifecycle`：五组运行时设置统一使用 revision CAS；写入要求近期重新认证、固定保护限流，并与 `settings.updated` 审计同事务提交。
 - `protection` 动态控制登录、账户操作、头像和 SMTP 管理限流，以及自助客户端全局默认配额。关闭限流组需要精确危险确认；每次 revision 都使用新的 Redis key namespace，旧计数自然过期。
-- `lifecycle` 动态控制浏览器会话绝对期限、近期认证期限和审计保留天数。缩短会话期限会在下一次请求时淘汰超龄会话；延长不会恢复 Redis 中已经过期的会话。
+- `lifecycle` 动态控制浏览器会话绝对/空闲期限、每用户并发会话上限、近期认证期限、Access/Refresh Token、授权码和审计保留天数。缩短会话期限会在下一次请求时淘汰超龄会话；并发上限在下一次登录时原子淘汰最旧会话；延长不会恢复 Redis 中已经过期的会话。Token 与授权码策略只影响之后新签发或轮换的凭据，已签发凭据保持原到期时间。
 - `GET /api/admin/stats`：快照化的用户、会话、注册、邮件 backlog、24 小时失败尝试和 SMTP 熔断摘要。
 - `GET /api/admin/stats/login-trend`、`registration-trend`、`mail-trend`：按 UTC 返回 7–90 天的补零趋势；注册趋势含邀请预占/消费/释放，邮件趋势区分其他失败尝试（不含永久拒收）、永久拒收与过期。
 - `GET /api/admin/audit-logs/options`：返回有界、静态的事件、结果、风险和目标类型筛选目录，不扫描审计分区。

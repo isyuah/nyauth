@@ -24,6 +24,7 @@ type browserSessionResponse struct {
 	LastSeenAt                    time.Time `json:"last_seen_at"`
 	AuthenticatedAt               time.Time `json:"authenticated_at"`
 	SessionExpiresAt              time.Time `json:"session_expires_at"`
+	SessionIdleExpiresAt          time.Time `json:"session_idle_expires_at"`
 	RecentAuthenticationExpiresAt time.Time `json:"recent_authentication_expires_at"`
 }
 
@@ -35,6 +36,7 @@ func mapBrowserSessions(items []session.SessionData, currentPublicID string, lif
 			IPAddress: item.IPAddress, UserAgent: item.UserAgent,
 			CreatedAt: item.CreatedAt, LastSeenAt: item.LastSeenAt, AuthenticatedAt: item.AuthenticatedAt,
 			SessionExpiresAt:              item.CreatedAt.Add(lifecycle.SessionAbsoluteDuration()),
+			SessionIdleExpiresAt:          item.LastSeenAt.Add(lifecycle.SessionIdleDuration()),
 			RecentAuthenticationExpiresAt: item.AuthenticatedAt.Add(lifecycle.RecentAuthenticationDuration()),
 		})
 	}

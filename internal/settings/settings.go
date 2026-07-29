@@ -113,6 +113,9 @@ type Manager struct {
 	db                 *pgxpool.Pool
 	brandingDefaults   Branding
 	auditRetentionDays int
+	accessTokenTTL     time.Duration
+	refreshTokenTTL    time.Duration
+	authCodeTTL        time.Duration
 	passkeyRPID        string
 	branding           atomic.Pointer[Versioned[Branding]]
 	registration       atomic.Pointer[Versioned[Registration]]
@@ -144,6 +147,27 @@ func (m *Manager) SetAuditRetentionFallback(retention time.Duration) {
 	if days >= MinAuditRetentionDays && days <= MaxAuditRetentionDays {
 		m.auditRetentionDays = days
 	}
+}
+
+// SetAuthenticationFallbacks configures the deployment values used until an
+// administrator stores a lifecycle policy. Existing lifecycle rows from C2
+// also inherit missing C4 fields from these values.
+func (m *Manager) SetAuthenticationFallbacks(accessTokenTTL, refreshTokenTTL, authorizationCodeTTL time.Duration) {
+	if accessTokenTTL > 0 {
+		m.accessTokenTTL = accessTokenTTL
+	}
+	if refreshTokenTTL > 0 {
+		m.refreshTokenTTL = refreshTokenTTL
+	}
+	if authorizationCodeTTL > 0 {
+		m.authCodeTTL = authorizationCodeTTL
+	}
+}
+
+func (m *Manager) lifecycleDefaults() Lifecycle {
+	return DefaultLifecycleWithAuthentication(
+		m.auditRetentionDays, m.accessTokenTTL, m.refreshTokenTTL, m.authCodeTTL,
+	)
 }
 
 // Branding returns the stored branding, or the config defaults before the
@@ -202,7 +226,42 @@ func (m *Manager) LifecycleSnapshot() Versioned[Lifecycle] {
 	if snapshot := m.lifecycle.Load(); snapshot != nil {
 		return *snapshot
 	}
-	return Versioned[Lifecycle]{Value: DefaultLifecycle(m.auditRetentionDays)}
+	return Versioned[Lifecycle]{Value: m.lifecycleDefaults()}
+}
+
+func decodeLifecycle(raw []byte, defaults Lifecycle) (Lifecycle, error) {
+	value := defaults
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return Lifecycle{}, err
+	}
+	if err := json.Unmarshal(raw, &value); err != nil {
+		return Lifecycle{}, err
+	}
+	if _, ok := fields["session_idle_ttl"]; !ok {
+		// C2 rows predate idle expiration. Inheriting the row's absolute TTL
+		// preserves their previous behavior instead of silently shortening it.
+		value.SessionIdleTTL = value.SessionAbsoluteTTL
+	}
+	if _, ok := fields["max_concurrent_sessions"]; !ok {
+		value.MaxConcurrentSessions = 0
+	}
+
+	validationValue := value
+	codeDefaults := DefaultLifecycle(defaults.AuditRetentionDays)
+	if _, ok := fields["access_token_ttl"]; !ok {
+		validationValue.AccessTokenTTL = codeDefaults.AccessTokenTTL
+	}
+	if _, ok := fields["refresh_token_ttl"]; !ok {
+		validationValue.RefreshTokenTTL = codeDefaults.RefreshTokenTTL
+	}
+	if _, ok := fields["authorization_code_ttl"]; !ok {
+		validationValue.AuthorizationCodeTTL = codeDefaults.AuthorizationCodeTTL
+	}
+	if err := ValidateLifecycle(validationValue); err != nil {
+		return Lifecycle{}, err
+	}
+	return value, nil
 }
 
 // Load refreshes every settings group from the database. Missing rows reset
@@ -284,11 +343,8 @@ func (m *Manager) Load(ctx context.Context) error {
 
 	var lifecycle *Versioned[Lifecycle]
 	if storedValue, ok := stored[lifecycleKey]; ok {
-		value := DefaultLifecycle(m.auditRetentionDays)
-		if err := json.Unmarshal(storedValue.value, &value); err != nil {
-			return fmt.Errorf("decoding stored lifecycle settings: %w", err)
-		}
-		if err := ValidateLifecycle(value); err != nil {
+		value, err := decodeLifecycle(storedValue.value, m.lifecycleDefaults())
+		if err != nil {
 			return fmt.Errorf("decoding stored lifecycle settings: %w", err)
 		}
 		lifecycle = &Versioned[Lifecycle]{Revision: storedValue.revision, Value: value}

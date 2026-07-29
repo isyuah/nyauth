@@ -18,18 +18,24 @@ import (
 
 type ConsentHandler struct {
 	sessionStore       *session.Store
+	tokenService       *TokenService
 	clientStore        *client.Store
 	authorizationStore *authorization.Store
 	config             *config.Config
+	sessionResolver    BrowserSessionResolver
 }
 
-func NewConsentHandler(sessionStore *session.Store, _ *TokenService, clientStore *client.Store, authorizationStore *authorization.Store, cfg *config.Config) *ConsentHandler {
-	return &ConsentHandler{sessionStore: sessionStore, clientStore: clientStore, authorizationStore: authorizationStore, config: cfg}
+func (h *ConsentHandler) SetBrowserSessionResolver(resolver BrowserSessionResolver) {
+	h.sessionResolver = resolver
+}
+
+func NewConsentHandler(sessionStore *session.Store, tokenService *TokenService, clientStore *client.Store, authorizationStore *authorization.Store, cfg *config.Config) *ConsentHandler {
+	return &ConsentHandler{sessionStore: sessionStore, tokenService: tokenService, clientStore: clientStore, authorizationStore: authorizationStore, config: cfg}
 }
 
 func (h *ConsentHandler) GetConsent(w http.ResponseWriter, r *http.Request) {
 	challenge := r.URL.Query().Get("challenge")
-	sess, ok := h.authenticatedSession(r)
+	sess, ok := h.authenticatedSession(w, r)
 	if !ok {
 		writeError(w, http.StatusUnauthorized, "authentication_required")
 		return
@@ -61,7 +67,7 @@ func (h *ConsentHandler) GetConsent(w http.ResponseWriter, r *http.Request) {
 }
 
 func (h *ConsentHandler) AcceptConsent(w http.ResponseWriter, r *http.Request) {
-	sess, ok := h.authorizeMutation(r)
+	sess, ok := h.authorizeMutation(w, r)
 	if !ok {
 		writeError(w, http.StatusForbidden, "csrf_validation_failed")
 		return
@@ -81,11 +87,7 @@ func (h *ConsentHandler) AcceptConsent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "server_error")
 		return
 	}
-	tokenTTL := h.config.Auth.RefreshTokenTTL
-	if h.config.Auth.AccessTokenTTL > tokenTTL {
-		tokenTTL = h.config.Auth.AccessTokenTTL
-	}
-	authorizationIssuedAt, err := h.sessionStore.AuthorizationIssueTime(r.Context(), data.UserID, data.ClientID, tokenTTL+5*time.Minute)
+	authorizationIssuedAt, err := h.sessionStore.AuthorizationIssueTime(r.Context(), data.UserID, data.ClientID, h.authorizationStateTTL())
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "server_error")
 		return
@@ -104,7 +106,7 @@ func (h *ConsentHandler) AcceptConsent(w http.ResponseWriter, r *http.Request) {
 		CodeChallenge: data.CodeChallenge, ChallengeMethod: "S256", Nonce: data.Nonce, AuthVersion: data.AuthVersion,
 		AuthorizationIssuedAt: authorizationIssuedAt,
 	}
-	if err := h.sessionStore.SaveAuthorizationCode(r.Context(), code, authorization, h.config.Auth.AuthorizationCodeTTL); err != nil {
+	if err := h.sessionStore.SaveAuthorizationCode(r.Context(), code, authorization, h.authorizationCodeTTL()); err != nil {
 		writeError(w, http.StatusInternalServerError, "server_error")
 		return
 	}
@@ -116,8 +118,28 @@ func (h *ConsentHandler) AcceptConsent(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"redirect_url": target})
 }
 
+func (h *ConsentHandler) authorizationStateTTL() time.Duration {
+	if h.tokenService != nil {
+		return h.tokenService.RevocationTTL() + 5*time.Minute
+	}
+	if h.config == nil {
+		return 5 * time.Minute
+	}
+	return maxDuration(h.config.Auth.AccessTokenTTL, h.config.Auth.RefreshTokenTTL) + 5*time.Minute
+}
+
+func (h *ConsentHandler) authorizationCodeTTL() time.Duration {
+	if h.tokenService != nil {
+		return h.tokenService.Lifetimes().AuthorizationCode
+	}
+	if h.config != nil && h.config.Auth.AuthorizationCodeTTL > 0 {
+		return h.config.Auth.AuthorizationCodeTTL
+	}
+	return 5 * time.Minute
+}
+
 func (h *ConsentHandler) DenyConsent(w http.ResponseWriter, r *http.Request) {
-	sess, ok := h.authorizeMutation(r)
+	sess, ok := h.authorizeMutation(w, r)
 	if !ok {
 		writeError(w, http.StatusForbidden, "csrf_validation_failed")
 		return
@@ -140,7 +162,11 @@ func (h *ConsentHandler) DenyConsent(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]string{"redirect_url": target})
 }
 
-func (h *ConsentHandler) authenticatedSession(r *http.Request) (*session.SessionData, bool) {
+func (h *ConsentHandler) authenticatedSession(w http.ResponseWriter, r *http.Request) (*session.SessionData, bool) {
+	if h.sessionResolver != nil {
+		sess, err := h.sessionResolver(w, r)
+		return sess, err == nil && sess != nil && sess.UserID != ""
+	}
 	cookie, err := r.Cookie(oauthSessionCookie)
 	if err != nil {
 		return nil, false
@@ -149,8 +175,8 @@ func (h *ConsentHandler) authenticatedSession(r *http.Request) (*session.Session
 	return sess, err == nil && sess.UserID != ""
 }
 
-func (h *ConsentHandler) authorizeMutation(r *http.Request) (*session.SessionData, bool) {
-	sess, ok := h.authenticatedSession(r)
+func (h *ConsentHandler) authorizeMutation(w http.ResponseWriter, r *http.Request) (*session.SessionData, bool) {
+	sess, ok := h.authenticatedSession(w, r)
 	if !ok || sess.CSRFToken == "" {
 		return nil, false
 	}

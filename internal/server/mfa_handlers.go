@@ -338,7 +338,7 @@ func (s *Server) completeMFAChallenge(
 			return
 		}
 		requestWithSession := r.WithContext(withAuthenticatedSession(r.Context(), authenticated))
-		marked, err := s.sessionMiddleware.MarkReauthenticated(requestWithSession, updated)
+		marked, err := s.sessionMiddleware.MarkReauthenticated(w, requestWithSession, updated)
 		if err != nil {
 			writeAPIError(w, http.StatusServiceUnavailable, "reauthentication session could not be updated")
 			return

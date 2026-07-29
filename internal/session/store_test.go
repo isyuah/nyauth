@@ -73,6 +73,37 @@ func TestUserCanListAndRevokeSessionByPublicID(t *testing.T) {
 	}
 }
 
+func TestSaveSessionWithLimitAtomicallyEvictsOldestSession(t *testing.T) {
+	store, _ := testStore(t)
+	ctx := context.Background()
+	createdAt := time.Now().UTC().Add(-3 * time.Hour)
+	for index, sessionID := range []string{"oldest", "middle", "newest"} {
+		data := &SessionData{
+			UserID: "limited-user", Username: "alice", AuthVersion: 1, SessionVersion: 1,
+			CreatedAt: createdAt.Add(time.Duration(index) * time.Hour),
+		}
+		removed, err := store.SaveSessionWithLimit(ctx, sessionID, data, time.Hour, 2)
+		if err != nil {
+			t.Fatalf("save %s: %v", sessionID, err)
+		}
+		if index < 2 && removed != 0 || index == 2 && removed != 1 {
+			t.Fatalf("save %s removed=%d", sessionID, removed)
+		}
+	}
+	if _, err := store.GetSession(ctx, "oldest"); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("oldest session survived: %v", err)
+	}
+	for _, sessionID := range []string{"middle", "newest"} {
+		if _, err := store.GetSession(ctx, sessionID); err != nil {
+			t.Fatalf("%s session was removed: %v", sessionID, err)
+		}
+	}
+	items, err := store.ListUserSessions(ctx, "limited-user")
+	if err != nil || len(items) != 2 {
+		t.Fatalf("limited sessions=%d err=%v", len(items), err)
+	}
+}
+
 func TestUpdateSessionCannotResurrectARevokedSession(t *testing.T) {
 	store, _ := testStore(t)
 	ctx := context.Background()

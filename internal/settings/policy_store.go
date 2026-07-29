@@ -105,7 +105,7 @@ func (m *Manager) SetLifecycle(
 		return 0, fmt.Errorf("starting lifecycle settings transaction: %w", err)
 	}
 	defer tx.Rollback(ctx)
-	previous, _, err := loadLifecycleTx(ctx, tx, m.auditRetentionDays)
+	previous, _, err := loadLifecycleTx(ctx, tx, m.lifecycleDefaults())
 	if err != nil {
 		return 0, err
 	}
@@ -118,10 +118,15 @@ func (m *Manager) SetLifecycle(
 		return 0, err
 	}
 	mutation = mutation.WithTarget("settings", lifecycleKey).WithDetails(map[string]any{
-		"revision":                  revision,
-		"session_absolute_ttl":      value.SessionAbsoluteTTL,
-		"recent_authentication_ttl": value.RecentAuthenticationTTL,
-		"audit_retention_days":      value.AuditRetentionDays,
+		"revision":                     revision,
+		"session_absolute_ttl":         value.SessionAbsoluteTTL,
+		"session_idle_ttl":             value.SessionIdleTTL,
+		"max_concurrent_sessions":      value.MaxConcurrentSessions,
+		"recent_authentication_ttl":    value.RecentAuthenticationTTL,
+		"access_credential_lifetime":   value.AccessTokenTTL,
+		"refresh_credential_lifetime":  value.RefreshTokenTTL,
+		"authorization_grant_lifetime": value.AuthorizationCodeTTL,
+		"audit_retention_days":         value.AuditRetentionDays,
 	})
 	if err := audit.EnqueueMutationTx(ctx, tx, mutation); err != nil {
 		return 0, fmt.Errorf("auditing lifecycle settings: %w", err)
@@ -250,8 +255,8 @@ func loadProtectionTx(ctx context.Context, tx pgx.Tx) (Protection, int64, error)
 	return value, revision, nil
 }
 
-func loadLifecycleTx(ctx context.Context, tx pgx.Tx, fallbackDays int) (Lifecycle, int64, error) {
-	value := DefaultLifecycle(fallbackDays)
+func loadLifecycleTx(ctx context.Context, tx pgx.Tx, defaults Lifecycle) (Lifecycle, int64, error) {
+	value := defaults
 	var raw []byte
 	var revision int64
 	err := tx.QueryRow(ctx, `SELECT value,revision FROM runtime_settings WHERE key=$1`, lifecycleKey).Scan(&raw, &revision)
@@ -261,10 +266,8 @@ func loadLifecycleTx(ctx context.Context, tx pgx.Tx, fallbackDays int) (Lifecycl
 	if err != nil {
 		return Lifecycle{}, 0, fmt.Errorf("loading lifecycle settings: %w", err)
 	}
-	if err := json.Unmarshal(raw, &value); err != nil {
-		return Lifecycle{}, 0, fmt.Errorf("decoding lifecycle settings: %w", err)
-	}
-	if err := ValidateLifecycle(value); err != nil {
+	value, err = decodeLifecycle(raw, defaults)
+	if err != nil {
 		return Lifecycle{}, 0, err
 	}
 	return value, revision, nil
@@ -287,11 +290,9 @@ func ResolveAuditRetention(
 	if err != nil {
 		return 0, fmt.Errorf("loading audit retention policy: %w", err)
 	}
-	if err := json.Unmarshal(raw, &value); err != nil {
+	value, err = decodeLifecycle(raw, value)
+	if err != nil {
 		return 0, fmt.Errorf("decoding audit retention policy: %w", err)
-	}
-	if err := ValidateLifecycle(value); err != nil {
-		return 0, fmt.Errorf("validating audit retention policy: %w", err)
 	}
 	return time.Duration(value.AuditRetentionDays) * 24 * time.Hour, nil
 }
