@@ -56,6 +56,7 @@ func TestParseCommand(t *testing.T) {
 		{name: "healthcheck", args: []string{"healthcheck", "-timeout", "1s"}, command: commandHealthcheck, rest: []string{"-timeout", "1s"}},
 		{name: "verify recovery", args: []string{"verify-recovery", "-config", "config.yaml"}, command: commandVerifyRecovery, rest: []string{"-config", "config.yaml"}},
 		{name: "service control reset", args: []string{"service-control", "reset", "-reason", "incident resolved"}, command: commandServiceControl, rest: []string{"reset", "-reason", "incident resolved"}},
+		{name: "MFA reset", args: []string{"mfa", "reset", "-username", "admin"}, command: commandMFA, rest: []string{"reset", "-username", "admin"}},
 		{name: "unknown", args: []string{"rollback"}, wantErr: true},
 	}
 	for _, tt := range tests {
@@ -74,6 +75,33 @@ func TestParseCommand(t *testing.T) {
 				if rest[i] != tt.rest[i] {
 					t.Errorf("rest[%d] = %q, want %q", i, rest[i], tt.rest[i])
 				}
+			}
+		})
+	}
+}
+
+func TestRunMFARejectsInvalidArgumentsBeforeLoadingConfiguration(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "missing subcommand", want: "mfa reset"},
+		{name: "unknown subcommand", args: []string{"status"}, want: "mfa reset"},
+		{name: "missing selector", args: []string{"reset", "-reason", "lost device"}, want: "exactly one"},
+		{name: "multiple selectors", args: []string{"reset", "-username", "admin", "-user-id", "967ba07e-9c8e-4a76-8360-3470b10792b7", "-reason", "lost device"}, want: "exactly one"},
+		{name: "invalid UUID", args: []string{"reset", "-user-id", "invalid", "-reason", "lost device", "-confirm", "invalid"}, want: "user ID is invalid"},
+		{name: "missing confirmation", args: []string{"reset", "-username", "admin", "-reason", "lost device"}, want: "-confirm"},
+		{name: "wrong confirmation", args: []string{"reset", "-username", "admin", "-reason", "lost device", "-confirm", "other"}, want: "-confirm"},
+		{name: "invalid scope", args: []string{"reset", "-username", "admin", "-reason", "lost device", "-confirm", "admin", "-scope", "recovery"}, want: "all, totp, or passkeys"},
+		{name: "short reason", args: []string{"reset", "-username", "admin", "-reason", "x", "-confirm", "admin"}, want: "3 to 500"},
+		{name: "unexpected argument", args: []string{"reset", "-username", "admin", "-reason", "lost device", "-confirm", "admin", "extra"}, want: "unexpected MFA reset arguments"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := runMFA(test.args)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("runMFA(%v) error = %v, want containing %q", test.args, err, test.want)
 			}
 		})
 	}

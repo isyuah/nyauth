@@ -317,6 +317,18 @@ docker compose --env-file .env.production -f docker-compose.external.yml run --r
 
 命令默认等待在线实例最多 30 秒并输出 JSON。`application_status=applying` 表示数据库 reset 已提交，但仍有活动实例尚未确认；不要重复执行 reset，应先检查实例心跳、数据库连通性和应用日志。每次执行都会写 `service_control.cli_reset` 审计，`-reason` 不得包含密码、Token、DSN 或其他 secret。
 
+若管理员因丢失 Passkey、TOTP 或恢复码而无法完成登录 MFA，可从同一容器使用事务化恢复命令。优先只删除确认失效的因素，不要无依据地清空全部 MFA：
+
+```bash
+docker compose --env-file .env.production -f docker-compose.external.yml exec nyauth \
+  nyauth mfa reset -username admin -scope passkeys \
+  -reason "operator confirmed lost Passkey" -confirm admin
+```
+
+也可以用 `-user-id <uuid>` 代替用户名，此时 `-confirm` 必须重复规范化后的同一 UUID。`-scope` 为 `passkeys`、`totp` 或 `all`；命令保留 WebAuthn user handle，删除成功后推进 `auth_version`，由现有安全撤销 outbox 使旧会话、MFA challenge 和 refresh family 失效。它会拒绝删除最后一种主认证方式。
+
+如果活动管理员启用了强制 MFA，而所选操作会删除最后一个因素，命令默认失败。只有事故处置明确要求临时降低全局策略时才追加 `-disable-admin-mfa-requirement`；策略变更与因素清除在同一事务提交，并分别写入 `settings.updated` 和 `mfa.recovery_reset`。HA 环境只在一个实例执行一次；策略通知通常立即同步，通知丢失时实例会在一分钟 reconciliation 内加载新 revision。
+
 正常停止而保留 PostgreSQL 数据：
 
 ```bash

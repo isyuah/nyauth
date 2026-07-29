@@ -72,6 +72,16 @@ docker compose logs --follow nyauth
 docker compose exec nyauth nyauth service-control reset -reason "local operator recovery"
 ```
 
+若用户丢失了 MFA 凭据且无法通过正常的近期重新认证流程删除，可使用带审计的 break-glass CLI。必须精确指定一个用户、重置范围、原因，并再次输入目标标识作为人工确认；下面只删除 `admin` 的 Passkey，保留其 TOTP 与稳定 WebAuthn handle：
+
+```powershell
+docker compose exec nyauth nyauth mfa reset `
+  -username admin -scope passkeys `
+  -reason "operator confirmed lost Passkey" -confirm admin
+```
+
+`-scope` 支持 `passkeys`、`totp` 和 `all`（默认）。命令会确认重置后仍有密码、启用的 Provider 或剩余 Passkey 可用于主认证，随后在同一 PostgreSQL 事务中清除所选因素、推进 `auth_version` 并写入 `mfa.recovery_reset` 审计。若管理员强制 MFA 会让重置后的账号仍无法登录，命令默认拒绝；只有明确加入 `-disable-admin-mfa-requirement` 才会同时关闭该全局策略并额外写入 `settings.updated` 审计。原因不得包含密码、Token、DSN 或其他 secret。
+
 ### 使用本机服务
 
 本机运行 Go 进程前必须先生成会被嵌入二进制的 `web/build`：

@@ -38,6 +38,7 @@ func KnownFilterOptions() FilterOptions {
 		models.AuditInviteReserved,
 		models.AuditInviteRevoked,
 		models.AuditMFAChallengeFailed,
+		models.AuditMFARecoveryReset,
 		models.AuditMFADisabled,
 		models.AuditMFAEnrolled,
 		models.AuditMailCircuitOpened,

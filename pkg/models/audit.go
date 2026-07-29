@@ -78,6 +78,7 @@ const (
 	AuditMFAEnrolled            = "mfa.enrolled"
 	AuditMFADisabled            = "mfa.disabled"
 	AuditMFAChallengeFailed     = "mfa.challenge_failed"
+	AuditMFARecoveryReset       = "mfa.recovery_reset"
 	AuditRecoveryCodeUsed       = "recovery_code.used"
 	AuditRecoveryCodesGenerated = "recovery_code.regenerated"
 	AuditPasskeyRegistered      = "passkey.registered"

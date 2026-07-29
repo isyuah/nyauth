@@ -14,11 +14,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/google/uuid"
 	nyauthroot "github.com/nyasharp/nyauth"
 	"github.com/nyasharp/nyauth/internal/audit"
 	"github.com/nyasharp/nyauth/internal/avatar"
 	"github.com/nyasharp/nyauth/internal/config"
 	"github.com/nyasharp/nyauth/internal/database"
+	"github.com/nyasharp/nyauth/internal/mfa"
 	"github.com/nyasharp/nyauth/internal/recovery"
 	"github.com/nyasharp/nyauth/internal/registration"
 	"github.com/nyasharp/nyauth/internal/server"
@@ -34,6 +36,7 @@ const (
 	commandHealthcheck    = "healthcheck"
 	commandVerifyRecovery = "verify-recovery"
 	commandServiceControl = "service-control"
+	commandMFA            = "mfa"
 )
 
 var (
@@ -61,6 +64,12 @@ func main() {
 	if command == commandServiceControl {
 		if err := runServiceControl(args); err != nil {
 			fatal("service control failed", err)
+		}
+		return
+	}
+	if command == commandMFA {
+		if err := runMFA(args); err != nil {
+			fatal("MFA recovery failed", err)
 		}
 		return
 	}
@@ -375,14 +384,90 @@ func runServiceControl(args []string) error {
 	return nil
 }
 
+func runMFA(args []string) error {
+	if len(args) == 0 || args[0] != "reset" {
+		return fmt.Errorf("expected `mfa reset`")
+	}
+	flags := flag.NewFlagSet("nyauth mfa reset", flag.ContinueOnError)
+	configPath := flags.String("config", "", "path to config file (default: config.yaml)")
+	userIDValue := flags.String("user-id", "", "exact target user UUID")
+	username := flags.String("username", "", "exact target username")
+	scopeValue := flags.String("scope", string(mfa.RecoveryResetAll), "factors to reset: all, totp, or passkeys")
+	reason := flags.String("reason", "", "mandatory break-glass recovery reason")
+	confirmation := flags.String("confirm", "", "repeat the exact username or user UUID")
+	disableAdminRequirement := flags.Bool("disable-admin-mfa-requirement", false, "also disable mandatory administrator MFA when required for recovery")
+	if err := flags.Parse(args[1:]); err != nil {
+		return fmt.Errorf("parsing MFA reset arguments: %w", err)
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("unexpected MFA reset arguments: %s", strings.Join(flags.Args(), " "))
+	}
+	userIDText := strings.TrimSpace(*userIDValue)
+	usernameText := strings.TrimSpace(*username)
+	if (userIDText == "") == (usernameText == "") {
+		return fmt.Errorf("mfa reset requires exactly one of -user-id or -username")
+	}
+	targetConfirmation := usernameText
+	var userID uuid.UUID
+	if userIDText != "" {
+		parsed, err := uuid.Parse(userIDText)
+		if err != nil {
+			return fmt.Errorf("mfa reset user ID is invalid")
+		}
+		userID = parsed
+		targetConfirmation = parsed.String()
+	}
+	if strings.TrimSpace(*confirmation) != targetConfirmation {
+		return fmt.Errorf("mfa reset -confirm must exactly match the selected username or canonical user UUID")
+	}
+	scope, err := mfa.ParseRecoveryResetScope(*scopeValue)
+	if err != nil {
+		return err
+	}
+	if len(strings.TrimSpace(*reason)) < 3 || len(strings.TrimSpace(*reason)) > 500 {
+		return fmt.Errorf("mfa reset requires a reason containing 3 to 500 characters")
+	}
+	cfg, err := config.LoadDatabaseMaintenance(*configPath)
+	if err != nil {
+		return fmt.Errorf("loading database configuration: %w", err)
+	}
+	connectCtx, cancelConnect := context.WithTimeout(context.Background(), 30*time.Second)
+	db, err := database.NewPostgresPool(connectCtx, cfg.Database)
+	cancelConnect()
+	if err != nil {
+		return fmt.Errorf("connecting to database: %w", err)
+	}
+	defer db.Close()
+	validationCtx, cancelValidation := context.WithTimeout(context.Background(), 30*time.Second)
+	if err := database.ValidateSchemaVersion(validationCtx, db); err != nil {
+		cancelValidation()
+		return fmt.Errorf("validating database schema: %w", err)
+	}
+	cancelValidation()
+	resetCtx, cancelReset := context.WithTimeout(context.Background(), 30*time.Second)
+	report, err := mfa.ResetForRecovery(resetCtx, db, mfa.RecoveryResetInput{
+		UserID: userID, Username: usernameText, Scope: scope,
+		Reason: *reason, DisableAdminMFARequirement: *disableAdminRequirement,
+		ActorName: "nyauth mfa CLI", Now: time.Now().UTC(),
+	})
+	cancelReset()
+	if err != nil {
+		return err
+	}
+	if err := json.NewEncoder(os.Stdout).Encode(report); err != nil {
+		return fmt.Errorf("encoding MFA reset report: %w", err)
+	}
+	return nil
+}
+
 func parseCommand(args []string) (string, []string, error) {
 	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
 		return commandServe, args, nil
 	}
 	switch args[0] {
-	case commandServe, commandMigrate, commandMaintenance, commandHealthcheck, commandVerifyRecovery, commandServiceControl:
+	case commandServe, commandMigrate, commandMaintenance, commandHealthcheck, commandVerifyRecovery, commandServiceControl, commandMFA:
 		return args[0], args[1:], nil
 	default:
-		return "", nil, fmt.Errorf("unknown command %q (expected serve, migrate, maintenance, healthcheck, verify-recovery, or service-control)", args[0])
+		return "", nil, fmt.Errorf("unknown command %q (expected serve, migrate, maintenance, healthcheck, verify-recovery, service-control, or mfa)", args[0])
 	}
 }
