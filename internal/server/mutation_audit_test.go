@@ -230,3 +230,37 @@ func TestDescribeMailAdministrationMutations(t *testing.T) {
 		})
 	}
 }
+
+func TestDescribeMediaAdministrationMutations(t *testing.T) {
+	actor := &models.User{ID: uuid.New(), Username: "admin"}
+	tests := []struct {
+		method, path, route, id string
+		event, targetType       string
+	}{
+		{http.MethodPut, "/api/admin/settings/media/candidate", "/api/admin/settings/media/candidate", "", models.AuditMediaSettingsSaved, "media_config"},
+		{http.MethodPost, "/api/admin/settings/media/candidate/test", "/api/admin/settings/media/candidate/test", "", models.AuditMediaSettingsTested, "media_config"},
+		{http.MethodPost, "/api/admin/settings/media/migrations", "/api/admin/settings/media/migrations", "", models.AuditMediaMigrationStarted, "media_migration"},
+		{http.MethodPost, "/api/admin/settings/media/migrations/migration-1/retry", "/api/admin/settings/media/migrations/{id}/retry", "migration-1", models.AuditMediaMigrationRetried, "media_migration"},
+	}
+
+	for _, test := range tests {
+		t.Run(test.method+" "+test.path, func(t *testing.T) {
+			routeContext := chi.NewRouteContext()
+			routeContext.RoutePatterns = append(routeContext.RoutePatterns, test.route)
+			if test.id != "" {
+				routeContext.URLParams.Add("id", test.id)
+			}
+			request := httptest.NewRequest(test.method, test.path, nil)
+			request = request.WithContext(context.WithValue(request.Context(), chi.RouteCtxKey, routeContext))
+			descriptor, ok := describeMutation(request, actor)
+			if !ok {
+				t.Fatal("media administration mutation was not described")
+			}
+			if descriptor.event != test.event || descriptor.targetType != test.targetType ||
+				descriptor.targetID != test.id || descriptor.riskLevel != "critical" ||
+				!descriptor.successAlreadyAudited {
+				t.Fatalf("unexpected descriptor: %#v", descriptor)
+			}
+		})
+	}
+}

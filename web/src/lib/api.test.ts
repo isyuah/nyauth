@@ -53,6 +53,7 @@ describe('localizeAPIErrorMessage', () => {
     expect(localizeAPIErrorMessage('wording changed', 'account.password_change_required')).toBe('请先修改密码后再继续');
     expect(localizeAPIErrorMessage('wording changed', 'service_control.registration_conflict')).toBe('当前运行控制状态不允许启用该注册策略，请先调整注册或邮件投递能力');
     expect(localizeAPIErrorMessage('wording changed', 'settings.revision_conflict')).toBe('设置已被其他管理员修改，请加载最新设置后重试');
+    expect(localizeAPIErrorMessage('wording changed', 'media.instances_not_ready')).toBe('仍有运行实例尚未加载候选配置，请稍后重试');
   });
 
   it('uses a Chinese fallback for an unknown coded backend error', () => {
@@ -589,5 +590,91 @@ describe('runtime policy settings API contract', () => {
       audit_retention_days: 90,
       retention_confirmation: 'RETENTION 90 DAYS',
     });
+  });
+});
+
+describe('runtime media storage API contract', () => {
+  afterEach(() => {
+    setCsrfToken('');
+    vi.unstubAllGlobals();
+  });
+
+  it('uses revisioned media endpoints without exposing credentials in response types', async () => {
+    const profile = {
+      id: '22222222-2222-2222-2222-222222222222',
+      backend: 's3',
+      settings: {
+        endpoint: 'https://s3.example.test',
+        region: 'auto',
+        bucket: 'private-media',
+        prefix: 'nyauth',
+        path_style: true,
+      },
+      credentials_configured: true,
+      session_token_configured: false,
+      created_by_name: 'admin',
+      created_at: '2026-07-29T01:00:00Z',
+    };
+    const migration = {
+      id: '33333333-3333-3333-3333-333333333333',
+      source_backend: 'local',
+      target_profile_id: profile.id,
+      status: 'running',
+      total_count: 2,
+      copied_count: 1,
+      completed_count: 1,
+      failed_count: 0,
+      created_by_name: 'admin',
+      created_at: '2026-07-29T01:05:00Z',
+      updated_at: '2026-07-29T01:06:00Z',
+    };
+    const responses = [
+      { mode: 'fallback', revision: 1, available: true, active: { backend: 'local', credentials_configured: true } },
+      { candidate: profile, revision: 2 },
+      { candidate: { ...profile, test_result: 'success' }, revision: 3, result: 'success' },
+      { migration, revision: 3 },
+      { migration: { ...migration, status: 'pending' } },
+    ];
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    setCsrfToken('media-csrf');
+
+    await api.admin.getMediaSettings();
+    await api.admin.saveMediaCandidate({
+      expected_revision: 1,
+      ...profile.settings,
+      access_key_id: 'access-key',
+      secret_access_key: 'secret-key',
+      session_token: '',
+    });
+    await api.admin.testMediaCandidate(2, profile.id);
+    await api.admin.startMediaMigration(3, profile.id);
+    await api.admin.retryMediaMigration(migration.id);
+
+    const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit]>;
+    expect(calls.map(([url]) => url)).toEqual([
+      '/api/admin/settings/media',
+      '/api/admin/settings/media/candidate',
+      '/api/admin/settings/media/candidate/test',
+      '/api/admin/settings/media/migrations',
+      `/api/admin/settings/media/migrations/${migration.id}/retry`,
+    ]);
+    expect(calls[0][1].cache).toBe('no-store');
+    expect(JSON.parse(String(calls[1][1].body))).toEqual({
+      expected_revision: 1,
+      ...profile.settings,
+      access_key_id: 'access-key',
+      secret_access_key: 'secret-key',
+      session_token: '',
+    });
+    expect(JSON.parse(String(calls[2][1].body))).toEqual({ expected_revision: 2, profile_id: profile.id });
+    expect(JSON.parse(String(calls[3][1].body))).toEqual({ expected_revision: 3, profile_id: profile.id });
+    expect(calls[4][1].method).toBe('POST');
+    for (const index of [1, 2, 3, 4]) {
+      expect(new Headers(calls[index][1].headers).get('X-CSRF-Token')).toBe('media-csrf');
+    }
   });
 });

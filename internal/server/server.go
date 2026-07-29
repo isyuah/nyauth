@@ -34,6 +34,7 @@ import (
 	"github.com/nyasharp/nyauth/internal/identity"
 	"github.com/nyasharp/nyauth/internal/invite"
 	"github.com/nyasharp/nyauth/internal/mailruntime"
+	"github.com/nyasharp/nyauth/internal/mediaruntime"
 	"github.com/nyasharp/nyauth/internal/mfa"
 	"github.com/nyasharp/nyauth/internal/provider"
 	"github.com/nyasharp/nyauth/internal/registration"
@@ -85,6 +86,7 @@ type Server struct {
 	avatarService             *avatar.Service
 	avatarRepository          *avatar.Repository
 	avatarStore               avatar.BlobStore
+	mediaManager              *mediaruntime.Manager
 	avatarImportWorker        *avatar.ImportWorker
 	avatarProcessing          chan struct{}
 	emailDispatcher           *account.Dispatcher
@@ -131,7 +133,21 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 	if err := avatarRepository.EnsureStorageBackendCompatible(mediaInitCtx, avatarStore.Backend()); err != nil {
 		return nil, fmt.Errorf("validating avatar media storage: %w", err)
 	}
-	avatarService, err := avatar.NewService(avatarRepository, avatarStore, avatar.NewProcessor())
+	mediaRuntimeStore, err := mediaruntime.NewStore(db, "primary", map[string][]byte{"primary": cfg.Auth.MasterKey})
+	if err != nil {
+		return nil, fmt.Errorf("configuring runtime media storage: %w", err)
+	}
+	mediaManager, err := mediaruntime.NewManager(mediaRuntimeStore, avatarStore, mediaruntime.ManagerOptions{
+		InstanceID: uuid.New(), Version: buildinfo.Version, Production: cfg.IsProduction(),
+		OnError: func(err error) { slog.Error("runtime media storage synchronization failed", "error", err) },
+	})
+	if err != nil {
+		return nil, fmt.Errorf("configuring runtime media manager: %w", err)
+	}
+	if err := mediaManager.Load(mediaInitCtx); err != nil {
+		return nil, fmt.Errorf("loading runtime media storage: %w", err)
+	}
+	avatarService, err := avatar.NewRuntimeService(avatarRepository, mediaManager, avatar.NewProcessor())
 	if err != nil {
 		return nil, fmt.Errorf("configuring avatar media service: %w", err)
 	}
@@ -168,7 +184,7 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 		settingsMgr: settingsMgr, inviteStore: invite.NewStore(db),
 		registrationStore: registration.NewStore(db), telemetry: telemetryRuntime,
 		mfaService: mfaService, avatarService: avatarService, avatarRepository: avatarRepository,
-		avatarStore: avatarStore, avatarProcessing: make(chan struct{}, 1),
+		avatarStore: avatarStore, mediaManager: mediaManager, avatarProcessing: make(chan struct{}, 1),
 	}
 	serviceControlStore, err := servicecontrol.NewStore(db)
 	if err != nil {
@@ -182,6 +198,7 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 		return nil, fmt.Errorf("configuring runtime service control: %w", err)
 	}
 	s.serviceControl = serviceControlManager
+	mediaManager.SetOnMigrationCompleted(s.restoreMediaWritesAfterMigration)
 	authHandler.SetIssuanceMiddleware(s.capabilityMiddleware(servicecontrol.CapabilityAuthIssuance))
 	s.securityVersions = func(ctx context.Context, userID uuid.UUID) (int64, int64, error) {
 		var authVersion, sessionVersion int64
@@ -467,6 +484,11 @@ func (s *Server) buildRouter() *chi.Mux {
 			r.With(adminMutations).Post("/admin/settings/mail/activate", s.handleActivateMailCandidate)
 			r.With(adminMutations).Post("/admin/settings/mail/rollback", s.handleRollbackMailSettings)
 			r.With(adminMutations).Post("/admin/settings/mail/disable", s.handleDisableMail)
+			r.Get("/admin/settings/media", s.handleGetMediaSettings)
+			r.With(adminMutations).Put("/admin/settings/media/candidate", s.handleSaveMediaCandidate)
+			r.With(adminMutations).Post("/admin/settings/media/candidate/test", s.handleTestMediaCandidate)
+			r.With(adminMutations).Post("/admin/settings/media/migrations", s.handleStartMediaMigration)
+			r.With(adminMutations).Post("/admin/settings/media/migrations/{id}/retry", s.handleRetryMediaMigration)
 			r.Get("/admin/invites", s.handleListInvites)
 			r.With(adminMutations).Post("/admin/invites", s.handleCreateInvite)
 			r.With(adminMutations).Delete("/admin/invites/{id}", s.handleRevokeInvite)
@@ -590,6 +612,9 @@ func (s *Server) Run(ctx context.Context) error {
 	if s.mailManager != nil {
 		s.mailManager.StartSynchronization(runCtx)
 	}
+	if s.mediaManager != nil {
+		s.mediaManager.StartSynchronization(runCtx)
+	}
 	if s.auditDispatcher != nil {
 		go func() {
 			if dispatchErr := s.auditDispatcher.Run(runCtx); dispatchErr != nil && !errors.Is(dispatchErr, context.Canceled) {
@@ -646,22 +671,36 @@ func (s *Server) Run(ctx context.Context) error {
 
 func (s *Server) runAvatarCleanup(ctx context.Context) {
 	run := func() {
+		if s.mediaManager != nil {
+			active, err := s.mediaManager.ActiveMigration(ctx)
+			if err != nil {
+				slog.ErrorContext(ctx, "checking media migration before cleanup failed", "error", err)
+				return
+			}
+			if active {
+				return
+			}
+		}
 		started := time.Now()
 		cleanupCtx, cancel := context.WithTimeout(ctx, 2*time.Minute)
 		defer cancel()
 		result, err := s.avatarService.Cleanup(cleanupCtx, time.Now().UTC(), 15*time.Minute, 100, 10)
 		if err != nil {
 			s.telemetry.RecordAvatarOperation(ctx, "cleanup", "failure", "storage_unavailable", time.Since(started))
-			s.telemetry.RecordAvatarStorageError(ctx, string(s.avatarStore.Backend()), "delete")
+			s.telemetry.RecordAvatarStorageError(ctx, string(s.avatarService.RuntimeStatus().Backend), "delete")
 			if !errors.Is(err, context.Canceled) {
 				slog.ErrorContext(ctx, "avatar media cleanup failed", "error", err)
 			}
 			return
 		}
 		s.telemetry.RecordAvatarOperation(ctx, "cleanup", "success", "none", time.Since(started))
-		if pending, countErr := s.avatarRepository.CountCleanupPending(ctx, s.avatarStore.Backend()); countErr == nil {
-			s.telemetry.RecordAvatarCleanupPending(ctx, pending)
+		var pending int64
+		for _, backend := range []avatar.StorageBackend{avatar.StorageLocal, avatar.StorageS3} {
+			if count, countErr := s.avatarRepository.CountCleanupPending(ctx, backend); countErr == nil {
+				pending += count
+			}
 		}
+		s.telemetry.RecordAvatarCleanupPending(ctx, pending)
 		if result.LockAcquired && result.Rows > 0 {
 			slog.InfoContext(ctx, "avatar media cleaned", "rows", result.Rows, "batches", result.Batches)
 		}

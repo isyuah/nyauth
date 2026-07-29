@@ -260,6 +260,14 @@ func describeMutation(r *http.Request, actor *models.User) (mutationAuditDescrip
 		return mutationAuditDescriptor{event: models.AuditMailSettingsRolledBack, targetType: "mail_runtime", targetID: "singleton", riskLevel: "high", successAlreadyAudited: true}, true
 	case r.Method == http.MethodPost && path == "/api/admin/settings/mail/disable":
 		return mutationAuditDescriptor{event: models.AuditMailSettingsDisabled, targetType: "mail_runtime", targetID: "singleton", riskLevel: "high", successAlreadyAudited: true}, true
+	case r.Method == http.MethodPut && path == "/api/admin/settings/media/candidate":
+		return mutationAuditDescriptor{event: models.AuditMediaSettingsSaved, targetType: "media_config", riskLevel: "critical", successAlreadyAudited: true}, true
+	case r.Method == http.MethodPost && path == "/api/admin/settings/media/candidate/test":
+		return mutationAuditDescriptor{event: models.AuditMediaSettingsTested, targetType: "media_config", riskLevel: "critical", successAlreadyAudited: true}, true
+	case r.Method == http.MethodPost && path == "/api/admin/settings/media/migrations":
+		return mutationAuditDescriptor{event: models.AuditMediaMigrationStarted, targetType: "media_migration", riskLevel: "critical", successAlreadyAudited: true}, true
+	case r.Method == http.MethodPost && strings.HasSuffix(path, "/retry") && strings.HasPrefix(path, "/api/admin/settings/media/migrations/"):
+		return mutationAuditDescriptor{event: models.AuditMediaMigrationRetried, targetType: "media_migration", targetID: param("id"), riskLevel: "critical", successAlreadyAudited: true}, true
 	case r.Method == http.MethodPost && path == "/api/admin/invites":
 		return mutationAuditDescriptor{event: models.AuditInviteCreated, targetType: "invite", riskLevel: "medium", successAlreadyAudited: true}, true
 	case r.Method == http.MethodDelete && strings.HasPrefix(path, "/api/admin/invites/"):

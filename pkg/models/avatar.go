@@ -46,6 +46,7 @@ type UserAvatar struct {
 	Source            AvatarSource         `json:"source" db:"source"`
 	Status            AvatarStatus         `json:"status" db:"status"`
 	StorageBackend    AvatarStorageBackend `json:"storage_backend" db:"storage_backend"`
+	StorageProfileID  *uuid.UUID           `json:"-" db:"storage_profile_id"`
 	ObjectPrefix      string               `json:"object_prefix" db:"object_prefix"`
 	Variants          []AvatarVariant      `json:"variants" db:"variants"`
 	ContentSHA256     []byte               `json:"-" db:"content_sha256"`

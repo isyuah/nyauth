@@ -12,11 +12,12 @@ import (
 )
 
 type Service struct {
-	repo      *Repository
-	store     BlobStore
-	processor Processor
-	statusMu  sync.RWMutex
-	status    RuntimeStatus
+	repo         *Repository
+	resolver     StoreResolver
+	processor    Processor
+	statusMu     sync.RWMutex
+	status       RuntimeStatus
+	fallbackOnly bool
 }
 
 const avatarCompensationTimeout = 15 * time.Second
@@ -29,13 +30,25 @@ type RuntimeStatus struct {
 }
 
 func NewService(repo *Repository, store BlobStore, processor Processor) (*Service, error) {
-	if repo == nil || store == nil {
+	service, err := NewRuntimeService(repo, StaticStoreResolver{Store: store}, processor)
+	if service != nil {
+		service.fallbackOnly = true
+	}
+	return service, err
+}
+
+func NewRuntimeService(repo *Repository, resolver StoreResolver, processor Processor) (*Service, error) {
+	if repo == nil || resolver == nil {
 		return nil, fmt.Errorf("avatar repository and blob store are required")
 	}
 	if processor.MaxBytes == 0 {
 		processor = NewProcessor()
 	}
-	return &Service{repo: repo, store: store, processor: processor, status: RuntimeStatus{Backend: store.Backend(), Status: "ok", Configured: true}}, nil
+	current, err := resolver.Current(context.Background())
+	if err != nil || current.Store == nil {
+		return nil, fmt.Errorf("resolving current avatar storage: %w", err)
+	}
+	return &Service{repo: repo, resolver: resolver, processor: processor, status: RuntimeStatus{Backend: current.Store.Backend(), Status: "ok", Configured: true}}, nil
 }
 
 func (s *Service) RuntimeStatus() RuntimeStatus {
@@ -43,8 +56,13 @@ func (s *Service) RuntimeStatus() RuntimeStatus {
 		return RuntimeStatus{Status: "not_configured"}
 	}
 	s.statusMu.RLock()
-	defer s.statusMu.RUnlock()
-	return s.status
+	status := s.status
+	s.statusMu.RUnlock()
+	if current, err := s.resolver.Current(context.Background()); err == nil && current.Store != nil {
+		status.Backend = current.Store.Backend()
+		status.Configured = true
+	}
+	return status
 }
 
 func (s *Service) UploadUserAvatar(ctx context.Context, userID uuid.UUID, input io.Reader, now time.Time) (*models.UserAvatar, error) {
@@ -64,10 +82,11 @@ func (s *Service) OpenActiveVariant(ctx context.Context, avatarID uuid.UUID, siz
 	if err != nil {
 		return BlobObject{}, err
 	}
-	if variant.StorageBackend != s.store.Backend() {
-		return BlobObject{}, fmt.Errorf("avatar storage backend is unavailable")
+	store, err := s.resolver.Resolve(ctx, variant.StorageProfileID, variant.StorageBackend)
+	if err != nil {
+		return BlobObject{}, err
 	}
-	object, err := s.store.Get(ctx, variant.Variant.ObjectKey)
+	object, err := store.Get(ctx, variant.Variant.ObjectKey)
 	if err != nil {
 		s.recordStorageResult(err, time.Now().UTC())
 		return BlobObject{}, err
@@ -91,6 +110,10 @@ func (s *Service) upload(ctx context.Context, userID uuid.UUID, source Source, i
 	if err != nil {
 		return nil, err
 	}
+	storage, err := s.resolver.Current(ctx)
+	if err != nil || storage.Store == nil {
+		return nil, ErrStorageUnavailable
+	}
 	avatarID := uuid.New()
 	prefix := "avatars/" + userID.String() + "/" + avatarID.String()
 	variants := make([]models.AvatarVariant, 0, len(VariantSizes))
@@ -112,7 +135,8 @@ func (s *Service) upload(ctx context.Context, userID uuid.UUID, source Source, i
 		ID:                avatarID,
 		UserID:            userID,
 		Source:            source,
-		StorageBackend:    s.store.Backend(),
+		StorageBackend:    storage.Store.Backend(),
+		StorageProfileID:  storage.ProfileID,
 		ObjectPrefix:      prefix,
 		Variants:          variants,
 		ContentSHA256:     processed.SHA256,
@@ -132,7 +156,7 @@ func (s *Service) upload(ctx context.Context, userID uuid.UUID, source Source, i
 	for _, size := range VariantSizes {
 		body := processed.Variants[size]
 		key := objectKey(prefix, size)
-		if err := s.store.Put(ctx, key, body, ContentType); err != nil {
+		if err := storage.Store.Put(ctx, key, body, ContentType); err != nil {
 			s.recordStorageResult(err, time.Now().UTC())
 			s.compensateFailedUpload(avatarID, storedKeys, err, now)
 			return nil, err
@@ -164,7 +188,8 @@ func (s *Service) upload(ctx context.Context, userID uuid.UUID, source Source, i
 		UserID:            userID,
 		Source:            source,
 		Status:            models.AvatarStatusActive,
-		StorageBackend:    s.store.Backend(),
+		StorageBackend:    storage.Store.Backend(),
+		StorageProfileID:  cloneUUID(storage.ProfileID),
 		ObjectPrefix:      prefix,
 		Variants:          variants,
 		ContentSHA256:     processed.SHA256,
@@ -183,14 +208,14 @@ func (s *Service) DeleteUserAvatar(ctx context.Context, userID uuid.UUID, now ti
 		return false, err
 	}
 	defer tx.Rollback(ctx)
-	keys, err := s.repo.DeleteActiveTx(ctx, tx, userID, now)
+	items, err := s.repo.DeleteActiveTx(ctx, tx, userID, now)
 	if err != nil {
 		return false, err
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return false, fmt.Errorf("committing avatar deletion: %w", err)
 	}
-	err = s.deleteBestEffort(ctx, keys)
+	err = s.deleteItemsBestEffort(ctx, items)
 	s.recordStorageResult(err, time.Now().UTC())
 	// The database transaction is the user-visible deletion boundary. Failed
 	// object removal is deferred to the HA-safe cleanup worker and must not turn
@@ -199,15 +224,35 @@ func (s *Service) DeleteUserAvatar(ctx context.Context, userID uuid.UUID, now ti
 }
 
 func (s *Service) Cleanup(ctx context.Context, now time.Time, olderThan time.Duration, batchSize, maxBatches int) (CleanupResult, error) {
-	result, err := s.repo.CleanupUnreferenced(ctx, s.store.Backend(), now, olderThan, batchSize, maxBatches)
-	if err != nil {
-		return result, err
-	}
+	var result CleanupResult
 	var firstErr error
+	for _, backend := range []StorageBackend{StorageLocal, StorageS3} {
+		partial, err := s.repo.CleanupUnreferenced(ctx, backend, now, olderThan, batchSize, maxBatches)
+		if err != nil {
+			return result, err
+		}
+		result.LockAcquired = result.LockAcquired || partial.LockAcquired
+		result.Rows += partial.Rows
+		result.Batches += partial.Batches
+		result.Items = append(result.Items, partial.Items...)
+	}
 	for _, item := range result.Items {
+		if s.fallbackOnly && item.StorageProfileID != nil {
+			_ = s.repo.ReleaseCleanupClaim(ctx, item.AvatarID)
+			result.Rows--
+			continue
+		}
+		store, resolveErr := s.resolver.Resolve(ctx, item.StorageProfileID, item.StorageBackend)
+		if resolveErr != nil {
+			_ = s.repo.ReleaseCleanupClaim(ctx, item.AvatarID)
+			if firstErr == nil {
+				firstErr = resolveErr
+			}
+			continue
+		}
 		itemFailed := false
 		for _, key := range item.ObjectKeys {
-			if err := s.store.Delete(ctx, key); err != nil {
+			if err := store.Delete(ctx, key); err != nil {
 				itemFailed = true
 				if firstErr == nil {
 					firstErr = err
@@ -229,9 +274,31 @@ func (s *Service) Cleanup(ctx context.Context, now time.Time, olderThan time.Dur
 }
 
 func (s *Service) deleteBestEffort(ctx context.Context, keys []string) error {
+	current, err := s.resolver.Current(ctx)
+	if err != nil {
+		return err
+	}
+	return deleteKeys(ctx, current.Store, keys)
+}
+
+func (s *Service) deleteItemsBestEffort(ctx context.Context, items []CleanupItem) error {
+	var first error
+	for _, item := range items {
+		store, err := s.resolver.Resolve(ctx, item.StorageProfileID, item.StorageBackend)
+		if err == nil {
+			err = deleteKeys(ctx, store, item.ObjectKeys)
+		}
+		if err != nil && first == nil {
+			first = err
+		}
+	}
+	return first
+}
+
+func deleteKeys(ctx context.Context, store BlobStore, keys []string) error {
 	var first error
 	for _, key := range keys {
-		if err := s.store.Delete(ctx, key); err != nil && first == nil {
+		if err := store.Delete(ctx, key); err != nil && first == nil {
 			first = err
 		}
 	}
@@ -246,6 +313,14 @@ func (s *Service) compensateFailedUpload(avatarID uuid.UUID, keys []string, caus
 }
 
 func ptrTime(t time.Time) *time.Time { return &t }
+
+func cloneUUID(value *uuid.UUID) *uuid.UUID {
+	if value == nil {
+		return nil
+	}
+	cloned := *value
+	return &cloned
+}
 
 func (s *Service) recordStorageResult(err error, now time.Time) {
 	s.statusMu.Lock()

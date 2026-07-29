@@ -1,6 +1,6 @@
 # 安全头像媒体契约
 
-> 状态：已实现（2026-07-27），并已折叠进 `0.3.0` 的 `000001_baseline`；后续兼容迁移不改变本媒体契约。
+> 状态：已实现；`0.4.0-dev` 的 `000006_runtime_media_storage` 在原媒体安全契约上增加版本化运行时 S3 配置与可续跑迁移。
 
 ## 1. 结论与边界
 
@@ -80,11 +80,15 @@ media:
 
 仓库中的 `docker-compose.media-s3.yml` 为单机生产 Compose 提供 S3 override；`docker-compose.ha.yml` 则直接强制 `NYAUTH_MEDIA_BACKEND=s3`。当前 Compose override 为 access key ID 和 secret access key 提供 secret 文件挂载；需要 session token 的平台应通过部署环境自己的受控 override 挂载并设置对应 `*_FILE`。
 
-存储后端不是已填充环境的在线迁移开关。每条头像记录都保存创建时的 `storage_backend`，运行实例只读取与自身已配置后端一致的对象；当前没有把既有本地头像自动迁移到 S3、或把 S3 头像迁回本地的工具。`serve` 和 `maintenance` 启动时会检查尚未完成物理清理的记录，只要仍有对象属于另一后端就明确拒绝启动。生产环境应在允许首次头像上传前确定后端，已有头像时不得只改配置强行切换。
+静态 `media` 配置是数据库尚未激活动态 profile 时的 fallback。运行时 API 首版只接受私有 S3 兼容配置，不接受任意本地目录；每个候选版本不可变，access key、secret 和可选 session token 分字段使用 master key envelope encryption，响应、日志和审计只返回是否已配置。
+
+候选必须在十秒有界操作窗口内实际执行 Put、Get、字节校验和 Delete，且成功结果只有十分钟有效。迁移自动通过运行时服务控制排空 `media_writes`，头像读取、登录和 OAuth 不暂停。每条头像绑定明确的 `storage_profile_id`；迁移期间新旧 store 同时可读，单个头像的四种变体全部复制并从目标重新读取校验后，数据库才切换该头像的 profile，再删除源对象。进程在复制、切换或删除之间退出时会从持久化 item 状态继续；失败状态仍属于未解决迁移，会继续阻止对象清理和候选替换，并保持媒体写入暂停供管理员显式重试。重试前服务控制必须再次确认 `media_writes` 已排空。全部完成并由实例加载新 revision 后才尝试以 CAS 恢复迁移前的服务控制状态；若管理员期间修改了维护状态，系统不会覆盖该修改。
+
+首版不支持动态迁回本地目录，也不支持浏览器直传 S3。HA 仍要求所有实例能访问同一静态 fallback 和所有已使用的动态 S3 profile。
 
 ## 4. 数据与事务生命周期
 
-`user_avatars` 保存头像元数据和对象变体，不保存图片二进制。记录包含用户、来源、状态、存储后端、对象前缀、四种变体、原始媒体类型与尺寸、内容 SHA-256，以及激活、替换、删除、失败和存储清理时间。
+`user_avatars` 保存头像元数据和对象变体，不保存图片二进制。记录包含用户、来源、状态、存储后端、可空的不可变存储 profile、对象前缀、四种变体、原始媒体类型与尺寸、内容 SHA-256，以及激活、替换、删除、失败和存储清理时间。`storage_profile_id=NULL` 明确表示部署期静态 fallback，不表示“当前任意同类型 store”。
 
 状态固定为：
 
@@ -108,7 +112,7 @@ PostgreSQL 与文件系统/S3 不能组成分布式事务，因此清理采用�
 - staging、failed、replaced、deleted 或失去用户引用的对象超过 15 分钟后才有资格清理。
 - `serve` 启动后立即执行一轮，之后每小时执行；`nyauth maintenance` 复用相同服务作为运维兜底。
 - PostgreSQL advisory lock 保证多实例每轮只有一个清理者；有界批次和 claim 防止重复处理。
-- 清理只处理与当前配置 `storage_backend` 相同的记录。对象删除成功后才写 `storage_deleted_at`；删除失败会释放 claim，留待下次重试。
+- 清理按每条记录的 `storage_profile_id` 解析静态 fallback 或历史动态 profile；存在未完成或失败待重试的媒体迁移时整轮跳过。对象删除成功后才写 `storage_deleted_at`；删除失败会释放 claim，留待下次重试。
 
 ## 5. HTTP API 与缓存
 

@@ -44,6 +44,22 @@ func TestMiddlewareErrorsHaveSpecificStableCodes(t *testing.T) {
 	}
 }
 
+func TestMediaSettingsErrorsHaveSpecificStableCodes(t *testing.T) {
+	tests := map[string]string{
+		"media settings are temporarily unavailable":                           "media.settings_unavailable",
+		"media storage configuration is invalid":                               "media.configuration_invalid",
+		"media settings changed; reload and try again":                         "media.revision_conflict",
+		"a recent successful media storage test is required":                   "media.test_required",
+		"active instances are still preparing the media storage candidate":     "media.instances_not_ready",
+		"clear the current maintenance expiry before starting media migration": "media.maintenance_expiry",
+	}
+	for message, expected := range tests {
+		if got := apiErrorCodeForMessage(message); got != expected {
+			t.Fatalf("error code for %q = %q, want %q", message, got, expected)
+		}
+	}
+}
+
 func TestAPIErrorMappingKeysAreNormalized(t *testing.T) {
 	for message := range apiErrorCodesByMessage {
 		if normalized := strings.ToLower(strings.TrimSpace(message)); message != normalized {

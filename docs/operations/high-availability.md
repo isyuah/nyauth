@@ -65,7 +65,7 @@ NYAUTH_MEDIA_S3_SECRET_ACCESS_KEY_FILE=/secure/path/media-s3-secret-access-key
 
 凭据只授予目标 bucket 中配置 prefix 所需的读取、写入和删除权限。bucket 应启用默认静态加密、versioning、访问审计和删除告警；lifecycle 不得按年龄删除当前对象版本，只能在覆盖 PostgreSQL PITR 窗口后清理 noncurrent version 和 delete marker。完整恢复要求见 [备份与恢复手册](backup-restore.md)。
 
-媒体后端是静态部署选择。头像记录持久化创建时的 `storage_backend`，当前没有 local/S3 自动迁移工具；HA 上线必须从首次头像上传开始使用 S3，不能把已有 local 部署仅改配置后直接扩成双实例。
+静态媒体配置只是在数据库尚未激活动态 profile 时使用的 fallback。管理员可在单机阶段通过 `/admin/settings/media` 保存并真实测试私有 S3 候选，再由系统排空 `media_writes`、逐对象复制回读校验并切换 profile；迁移完成且所有实例加载新 revision 后，才能把应用扩成 HA。失败迁移仍会阻止清理和候选替换，必须在媒体写入保持排空时重试。首版不支持动态迁回本地目录，也不能用各实例互不共享的本地目录运行 HA。
 
 展开配置前先确认两个 secret 文件存在且权限受控：
 
@@ -114,12 +114,13 @@ docker compose -f docker-compose.ha.yml ps
 - 动态 SMTP 的活动版本、上一版本和熔断状态由 PostgreSQL 共享；变更通过 `LISTEN/NOTIFY` 同步，并每分钟 reconciliation。每 30 秒最多一个实例取得熔断探测权。
 - 运行时服务控制状态和 revision 存于 PostgreSQL；`LISTEN/NOTIFY` 提供即时同步，5 秒 reconciliation 修复丢失通知。实例先关闭对应 gate，再等待旧 in-flight 排空并确认 applied revision。15 秒未能刷新数据库状态的实例对六类受控能力 fail-closed，但健康检查、撤销、登出、审计与清理仍可用。
 - 运行时运营设置存于 PostgreSQL 并按设置组使用 revision CAS；实例通过原子快照、`LISTEN/NOTIFY` 和每分钟 reconciliation 同步。限流 revision 隔离 Redis 计数；全局客户端配额变更与客户端创建/转入使用共享/独占 advisory lock 建立明确提交边界。
+- 运行时媒体 profile 和迁移状态存于 PostgreSQL；实例预加载候选私有 S3 profile 后才允许迁移。迁移使用持久化逐头像 item、对象回读哈希校验和 `media_writes` 排空，失败不会切断旧 profile 读取，也不会自动覆盖管理员后续维护状态。
 - 管理员高风险变更与审计记录必须在同一数据库事务中完成。
 - 审计日志按 UTC 月分区；分区预创建和保留清理由独立迁移账号运行 `nyauth maintenance`，应用实例不执行 DDL。
 
 ## 发布顺序
 
-`0.3.0-rc.1` 是 schema version 1 的破坏性 release baseline，不支持从早期开发数据库滚动升级。正式 `0.3.0` 通过兼容迁移演进到 schema version 3；`0.4.0-dev` 再通过 `000004_runtime_service_control` 与 `000005_runtime_policy_settings` 兼容升级到 schema version 5。必须先由迁移任务完成加法迁移，再逐个替换应用实例。首次部署仍必须使用全新 PostgreSQL/Redis；启动单个新实例完成 smoke test 后再扩容第二实例。后续版本只有在发布说明明确承诺兼容时才可滚动升级，不得让要求不同数据库契约的应用版本同时处理流量。
+`0.3.0-rc.1` 是 schema version 1 的破坏性 release baseline，不支持从早期开发数据库滚动升级。正式 `0.3.0` 通过兼容迁移演进到 schema version 3；`0.4.0-dev` 再通过 `000004` 至 `000006_runtime_media_storage` 兼容升级到 schema version 6。必须先由迁移任务完成加法迁移，再逐个替换应用实例。首次部署仍必须使用全新 PostgreSQL/Redis；启动单个新实例完成 smoke test 后再扩容第二实例。后续版本只有在发布说明明确承诺兼容时才可滚动升级，不得让要求不同数据库契约的应用版本同时处理流量。
 
 运行时暂停变更后，管理 API 最多等待 5 秒收集所有活动实例的排空确认；返回 `202 applying` 时设置已经生效且不会自动回滚，应轮询管理状态直至所有活动实例 applied。无限期暂停的 HA 紧急解锁可从任一相同版本服务定义执行：
 

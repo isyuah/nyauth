@@ -775,6 +775,66 @@ export interface MailMutationResult {
   state_revision: number;
 }
 
+export interface MediaStorageProfileSettings {
+  endpoint: string;
+  region: string;
+  bucket: string;
+  prefix: string;
+  path_style: boolean;
+}
+
+export interface MediaStorageProfile {
+  id?: string;
+  backend: 'local' | 's3' | string;
+  settings?: MediaStorageProfileSettings;
+  credentials_configured: boolean;
+  session_token_configured?: boolean;
+  created_by?: string;
+  created_by_name?: string;
+  created_at?: string;
+  tested_at?: string;
+  test_result?: 'success' | 'failure';
+  test_error_category?: string;
+  test_error?: string;
+}
+
+export interface MediaStorageMigration {
+  id: string;
+  source_profile_id?: string;
+  source_backend: string;
+  target_profile_id: string;
+  status: 'pending' | 'running' | 'applying' | 'completed' | 'failed' | string;
+  total_count: number;
+  copied_count: number;
+  completed_count: number;
+  failed_count: number;
+  created_by?: string;
+  created_by_name: string;
+  created_at: string;
+  started_at?: string;
+  completed_at?: string;
+  failed_at?: string;
+  last_error?: string;
+  updated_at: string;
+}
+
+export interface MediaStorageSettings {
+  mode: 'fallback' | 'dynamic' | string;
+  revision: number;
+  available: boolean;
+  active?: MediaStorageProfile;
+  candidate?: MediaStorageProfile;
+  previous?: MediaStorageProfile;
+  migration?: MediaStorageMigration;
+}
+
+export interface SaveMediaStorageCandidateInput extends MediaStorageProfileSettings {
+  expected_revision: number;
+  access_key_id: string;
+  secret_access_key: string;
+  session_token: string;
+}
+
 export type ComponentStatus = 'ok' | 'degraded' | 'unavailable' | string;
 
 export interface SystemStatus {
@@ -947,6 +1007,18 @@ const API_ERROR_TRANSLATIONS: Record<string, string> = {
   'too many avatar operations': '头像操作过于频繁，请稍后重试',
   'avatar operation is temporarily unavailable': '头像操作暂时不可用，请稍后重试',
   'avatar storage is temporarily unavailable': '头像存储暂时不可用，请稍后重试',
+  'media settings are temporarily unavailable': '媒体存储设置暂时不可用，请稍后重试',
+  'media storage configuration is invalid': '对象存储配置无效，请检查 endpoint、区域、bucket 和凭据',
+  'media settings changed; reload and try again': '媒体存储设置已被其他管理员修改，请重新加载',
+  'media storage candidate was not found': '对象存储候选配置不存在，请重新保存',
+  'a recent successful media storage test is required': '迁移前必须在十分钟内成功完成真实对象存储测试',
+  'a media storage migration is already active': '已有媒体存储迁移正在进行',
+  'media storage migration was not found': '媒体存储迁移不存在或当前不可重试',
+  'media writes must be paused before migration': '迁移前必须先完成媒体写入排空',
+  'active instances are still preparing the media storage candidate': '仍有运行实例尚未加载候选配置，请稍后重试',
+  'media writes are still draining; retry after service control is applied': '媒体写入仍在排空，请稍后重试启动迁移',
+  'clear the current maintenance expiry before starting media migration': '迁移期间不能自动恢复媒体写入，请先清除当前维护状态的到期时间',
+  'too many media settings operations': '媒体存储设置操作过于频繁，请稍后重试',
   'application limit reached': '已达到该账户的应用配额上限',
   'service capability is paused': '该操作因服务维护而暂时停用',
   'service control revision conflict': '运行状态已被其他管理员修改，请重新加载后再试',
@@ -1037,6 +1109,18 @@ const API_ERROR_MESSAGES_BY_CODE: Record<string, string> = {
   'avatar.rate_limited': 'too many avatar operations',
   'avatar.operation_unavailable': 'avatar operation is temporarily unavailable',
   'avatar.storage_unavailable': 'avatar storage is temporarily unavailable',
+  'media.settings_unavailable': 'media settings are temporarily unavailable',
+  'media.configuration_invalid': 'media storage configuration is invalid',
+  'media.revision_conflict': 'media settings changed; reload and try again',
+  'media.candidate_not_found': 'media storage candidate was not found',
+  'media.test_required': 'a recent successful media storage test is required',
+  'media.migration_active': 'a media storage migration is already active',
+  'media.migration_not_found': 'media storage migration was not found',
+  'media.migration_not_paused': 'media writes must be paused before migration',
+  'media.instances_not_ready': 'active instances are still preparing the media storage candidate',
+  'media.draining': 'media writes are still draining; retry after service control is applied',
+  'media.maintenance_expiry': 'clear the current maintenance expiry before starting media migration',
+  'media.rate_limited': 'too many media settings operations',
   'service.capability_paused': 'service capability is paused',
   'service_control.revision_conflict': 'service control revision conflict',
   'service_control.registration_conflict': 'registration settings conflict with service control',
@@ -1339,6 +1423,15 @@ export const api = {
       req<MailMutationResult>('/api/admin/settings/mail/disable', {
         method: 'POST', body: JSON.stringify({ expected_revision: expectedRevision }),
       }),
+    getMediaSettings: () => req<MediaStorageSettings>('/api/admin/settings/media', { cache: 'no-store' }),
+    saveMediaCandidate: (settings: SaveMediaStorageCandidateInput) =>
+      req<{ candidate: MediaStorageProfile; revision: number }>('/api/admin/settings/media/candidate', { method: 'PUT', body: JSON.stringify(settings) }),
+    testMediaCandidate: (expectedRevision: number, profileID: string) =>
+      req<{ candidate: MediaStorageProfile; revision: number; result?: string }>('/api/admin/settings/media/candidate/test', { method: 'POST', body: JSON.stringify({ expected_revision: expectedRevision, profile_id: profileID }) }),
+    startMediaMigration: (expectedRevision: number, profileID: string) =>
+      req<{ migration: MediaStorageMigration; revision: number }>('/api/admin/settings/media/migrations', { method: 'POST', body: JSON.stringify({ expected_revision: expectedRevision, profile_id: profileID }) }),
+    retryMediaMigration: (migrationID: string) =>
+      req<{ migration: MediaStorageMigration }>(`/api/admin/settings/media/migrations/${encodeURIComponent(migrationID)}/retry`, { method: 'POST' }),
     getInvites: () => req<Invite[]>('/api/admin/invites'),
     createInvite: (data: { note?: string; max_uses?: number; ttl?: string }) =>
       req<CreateInviteResult>('/api/admin/invites', { method: 'POST', body: JSON.stringify(data) }),

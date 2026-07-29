@@ -55,6 +55,10 @@ jobs:
       NYAUTH_REDIS_ADDR: redis.release.invalid:6379
       NYAUTH_BACKEND_NETWORK: nyauth-release-backend
       NYAUTH_PROXY_NETWORK: nyauth-release-proxy
+      NYAUTH_MEDIA_S3_REGION: us-east-1
+      NYAUTH_MEDIA_S3_BUCKET: nyauth-release-media
+      NYAUTH_MEDIA_S3_ACCESS_KEY_ID_FILE: .release-secrets/media-s3-access-key-id
+      NYAUTH_MEDIA_S3_SECRET_ACCESS_KEY_FILE: .release-secrets/media-s3-secret-access-key
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -122,6 +126,8 @@ jobs:
           printf '%s' 'release-redis-password-0123456789' > .release-secrets/redis-password
           printf '%s' 'cmVsZWFzZS1tYXN0ZXIta2V5LTAxMjM0NTY3ODlhYmM=' > .release-secrets/auth-master-key
           printf '%s' 'release-migration-database-password' > .release-secrets/postgres-password
+          printf '%s' 'release-media-access-key' > .release-secrets/media-s3-access-key-id
+          printf '%s' 'release-media-secret-access-key' > .release-secrets/media-s3-secret-access-key
       - name: Validate development Compose
         run: docker compose -f docker-compose.yml config --quiet
       - name: Validate production Compose

@@ -122,6 +122,8 @@ func assertReleaseBaseline(t *testing.T, schema *postgresTestSchema) {
 		"registration_stats_daily", "user_totp_credentials", "user_passkey_credentials",
 		"user_avatars", "provider_avatar_import_jobs", "idx_audit_logs_target_created",
 		"service_control_state", "service_control_pauses", "service_control_instances",
+		"media_storage_profiles", "media_storage_state", "media_storage_migrations",
+		"media_storage_migration_items", "media_storage_instances",
 	} {
 		var resolved *string
 		if err := schema.pool.QueryRow(ctx, `SELECT to_regclass($1)::text`, object).Scan(&resolved); err != nil {
@@ -136,6 +138,7 @@ func assertReleaseBaseline(t *testing.T, schema *postgresTestSchema) {
 		{"users", "current_avatar_id"}, {"users", "creation_source"}, {"users", "created_by"},
 		{"oauth_clients", "access_policy"}, {"oauth_providers", "import_avatar"},
 		{"oauth_providers", "avatar_allowed_hosts"},
+		{"user_avatars", "storage_profile_id"},
 	} {
 		var count int
 		if err := schema.pool.QueryRow(ctx, `

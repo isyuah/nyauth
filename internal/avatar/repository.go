@@ -35,7 +35,7 @@ func (r *Repository) EnsureStorageBackendCompatible(ctx context.Context, backend
 	var incompatible int64
 	if err := r.db.QueryRow(ctx, `
 		SELECT COUNT(*) FROM user_avatars
-		WHERE storage_backend<>$1 AND storage_deleted_at IS NULL
+		WHERE storage_profile_id IS NULL AND storage_backend<>$1 AND storage_deleted_at IS NULL
 	`, backend).Scan(&incompatible); err != nil {
 		return fmt.Errorf("checking avatar storage backend compatibility: %w", err)
 	}
@@ -65,10 +65,10 @@ func (r *Repository) CreateStagingTx(ctx context.Context, tx pgx.Tx, params Crea
 	}
 	_, err = tx.Exec(ctx, `
 		INSERT INTO user_avatars (
-			id,user_id,source,status,storage_backend,object_prefix,variants,content_sha256,
+			id,user_id,source,status,storage_backend,storage_profile_id,object_prefix,variants,content_sha256,
 			original_media_type,original_width,original_height,created_at,updated_at
-		) VALUES ($1,$2,$3,'staging',$4,$5,$6,$7,$8,$9,$10,$11,$11)
-	`, params.ID, params.UserID, params.Source, params.StorageBackend, params.ObjectPrefix, variants,
+		) VALUES ($1,$2,$3,'staging',$4,$5,$6,$7,$8,$9,$10,$11,$12,$12)
+	`, params.ID, params.UserID, params.Source, params.StorageBackend, params.StorageProfileID, params.ObjectPrefix, variants,
 		params.ContentSHA256, params.OriginalMediaType, params.OriginalWidth, params.OriginalHeight, now.UTC())
 	if err != nil {
 		return fmt.Errorf("creating staging avatar record: %w", err)
@@ -134,10 +134,10 @@ func (r *Repository) GetActiveVariant(ctx context.Context, avatarID uuid.UUID, s
 	}
 	var raw []byte
 	if err := r.db.QueryRow(ctx, `
-		SELECT storage_backend,variants
+		SELECT storage_backend,storage_profile_id,variants
 		FROM user_avatars
 		WHERE id=$1 AND status='active' AND storage_deleted_at IS NULL
-	`, avatarID).Scan(&result.StorageBackend, &raw); err != nil {
+	`, avatarID).Scan(&result.StorageBackend, &result.StorageProfileID, &raw); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return result, ErrNotFound
 		}
@@ -183,7 +183,7 @@ func (r *Repository) MarkFailed(ctx context.Context, avatarID uuid.UUID, reason 
 	return nil
 }
 
-func (r *Repository) DeleteActiveTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, now time.Time) ([]string, error) {
+func (r *Repository) DeleteActiveTx(ctx context.Context, tx pgx.Tx, userID uuid.UUID, now time.Time) ([]CleanupItem, error) {
 	if tx == nil {
 		return nil, fmt.Errorf("avatar transaction is required")
 	}
@@ -195,19 +195,19 @@ func (r *Repository) DeleteActiveTx(ctx context.Context, tx pgx.Tx, userID uuid.
 		UPDATE user_avatars
 		SET status='deleted',deleted_at=$2,updated_at=$2
 		WHERE user_id=$1 AND status='active'
-		RETURNING variants
+		RETURNING id,storage_backend,storage_profile_id,variants
 	`, userID, now)
 	if err != nil {
 		return nil, fmt.Errorf("deleting active avatar record: %w", err)
 	}
-	keys, _, err := collectVariantKeys(rows)
+	items, _, err := collectCleanupItems(rows)
 	if err != nil {
 		return nil, err
 	}
 	if _, err := tx.Exec(ctx, `UPDATE users SET current_avatar_id=NULL,updated_at=$2 WHERE id=$1`, userID, now); err != nil {
 		return nil, fmt.Errorf("clearing user current avatar: %w", err)
 	}
-	return keys, nil
+	return items, nil
 }
 
 type CleanupResult struct {
@@ -218,8 +218,10 @@ type CleanupResult struct {
 }
 
 type CleanupItem struct {
-	AvatarID   uuid.UUID
-	ObjectKeys []string
+	AvatarID         uuid.UUID
+	StorageBackend   StorageBackend
+	StorageProfileID *uuid.UUID
+	ObjectKeys       []string
 }
 
 func (r *Repository) CleanupUnreferenced(ctx context.Context, backend StorageBackend, now time.Time, olderThan time.Duration, batchSize, maxBatches int) (CleanupResult, error) {
@@ -304,7 +306,7 @@ func cleanupBatch(ctx context.Context, conn *pgxpool.Conn, backend StorageBacken
 		SET cleanup_claimed_at=$4::timestamptz
 		FROM candidates
 		WHERE avatar.id=candidates.id
-		RETURNING avatar.id,avatar.variants
+		RETURNING avatar.id,avatar.storage_backend,avatar.storage_profile_id,avatar.variants
 	`, cutoff, claimExpiredBefore, batchSize, now, backend)
 	if err != nil {
 		return nil, 0, fmt.Errorf("marking avatar media for cleanup: %w", err)
@@ -485,16 +487,15 @@ func collectCleanupItems(rows pgx.Rows) ([]CleanupItem, int64, error) {
 	defer rows.Close()
 	items := make([]CleanupItem, 0)
 	for rows.Next() {
-		var id uuid.UUID
+		var item CleanupItem
 		var raw []byte
-		if err := rows.Scan(&id, &raw); err != nil {
+		if err := rows.Scan(&item.AvatarID, &item.StorageBackend, &item.StorageProfileID, &raw); err != nil {
 			return nil, 0, fmt.Errorf("scanning avatar cleanup candidate: %w", err)
 		}
 		var variants []models.AvatarVariant
 		if err := json.Unmarshal(raw, &variants); err != nil {
 			return nil, 0, fmt.Errorf("decoding avatar cleanup variants: %w", err)
 		}
-		item := CleanupItem{AvatarID: id}
 		for _, variant := range variants {
 			if variant.ObjectKey != "" {
 				item.ObjectKeys = append(item.ObjectKeys, variant.ObjectKey)

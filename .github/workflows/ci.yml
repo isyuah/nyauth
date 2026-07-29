@@ -98,6 +98,10 @@ jobs:
       NYAUTH_REDIS_ADDR: redis.ci.invalid:6379
       NYAUTH_BACKEND_NETWORK: nyauth-ci-backend
       NYAUTH_PROXY_NETWORK: nyauth-ci-proxy
+      NYAUTH_MEDIA_S3_REGION: us-east-1
+      NYAUTH_MEDIA_S3_BUCKET: nyauth-ci-media
+      NYAUTH_MEDIA_S3_ACCESS_KEY_ID_FILE: .ci-secrets/media-s3-access-key-id
+      NYAUTH_MEDIA_S3_SECRET_ACCESS_KEY_FILE: .ci-secrets/media-s3-secret-access-key
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
@@ -114,6 +118,8 @@ jobs:
           printf '%s' 'ci-redis-password-0123456789' > .ci-secrets/redis-password
           printf '%s' 'Y2ktbWFzdGVyLWtleS0wMTIzNDU2Nzg5YWJjZGVmZ2g=' > .ci-secrets/auth-master-key
           printf '%s' 'ci-migration-database-password' > .ci-secrets/postgres-password
+          printf '%s' 'ci-media-access-key' > .ci-secrets/media-s3-access-key-id
+          printf '%s' 'ci-media-secret-access-key' > .ci-secrets/media-s3-secret-access-key
       - name: Validate development Compose
         run: docker compose -f docker-compose.yml config --quiet
       - name: Validate production Compose

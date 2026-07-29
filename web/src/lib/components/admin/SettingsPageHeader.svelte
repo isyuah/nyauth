@@ -11,6 +11,7 @@
     { href: '/admin/settings/branding', label: '品牌' },
     { href: '/admin/settings/registration', label: '注册' },
     { href: '/admin/settings/mail', label: '邮件' },
+    { href: '/admin/settings/media', label: '媒体' },
     { href: '/admin/settings/security', label: '登录安全' },
     { href: '/admin/settings/protection', label: '访问保护' },
     { href: '/admin/settings/lifecycle', label: '生命周期' },

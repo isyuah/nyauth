@@ -26,6 +26,7 @@ var (
 	ErrUserImageNotSquare = errors.New("user avatar upload must be square after browser crop")
 	ErrNotFound           = errors.New("avatar not found")
 	ErrAvatarAlreadySet   = errors.New("user already has an avatar")
+	ErrStorageUnavailable = errors.New("avatar storage profile is unavailable")
 )
 
 type Source = models.AvatarSource
@@ -54,8 +55,9 @@ type StoredVariant struct {
 }
 
 type ActiveVariant struct {
-	StorageBackend StorageBackend
-	Variant        models.AvatarVariant
+	StorageBackend   StorageBackend
+	StorageProfileID *uuid.UUID
+	Variant          models.AvatarVariant
 }
 
 type CreateAvatarParams struct {
@@ -63,6 +65,7 @@ type CreateAvatarParams struct {
 	UserID            uuid.UUID
 	Source            Source
 	StorageBackend    StorageBackend
+	StorageProfileID  *uuid.UUID
 	ObjectPrefix      string
 	Variants          []models.AvatarVariant
 	ContentSHA256     []byte
