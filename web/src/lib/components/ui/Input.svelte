@@ -15,6 +15,7 @@
     required = false,
     id = '',
     autocomplete,
+    ignorePasswordManagers = false,
     inputmode,
     maxlength,
     oninput,
@@ -32,6 +33,7 @@
     required?: boolean;
     id?: string;
     autocomplete?: 'current-password' | 'new-password' | 'username' | 'username webauthn' | 'email' | 'one-time-code' | 'off';
+    ignorePasswordManagers?: boolean;
     inputmode?: 'text' | 'numeric' | 'email' | 'url' | 'search' | 'tel' | 'decimal' | 'none';
     maxlength?: number;
     oninput?: (e: Event) => void;
@@ -52,6 +54,9 @@
     {readonly}
     {required}
     {autocomplete}
+    data-bwignore={ignorePasswordManagers ? 'true' : undefined}
+    data-1p-ignore={ignorePasswordManagers ? 'true' : undefined}
+    data-lpignore={ignorePasswordManagers ? 'true' : undefined}
     {inputmode}
     {maxlength}
     aria-invalid={error ? 'true' : undefined}

@@ -1,12 +1,13 @@
 <script lang="ts">
   import { page } from '$app/stores';
-  import { api, ApiError, isAPIErrorCode, isMFARequiredResponse } from '$lib/api';
+  import { api, ApiError, isAPIErrorCode, isMFARequiredResponse, type ProviderSummary } from '$lib/api';
   import { brandingStore, consumeProviderAuthError, safeReturnPath, sessionStore } from '$lib/stores';
   import { capabilityPauseReason, isCapabilityPaused, serviceStatusStore } from '$lib/service-control';
   import { goto } from '$app/navigation';
   import { onMount } from 'svelte';
   import Button from '$lib/components/ui/Button.svelte';
   import Input from '$lib/components/ui/Input.svelte';
+  import ProviderIcon from '$lib/components/identity/ProviderIcon.svelte';
   import {
     WEBAUTHN_ERROR_CODES,
     authenticationCredentialToJSON,
@@ -22,7 +23,7 @@
   let loading = $state(false);
   let passkeyLoading = $state(false);
   let passkeySupported = $state(false);
-  let providers = $state<Array<{ name: string; type: string }>>([]);
+  let providers = $state<ProviderSummary[]>([]);
   let providersLoading = $state(true);
   let providersError = $state('');
   let cleanedReturnTo = $state<string | null>(null);
@@ -341,7 +342,8 @@
                 onclick={() => handleOAuth(p.name)}
                 class="w-full h-10 flex items-center justify-center gap-2 border border-nya-border rounded-nya-sm text-body-medium text-nya-text-primary hover:bg-nya-surface-hover transition-colors duration-fast disabled:cursor-not-allowed disabled:opacity-50"
               >
-                <span class="capitalize">{p.name}</span>
+                <ProviderIcon type={p.type} iconKey={p.icon_key} size={18} />
+                <span>{p.display_name || p.name}</span>
               </button>
             {/each}
           </div>

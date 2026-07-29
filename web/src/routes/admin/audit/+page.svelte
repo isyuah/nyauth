@@ -287,12 +287,12 @@
       <div class="md:col-span-2"><TreeMultiSelect id="audit-event" label="事件" bind:values={events} options={filterOptions.events} placeholder="搜索事件，例如 user.login" /></div>
       <Select id="audit-result" label="结果" bind:value={result} options={resultOptions} />
       <Select id="audit-risk" label="风险" bind:value={risk} options={riskOptions} />
-      <Input id="audit-actor" label="操作者（模糊）" bind:value={actor} placeholder="名称或 ID" />
-      <Input id="audit-target" label="目标（模糊）" bind:value={target} placeholder="类型或 ID" />
-      <Input id="audit-subject-user-id" label="主体用户 ID（精确）" bind:value={subjectUserId} placeholder="用户 UUID" />
+      <Input id="audit-actor" label="操作者（模糊）" bind:value={actor} placeholder="名称或 ID" autocomplete="off" ignorePasswordManagers />
+      <Input id="audit-target" label="目标（模糊）" bind:value={target} placeholder="类型或 ID" autocomplete="off" ignorePasswordManagers />
+      <Input id="audit-subject-user-id" label="主体用户 ID（精确）" bind:value={subjectUserId} placeholder="用户 UUID" autocomplete="off" ignorePasswordManagers />
       <Select id="audit-target-type" label="目标类型（精确）" bind:value={targetType} options={targetTypeOptions} />
-      <Input id="audit-target-id" label="目标 ID（精确）" bind:value={targetId} placeholder="完整目标 ID" />
-      <Input id="audit-ip" label="IP 地址" bind:value={ip} placeholder="例如 203.0.113.10" />
+      <Input id="audit-target-id" label="目标 ID（精确）" bind:value={targetId} placeholder="完整目标 ID" autocomplete="off" ignorePasswordManagers />
+      <Input id="audit-ip" label="IP 地址" bind:value={ip} placeholder="例如 203.0.113.10" autocomplete="off" ignorePasswordManagers />
       <div class="md:col-span-2">
         <DateTimeRangePicker id="audit-time-range" bind:from bind:to onconfirm={applyFilters} />
       </div>

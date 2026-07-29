@@ -112,6 +112,9 @@
         bind:value={search}
         {disabled}
         autocomplete="off"
+        data-bwignore="true"
+        data-1p-ignore="true"
+        data-lpignore="true"
         role="combobox"
         aria-haspopup="dialog"
         aria-autocomplete="list"

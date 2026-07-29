@@ -1106,7 +1106,9 @@ test('provider login methods expose a retry instead of becoming an empty list', 
   await expect(page.getByRole('alert')).toContainText('外部登录方式暂时不可用');
   await page.getByRole('button', { name: '重试' }).click();
 
-  await expect(page.getByRole('button', { name: 'github' })).toBeVisible();
+  const providerButton = page.getByRole('button', { name: 'GitHub' });
+  await expect(providerButton).toBeVisible();
+  await expect(providerButton.locator('svg')).toHaveCount(1);
   expect(state.providerListRequests).toBe(2);
 });
 
@@ -3447,6 +3449,10 @@ test('audit filters use backend options, exact URL parameters, quick ranges and 
   await page.getByRole('option', { name: '客户端', exact: true }).click();
   await page.getByLabel('目标 ID（精确）').fill('client-123');
   await page.getByLabel('IP 地址').fill('192.0.2.10');
+  for (const field of ['事件', '操作者（模糊）', '目标（模糊）', '主体用户 ID（精确）', '目标 ID（精确）', 'IP 地址']) {
+    await expect(page.getByLabel(field, { exact: true })).toHaveAttribute('autocomplete', 'off');
+    await expect(page.getByLabel(field, { exact: true })).toHaveAttribute('data-bwignore', 'true');
+  }
   await page.getByRole('button', { name: '应用筛选' }).click();
 
   await expect(page).toHaveURL(/subject_user_id=/);
