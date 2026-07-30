@@ -1,23 +1,23 @@
 import { writable } from 'svelte/store';
-import { api, type PublicAnnouncementResponse } from './api';
+import { api, type PublicSiteBannerResponse } from './api';
 
-export const DISMISSED_ANNOUNCEMENT_VERSION_KEY = 'nyauth:announcement:dismissed-version';
+export const DISMISSED_SITE_BANNER_VERSION_KEY = 'nyauth:site-banner:dismissed-version';
 
-export interface AnnouncementState {
+export interface SiteBannerState {
   initialized: boolean;
   loading: boolean;
-  value: PublicAnnouncementResponse;
+  value: PublicSiteBannerResponse;
   dismissed: boolean;
   error: string | null;
 }
 
-interface AnnouncementEventSource {
+interface SiteBannerEventSource {
   addEventListener(type: string, listener: EventListenerOrEventListenerObject): void;
   close(): void;
 }
 
-interface AnnouncementStoreOptions {
-  eventSourceFactory?: (url: string) => AnnouncementEventSource | null;
+interface SiteBannerStoreOptions {
+  eventSourceFactory?: (url: string) => SiteBannerEventSource | null;
   storage?: Pick<Storage, 'getItem' | 'setItem'> | null;
   now?: () => number;
   pollMinimumMilliseconds?: number;
@@ -25,45 +25,32 @@ interface AnnouncementStoreOptions {
   reconnectMilliseconds?: number;
 }
 
-export function isSafeAnnouncementLink(raw: string): boolean {
-  if (raw.includes('\\')) return false;
-  if (raw.startsWith('/') && !raw.startsWith('//')) return true;
-  try {
-    const parsed = new URL(raw);
-    return parsed.protocol === 'https:' && !parsed.username && !parsed.password;
-  } catch {
-    return false;
-  }
-}
+const EMPTY_SITE_BANNER: PublicSiteBannerResponse = { site_banner: null };
 
-const EMPTY_ANNOUNCEMENT: PublicAnnouncementResponse = { announcement: null };
-
-export function isPublicAnnouncementResponse(value: unknown): value is PublicAnnouncementResponse {
+export function isPublicSiteBannerResponse(value: unknown): value is PublicSiteBannerResponse {
   if (typeof value !== 'object' || value === null) return false;
-  const candidate = value as Partial<PublicAnnouncementResponse>;
+  const candidate = value as Partial<PublicSiteBannerResponse>;
   if (candidate.next_change_at !== undefined && typeof candidate.next_change_at !== 'string') return false;
-  if (candidate.announcement === null) return true;
-  if (typeof candidate.announcement !== 'object' || candidate.announcement === null) return false;
-  const announcement = candidate.announcement;
-  return Number.isSafeInteger(announcement.version)
-    && announcement.version > 0
-    && ['info', 'warning', 'critical'].includes(announcement.severity)
-    && typeof announcement.title === 'string'
-    && typeof announcement.message === 'string'
-    && typeof announcement.dismissible === 'boolean'
-    && (announcement.link_label === undefined || typeof announcement.link_label === 'string')
-    && (announcement.link_url === undefined || typeof announcement.link_url === 'string')
-    && (announcement.ends_at === undefined || typeof announcement.ends_at === 'string');
+  if (candidate.site_banner === null) return true;
+  if (typeof candidate.site_banner !== 'object' || candidate.site_banner === null) return false;
+  const siteBanner = candidate.site_banner;
+  return Number.isSafeInteger(siteBanner.version)
+    && siteBanner.version > 0
+    && ['info', 'warning', 'critical'].includes(siteBanner.severity)
+    && typeof siteBanner.title === 'string'
+    && typeof siteBanner.message_html === 'string'
+    && typeof siteBanner.dismissible === 'boolean'
+    && (siteBanner.ends_at === undefined || typeof siteBanner.ends_at === 'string');
 }
 
-export function createAnnouncementStore(
-  loadAnnouncement: () => Promise<PublicAnnouncementResponse> = api.getAnnouncement,
-  options: AnnouncementStoreOptions = {},
+export function createSiteBannerStore(
+  loadSiteBanner: () => Promise<PublicSiteBannerResponse> = api.getSiteBanner,
+  options: SiteBannerStoreOptions = {},
 ) {
-  const { subscribe, set, update } = writable<AnnouncementState>({
+  const { subscribe, set, update } = writable<SiteBannerState>({
     initialized: false,
     loading: false,
-    value: EMPTY_ANNOUNCEMENT,
+    value: EMPTY_SITE_BANNER,
     dismissed: false,
     error: null,
   });
@@ -71,8 +58,8 @@ export function createAnnouncementStore(
   const pollMinimum = options.pollMinimumMilliseconds ?? 5_000;
   const pollMaximum = Math.max(pollMinimum, options.pollMaximumMilliseconds ?? 60_000);
   const reconnectDelay = options.reconnectMilliseconds ?? 30_000;
-  let pending: Promise<PublicAnnouncementResponse> | null = null;
-  let source: AnnouncementEventSource | null = null;
+  let pending: Promise<PublicSiteBannerResponse> | null = null;
+  let source: SiteBannerEventSource | null = null;
   let pollTimer: ReturnType<typeof setTimeout> | null = null;
   let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   let changeTimer: ReturnType<typeof setTimeout> | null = null;
@@ -85,11 +72,11 @@ export function createAnnouncementStore(
     return typeof localStorage === 'undefined' ? null : localStorage;
   }
 
-  function isDismissed(response: PublicAnnouncementResponse): boolean {
-    const version = response.announcement?.version;
+  function isDismissed(response: PublicSiteBannerResponse): boolean {
+    const version = response.site_banner?.version;
     if (!version) return false;
     try {
-      return storage()?.getItem(DISMISSED_ANNOUNCEMENT_VERSION_KEY) === String(version);
+      return storage()?.getItem(DISMISSED_SITE_BANNER_VERSION_KEY) === String(version);
     } catch {
       return false;
     }
@@ -108,24 +95,24 @@ export function createAnnouncementStore(
     }, delay);
   }
 
-  function apply(response: PublicAnnouncementResponse, external = false) {
+  function apply(response: PublicSiteBannerResponse, external = false) {
     if (external) generation += 1;
     set({ initialized: true, loading: false, value: response, dismissed: isDismissed(response), error: null });
     scheduleNextChange(response.next_change_at);
   }
 
-  function refresh(force = false): Promise<PublicAnnouncementResponse> {
+  function refresh(force = false): Promise<PublicSiteBannerResponse> {
     if (pending && !force) return pending;
     const requestGeneration = generation;
     update((current) => ({ ...current, loading: true, error: null }));
-    const request = loadAnnouncement()
+    const request = loadSiteBanner()
       .then((response) => {
-        if (!isPublicAnnouncementResponse(response)) throw new Error('公告服务返回了无效响应');
+        if (!isPublicSiteBannerResponse(response)) throw new Error('全站横幅服务返回了无效响应');
         if (requestGeneration === generation) apply(response);
         return response;
       })
       .catch((cause: unknown) => {
-        const message = cause instanceof Error ? cause.message : '公告加载失败';
+        const message = cause instanceof Error ? cause.message : '全站横幅加载失败';
         update((current) => ({ ...current, initialized: true, loading: false, error: message }));
         throw cause;
       })
@@ -177,7 +164,7 @@ export function createAnnouncementStore(
       return new EventSource(url);
     });
     try {
-      source = factory('/api/announcement/events');
+      source = factory('/api/site-banner/events');
       if (source === null) {
         schedulePoll(0);
         return;
@@ -187,10 +174,10 @@ export function createAnnouncementStore(
         pollingDelay = pollMinimum;
       });
       source.addEventListener('error', handleStreamFailure);
-      source.addEventListener('announcement', (event) => {
+      source.addEventListener('site_banner', (event) => {
         try {
           const response: unknown = JSON.parse((event as MessageEvent<string>).data);
-          if (isPublicAnnouncementResponse(response)) apply(response, true);
+          if (isPublicSiteBannerResponse(response)) apply(response, true);
         } catch {
           // Polling remains authoritative when a notification is malformed.
         }
@@ -216,10 +203,10 @@ export function createAnnouncementStore(
     refresh,
     dismiss() {
       update((current) => {
-        const announcement = current.value.announcement;
-        if (!announcement?.dismissible) return current;
+        const siteBanner = current.value.site_banner;
+        if (!siteBanner?.dismissible) return current;
         try {
-          storage()?.setItem(DISMISSED_ANNOUNCEMENT_VERSION_KEY, String(announcement.version));
+          storage()?.setItem(DISMISSED_SITE_BANNER_VERSION_KEY, String(siteBanner.version));
         } catch {
           // Storage denial must not make the close control unusable for this page view.
         }
@@ -249,4 +236,4 @@ export function createAnnouncementStore(
   };
 }
 
-export const announcementStore = createAnnouncementStore();
+export const siteBannerStore = createSiteBannerStore();

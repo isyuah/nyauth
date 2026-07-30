@@ -1,7 +1,7 @@
 import { expect, test, type Page, type Route } from '@playwright/test';
 import type {
   CommunicationsSettings,
-  PublicAnnouncementResponse,
+  PublicSiteBannerResponse,
   ServiceStatus,
   SessionInfo,
   UpdateCommunicationsSettingsInput,
@@ -48,14 +48,12 @@ const communications: CommunicationsSettings = {
       },
     },
   },
-  announcement: {
+  site_banner: {
     version: 2,
     enabled: false,
     severity: 'info',
     title: '',
     message: '',
-    link_label: '',
-    link_url: '',
     dismissible: true,
     starts_at: null,
     ends_at: null,
@@ -71,7 +69,7 @@ const communications: CommunicationsSettings = {
 };
 
 interface MockOptions {
-  announcement?: PublicAnnouncementResponse;
+  siteBanner?: PublicSiteBannerResponse;
   communications?: CommunicationsSettings;
   saveConflict?: boolean;
   reauthenticateTestWith?: 'password' | 'provider';
@@ -84,7 +82,7 @@ async function json(route: Route, status: number, body: unknown) {
 
 async function installMocks(page: Page, options: MockOptions = {}) {
   let current = options.communications ?? structuredClone(communications);
-  let publicAnnouncement = options.announcement ?? { announcement: null };
+  let publicSiteBanner = options.siteBanner ?? { site_banner: null };
   let currentSession = {
     ...session,
     has_password: options.reauthenticateTestWith === 'provider' ? false : session.has_password,
@@ -101,13 +99,13 @@ async function installMocks(page: Page, options: MockOptions = {}) {
     const method = request.method();
     if (path === '/api/service-status') return json(route, 200, normalStatus);
     if (path === '/api/branding') return json(route, 200, { title: 'Nya', logo_url: '' });
-    if (path === '/api/announcement') return json(route, 200, publicAnnouncement);
-    if (path === '/api/announcement/events') {
+    if (path === '/api/site-banner') return json(route, 200, publicSiteBanner);
+    if (path === '/api/site-banner/events') {
       return route.fulfill({
         status: 200,
         contentType: 'text/event-stream',
         headers: { 'Cache-Control': 'no-store' },
-        body: `event: announcement\ndata: ${JSON.stringify(publicAnnouncement)}\n\n`,
+        body: `event: site_banner\ndata: ${JSON.stringify(publicSiteBanner)}\n\n`,
       });
     }
     if (path === '/api/session') return json(route, 200, currentSession);
@@ -125,6 +123,10 @@ async function installMocks(page: Page, options: MockOptions = {}) {
       if (options.saveConflict) return json(route, 409, { code: 'settings.revision_conflict', error: 'settings revision conflict' });
       current = { ...body, revision: body.expected_revision + 1, template_variables: current.template_variables };
       return json(route, 200, current);
+    }
+    if (path === '/api/admin/settings/communications/site-banner/preview' && method === 'POST') {
+      const body = request.postDataJSON() as { message: string };
+      return json(route, 200, { html: `<p>${body.message || '横幅正文支持 Markdown。'}</p>` });
     }
     if (path === '/api/admin/settings/communications/email/preview' && method === 'POST') {
       previewBodies.push(request.postDataJSON());
@@ -164,25 +166,28 @@ async function installMocks(page: Page, options: MockOptions = {}) {
     previewBodies,
     testBodies,
     testAttempts: () => testAttempts,
-    setPublicAnnouncement(value: PublicAnnouncementResponse) { publicAnnouncement = value; },
+    setPublicSiteBanner(value: PublicSiteBannerResponse) { publicSiteBanner = value; },
   };
 }
 
-test('announcement events appear and disappear without reloading the page', async ({ page }) => {
+test('site banner events appear and disappear without reloading the page', async ({ page }) => {
   await page.addInitScript(() => {
     const listeners: EventListenerOrEventListenerObject[] = [];
     class ControlledEventSource {
       addEventListener(type: string, listener: EventListenerOrEventListenerObject) {
-        if (type === 'announcement') listeners.push(listener);
+        if (type === 'site_banner') {
+          listeners.push(listener);
+          Object.defineProperty(window, '__siteBannerListenerReady', { configurable: true, value: true });
+        }
       }
 
       close() {}
     }
     Object.defineProperty(window, 'EventSource', { configurable: true, value: ControlledEventSource });
-    Object.defineProperty(window, '__emitAnnouncement', {
+    Object.defineProperty(window, '__emitSiteBanner', {
       configurable: true,
       value: (payload: unknown) => {
-        const event = new MessageEvent('announcement', { data: JSON.stringify(payload) });
+        const event = new MessageEvent('site_banner', { data: JSON.stringify(payload) });
         for (const listener of listeners) {
           if (typeof listener === 'function') listener(event);
           else listener.handleEvent(event);
@@ -190,41 +195,42 @@ test('announcement events appear and disappear without reloading the page', asyn
       },
     });
   });
-  await installMocks(page, { announcement: { announcement: null } });
+  await installMocks(page, { siteBanner: { site_banner: null } });
   await page.goto('/login');
+  await expect.poll(() => page.evaluate(() => Boolean((window as typeof window & { __siteBannerListenerReady?: boolean }).__siteBannerListenerReady))).toBe(true);
   await page.evaluate(() => {
-    (window as typeof window & { __emitAnnouncement: (payload: unknown) => void }).__emitAnnouncement({
-      announcement: {
+    (window as typeof window & { __emitSiteBanner: (payload: unknown) => void }).__emitSiteBanner({
+      site_banner: {
         version: 10,
         severity: 'critical',
         title: '紧急通知',
-        message: '认证服务将在稍后维护。',
+        message_html: '<p>认证服务将在稍后维护。</p>',
         dismissible: false,
       },
     });
   });
   await expect(page.getByText('紧急通知')).toBeVisible();
   await page.evaluate(() => {
-    (window as typeof window & { __emitAnnouncement: (payload: unknown) => void }).__emitAnnouncement({ announcement: null });
+    (window as typeof window & { __emitSiteBanner: (payload: unknown) => void }).__emitSiteBanner({ site_banner: null });
   });
   await expect(page.getByText('紧急通知')).toHaveCount(0);
 });
 
 test('dismissal is retained for the current version and reset by a new version', async ({ page }) => {
   const state = await installMocks(page, {
-    announcement: {
-      announcement: { version: 20, severity: 'info', title: '使用提示', message: '欢迎使用 Nya。', dismissible: true },
+    siteBanner: {
+      site_banner: { version: 20, severity: 'info', title: '使用提示', message_html: '<p>欢迎使用 Nya。</p>', dismissible: true },
     },
   });
   await page.goto('/login');
   await expect(page.getByText('使用提示')).toBeVisible();
-  await page.getByRole('button', { name: '关闭站点公告' }).click();
+  await page.getByRole('button', { name: '关闭全站横幅' }).click();
   await expect(page.getByText('使用提示')).toHaveCount(0);
 
   await page.reload();
   await expect(page.getByText('使用提示')).toHaveCount(0);
-  state.setPublicAnnouncement({
-    announcement: { version: 21, severity: 'info', title: '新的提示', message: '公告内容已更新。', dismissible: true },
+  state.setPublicSiteBanner({
+    site_banner: { version: 21, severity: 'info', title: '新的提示', message_html: '<p>横幅内容已更新。</p>', dismissible: true },
   });
   await page.reload();
   await expect(page.getByText('新的提示')).toBeVisible();
@@ -260,13 +266,133 @@ test('edits, previews, tests, and saves a structured email template', async ({ p
   expect(state.saveBodies[0].email.templates['account.email_verification'].subject).toBe('[{{site_name}}] 请验证邮箱');
 });
 
-test('revision conflicts retain the announcement draft until an explicit reload', async ({ page }) => {
+test('normalizes null variable arrays before switching templates and saving', async ({ page }) => {
+  const withNullArrays = structuredClone(communications) as unknown as {
+    template_variables: Record<string, {
+      heading: string[] | null;
+      button_label: string[] | null;
+      required_body: string[] | null;
+    }>;
+  };
+  withNullArrays.template_variables['account.email_verification'].heading = null;
+  withNullArrays.template_variables['account.email_verification'].button_label = null;
+  withNullArrays.template_variables['account.email_verification'].required_body = null;
+  const state = await installMocks(page, { communications: withNullArrays as unknown as CommunicationsSettings });
+  const pageErrors: string[] = [];
+  page.on('pageerror', (error) => pageErrors.push(error.message));
+
+  await page.goto('/admin/settings/communications');
+  await page.getByRole('tab', { name: '邮件模板' }).click();
+  await expect(page.getByLabel('邮件类型')).toBeVisible();
+  await page.getByRole('button', { name: '保存沟通设置' }).click();
+  await expect.poll(() => state.saveBodies.length).toBe(1);
+  expect(pageErrors).toEqual([]);
+});
+
+test('uses Markdown links and the custom schedule range picker for site banners', async ({ page }) => {
+  await installMocks(page);
+  await page.goto('/admin/settings/communications');
+  await expect(page.getByLabel('链接文字')).toHaveCount(0);
+  await expect(page.getByLabel('链接地址')).toHaveCount(0);
+  await page.getByLabel('横幅正文（Markdown）').fill('维护期间请查看 [状态页](/status)。');
+  await expect(page.getByText('维护期间请查看 [状态页](/status)。')).toBeVisible();
+
+  await page.getByRole('button', { name: '展示时间（可选）' }).click();
+  const dialog = page.getByRole('dialog', { name: '设置展示时间' });
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByRole('button', { name: '最近 1 天' })).toHaveCount(0);
+  await expect(dialog.getByRole('checkbox', { name: '不设置结束时间' })).toBeVisible();
+});
+
+test('supports all four site banner schedule boundaries', async ({ page }) => {
+  const state = await installMocks(page);
+  await page.goto('/admin/settings/communications');
+
+  const openSchedule = async () => {
+    await page.getByRole('button', { name: '展示时间（可选）' }).click();
+    return page.getByRole('dialog', { name: '设置展示时间' });
+  };
+  const save = async (expectedCount: number) => {
+    await page.getByRole('button', { name: '保存沟通设置' }).click();
+    await expect.poll(() => state.saveBodies.length).toBe(expectedCount);
+    return state.saveBodies[expectedCount - 1].site_banner;
+  };
+
+  let dialog = await openSchedule();
+  await dialog.getByRole('checkbox', { name: /立即开始/ }).uncheck();
+  await dialog.locator('button[aria-current="date"]').click();
+  await dialog.getByRole('button', { name: '确认并应用' }).click();
+  let saved = await save(1);
+  expect(saved.starts_at).not.toBeNull();
+  expect(saved.ends_at).toBeNull();
+
+  dialog = await openSchedule();
+  await dialog.getByRole('checkbox', { name: /立即开始/ }).check();
+  await dialog.getByRole('checkbox', { name: /持续到手动停用/ }).uncheck();
+  await dialog.locator('button[aria-current="date"]').click();
+  await dialog.getByRole('button', { name: '确认并应用' }).click();
+  saved = await save(2);
+  expect(saved.starts_at).toBeNull();
+  expect(saved.ends_at).not.toBeNull();
+
+  dialog = await openSchedule();
+  await dialog.getByRole('checkbox', { name: /持续到手动停用/ }).check();
+  await dialog.getByRole('button', { name: '确认并应用' }).click();
+  saved = await save(3);
+  expect(saved.starts_at).toBeNull();
+  expect(saved.ends_at).toBeNull();
+
+  dialog = await openSchedule();
+  await dialog.getByRole('checkbox', { name: /立即开始/ }).uncheck();
+  await dialog.getByRole('checkbox', { name: /持续到手动停用/ }).uncheck();
+  await dialog.locator('button[aria-current="date"]').click();
+  await dialog.locator('button[aria-current="date"]').click();
+  await dialog.getByRole('button', { name: '确认并应用' }).click();
+  saved = await save(4);
+  expect(saved.starts_at).not.toBeNull();
+  expect(saved.ends_at).not.toBeNull();
+});
+
+test('keeps the site banner, desktop sidebar, and sticky topbar aligned while scrolling', async ({ page }) => {
+  await installMocks(page, {
+    siteBanner: {
+      site_banner: {
+        version: 30,
+        severity: 'warning',
+        title: '维护提示',
+        message_html: '<p>部分功能暂时不可用。</p>',
+        dismissible: false,
+      },
+    },
+  });
+  await page.goto('/admin/settings/communications');
+  const banner = page.getByTestId('site-wide-banner');
+  const sidebar = page.locator('aside[aria-label="管理后台导航"]');
+  const topbar = page.locator('header');
+  await expect(banner).toBeVisible();
+
+  const assertAligned = async () => {
+    const boxes = await Promise.all([banner.boundingBox(), sidebar.boundingBox(), topbar.boundingBox()]);
+    expect(boxes.every(Boolean)).toBe(true);
+    const [bannerBox, sidebarBox, topbarBox] = boxes as NonNullable<(typeof boxes)[number]>[];
+    const bannerBottom = bannerBox.y + bannerBox.height;
+    expect(Math.abs(sidebarBox.y - bannerBottom)).toBeLessThanOrEqual(1.5);
+    expect(Math.abs(topbarBox.y - bannerBottom)).toBeLessThanOrEqual(1.5);
+  };
+
+  await assertAligned();
+  await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight));
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBeGreaterThan(0);
+  await assertAligned();
+});
+
+test('revision conflicts retain the site banner draft until an explicit reload', async ({ page }) => {
   await installMocks(page, { saveConflict: true });
   await page.goto('/admin/settings/communications');
-  await page.getByLabel('公告标题').fill('尚未保存的公告');
+  await page.getByLabel('横幅标题').fill('尚未保存的横幅');
   await page.getByRole('button', { name: '保存沟通设置' }).click();
   await expect(page.getByRole('alert')).toContainText('当前草稿已保留');
-  await expect(page.getByLabel('公告标题')).toHaveValue('尚未保存的公告');
+  await expect(page.getByLabel('横幅标题')).toHaveValue('尚未保存的横幅');
   await expect(page.getByRole('button', { name: '加载最新设置' })).toBeVisible();
 });
 

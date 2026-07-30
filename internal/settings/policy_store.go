@@ -240,15 +240,15 @@ func (m *Manager) SetCommunications(
 	if err != nil {
 		return 0, Communications{}, fmt.Errorf("decoding current communication settings: %w", err)
 	}
-	if SameAnnouncementContent(current.Announcement, value.Announcement) {
-		value.Announcement.Version = current.Announcement.Version
+	if SameSiteBannerContent(current.SiteBanner, value.SiteBanner) {
+		value.SiteBanner.Version = current.SiteBanner.Version
 	} else {
-		if current.Announcement.Version == math.MaxInt64 {
-			return 0, Communications{}, errors.New("announcement version is exhausted")
+		if current.SiteBanner.Version == math.MaxInt64 {
+			return 0, Communications{}, errors.New("site banner version is exhausted")
 		}
-		value.Announcement.Version = current.Announcement.Version + 1
-		if value.Announcement.Version < 1 {
-			value.Announcement.Version = 1
+		value.SiteBanner.Version = current.SiteBanner.Version + 1
+		if value.SiteBanner.Version < 1 {
+			value.SiteBanner.Version = 1
 		}
 	}
 	encoded, err := json.Marshal(value)
@@ -260,10 +260,10 @@ func (m *Manager) SetCommunications(
 		return 0, Communications{}, err
 	}
 	mutation = mutation.WithTarget("settings", communicationsKey).WithDetails(map[string]any{
-		"announcement_enabled":  value.Announcement.Enabled,
-		"announcement_severity": value.Announcement.Severity,
-		"announcement_version":  value.Announcement.Version,
-		"email_template_count":  len(value.Email.Templates),
+		"site_banner_enabled":  value.SiteBanner.Enabled,
+		"site_banner_severity": value.SiteBanner.Severity,
+		"site_banner_version":  value.SiteBanner.Version,
+		"email_template_count": len(value.Email.Templates),
 	})
 	if err := audit.EnqueueMutationTx(ctx, tx, mutation); err != nil {
 		return 0, Communications{}, fmt.Errorf("auditing communication settings: %w", err)

@@ -1,22 +1,23 @@
 <script lang="ts">
-  import { onMount, tick } from 'svelte';
+  import { onDestroy, onMount, tick } from 'svelte';
   import {
     api,
     isAPIErrorCode,
     isRecentAuthenticationError,
-    type AnnouncementSettings,
+    type SiteBannerSettings,
     type CommunicationsSettings,
     type EmailTemplateContent,
     type EmailTemplatePreview,
     type EmailTemplateSettings,
+    type EmailTemplateVariableRules,
     type UpdateCommunicationsSettingsInput,
   } from '$lib/api';
   import { consumeProviderAuthError, sessionStore } from '$lib/stores';
-  import { isSafeAnnouncementLink } from '$lib/announcement';
   import { toast } from '$lib/toast';
   import ReauthenticationDialog from '$lib/components/account/ReauthenticationDialog.svelte';
   import EmailVariableButtons from '$lib/components/admin/EmailVariableButtons.svelte';
   import Button from '$lib/components/ui/Button.svelte';
+  import DateTimeRangePicker from '$lib/components/ui/DateTimeRangePicker.svelte';
   import Input from '$lib/components/ui/Input.svelte';
   import Select from '$lib/components/ui/Select.svelte';
   import Switch from '$lib/components/ui/Switch.svelte';
@@ -24,7 +25,7 @@
 
   let { returnTo = '/admin/settings/communications' }: { returnTo?: string } = $props();
 
-  type Section = 'announcement' | 'email';
+  type Section = 'siteBanner' | 'email';
   type PendingAction =
     | { kind: 'save'; input: UpdateCommunicationsSettingsInput }
     | { kind: 'test'; templateID: string; recipient: string; email: EmailTemplateSettings };
@@ -50,10 +51,10 @@
     'security.identity_unbound': '外部身份已解绑',
   };
 
-  let section = $state<Section>('announcement');
+  let section = $state<Section>('siteBanner');
   let settings = $state<CommunicationsSettings | null>(null);
   let email = $state<EmailTemplateSettings>({ footer: '', templates: {} });
-  let announcement = $state<AnnouncementSettings>(emptyAnnouncement());
+  let siteBanner = $state<SiteBannerSettings>(emptySiteBanner());
   let startsAt = $state('');
   let endsAt = $state('');
   let selectedTemplateID = $state('');
@@ -69,24 +70,25 @@
   let conflict = $state(false);
   let reauthOpen = $state(false);
   let pendingAction = $state<PendingAction | null>(null);
+  let siteBannerPreviewHTML = $state('');
+  let siteBannerPreviewError = $state('');
+  let siteBannerPreviewing = $state(false);
+  let siteBannerPreviewTimer: ReturnType<typeof setTimeout> | null = null;
+  let siteBannerPreviewGeneration = 0;
 
   let templateOptions = $derived(Object.keys(email.templates).map((id) => ({ value: id, label: templateLabels[id] ?? id })));
   let selectedTemplate = $derived(email.templates[selectedTemplateID] ?? null);
   let testRecipient = $derived($sessionStore.session?.email_verified ? ($sessionStore.session.user.email?.trim() ?? '') : '');
   let testEmailAvailable = $derived(testRecipient !== '');
-  let variableRules = $derived(settings?.template_variables[selectedTemplateID] ?? {
-    subject: [], heading: [], body: [], button_label: [], required_body: [],
-  });
+  let variableRules = $derived(normalizeVariableRules(settings?.template_variables?.[selectedTemplateID]));
 
-  function emptyAnnouncement(): AnnouncementSettings {
+  function emptySiteBanner(): SiteBannerSettings {
     return {
       version: 0,
       enabled: false,
       severity: 'info',
       title: '',
       message: '',
-      link_label: '',
-      link_url: '',
       dismissible: true,
       starts_at: null,
       ends_at: null,
@@ -101,17 +103,31 @@
   }
 
   function applySettings(value: CommunicationsSettings) {
-    settings = value;
+    const normalizedVariables = Object.fromEntries(
+      Object.entries(value.template_variables ?? {}).map(([id, rules]) => [id, normalizeVariableRules(rules)]),
+    );
+    settings = { ...value, template_variables: normalizedVariables };
     email = cloneEmail(value.email);
-    announcement = { ...value.announcement };
-    startsAt = toLocalDateTime(value.announcement.starts_at);
-    endsAt = toLocalDateTime(value.announcement.ends_at);
+    siteBanner = { ...value.site_banner };
+    startsAt = toLocalDateTime(value.site_banner.starts_at);
+    endsAt = toLocalDateTime(value.site_banner.ends_at);
     const templateIDs = Object.keys(value.email.templates);
     if (!templateIDs.includes(selectedTemplateID)) selectedTemplateID = templateIDs[0] ?? '';
     preview = null;
     previewedTemplateID = '';
     conflict = false;
     formError = '';
+    scheduleSiteBannerPreview(true);
+  }
+
+  function normalizeVariableRules(rules?: Partial<EmailTemplateVariableRules> | null): EmailTemplateVariableRules {
+    return {
+      subject: Array.isArray(rules?.subject) ? rules.subject : [],
+      heading: Array.isArray(rules?.heading) ? rules.heading : [],
+      body: Array.isArray(rules?.body) ? rules.body : [],
+      button_label: Array.isArray(rules?.button_label) ? rules.button_label : [],
+      required_body: Array.isArray(rules?.required_body) ? rules.required_body : [],
+    };
   }
 
   async function loadSettings() {
@@ -158,8 +174,8 @@
     return {
       expected_revision: settings.revision,
       email: cloneEmail(email),
-      announcement: {
-        ...announcement,
+      site_banner: {
+        ...siteBanner,
         starts_at: toISOStringOrNull(startsAt),
         ends_at: toISOStringOrNull(endsAt),
       },
@@ -190,11 +206,9 @@
     }
     const footerError = templateVariableError(input.email.footer, ['site_name'], '统一页脚');
     if (footerError) return footerError;
-    const value = input.announcement;
-    if (value.enabled && (!value.title.trim() || !value.message.trim())) return '启用公告时必须填写标题和正文。';
-    if ((value.link_label.trim() === '') !== (value.link_url.trim() === '')) return '公告链接文字和链接地址必须同时填写。';
-    if (value.link_url && !validAnnouncementURL(value.link_url)) return '公告链接必须是站内路径或 HTTPS 地址。';
-    if (value.starts_at && value.ends_at && Date.parse(value.ends_at) <= Date.parse(value.starts_at)) return '公告结束时间必须晚于开始时间。';
+    const value = input.site_banner;
+    if (value.enabled && (!value.title.trim() || !value.message.trim())) return '启用全站横幅时必须填写标题和正文。';
+    if (value.starts_at && value.ends_at && Date.parse(value.ends_at) <= Date.parse(value.starts_at)) return '横幅结束时间必须晚于开始时间。';
     return '';
   }
 
@@ -237,7 +251,7 @@
       const updated = await api.admin.updateCommunicationsSettings(input);
       pendingAction = null;
       applySettings(updated);
-      toast.success('沟通设置已保存，公告和后续事务邮件将使用新配置。');
+      toast.success('沟通设置已保存，全站横幅和后续事务邮件将使用新配置。');
     } catch (cause) {
       if (allowReauthentication && isRecentAuthenticationError(cause)) {
         reauthOpen = true;
@@ -322,7 +336,7 @@
       applySettings({
         revision: stored.input.expected_revision,
         email: stored.input.email,
-        announcement: stored.input.announcement,
+        site_banner: stored.input.site_banner,
         template_variables: current.template_variables,
       });
       const providerError = consumeProviderAuthError();
@@ -365,8 +379,34 @@
     return Number.isNaN(date.getTime()) ? null : date.toISOString();
   }
 
-  function validAnnouncementURL(value: string): boolean {
-    return isSafeAnnouncementLink(value);
+  function scheduleSiteBannerPreview(immediate = false) {
+    if (siteBannerPreviewTimer !== null) clearTimeout(siteBannerPreviewTimer);
+    siteBannerPreviewTimer = setTimeout(() => {
+      siteBannerPreviewTimer = null;
+      void requestSiteBannerPreview();
+    }, immediate ? 0 : 300);
+  }
+
+  async function requestSiteBannerPreview() {
+    const generation = ++siteBannerPreviewGeneration;
+    const messageValue = siteBanner.message.trim();
+    if (!messageValue) {
+      siteBannerPreviewHTML = '<p>横幅正文支持 Markdown，可直接在正文中添加链接。</p>\n';
+      siteBannerPreviewError = '';
+      return;
+    }
+    siteBannerPreviewing = true;
+    try {
+      const result = await api.admin.previewSiteBannerMarkdown(messageValue);
+      if (generation !== siteBannerPreviewGeneration) return;
+      siteBannerPreviewHTML = result.html;
+      siteBannerPreviewError = '';
+    } catch (cause) {
+      if (generation !== siteBannerPreviewGeneration) return;
+      siteBannerPreviewError = message(cause, 'Markdown 预览生成失败');
+    } finally {
+      if (generation === siteBannerPreviewGeneration) siteBannerPreviewing = false;
+    }
   }
 
   function message(cause: unknown, fallback: string): string {
@@ -377,16 +417,21 @@
     await loadSettings();
     await restoreProviderDraft();
   });
+
+  onDestroy(() => {
+    if (siteBannerPreviewTimer !== null) clearTimeout(siteBannerPreviewTimer);
+    siteBannerPreviewGeneration += 1;
+  });
 </script>
 
 <section class="rounded-nya-card border border-nya-border bg-nya-surface shadow-nya-card">
   <div class="flex flex-col gap-3 border-b border-nya-divider px-5 py-4 sm:flex-row sm:items-center sm:justify-between">
     <div>
       <h2 class="text-card-title text-nya-text-primary">站点沟通</h2>
-      <p class="mt-1 text-small text-nya-text-secondary">统一管理全站公告和事务邮件文案，不改变 SMTP 连接配置。</p>
+      <p class="mt-1 text-small text-nya-text-secondary">统一管理全站横幅和事务邮件文案，不改变 SMTP 连接配置。</p>
     </div>
     <div class="inline-flex self-start rounded-nya-sm bg-nya-surface-muted p-1" role="tablist" aria-label="沟通设置分区">
-      <button type="button" role="tab" aria-selected={section === 'announcement'} onclick={() => (section = 'announcement')} class="flex h-8 items-center gap-2 rounded-nya-xs px-3 text-small font-semibold {section === 'announcement' ? 'bg-nya-surface text-nya-primary shadow-nya-xs' : 'text-nya-text-secondary'}"><Megaphone size={14} /> 站点公告</button>
+      <button type="button" role="tab" aria-selected={section === 'siteBanner'} onclick={() => (section = 'siteBanner')} class="flex h-8 items-center gap-2 rounded-nya-xs px-3 text-small font-semibold {section === 'siteBanner' ? 'bg-nya-surface text-nya-primary shadow-nya-xs' : 'text-nya-text-secondary'}"><Megaphone size={14} /> 全站横幅</button>
       <button type="button" role="tab" aria-selected={section === 'email'} onclick={() => (section = 'email')} class="flex h-8 items-center gap-2 rounded-nya-xs px-3 text-small font-semibold {section === 'email' ? 'bg-nya-surface text-nya-primary shadow-nya-xs' : 'text-nya-text-secondary'}"><Mail size={14} /> 邮件模板</button>
     </div>
   </div>
@@ -401,23 +446,31 @@
         <div class="mx-5 mt-4 flex flex-wrap items-center justify-between gap-3 rounded-nya-sm bg-nya-danger-soft px-3 py-2 text-small text-nya-danger" role="alert"><span>{formError}</span>{#if conflict}<Button variant="secondary" size="sm" onclick={loadSettings}><RefreshCw size={14} /> 加载最新设置</Button>{/if}</div>
       {/if}
 
-      {#if section === 'announcement'}
+      {#if section === 'siteBanner'}
         <div class="grid gap-0 lg:grid-cols-[minmax(0,1fr)_minmax(320px,0.8fr)]">
           <div class="space-y-4 px-5 py-5 lg:border-r lg:border-nya-divider">
-            <div class="flex items-start justify-between gap-4"><div><p class="font-semibold text-nya-text-primary">显示站点公告</p><p class="mt-1 text-small text-nya-text-secondary">发布后通过实时事件同步到已打开的页面。</p></div><Switch checked={announcement.enabled} onchange={(checked) => (announcement.enabled = checked)} label="显示站点公告" /></div>
-            <Select id="communications-announcement-severity" label="严重程度" bind:value={announcement.severity} options={[{ value: 'info', label: '信息' }, { value: 'warning', label: '警告' }, { value: 'critical', label: '严重' }]} />
-            <Input id="communications-announcement-title" label="公告标题" bind:value={announcement.title} maxlength={120} placeholder="例如：计划维护通知" />
-            <div><label for="communications-announcement-message" class="mb-1.5 block text-body-medium text-nya-text-primary">公告正文</label><textarea id="communications-announcement-message" bind:value={announcement.message} maxlength="1000" rows="4" class="w-full rounded-nya-sm border border-nya-border bg-nya-surface px-3 py-2 text-body text-nya-text-primary focus:border-nya-primary focus:outline-none focus:ring-2 focus:ring-nya-primary/24" placeholder="说明影响范围和预计恢复时间。"></textarea></div>
-            <div class="grid gap-4 sm:grid-cols-2"><Input id="communications-link-label" label="链接文字" bind:value={announcement.link_label} maxlength={64} placeholder="查看详情" /><Input id="communications-link-url" label="链接地址" bind:value={announcement.link_url} inputmode="url" placeholder="/status 或 https://…" /></div>
-            <div class="grid gap-4 sm:grid-cols-2"><Input id="communications-starts-at" label="开始时间（可选）" type="datetime-local" bind:value={startsAt} /><Input id="communications-ends-at" label="结束时间（可选）" type="datetime-local" bind:value={endsAt} /></div>
-            <label class="flex cursor-pointer items-start gap-2"><input type="checkbox" bind:checked={announcement.dismissible} class="mt-0.5 rounded" /><span><span class="block text-body text-nya-text-primary">允许关闭</span><span class="block text-small text-nya-text-tertiary">关闭状态按公告版本保存在浏览器；修改公告后会再次显示。</span></span></label>
+            <div class="flex items-start justify-between gap-4"><div><p class="font-semibold text-nya-text-primary">显示全站横幅</p><p class="mt-1 text-small text-nya-text-secondary">发布后通过实时事件同步到已打开的页面。</p></div><Switch checked={siteBanner.enabled} onchange={(checked) => (siteBanner.enabled = checked)} label="显示全站横幅" /></div>
+            <Select id="communications-site-banner-severity" label="严重程度" bind:value={siteBanner.severity} options={[{ value: 'info', label: '信息' }, { value: 'warning', label: '警告' }, { value: 'critical', label: '严重' }]} />
+            <Input id="communications-site-banner-title" label="横幅标题" bind:value={siteBanner.title} maxlength={120} placeholder="例如：计划维护通知" />
+            <div>
+              <div class="mb-1.5 flex items-center justify-between gap-3"><label for="communications-site-banner-message" class="text-body-medium text-nya-text-primary">横幅正文（Markdown）</label><span class="text-micro text-nya-text-tertiary">支持强调、列表、代码和链接</span></div>
+              <textarea id="communications-site-banner-message" bind:value={siteBanner.message} oninput={() => scheduleSiteBannerPreview()} maxlength="1000" rows="6" class="w-full rounded-nya-sm border border-nya-border bg-nya-surface px-3 py-2 font-mono text-body text-nya-text-primary focus:border-nya-primary focus:outline-none focus:ring-2 focus:ring-nya-primary/24" placeholder="系统将在 **今晚 22:00** 维护。\n\n[查看详情](/status)"></textarea>
+              <p class="mt-1.5 text-micro text-nya-text-tertiary">链接仅允许站内绝对路径或 HTTPS 地址；不接受 HTML 和图片。</p>
+            </div>
+            <DateTimeRangePicker id="communications-active-range" label="展示时间（可选）" bind:from={startsAt} bind:to={endsAt} mode="schedule" />
+            <label class="flex cursor-pointer items-start gap-2"><input type="checkbox" bind:checked={siteBanner.dismissible} class="mt-0.5 rounded" /><span><span class="block text-body text-nya-text-primary">允许关闭</span><span class="block text-small text-nya-text-tertiary">关闭状态按横幅版本保存在浏览器；修改横幅后会再次显示。</span></span></label>
           </div>
           <div class="bg-nya-surface-muted px-5 py-5">
             <p class="mb-3 text-small font-semibold text-nya-text-secondary">横幅预览</p>
-            <div class="border-l-4 px-4 py-3 {announcement.severity === 'critical' ? 'border-nya-danger bg-nya-danger-soft text-nya-danger' : announcement.severity === 'warning' ? 'border-nya-warning bg-nya-warning-soft text-nya-warning' : 'border-nya-info bg-nya-info-soft text-nya-info'}">
-              <p class="font-semibold">{announcement.title || '公告标题'}</p><p class="mt-1 text-small">{announcement.message || '公告正文会以纯文本显示。'}</p>{#if announcement.link_label}<span class="mt-2 inline-block text-small font-semibold underline">{announcement.link_label}</span>{/if}
+            <div class="border-l-4 px-4 py-3 {siteBanner.severity === 'critical' ? 'border-nya-danger bg-nya-danger-soft text-nya-danger' : siteBanner.severity === 'warning' ? 'border-nya-warning bg-nya-warning-soft text-nya-warning' : 'border-nya-info bg-nya-info-soft text-nya-info'}" aria-busy={siteBannerPreviewing}>
+              <p class="font-semibold">{siteBanner.title || '横幅标题'}</p>
+              {#if siteBannerPreviewError}
+                <p class="mt-2 text-small text-nya-danger" role="alert">{siteBannerPreviewError}</p>
+              {:else}
+                <div class="site-banner-preview mt-1 text-small">{@html siteBannerPreviewHTML}</div>
+              {/if}
             </div>
-            <p class="mt-3 text-micro text-nya-text-tertiary">公告不会解析 HTML；开启“允许关闭”后会显示关闭按钮。</p>
+            <p class="mt-3 text-micro text-nya-text-tertiary">预览由服务端安全渲染；开启“允许关闭”后会显示关闭按钮。</p>
           </div>
         </div>
       {:else}
@@ -454,3 +507,12 @@
 </section>
 
 <ReauthenticationDialog bind:open={reauthOpen} {returnTo} description="保存沟通设置或发送测试邮件前需要验证近期身份" onauthenticated={retryPendingAction} onbeforeprovider={persistProviderDraft} />
+
+<style>
+  :global(.site-banner-preview p + p) { margin-top: 0.4rem; }
+  :global(.site-banner-preview a) { font-weight: 600; text-decoration: underline; text-underline-offset: 2px; }
+  :global(.site-banner-preview ul), :global(.site-banner-preview ol) { margin-top: 0.4rem; list-style-position: inside; }
+  :global(.site-banner-preview ul) { list-style-type: disc; }
+  :global(.site-banner-preview ol) { list-style-type: decimal; }
+  :global(.site-banner-preview code) { border-radius: 3px; background: rgb(0 0 0 / 0.06); padding: 0.05rem 0.25rem; font-family: ui-monospace, SFMono-Regular, Consolas, monospace; }
+</style>

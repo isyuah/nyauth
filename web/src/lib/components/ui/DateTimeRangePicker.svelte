@@ -22,6 +22,7 @@
     from = $bindable(''),
     to = $bindable(''),
     showSeconds = false,
+    mode = 'range',
     onconfirm,
   }: {
     id?: string;
@@ -29,11 +30,12 @@
     from?: string;
     to?: string;
     showSeconds?: boolean;
+    mode?: 'range' | 'schedule';
     onconfirm?: () => void | Promise<void>;
   } = $props();
 
   const weekdays = ['一', '二', '三', '四', '五', '六', '日'];
-  const quickRanges = [1, 7, 14, 30];
+  let quickRanges = $derived(mode === 'range' ? [1, 7, 14, 30] : []);
 
   let open = $state(false);
   let visibleYear = $state(new Date().getFullYear());
@@ -43,6 +45,8 @@
   let draftStartTime = $state('00:00');
   let draftEndTime = $state('23:59');
   let endAtConfirmation = $state(false);
+  let noStart = $state(false);
+  let noEnd = $state(false);
   let selectionPhase = $state<'start' | 'end'>('start');
   let validationError = $state('');
 
@@ -50,7 +54,13 @@
   let monthTitle = $derived(`${visibleYear} 年 ${visibleMonth + 1} 月`);
   let triggerValue = $derived(formatRangeLabel(from, to));
   let selectionHint = $derived(
-    endAtConfirmation
+    noStart && noEnd
+      ? '发布后立即展示，持续到手动停用'
+      : noStart
+        ? (draftEndDate ? '已选择结束日期；发布后立即展示' : '请选择结束日期')
+      : noEnd
+      ? (draftStartDate ? '已选择开始日期；横幅不会自动结束' : '请选择开始日期')
+      : endAtConfirmation
       ? (draftStartDate ? '已选择起始日期；结束时间将在确认时确定' : '请选择起始日期')
       : selectionPhase === 'end'
         ? '请选择结束日期'
@@ -75,9 +85,9 @@
     const startLabel = formatDisplayDateTime(start);
     const endLabel = formatDisplayDateTime(end);
     if (startLabel && endLabel) return `${startLabel} - ${endLabel}`;
-    if (startLabel) return `${startLabel} - 未设置结束时间`;
-    if (endLabel) return `未设置开始时间 - ${endLabel}`;
-    return '选择日期和时间范围';
+    if (startLabel) return mode === 'schedule' ? `${startLabel}起，持续展示` : `${startLabel} - 未设置结束时间`;
+    if (endLabel) return mode === 'schedule' ? `立即展示 - ${endLabel}` : `未设置开始时间 - ${endLabel}`;
+    return mode === 'schedule' ? '发布后立即展示，不自动结束' : '选择日期和时间范围';
   }
 
   function openPicker() {
@@ -89,7 +99,10 @@
     draftEndDate = end.date;
     draftEndTime = end.time;
     endAtConfirmation = false;
-    selectionPhase = start.date && !end.date ? 'end' : 'start';
+    noStart = mode === 'schedule' && !start.date;
+    noEnd = mode === 'schedule' && Boolean(start.date) && !end.date;
+    if (mode === 'schedule' && !start.date && !end.date) noEnd = true;
+    selectionPhase = noStart ? 'end' : (start.date && !end.date ? 'end' : 'start');
     visibleYear = focusDate.getFullYear();
     visibleMonth = focusDate.getMonth();
     validationError = '';
@@ -110,7 +123,12 @@
       visibleMonth = selectedDate.getMonth();
     }
 
-    if (endAtConfirmation || selectionPhase === 'start') {
+    if (noStart) {
+      draftEndDate = dateKey;
+      selectionPhase = 'end';
+      return;
+    }
+    if (endAtConfirmation || noEnd || selectionPhase === 'start') {
       draftStartDate = dateKey;
       if (!endAtConfirmation) draftEndDate = '';
       selectionPhase = endAtConfirmation ? 'start' : 'end';
@@ -134,6 +152,8 @@
     draftEndDate = endParts.date;
     draftEndTime = endParts.time;
     endAtConfirmation = false;
+    noStart = false;
+    noEnd = false;
     selectionPhase = 'start';
     visibleYear = start.getFullYear();
     visibleMonth = start.getMonth();
@@ -142,7 +162,21 @@
 
   function handleEndModeChange() {
     validationError = '';
+    noStart = false;
+    noEnd = false;
     selectionPhase = endAtConfirmation ? 'start' : (draftStartDate && !draftEndDate ? 'end' : 'start');
+  }
+
+  function handleNoEndChange() {
+    validationError = '';
+    endAtConfirmation = false;
+    selectionPhase = noStart ? 'end' : noEnd ? 'start' : (draftStartDate && !draftEndDate ? 'end' : 'start');
+  }
+
+  function handleNoStartChange() {
+    validationError = '';
+    endAtConfirmation = false;
+    selectionPhase = noStart ? 'end' : noEnd ? 'start' : (!draftStartDate ? 'start' : !draftEndDate ? 'end' : 'start');
   }
 
   function dayLabel(day: CalendarDay): string {
@@ -153,8 +187,8 @@
   }
 
   function dayClass(day: CalendarDay): string {
-    const isEndpoint = day.dateKey === draftStartDate || (!endAtConfirmation && day.dateKey === draftEndDate);
-    const inRange = !endAtConfirmation && isWithinDateRange(day.dateKey, draftStartDate, draftEndDate);
+    const isEndpoint = (!noStart && day.dateKey === draftStartDate) || (!endAtConfirmation && !noEnd && day.dateKey === draftEndDate);
+    const inRange = !noStart && !endAtConfirmation && !noEnd && isWithinDateRange(day.dateKey, draftStartDate, draftEndDate);
     return [
       'flex h-9 w-full items-center justify-center rounded-nya-sm text-body transition-colors',
       isEndpoint
@@ -170,32 +204,36 @@
 
   async function confirmRange() {
     validationError = '';
-    if (!draftStartDate) {
+    if (!noStart && !draftStartDate) {
       validationError = '请选择起始日期。';
       return;
     }
-    if (!endAtConfirmation && !draftEndDate) {
-      validationError = '请选择结束日期，或启用“结束时间使用确认时刻”。';
+    if (!endAtConfirmation && !noEnd && !draftEndDate) {
+      validationError = mode === 'schedule'
+        ? '请选择结束日期，或启用“不设置结束时间”。'
+        : '请选择结束日期，或启用“结束时间使用确认时刻”。';
       return;
     }
 
-    const startValue = combineLocalDateTime(draftStartDate, draftStartTime);
-    const endValue = endAtConfirmation
+    const startValue = noStart ? '' : combineLocalDateTime(draftStartDate, draftStartTime);
+    const endValue = noEnd
+      ? ''
+      : endAtConfirmation
       ? formatLocalDateTime(new Date(), showSeconds)
       : combineLocalDateTime(draftEndDate, draftEndTime);
-    const parsedStart = parseLocalDateTime(startValue);
-    const parsedEnd = parseLocalDateTime(endValue);
-    if (!parsedStart || !parsedEnd) {
+    const parsedStart = noStart ? null : parseLocalDateTime(startValue);
+    const parsedEnd = noEnd ? null : parseLocalDateTime(endValue);
+    if ((!noStart && !parsedStart) || (!noEnd && !parsedEnd)) {
       validationError = '日期或时间无效。';
       return;
     }
-    if (parsedEnd.getTime() < parsedStart.getTime()) {
+    if (parsedStart && parsedEnd && parsedEnd.getTime() < parsedStart.getTime()) {
       validationError = '结束时间不能早于起始时间。';
       return;
     }
 
-    from = startValue;
-    to = endValue;
+    from = noStart ? '' : startValue;
+    to = noEnd ? '' : endValue;
     open = false;
     await onconfirm?.();
   }
@@ -225,8 +263,8 @@
     {#if from || to}
       <button
         type="button"
-        aria-label="清除时间范围筛选"
-        title="清除时间范围筛选"
+        aria-label={mode === 'schedule' ? '清除展示时间' : '清除时间范围筛选'}
+        title={mode === 'schedule' ? '清除展示时间' : '清除时间范围筛选'}
         onclick={clearRange}
         class="flex w-10 shrink-0 items-center justify-center border-l border-nya-divider text-nya-text-tertiary transition-colors hover:bg-nya-surface-muted hover:text-nya-danger focus:outline-none"
       ><X size={16} aria-hidden="true" /></button>
@@ -234,14 +272,16 @@
   </div>
 </div>
 
-<Modal bind:open title="选择时间范围" description="按本地时间选择，确认后转换为标准时间写入审计筛选" size="lg">
+<Modal bind:open title={mode === 'schedule' ? '设置展示时间' : '选择时间范围'} description={mode === 'schedule' ? '开始和结束时间均可独立留空；时间按本地时区输入' : '按本地时间选择，确认后转换为标准时间写入审计筛选'} size="lg">
   <div class="space-y-5">
-    <div class="flex flex-wrap items-center gap-2" aria-label="快捷时间范围">
-      <span class="mr-1 text-small font-medium text-nya-text-secondary">距今</span>
-      {#each quickRanges as days}
-        <Button size="sm" variant="soft" onclick={() => setQuickRange(days)} ariaLabel={`最近 ${days} 天`}>{days} 天</Button>
-      {/each}
-    </div>
+    {#if quickRanges.length > 0}
+      <div class="flex flex-wrap items-center gap-2" aria-label="快捷时间范围">
+        <span class="mr-1 text-small font-medium text-nya-text-secondary">距今</span>
+        {#each quickRanges as days}
+          <Button size="sm" variant="soft" onclick={() => setQuickRange(days)} ariaLabel={`最近 ${days} 天`}>{days} 天</Button>
+        {/each}
+      </div>
+    {/if}
 
     <div class="grid gap-5 md:grid-cols-[minmax(0,1fr)_220px]">
       <section aria-labelledby={`${id}-calendar-title`}>
@@ -264,7 +304,7 @@
               class={dayClass(day)}
               onclick={() => chooseDay(day.dateKey)}
               aria-label={dayLabel(day)}
-              aria-selected={day.dateKey === draftStartDate || (!endAtConfirmation && day.dateKey === draftEndDate)}
+              aria-selected={(!noStart && day.dateKey === draftStartDate) || (!endAtConfirmation && !noEnd && day.dateKey === draftEndDate)}
               aria-current={day.isToday ? 'date' : undefined}
               role="gridcell"
             >{day.day}</button>
@@ -274,15 +314,26 @@
 
       <section class="border-t border-nya-divider pt-4 md:border-l md:border-t-0 md:pl-5 md:pt-0" aria-label="精确时间">
         <div class="space-y-4">
-          <TimePicker id={`${id}-start-time`} label="起始时间" bind:value={draftStartTime} {showSeconds} />
-          <TimePicker id={`${id}-end-time`} label="结束时间" bind:value={draftEndTime} {showSeconds} disabled={endAtConfirmation} />
-          <label class="flex cursor-pointer items-start gap-2.5 rounded-nya-sm bg-nya-surface-muted px-3 py-2.5 text-small text-nya-text-secondary">
-            <input type="checkbox" bind:checked={endAtConfirmation} onchange={handleEndModeChange} class="mt-0.5 h-4 w-4 shrink-0 accent-[var(--nya-primary)]" />
-            <span>结束时间使用确认时刻</span>
-          </label>
+          <TimePicker id={`${id}-start-time`} label="起始时间" bind:value={draftStartTime} {showSeconds} disabled={noStart} />
+          <TimePicker id={`${id}-end-time`} label="结束时间" bind:value={draftEndTime} {showSeconds} disabled={endAtConfirmation || noEnd} />
+          {#if mode === 'schedule'}
+            <label class="flex cursor-pointer items-start gap-2.5 rounded-nya-sm bg-nya-surface-muted px-3 py-2.5 text-small text-nya-text-secondary">
+              <input type="checkbox" bind:checked={noStart} onchange={handleNoStartChange} class="mt-0.5 h-4 w-4 shrink-0 accent-[var(--nya-primary)]" />
+              <span>立即开始（不设置开始时间）</span>
+            </label>
+            <label class="flex cursor-pointer items-start gap-2.5 rounded-nya-sm bg-nya-surface-muted px-3 py-2.5 text-small text-nya-text-secondary">
+              <input type="checkbox" bind:checked={noEnd} onchange={handleNoEndChange} class="mt-0.5 h-4 w-4 shrink-0 accent-[var(--nya-primary)]" />
+              <span>持续到手动停用（不设置结束时间）</span>
+            </label>
+          {:else}
+            <label class="flex cursor-pointer items-start gap-2.5 rounded-nya-sm bg-nya-surface-muted px-3 py-2.5 text-small text-nya-text-secondary">
+              <input type="checkbox" bind:checked={endAtConfirmation} onchange={handleEndModeChange} class="mt-0.5 h-4 w-4 shrink-0 accent-[var(--nya-primary)]" />
+              <span>结束时间使用确认时刻</span>
+            </label>
+          {/if}
           <div class="rounded-nya-sm border border-nya-border bg-nya-surface-subtle px-3 py-2.5 text-small text-nya-text-secondary">
-            <p><span class="text-nya-text-tertiary">起始：</span>{draftStartDate || '未选择'} {draftStartDate ? draftStartTime : ''}</p>
-            <p class="mt-1"><span class="text-nya-text-tertiary">结束：</span>{endAtConfirmation ? '确认时刻' : `${draftEndDate || '未选择'} ${draftEndDate ? draftEndTime : ''}`}</p>
+            <p><span class="text-nya-text-tertiary">起始：</span>{noStart ? '保存后立即开始' : `${draftStartDate || '未选择'} ${draftStartDate ? draftStartTime : ''}`}</p>
+            <p class="mt-1"><span class="text-nya-text-tertiary">结束：</span>{noEnd ? '不自动结束' : endAtConfirmation ? '确认时刻' : `${draftEndDate || '未选择'} ${draftEndDate ? draftEndTime : ''}`}</p>
           </div>
         </div>
       </section>
@@ -295,7 +346,7 @@
     <div class="flex flex-wrap items-center justify-between gap-2 border-t border-nya-divider pt-4">
       <div>
         {#if from || to}
-          <Button variant="ghost" onclick={clearRange}>清除时间筛选</Button>
+          <Button variant="ghost" onclick={clearRange}>{mode === 'schedule' ? '清除展示时间' : '清除时间筛选'}</Button>
         {/if}
       </div>
       <div class="flex gap-2">

@@ -20,7 +20,7 @@
   let initials = $derived((user?.display_name || user?.username || '?').slice(0, 1).toUpperCase());
 </script>
 
-<header class="sticky top-0 z-20 flex h-16 items-center justify-between border-b border-nya-divider bg-white/95 px-4 backdrop-blur-[10px] md:px-5">
+<header class="sticky z-20 flex h-16 items-center justify-between border-b border-nya-divider bg-white/95 px-4 backdrop-blur-[10px] md:px-5" style="top: var(--nya-global-banner-height, 0px);">
   <div class="flex items-center gap-3">
     {#if isMobile}
       <button

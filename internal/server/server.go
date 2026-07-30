@@ -93,7 +93,7 @@ type Server struct {
 	revocationWorker          *securityrevocation.Dispatcher
 	serviceControl            serviceControlRuntime
 	serviceStatusStreams      atomic.Int64
-	announcementStreams       atomic.Int64
+	siteBannerStreams         atomic.Int64
 	securityVersions          func(context.Context, uuid.UUID) (int64, int64, error)
 	readiness                 readinessState
 }
@@ -412,7 +412,7 @@ func (s *Server) buildRouter() *chi.Mux {
 	}
 	r.Use(redactedRequestLogger)
 	r.Use(structuredRecoverer)
-	r.Use(timeoutExcept(30*time.Second, serviceStatusEventsPath, announcementEventsPath))
+	r.Use(timeoutExcept(30*time.Second, serviceStatusEventsPath, siteBannerEventsPath))
 	issuer, _ := url.Parse(s.cfg.Auth.Issuer)
 	allowedOrigin := issuer.Scheme + "://" + issuer.Host
 	r.Use(cors.Handler(cors.Options{AllowedOrigins: []string{allowedOrigin}, AllowedMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"}, AllowedHeaders: []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token", "X-WebAuthn-Ceremony"}, ExposedHeaders: []string{"Retry-After"}, AllowCredentials: true, MaxAge: 300}))
@@ -430,8 +430,8 @@ func (s *Server) buildRouter() *chi.Mux {
 	r.Route("/api", func(r chi.Router) {
 		r.Get("/service-status", s.handleServiceStatus)
 		r.Get("/service-status/events", s.handleServiceStatusEvents)
-		r.Get("/announcement", s.handleAnnouncement)
-		r.Get("/announcement/events", s.handleAnnouncementEvents)
+		r.Get("/site-banner", s.handleSiteBanner)
+		r.Get("/site-banner/events", s.handleSiteBannerEvents)
 		r.With(authIssuance).Post("/login", s.handleLogin)
 		r.With(authIssuance).Post("/login/passkey/options", s.handleBeginPasskeyLogin)
 		r.With(authIssuance).Post("/login/passkey/verify", s.handleFinishPasskeyLogin)
@@ -515,6 +515,7 @@ func (s *Server) buildRouter() *chi.Mux {
 			r.Get("/admin/settings/oauth", s.handleGetOAuthSettings)
 			r.With(adminMutations).Put("/admin/settings/oauth", s.handleUpdateOAuthSettings)
 			r.Get("/admin/settings/communications", s.handleGetCommunicationsSettings)
+			r.Post("/admin/settings/communications/site-banner/preview", s.handlePreviewSiteBannerMarkdown)
 			r.Post("/admin/settings/communications/email/preview", s.handlePreviewEmailTemplate)
 			r.With(adminMutations).Post("/admin/settings/communications/email/test", s.handleTestEmailTemplate)
 			r.With(adminMutations).Put("/admin/settings/communications", s.handleUpdateCommunicationsSettings)

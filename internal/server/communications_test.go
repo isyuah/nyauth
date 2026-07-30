@@ -47,10 +47,10 @@ func TestEmailTemplatePreviewUsesSafeSampleDataAndFixedLink(t *testing.T) {
 	}
 }
 
-func TestPublicAnnouncementDefaultsToNoAnnouncementAndNoStore(t *testing.T) {
+func TestPublicSiteBannerDefaultsToNoSiteBannerAndNoStore(t *testing.T) {
 	server := &Server{settingsMgr: settings.NewManager(nil, settings.Branding{Title: "Nya"})}
 	recorder := httptest.NewRecorder()
-	server.handleAnnouncement(recorder, httptest.NewRequest(http.MethodGet, "/api/announcement", nil))
+	server.handleSiteBanner(recorder, httptest.NewRequest(http.MethodGet, "/api/site-banner", nil))
 	if recorder.Code != http.StatusOK || recorder.Header().Get("Cache-Control") != "no-store" {
 		t.Fatalf("status=%d cache=%q", recorder.Code, recorder.Header().Get("Cache-Control"))
 	}
@@ -58,20 +58,20 @@ func TestPublicAnnouncementDefaultsToNoAnnouncementAndNoStore(t *testing.T) {
 	if err := json.Unmarshal(recorder.Body.Bytes(), &response); err != nil {
 		t.Fatalf("decode response: %v", err)
 	}
-	if response["announcement"] != nil || len(response) != 1 {
+	if response["site_banner"] != nil || len(response) != 1 {
 		t.Fatalf("public response leaked inactive settings: %#v", response)
 	}
 }
 
-func TestPublicAnnouncementExposesOnlyActivePublicFields(t *testing.T) {
+func TestPublicSiteBannerExposesOnlyActivePublicFields(t *testing.T) {
 	now := time.Date(2026, 7, 29, 12, 0, 0, 0, time.UTC)
 	start := now.Add(-time.Hour)
 	end := now.Add(time.Hour)
-	response := publicAnnouncementAt(settings.Announcement{
-		Version: 7, Enabled: true, Severity: settings.AnnouncementSeverityWarning,
-		Title: "Planned maintenance", Message: "Sign-in remains available.",
-		LinkLabel: "Status", LinkURL: "/status", Dismissible: true,
-		StartsAt: &start, EndsAt: &end,
+	response := publicSiteBannerAt(settings.SiteBanner{
+		Version: 7, Enabled: true, Severity: settings.SiteBannerSeverityWarning,
+		Title: "Planned maintenance", Message: "Sign-in remains **available**. [Status](/status)",
+		Dismissible: true,
+		StartsAt:    &start, EndsAt: &end,
 	}, now)
 	encoded, err := json.Marshal(response)
 	if err != nil {
@@ -80,11 +80,36 @@ func TestPublicAnnouncementExposesOnlyActivePublicFields(t *testing.T) {
 	body := string(encoded)
 	for _, forbidden := range []string{"enabled", "starts_at", "revision", "email", "templates"} {
 		if strings.Contains(body, forbidden) {
-			t.Fatalf("public announcement leaked %q: %s", forbidden, body)
+			t.Fatalf("public site banner leaked %q: %s", forbidden, body)
 		}
 	}
-	if response.Announcement == nil || response.Announcement.Version != 7 || response.NextChangeAt == nil || !response.NextChangeAt.Equal(end) {
-		t.Fatalf("unexpected public announcement: %#v", response)
+	if response.SiteBanner == nil || response.SiteBanner.Version != 7 || response.NextChangeAt == nil || !response.NextChangeAt.Equal(end) {
+		t.Fatalf("unexpected public site banner: %#v", response)
+	}
+	if !strings.Contains(response.SiteBanner.MessageHTML, "<strong>available</strong>") || !strings.Contains(response.SiteBanner.MessageHTML, `href="/status"`) {
+		t.Fatalf("public site banner was not rendered safely: %#v", response.SiteBanner)
+	}
+}
+
+func TestSiteBannerMarkdownPreviewRejectsUnsafeMarkup(t *testing.T) {
+	server := &Server{settingsMgr: settings.NewManager(nil, settings.Branding{Title: "Nya"})}
+	for _, test := range []struct {
+		name string
+		body string
+		want int
+	}{
+		{name: "safe markdown", body: `{"message":"**planned** [status](/status)"}`, want: http.StatusOK},
+		{name: "raw html", body: `{"message":"<script>alert(1)</script>"}`, want: http.StatusBadRequest},
+		{name: "unsafe link", body: `{"message":"[open](javascript:alert(1))"}`, want: http.StatusBadRequest},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			recorder := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, "/api/admin/settings/communications/site-banner/preview", strings.NewReader(test.body))
+			server.handlePreviewSiteBannerMarkdown(recorder, request)
+			if recorder.Code != test.want {
+				t.Fatalf("status=%d body=%s", recorder.Code, recorder.Body.String())
+			}
+		})
 	}
 }
 
@@ -128,11 +153,11 @@ func TestTemplateTestRecipientMustBeCurrentVerifiedAdministratorEmail(t *testing
 	}
 }
 
-func TestAnnouncementStreamLimitFailsBeforeStartingSSE(t *testing.T) {
+func TestSiteBannerStreamLimitFailsBeforeStartingSSE(t *testing.T) {
 	server := &Server{settingsMgr: settings.NewManager(nil, settings.Branding{Title: "Nya"})}
-	server.announcementStreams.Store(maxAnnouncementEventStreams)
+	server.siteBannerStreams.Store(maxSiteBannerEventStreams)
 	recorder := httptest.NewRecorder()
-	server.handleAnnouncementEvents(recorder, httptest.NewRequest(http.MethodGet, announcementEventsPath, nil))
+	server.handleSiteBannerEvents(recorder, httptest.NewRequest(http.MethodGet, siteBannerEventsPath, nil))
 	if recorder.Code != http.StatusTooManyRequests || recorder.Header().Get("Retry-After") != "30" {
 		t.Fatalf("status=%d retry=%q body=%s", recorder.Code, recorder.Header().Get("Retry-After"), recorder.Body.String())
 	}

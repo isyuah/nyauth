@@ -14,11 +14,11 @@ import (
 )
 
 const (
-	announcementEventsPath      = "/api/announcement/events"
-	announcementEventName       = "announcement"
-	announcementKeepalive       = 10 * time.Second
-	announcementRefreshInterval = time.Second
-	maxAnnouncementEventStreams = 100
+	siteBannerEventsPath      = "/api/site-banner/events"
+	siteBannerEventName       = "site_banner"
+	siteBannerKeepalive       = 10 * time.Second
+	siteBannerRefreshInterval = time.Second
+	maxSiteBannerEventStreams = 100
 )
 
 type communicationsSettingsResponse struct {
@@ -49,20 +49,26 @@ type emailTemplatePreviewResponse struct {
 	HTMLBody string `json:"html_body"`
 }
 
-type publicAnnouncement struct {
+type siteBannerMarkdownPreviewRequest struct {
+	Message string `json:"message"`
+}
+
+type siteBannerMarkdownPreviewResponse struct {
+	HTML string `json:"html"`
+}
+
+type publicSiteBanner struct {
 	Version     int64      `json:"version"`
 	Severity    string     `json:"severity"`
 	Title       string     `json:"title"`
-	Message     string     `json:"message"`
-	LinkLabel   string     `json:"link_label,omitempty"`
-	LinkURL     string     `json:"link_url,omitempty"`
+	MessageHTML string     `json:"message_html"`
 	Dismissible bool       `json:"dismissible"`
 	EndsAt      *time.Time `json:"ends_at,omitempty"`
 }
 
-type publicAnnouncementResponse struct {
-	Announcement *publicAnnouncement `json:"announcement"`
-	NextChangeAt *time.Time          `json:"next_change_at,omitempty"`
+type publicSiteBannerResponse struct {
+	SiteBanner   *publicSiteBanner `json:"site_banner"`
+	NextChangeAt *time.Time        `json:"next_change_at,omitempty"`
 }
 
 func (s *Server) handleGetCommunicationsSettings(w http.ResponseWriter, _ *http.Request) {
@@ -119,6 +125,25 @@ func (s *Server) handlePreviewEmailTemplate(w http.ResponseWriter, r *http.Reque
 	writeJSON(w, http.StatusOK, emailTemplatePreviewResponse{
 		Subject: message.Subject, TextBody: message.TextBody, HTMLBody: message.HTMLBody,
 	})
+}
+
+func (s *Server) handlePreviewSiteBannerMarkdown(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
+	var request siteBannerMarkdownPreviewRequest
+	if err := decodeJSON(w, r, &request); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if len(request.Message) > 4000 {
+		writeAPIError(w, http.StatusBadRequest, "site banner message is too long")
+		return
+	}
+	rendered, err := settings.RenderSiteBannerMarkdown(strings.TrimSpace(request.Message))
+	if err != nil {
+		writeAPIError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	writeJSON(w, http.StatusOK, siteBannerMarkdownPreviewResponse{HTML: rendered})
 }
 
 func (s *Server) handleTestEmailTemplate(w http.ResponseWriter, r *http.Request) {
@@ -198,27 +223,31 @@ func emailTemplateVariables() map[string]account.EmailTemplateVariableRules {
 	return result
 }
 
-func (s *Server) handleAnnouncement(w http.ResponseWriter, _ *http.Request) {
+func (s *Server) handleSiteBanner(w http.ResponseWriter, _ *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusOK, s.currentPublicAnnouncement(time.Now().UTC()))
+	writeJSON(w, http.StatusOK, s.currentPublicSiteBanner(time.Now().UTC()))
 }
 
-func (s *Server) currentPublicAnnouncement(now time.Time) publicAnnouncementResponse {
-	return publicAnnouncementAt(s.settingsMgr.Communications().Announcement, now)
+func (s *Server) currentPublicSiteBanner(now time.Time) publicSiteBannerResponse {
+	return publicSiteBannerAt(s.settingsMgr.Communications().SiteBanner, now)
 }
 
-func publicAnnouncementAt(value settings.Announcement, now time.Time) publicAnnouncementResponse {
-	response := publicAnnouncementResponse{}
+func publicSiteBannerAt(value settings.SiteBanner, now time.Time) publicSiteBannerResponse {
+	response := publicSiteBannerResponse{}
 	if value.Enabled && value.StartsAt != nil && now.Before(*value.StartsAt) {
 		start := value.StartsAt.UTC()
 		response.NextChangeAt = &start
 	}
-	if !settings.AnnouncementActiveAt(value, now) {
+	if !settings.SiteBannerActiveAt(value, now) {
 		return response
 	}
-	response.Announcement = &publicAnnouncement{
-		Version: value.Version, Severity: value.Severity, Title: value.Title, Message: value.Message,
-		LinkLabel: value.LinkLabel, LinkURL: value.LinkURL, Dismissible: value.Dismissible, EndsAt: value.EndsAt,
+	rendered, err := settings.RenderSiteBannerMarkdown(value.Message)
+	if err != nil {
+		return response
+	}
+	response.SiteBanner = &publicSiteBanner{
+		Version: value.Version, Severity: value.Severity, Title: value.Title, MessageHTML: rendered,
+		Dismissible: value.Dismissible, EndsAt: value.EndsAt,
 	}
 	if value.EndsAt != nil {
 		end := value.EndsAt.UTC()
@@ -227,13 +256,13 @@ func publicAnnouncementAt(value settings.Announcement, now time.Time) publicAnno
 	return response
 }
 
-func (s *Server) handleAnnouncementEvents(w http.ResponseWriter, r *http.Request) {
-	if !s.claimAnnouncementStream() {
+func (s *Server) handleSiteBannerEvents(w http.ResponseWriter, r *http.Request) {
+	if !s.claimSiteBannerStream() {
 		w.Header().Set("Retry-After", "30")
-		writeAPIError(w, http.StatusTooManyRequests, "too many announcement streams")
+		writeAPIError(w, http.StatusTooManyRequests, "too many site banner streams")
 		return
 	}
-	defer s.announcementStreams.Add(-1)
+	defer s.siteBannerStreams.Add(-1)
 	flusher, ok := w.(http.Flusher)
 	if !ok {
 		writeAPIError(w, http.StatusInternalServerError, "streaming is unavailable")
@@ -246,7 +275,7 @@ func (s *Server) handleAnnouncementEvents(w http.ResponseWriter, r *http.Request
 
 	lastPayload := ""
 	send := func() error {
-		encoded, err := json.Marshal(s.currentPublicAnnouncement(time.Now().UTC()))
+		encoded, err := json.Marshal(s.currentPublicSiteBanner(time.Now().UTC()))
 		if err != nil {
 			return err
 		}
@@ -254,7 +283,7 @@ func (s *Server) handleAnnouncementEvents(w http.ResponseWriter, r *http.Request
 		if payload == lastPayload {
 			return nil
 		}
-		if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", announcementEventName, payload); err != nil {
+		if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", siteBannerEventName, payload); err != nil {
 			return err
 		}
 		lastPayload = payload
@@ -264,8 +293,8 @@ func (s *Server) handleAnnouncementEvents(w http.ResponseWriter, r *http.Request
 	if err := send(); err != nil {
 		return
 	}
-	refresh := time.NewTicker(announcementRefreshInterval)
-	keepalive := time.NewTicker(announcementKeepalive)
+	refresh := time.NewTicker(siteBannerRefreshInterval)
+	keepalive := time.NewTicker(siteBannerKeepalive)
 	defer refresh.Stop()
 	defer keepalive.Stop()
 	for {
@@ -285,13 +314,13 @@ func (s *Server) handleAnnouncementEvents(w http.ResponseWriter, r *http.Request
 	}
 }
 
-func (s *Server) claimAnnouncementStream() bool {
+func (s *Server) claimSiteBannerStream() bool {
 	for {
-		current := s.announcementStreams.Load()
-		if current >= maxAnnouncementEventStreams {
+		current := s.siteBannerStreams.Load()
+		if current >= maxSiteBannerEventStreams {
 			return false
 		}
-		if s.announcementStreams.CompareAndSwap(current, current+1) {
+		if s.siteBannerStreams.CompareAndSwap(current, current+1) {
 			return true
 		}
 	}

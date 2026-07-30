@@ -1,9 +1,20 @@
 package account
 
 import (
+	"encoding/json"
 	"strings"
 	"testing"
 )
+
+func TestEmailTemplateVariableRulesSerializeEmptyFieldsAsArrays(t *testing.T) {
+	encoded, err := json.Marshal(EmailTemplateVariables(MessageEmailVerification))
+	if err != nil {
+		t.Fatalf("json.Marshal: %v", err)
+	}
+	if strings.Contains(string(encoded), "null") {
+		t.Fatalf("variable rules must not expose null arrays: %s", encoded)
+	}
+}
 
 func TestStructuredEmailTemplateEscapesContentAndKeepsActionLinkSystemOwned(t *testing.T) {
 	settings := DefaultEmailTemplateSettings()

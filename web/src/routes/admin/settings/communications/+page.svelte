@@ -4,6 +4,6 @@
 </script>
 
 <div class="space-y-5">
-  <SettingsPageHeader title="沟通设置" description="管理全站公告与事务邮件模板" />
+  <SettingsPageHeader title="沟通设置" description="管理全站横幅与事务邮件模板" />
   <CommunicationsSettingsPanel />
 </div>

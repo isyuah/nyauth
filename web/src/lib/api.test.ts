@@ -743,7 +743,7 @@ describe('runtime communications API contract', () => {
     vi.unstubAllGlobals();
   });
 
-  it('uses the revisioned settings, preview, test, and public announcement endpoints', async () => {
+  it('uses the revisioned settings, preview, test, and public site banner endpoints', async () => {
     const email = {
       footer: '由 {{site_name}} 自动发送。',
       templates: {
@@ -755,14 +755,12 @@ describe('runtime communications API contract', () => {
         },
       },
     };
-    const announcement = {
+    const siteBanner = {
       version: 3,
       enabled: true,
       severity: 'info' as const,
       title: '服务通知',
       message: '欢迎使用。',
-      link_label: '',
-      link_url: '',
       dismissible: true,
       starts_at: null,
       ends_at: null,
@@ -770,7 +768,7 @@ describe('runtime communications API contract', () => {
     const communications = {
       revision: 4,
       email,
-      announcement,
+      site_banner: siteBanner,
       template_variables: {
         'account.email_verification': {
           subject: ['site_name'], heading: [], body: ['site_name', 'username'], button_label: [], required_body: [],
@@ -778,9 +776,10 @@ describe('runtime communications API contract', () => {
       },
     };
     const responses = [
-      { announcement: null },
+      { site_banner: null },
       communications,
       { ...communications, revision: 5 },
+      { html: '<p>欢迎使用。</p>' },
       { subject: '[Nya] 验证邮箱', text_body: '验证邮箱', html_body: '<!doctype html><p>验证邮箱</p>' },
       { status: 'sent' },
     ];
@@ -791,26 +790,29 @@ describe('runtime communications API contract', () => {
     vi.stubGlobal('fetch', fetchMock);
     setCsrfToken('communications-csrf');
 
-    await api.getAnnouncement();
+    await api.getSiteBanner();
     await api.admin.getCommunicationsSettings();
-    await api.admin.updateCommunicationsSettings({ expected_revision: 4, email, announcement });
+    await api.admin.updateCommunicationsSettings({ expected_revision: 4, email, site_banner: siteBanner });
+    await api.admin.previewSiteBannerMarkdown(siteBanner.message);
     await api.admin.previewEmailTemplate('account.email_verification', email);
     await api.admin.testEmailTemplate('account.email_verification', 'admin@example.test', email);
 
     const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit]>;
     expect(calls.map(([url]) => url)).toEqual([
-      '/api/announcement',
+      '/api/site-banner',
       '/api/admin/settings/communications',
       '/api/admin/settings/communications',
+      '/api/admin/settings/communications/site-banner/preview',
       '/api/admin/settings/communications/email/preview',
       '/api/admin/settings/communications/email/test',
     ]);
     expect(calls[0][1].cache).toBe('no-store');
     expect(calls[1][1].cache).toBe('no-store');
-    expect(JSON.parse(String(calls[2][1].body))).toEqual({ expected_revision: 4, email, announcement });
-    expect(JSON.parse(String(calls[3][1].body))).toEqual({ template_id: 'account.email_verification', email });
-    expect(JSON.parse(String(calls[4][1].body))).toEqual({ template_id: 'account.email_verification', recipient: 'admin@example.test', email });
-    for (const index of [2, 3, 4]) {
+    expect(JSON.parse(String(calls[2][1].body))).toEqual({ expected_revision: 4, email, site_banner: siteBanner });
+    expect(JSON.parse(String(calls[3][1].body))).toEqual({ message: siteBanner.message });
+    expect(JSON.parse(String(calls[4][1].body))).toEqual({ template_id: 'account.email_verification', email });
+    expect(JSON.parse(String(calls[5][1].body))).toEqual({ template_id: 'account.email_verification', recipient: 'admin@example.test', email });
+    for (const index of [2, 3, 4, 5]) {
       expect(new Headers(calls[index][1].headers).get('X-CSRF-Token')).toBe('communications-csrf');
     }
   });

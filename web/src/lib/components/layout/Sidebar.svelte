@@ -75,9 +75,9 @@
 
 {#if visible}
   <aside
-    class="fixed inset-y-0 left-0 z-50 flex flex-col border-r border-nya-border bg-[var(--nya-bg-sidebar)] transition-[width] duration-300"
+    class="fixed bottom-0 left-0 z-50 flex flex-col border-r border-nya-border bg-[var(--nya-bg-sidebar)] transition-[width] duration-300"
     class:shadow-nya-popup={mobile}
-    style="width: {width};"
+    style="top: {mobile ? '0' : 'var(--nya-global-banner-height, 0px)'}; width: {width};"
     aria-label={section === 'admin' ? '管理后台导航' : '用户中心导航'}
   >
     <a href={section === 'admin' ? '/admin' : '/dashboard'} onclick={onNavigate} class="flex h-[132px] shrink-0 flex-col items-center justify-center overflow-hidden bg-gradient-to-br from-[#f8f5ff] to-[#fff0f6] px-5">

@@ -294,34 +294,32 @@ func SameOAuthPolicy(left, right OAuthPolicy) bool {
 }
 
 const (
-	AnnouncementSeverityInfo     = "info"
-	AnnouncementSeverityWarning  = "warning"
-	AnnouncementSeverityCritical = "critical"
+	SiteBannerSeverityInfo     = "info"
+	SiteBannerSeverityWarning  = "warning"
+	SiteBannerSeverityCritical = "critical"
 )
 
-type Announcement struct {
+type SiteBanner struct {
 	Version     int64      `json:"version"`
 	Enabled     bool       `json:"enabled"`
 	Severity    string     `json:"severity"`
 	Title       string     `json:"title"`
 	Message     string     `json:"message"`
-	LinkLabel   string     `json:"link_label"`
-	LinkURL     string     `json:"link_url"`
 	Dismissible bool       `json:"dismissible"`
 	StartsAt    *time.Time `json:"starts_at"`
 	EndsAt      *time.Time `json:"ends_at"`
 }
 
 type Communications struct {
-	Email        account.EmailTemplateSettings `json:"email"`
-	Announcement Announcement                  `json:"announcement"`
+	Email      account.EmailTemplateSettings `json:"email"`
+	SiteBanner SiteBanner                    `json:"site_banner"`
 }
 
 func DefaultCommunications() Communications {
 	return Communications{
 		Email: account.DefaultEmailTemplateSettings(),
-		Announcement: Announcement{
-			Severity: AnnouncementSeverityInfo, Dismissible: true,
+		SiteBanner: SiteBanner{
+			Severity: SiteBannerSeverityInfo, Dismissible: true,
 		},
 	}
 }
@@ -332,30 +330,28 @@ func NormalizeCommunications(value Communications) (Communications, error) {
 		return Communications{}, err
 	}
 	value.Email = email
-	announcement, err := normalizeAnnouncement(value.Announcement)
+	siteBanner, err := normalizeSiteBanner(value.SiteBanner)
 	if err != nil {
 		return Communications{}, err
 	}
-	value.Announcement = announcement
+	value.SiteBanner = siteBanner
 	return value, nil
 }
 
-func normalizeAnnouncement(value Announcement) (Announcement, error) {
+func normalizeSiteBanner(value SiteBanner) (SiteBanner, error) {
 	value.Title = strings.TrimSpace(value.Title)
 	value.Message = strings.TrimSpace(value.Message)
-	value.LinkLabel = strings.TrimSpace(value.LinkLabel)
-	value.LinkURL = strings.TrimSpace(value.LinkURL)
 	if value.Severity == "" {
-		value.Severity = AnnouncementSeverityInfo
+		value.Severity = SiteBannerSeverityInfo
 	}
 	if value.Version < 0 {
-		return Announcement{}, errors.New("announcement version must not be negative")
+		return SiteBanner{}, errors.New("site banner version must not be negative")
 	}
-	if value.Severity != AnnouncementSeverityInfo && value.Severity != AnnouncementSeverityWarning && value.Severity != AnnouncementSeverityCritical {
-		return Announcement{}, errors.New("announcement severity is unsupported")
+	if value.Severity != SiteBannerSeverityInfo && value.Severity != SiteBannerSeverityWarning && value.Severity != SiteBannerSeverityCritical {
+		return SiteBanner{}, errors.New("site banner severity is unsupported")
 	}
 	if value.Enabled && (value.Title == "" || value.Message == "") {
-		return Announcement{}, errors.New("enabled announcement requires a title and message")
+		return SiteBanner{}, errors.New("enabled site banner requires a title and message")
 	}
 	for _, field := range []struct {
 		name         string
@@ -363,24 +359,18 @@ func normalizeAnnouncement(value Announcement) (Announcement, error) {
 		limit        int
 		allowNewline bool
 	}{
-		{"announcement title", value.Title, 120, false},
-		{"announcement message", value.Message, 1000, true},
-		{"announcement link_label", value.LinkLabel, 64, false},
+		{"site banner title", value.Title, 120, false},
+		{"site banner message", value.Message, 1000, true},
 	} {
 		if utf8.RuneCountInString(field.value) > field.limit {
-			return Announcement{}, fmt.Errorf("%s must be at most %d characters", field.name, field.limit)
+			return SiteBanner{}, fmt.Errorf("%s must be at most %d characters", field.name, field.limit)
 		}
-		if containsAnnouncementControl(field.value, field.allowNewline) {
-			return Announcement{}, fmt.Errorf("%s contains unsupported control characters", field.name)
+		if containsSiteBannerControl(field.value, field.allowNewline) {
+			return SiteBanner{}, fmt.Errorf("%s contains unsupported control characters", field.name)
 		}
 	}
-	if (value.LinkLabel == "") != (value.LinkURL == "") {
-		return Announcement{}, errors.New("announcement link_label and link_url must be provided together")
-	}
-	if value.LinkURL != "" {
-		if len(value.LinkURL) > 512 || !validAnnouncementURL(value.LinkURL) {
-			return Announcement{}, errors.New("announcement link_url must be a root-relative path or absolute HTTPS URL")
-		}
+	if _, err := RenderSiteBannerMarkdown(value.Message); err != nil {
+		return SiteBanner{}, err
 	}
 	if value.StartsAt != nil {
 		start := value.StartsAt.UTC()
@@ -391,20 +381,19 @@ func normalizeAnnouncement(value Announcement) (Announcement, error) {
 		value.EndsAt = &end
 	}
 	if value.StartsAt != nil && value.EndsAt != nil && !value.EndsAt.After(*value.StartsAt) {
-		return Announcement{}, errors.New("announcement ends_at must be later than starts_at")
+		return SiteBanner{}, errors.New("site banner ends_at must be later than starts_at")
 	}
 	return value, nil
 }
 
-func SameAnnouncementContent(left, right Announcement) bool {
+func SameSiteBannerContent(left, right SiteBanner) bool {
 	return left.Enabled == right.Enabled && left.Severity == right.Severity &&
 		left.Title == right.Title && left.Message == right.Message &&
-		left.LinkLabel == right.LinkLabel && left.LinkURL == right.LinkURL &&
 		left.Dismissible == right.Dismissible && sameOptionalTime(left.StartsAt, right.StartsAt) &&
 		sameOptionalTime(left.EndsAt, right.EndsAt)
 }
 
-func AnnouncementActiveAt(value Announcement, now time.Time) bool {
+func SiteBannerActiveAt(value SiteBanner, now time.Time) bool {
 	if !value.Enabled {
 		return false
 	}
@@ -422,25 +411,25 @@ func sameOptionalTime(left, right *time.Time) bool {
 	return left.Equal(*right)
 }
 
-func containsAnnouncementControl(value string, allowNewline bool) bool {
+func containsSiteBannerControl(value string, allowNewline bool) bool {
 	for _, character := range value {
 		if character == '\n' && allowNewline {
 			continue
 		}
-		if character == '\r' || character == 0 || isAnnouncementBidirectionalControl(character) || unicode.IsControl(character) {
+		if character == '\r' || character == 0 || isSiteBannerBidirectionalControl(character) || unicode.IsControl(character) {
 			return true
 		}
 	}
 	return false
 }
 
-func isAnnouncementBidirectionalControl(character rune) bool {
+func isSiteBannerBidirectionalControl(character rune) bool {
 	return character == '\u200e' || character == '\u200f' ||
 		(character >= '\u202a' && character <= '\u202e') ||
 		(character >= '\u2066' && character <= '\u2069')
 }
 
-func validAnnouncementURL(value string) bool {
+func validSiteBannerURL(value string) bool {
 	if strings.Contains(value, `\`) {
 		return false
 	}

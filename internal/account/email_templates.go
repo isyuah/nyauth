@@ -211,12 +211,23 @@ type EmailTemplateVariableRules struct {
 func EmailTemplateVariables(messageType string) EmailTemplateVariableRules {
 	definition, ok := emailTemplateDefinitionFor(messageType)
 	if !ok {
-		return EmailTemplateVariableRules{}
+		return EmailTemplateVariableRules{
+			Subject: []string{}, Heading: []string{}, Body: []string{},
+			ButtonLabel: []string{}, RequiredBody: []string{},
+		}
 	}
 	return EmailTemplateVariableRules{
-		Subject: []string{EmailVariableSiteName}, Body: slices.Clone(definition.BodyVariables),
-		RequiredBody: slices.Clone(definition.RequiredBodyVariables),
+		Subject: []string{EmailVariableSiteName}, Heading: []string{},
+		Body: cloneEmailVariableList(definition.BodyVariables), ButtonLabel: []string{},
+		RequiredBody: cloneEmailVariableList(definition.RequiredBodyVariables),
 	}
+}
+
+func cloneEmailVariableList(value []string) []string {
+	if len(value) == 0 {
+		return []string{}
+	}
+	return slices.Clone(value)
 }
 
 func NormalizeEmailTemplateSettings(value EmailTemplateSettings) (EmailTemplateSettings, error) {

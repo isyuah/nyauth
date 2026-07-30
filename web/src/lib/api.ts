@@ -555,7 +555,7 @@ export interface UpdateBrandingSettingsInput extends Branding {
 	expected_revision: number;
 }
 
-export type AnnouncementSeverity = 'info' | 'warning' | 'critical';
+export type SiteBannerSeverity = 'info' | 'warning' | 'critical';
 
 export interface EmailTemplateContent {
   subject: string;
@@ -577,14 +577,12 @@ export interface EmailTemplateVariableRules {
   required_body: string[];
 }
 
-export interface AnnouncementSettings {
+export interface SiteBannerSettings {
   version: number;
   enabled: boolean;
-  severity: AnnouncementSeverity;
+  severity: SiteBannerSeverity;
   title: string;
   message: string;
-  link_label: string;
-  link_url: string;
   dismissible: boolean;
   starts_at: string | null;
   ends_at: string | null;
@@ -593,14 +591,14 @@ export interface AnnouncementSettings {
 export interface CommunicationsSettings {
   revision: number;
   email: EmailTemplateSettings;
-  announcement: AnnouncementSettings;
+  site_banner: SiteBannerSettings;
   template_variables: Record<string, EmailTemplateVariableRules>;
 }
 
 export interface UpdateCommunicationsSettingsInput {
   expected_revision: number;
   email: EmailTemplateSettings;
-  announcement: AnnouncementSettings;
+  site_banner: SiteBannerSettings;
 }
 
 export interface EmailTemplatePreview {
@@ -609,19 +607,21 @@ export interface EmailTemplatePreview {
   html_body: string;
 }
 
-export interface PublicAnnouncement {
+export interface SiteBannerMarkdownPreview {
+  html: string;
+}
+
+export interface PublicSiteBanner {
   version: number;
-  severity: AnnouncementSeverity;
+  severity: SiteBannerSeverity;
   title: string;
-  message: string;
-  link_label?: string;
-  link_url?: string;
+  message_html: string;
   dismissible: boolean;
   ends_at?: string;
 }
 
-export interface PublicAnnouncementResponse {
-  announcement: PublicAnnouncement | null;
+export interface PublicSiteBannerResponse {
+  site_banner: PublicSiteBanner | null;
   next_change_at?: string;
 }
 
@@ -1376,7 +1376,7 @@ export const api = {
     }, false),
   getBranding: () => req<Branding>('/api/branding', {}, false),
   getServiceStatus: () => req<ServiceStatus>('/api/service-status', { cache: 'no-store' }, false),
-  getAnnouncement: () => req<PublicAnnouncementResponse>('/api/announcement', { cache: 'no-store' }, false),
+  getSiteBanner: () => req<PublicSiteBannerResponse>('/api/site-banner', { cache: 'no-store' }, false),
   getRegistrationOptions: () => req<RegistrationOptions>('/api/registration', {}, false),
   register: (data: RegisterInput) =>
     req<RegisterResult>('/api/register', { method: 'POST', body: JSON.stringify(data) }, false),
@@ -1525,6 +1525,10 @@ export const api = {
     getCommunicationsSettings: () => req<CommunicationsSettings>('/api/admin/settings/communications', { cache: 'no-store' }),
     updateCommunicationsSettings: (settings: UpdateCommunicationsSettingsInput) =>
       req<CommunicationsSettings>('/api/admin/settings/communications', { method: 'PUT', body: JSON.stringify(settings) }),
+    previewSiteBannerMarkdown: (message: string) =>
+      req<SiteBannerMarkdownPreview>('/api/admin/settings/communications/site-banner/preview', {
+        method: 'POST', body: JSON.stringify({ message }),
+      }),
     previewEmailTemplate: (templateID: string, email: EmailTemplateSettings) =>
       req<EmailTemplatePreview>('/api/admin/settings/communications/email/preview', {
         method: 'POST', body: JSON.stringify({ template_id: templateID, email }),
