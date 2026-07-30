@@ -139,7 +139,7 @@ func TestServicePublicBaseURLCanBeUpdatedForNewMessages(t *testing.T) {
 	if err != nil {
 		t.Fatalf("actionMessage(before): %v", err)
 	}
-	if err := service.SetPublicBaseURL("https://new-auth.example.test/prefix"); err != nil {
+	if err := service.SetPublicBaseURL("https://auth.example.test/new-prefix"); err != nil {
 		t.Fatalf("SetPublicBaseURL: %v", err)
 	}
 	after, err := service.actionMessage(ActionEmailVerification, "alice@example.test", "alice", testRawToken, time.Hour)
@@ -147,11 +147,52 @@ func TestServicePublicBaseURLCanBeUpdatedForNewMessages(t *testing.T) {
 		t.Fatalf("actionMessage(after): %v", err)
 	}
 	if !strings.Contains(before.TextBody, "https://auth.example.test/base/verify-email") ||
-		!strings.Contains(after.TextBody, "https://new-auth.example.test/prefix/verify-email") {
+		!strings.Contains(after.TextBody, "https://auth.example.test/new-prefix/verify-email") {
 		t.Fatalf("unexpected links before=%q after=%q", before.TextBody, after.TextBody)
 	}
 	if err := service.SetPublicBaseURL("https://user:secret@example.test"); err == nil {
 		t.Fatal("SetPublicBaseURL accepted credentials")
+	}
+	if err := service.SetPublicBaseURL("https://attacker.example.test"); err == nil {
+		t.Fatal("SetPublicBaseURL accepted a different action origin")
+	}
+}
+
+func TestServiceUsesLatestEmailPresentationOnlyForNewMessages(t *testing.T) {
+	presentation := EmailPresentation{SiteName: "Nya", Settings: DefaultEmailTemplateSettings()}
+	service, err := newService(&fakeServiceStore{}, ServiceOptions{
+		PublicBaseURL: "https://auth.example.test", ActiveKeyID: "primary",
+		MasterKeys: map[string][]byte{"primary": testKey},
+		Clock:      func() time.Time { return testNow }, GenerateToken: func() (string, error) { return testRawToken, nil },
+		EmailPresentationProvider: func() EmailPresentation { return presentation },
+	})
+	if err != nil {
+		t.Fatalf("newService: %v", err)
+	}
+	before, err := service.actionMessage(ActionEmailVerification, "alice@example.test", "alice", testRawToken, time.Hour)
+	if err != nil {
+		t.Fatalf("actionMessage(before): %v", err)
+	}
+	presentation = EmailPresentation{SiteName: "Acme Identity", Settings: DefaultEmailTemplateSettings()}
+	after, err := service.actionMessage(ActionEmailVerification, "alice@example.test", "alice", testRawToken, time.Hour)
+	if err != nil {
+		t.Fatalf("actionMessage(after): %v", err)
+	}
+	if !strings.Contains(before.Subject, "[Nya]") || !strings.Contains(after.Subject, "[Acme Identity]") {
+		t.Fatalf("presentation was not read per message: before=%q after=%q", before.Subject, after.Subject)
+	}
+	if strings.Contains(before.Subject, "Acme Identity") {
+		t.Fatalf("already rendered message changed retroactively: %q", before.Subject)
+	}
+}
+
+func TestOutboxEncryptionRejectsInvalidFinalMessage(t *testing.T) {
+	service := newTestService(t, &fakeServiceStore{})
+	_, err := service.newOutboxEmail(uuid.New(), MessagePasswordChanged, EmailMessage{
+		To: "alice@example.test", Subject: "Safe\r\nBcc: attacker@example.test", TextBody: "body",
+	}, testNow)
+	if err == nil || !strings.Contains(err.Error(), "validating email before outbox encryption") {
+		t.Fatalf("newOutboxEmail error = %v", err)
 	}
 }
 

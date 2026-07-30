@@ -555,6 +555,76 @@ export interface UpdateBrandingSettingsInput extends Branding {
 	expected_revision: number;
 }
 
+export type AnnouncementSeverity = 'info' | 'warning' | 'critical';
+
+export interface EmailTemplateContent {
+  subject: string;
+  heading: string;
+  body: string;
+  button_label?: string;
+}
+
+export interface EmailTemplateSettings {
+  footer: string;
+  templates: Record<string, EmailTemplateContent>;
+}
+
+export interface EmailTemplateVariableRules {
+  subject: string[];
+  heading: string[];
+  body: string[];
+  button_label: string[];
+  required_body: string[];
+}
+
+export interface AnnouncementSettings {
+  version: number;
+  enabled: boolean;
+  severity: AnnouncementSeverity;
+  title: string;
+  message: string;
+  link_label: string;
+  link_url: string;
+  dismissible: boolean;
+  starts_at: string | null;
+  ends_at: string | null;
+}
+
+export interface CommunicationsSettings {
+  revision: number;
+  email: EmailTemplateSettings;
+  announcement: AnnouncementSettings;
+  template_variables: Record<string, EmailTemplateVariableRules>;
+}
+
+export interface UpdateCommunicationsSettingsInput {
+  expected_revision: number;
+  email: EmailTemplateSettings;
+  announcement: AnnouncementSettings;
+}
+
+export interface EmailTemplatePreview {
+  subject: string;
+  text_body: string;
+  html_body: string;
+}
+
+export interface PublicAnnouncement {
+  version: number;
+  severity: AnnouncementSeverity;
+  title: string;
+  message: string;
+  link_label?: string;
+  link_url?: string;
+  dismissible: boolean;
+  ends_at?: string;
+}
+
+export interface PublicAnnouncementResponse {
+  announcement: PublicAnnouncement | null;
+  next_change_at?: string;
+}
+
 export type RegistrationMode = 'closed' | 'invite_only' | 'open';
 
 export interface RegistrationOptions {
@@ -1000,6 +1070,10 @@ const API_ERROR_TRANSLATIONS: Record<string, string> = {
   'mail is already disabled': '邮件服务已经处于禁用状态',
   'close self-registration before disabling mail': '禁用邮件服务前必须先关闭自助注册',
   'too many mail settings operations': '邮件设置操作过于频繁，请稍后重试',
+  'a verified administrator email is required for template tests': '发送模板测试邮件前，请先验证当前管理员的邮箱地址',
+  "test recipient must match the administrator's verified email": '测试邮件只能发送到当前管理员已验证的邮箱地址',
+  'mail delivery is unavailable': '邮件投递当前不可用，请检查 SMTP 状态后重试',
+  'test email could not be delivered': '测试邮件发送失败，请检查 SMTP 状态和收件地址后重试',
   'connect_timeout must be a valid duration': '连接超时必须是有效时长，例如 10s',
   'send_timeout must be a valid duration': '发送超时必须是有效时长，例如 30s',
   'plain smtp is forbidden in production': '生产环境禁止使用明文 SMTP',
@@ -1104,6 +1178,10 @@ const API_ERROR_MESSAGES_BY_CODE: Record<string, string> = {
   'mail.already_disabled': 'mail is already disabled',
   'mail.registration_must_close': 'close self-registration before disabling mail',
   'mail.rate_limited': 'too many mail settings operations',
+  'mail.template_test_recipient_unverified': 'a verified administrator email is required for template tests',
+  'mail.template_test_recipient_mismatch': "test recipient must match the administrator's verified email",
+  'mail.delivery_unavailable': 'mail delivery is unavailable',
+  'mail.template_test_delivery_failed': 'test email could not be delivered',
   'mail.connect_timeout_invalid': 'connect_timeout must be a valid duration',
   'mail.send_timeout_invalid': 'send_timeout must be a valid duration',
   'mail.plain_forbidden': 'plain smtp is forbidden in production',
@@ -1298,6 +1376,7 @@ export const api = {
     }, false),
   getBranding: () => req<Branding>('/api/branding', {}, false),
   getServiceStatus: () => req<ServiceStatus>('/api/service-status', { cache: 'no-store' }, false),
+  getAnnouncement: () => req<PublicAnnouncementResponse>('/api/announcement', { cache: 'no-store' }, false),
   getRegistrationOptions: () => req<RegistrationOptions>('/api/registration', {}, false),
   register: (data: RegisterInput) =>
     req<RegisterResult>('/api/register', { method: 'POST', body: JSON.stringify(data) }, false),
@@ -1443,6 +1522,17 @@ export const api = {
     getOAuthSettings: () => req<OAuthSettings>('/api/admin/settings/oauth', { cache: 'no-store' }),
     updateOAuthSettings: (settings: UpdateOAuthSettingsInput) =>
       req<OAuthSettings>('/api/admin/settings/oauth', { method: 'PUT', body: JSON.stringify(settings) }),
+    getCommunicationsSettings: () => req<CommunicationsSettings>('/api/admin/settings/communications', { cache: 'no-store' }),
+    updateCommunicationsSettings: (settings: UpdateCommunicationsSettingsInput) =>
+      req<CommunicationsSettings>('/api/admin/settings/communications', { method: 'PUT', body: JSON.stringify(settings) }),
+    previewEmailTemplate: (templateID: string, email: EmailTemplateSettings) =>
+      req<EmailTemplatePreview>('/api/admin/settings/communications/email/preview', {
+        method: 'POST', body: JSON.stringify({ template_id: templateID, email }),
+      }),
+    testEmailTemplate: (templateID: string, recipient: string, email: EmailTemplateSettings) =>
+      req<{ status: 'sent' }>('/api/admin/settings/communications/email/test', {
+        method: 'POST', body: JSON.stringify({ template_id: templateID, recipient, email }),
+      }),
     getBrandingSettings: () => req<BrandingSettings>('/api/admin/settings/branding', { cache: 'no-store' }),
     updateBranding: (branding: UpdateBrandingSettingsInput) =>
       req<BrandingSettings>('/api/admin/settings/branding', { method: 'PUT', body: JSON.stringify(branding) }),

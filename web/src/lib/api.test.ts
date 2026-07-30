@@ -34,6 +34,10 @@ describe('localizeAPIErrorMessage', () => {
     ['mail settings changed; reload and try again', '邮件设置已被其他管理员修改，请重新加载后再试'],
     ['a successful candidate test is required', '激活前必须先成功发送候选配置的测试邮件'],
     ['close self-registration before disabling mail', '禁用邮件服务前必须先关闭自助注册'],
+    ['a verified administrator email is required for template tests', '发送模板测试邮件前，请先验证当前管理员的邮箱地址'],
+    ["test recipient must match the administrator's verified email", '测试邮件只能发送到当前管理员已验证的邮箱地址'],
+    ['mail delivery is unavailable', '邮件投递当前不可用，请检查 SMTP 状态后重试'],
+    ['test email could not be delivered', '测试邮件发送失败，请检查 SMTP 状态和收件地址后重试'],
     ['invalid MFA code', '验证码或恢复码不正确'],
     ['MFA challenge expired', '多因素验证已过期，请重新登录'],
     ['TOTP enrollment is disabled', '管理员已关闭动态验证码注册'],
@@ -729,6 +733,85 @@ describe('runtime media storage API contract', () => {
     expect(calls[5][1].method).toBe('POST');
     for (const index of [1, 2, 3, 4, 5]) {
       expect(new Headers(calls[index][1].headers).get('X-CSRF-Token')).toBe('media-csrf');
+    }
+  });
+});
+
+describe('runtime communications API contract', () => {
+  afterEach(() => {
+    setCsrfToken('');
+    vi.unstubAllGlobals();
+  });
+
+  it('uses the revisioned settings, preview, test, and public announcement endpoints', async () => {
+    const email = {
+      footer: '由 {{site_name}} 自动发送。',
+      templates: {
+        'account.email_verification': {
+          subject: '[{{site_name}}] 验证邮箱',
+          heading: '验证邮箱',
+          body: '你好，{{username}}。',
+          button_label: '验证邮箱',
+        },
+      },
+    };
+    const announcement = {
+      version: 3,
+      enabled: true,
+      severity: 'info' as const,
+      title: '服务通知',
+      message: '欢迎使用。',
+      link_label: '',
+      link_url: '',
+      dismissible: true,
+      starts_at: null,
+      ends_at: null,
+    };
+    const communications = {
+      revision: 4,
+      email,
+      announcement,
+      template_variables: {
+        'account.email_verification': {
+          subject: ['site_name'], heading: [], body: ['site_name', 'username'], button_label: [], required_body: [],
+        },
+      },
+    };
+    const responses = [
+      { announcement: null },
+      communications,
+      { ...communications, revision: 5 },
+      { subject: '[Nya] 验证邮箱', text_body: '验证邮箱', html_body: '<!doctype html><p>验证邮箱</p>' },
+      { status: 'sent' },
+    ];
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    setCsrfToken('communications-csrf');
+
+    await api.getAnnouncement();
+    await api.admin.getCommunicationsSettings();
+    await api.admin.updateCommunicationsSettings({ expected_revision: 4, email, announcement });
+    await api.admin.previewEmailTemplate('account.email_verification', email);
+    await api.admin.testEmailTemplate('account.email_verification', 'admin@example.test', email);
+
+    const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit]>;
+    expect(calls.map(([url]) => url)).toEqual([
+      '/api/announcement',
+      '/api/admin/settings/communications',
+      '/api/admin/settings/communications',
+      '/api/admin/settings/communications/email/preview',
+      '/api/admin/settings/communications/email/test',
+    ]);
+    expect(calls[0][1].cache).toBe('no-store');
+    expect(calls[1][1].cache).toBe('no-store');
+    expect(JSON.parse(String(calls[2][1].body))).toEqual({ expected_revision: 4, email, announcement });
+    expect(JSON.parse(String(calls[3][1].body))).toEqual({ template_id: 'account.email_verification', email });
+    expect(JSON.parse(String(calls[4][1].body))).toEqual({ template_id: 'account.email_verification', recipient: 'admin@example.test', email });
+    for (const index of [2, 3, 4]) {
+      expect(new Headers(calls[index][1].headers).get('X-CSRF-Token')).toBe('communications-csrf');
     }
   });
 });

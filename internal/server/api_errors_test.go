@@ -66,6 +66,20 @@ func TestMediaSettingsErrorsHaveSpecificStableCodes(t *testing.T) {
 	}
 }
 
+func TestMailTemplateErrorsHaveSpecificStableCodes(t *testing.T) {
+	tests := map[string]string{
+		"a verified administrator email is required for template tests": "mail.template_test_recipient_unverified",
+		"test recipient must match the administrator's verified email":  "mail.template_test_recipient_mismatch",
+		"mail delivery is unavailable":                                  "mail.delivery_unavailable",
+		"test email could not be delivered":                             "mail.template_test_delivery_failed",
+	}
+	for message, expected := range tests {
+		if got := apiErrorCodeForMessage(message); got != expected {
+			t.Fatalf("error code for %q = %q, want %q", message, got, expected)
+		}
+	}
+}
+
 func TestAPIErrorMappingKeysAreNormalized(t *testing.T) {
 	for message := range apiErrorCodesByMessage {
 		if normalized := strings.ToLower(strings.TrimSpace(message)); message != normalized {

@@ -93,6 +93,7 @@ type Server struct {
 	revocationWorker          *securityrevocation.Dispatcher
 	serviceControl            serviceControlRuntime
 	serviceStatusStreams      atomic.Int64
+	announcementStreams       atomic.Int64
 	securityVersions          func(context.Context, uuid.UUID) (int64, int64, error)
 	readiness                 readinessState
 }
@@ -105,8 +106,12 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 	}
 	passkeyRPID := strings.ToLower(issuerURL.Hostname())
 	rpOrigin := (&url.URL{Scheme: issuerURL.Scheme, Host: issuerURL.Host}).String()
+	brandingDefaults, err := validateBranding(cfg.Web.Title, cfg.Web.LogoURL)
+	if err != nil {
+		return nil, fmt.Errorf("validating web branding: %w", err)
+	}
 	settingsMgr := settings.NewManagerForRP(
-		db, settings.Branding{Title: cfg.Web.Title, LogoURL: cfg.Web.LogoURL}, passkeyRPID,
+		db, brandingDefaults, passkeyRPID,
 	)
 	settingsMgr.SetAuditRetentionFallback(cfg.Audit.Retention)
 	settingsMgr.SetAuthenticationFallbacks(
@@ -314,9 +319,15 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 		publicBaseURL = cfg.Auth.Issuer
 	}
 	accountService, err := account.NewService(accountStore, account.ServiceOptions{
-		PublicBaseURL: publicBaseURL, ActiveKeyID: "primary",
+		PublicBaseURL: publicBaseURL, ActionOrigin: cfg.Auth.Issuer, ActiveKeyID: "primary",
 		MasterKeys:      map[string][]byte{"primary": cfg.Auth.MasterKey},
 		OnEmailVerified: telemetryRuntime.RecordEmailVerificationDuration,
+		EmailPresentationProvider: func() account.EmailPresentation {
+			return account.EmailPresentation{
+				SiteName: settingsMgr.Branding().Title,
+				Settings: settingsMgr.Communications().Email,
+			}
+		},
 		ReauthenticationTTLProvider: func() time.Duration {
 			return settingsMgr.Lifecycle().RecentAuthenticationDuration()
 		},
@@ -401,7 +412,7 @@ func (s *Server) buildRouter() *chi.Mux {
 	}
 	r.Use(redactedRequestLogger)
 	r.Use(structuredRecoverer)
-	r.Use(timeoutExcept(30*time.Second, serviceStatusEventsPath))
+	r.Use(timeoutExcept(30*time.Second, serviceStatusEventsPath, announcementEventsPath))
 	issuer, _ := url.Parse(s.cfg.Auth.Issuer)
 	allowedOrigin := issuer.Scheme + "://" + issuer.Host
 	r.Use(cors.Handler(cors.Options{AllowedOrigins: []string{allowedOrigin}, AllowedMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"}, AllowedHeaders: []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token", "X-WebAuthn-Ceremony"}, ExposedHeaders: []string{"Retry-After"}, AllowCredentials: true, MaxAge: 300}))
@@ -419,6 +430,8 @@ func (s *Server) buildRouter() *chi.Mux {
 	r.Route("/api", func(r chi.Router) {
 		r.Get("/service-status", s.handleServiceStatus)
 		r.Get("/service-status/events", s.handleServiceStatusEvents)
+		r.Get("/announcement", s.handleAnnouncement)
+		r.Get("/announcement/events", s.handleAnnouncementEvents)
 		r.With(authIssuance).Post("/login", s.handleLogin)
 		r.With(authIssuance).Post("/login/passkey/options", s.handleBeginPasskeyLogin)
 		r.With(authIssuance).Post("/login/passkey/verify", s.handleFinishPasskeyLogin)
@@ -501,6 +514,10 @@ func (s *Server) buildRouter() *chi.Mux {
 			r.With(adminMutations).Put("/admin/settings/lifecycle", s.handleUpdateLifecycleSettings)
 			r.Get("/admin/settings/oauth", s.handleGetOAuthSettings)
 			r.With(adminMutations).Put("/admin/settings/oauth", s.handleUpdateOAuthSettings)
+			r.Get("/admin/settings/communications", s.handleGetCommunicationsSettings)
+			r.Post("/admin/settings/communications/email/preview", s.handlePreviewEmailTemplate)
+			r.With(adminMutations).Post("/admin/settings/communications/email/test", s.handleTestEmailTemplate)
+			r.With(adminMutations).Put("/admin/settings/communications", s.handleUpdateCommunicationsSettings)
 			r.Get("/admin/settings/mail", s.handleGetMailSettings)
 			r.With(adminMutations).Put("/admin/settings/mail/candidate", s.handleSaveMailCandidate)
 			r.With(adminMutations).Post("/admin/settings/mail/candidate/test", s.handleTestMailCandidate)

@@ -1016,6 +1016,7 @@ func haTestConfig(t *testing.T) *config.Config {
 			JWK:                  config.JWKConfig{Algorithm: "RS256", KeySize: 2048, RotationInterval: 24 * time.Hour},
 		},
 		Media: config.MediaConfig{Backend: "local", Local: config.LocalMediaConfig{Directory: t.TempDir()}},
+		Web:   config.WebConfig{Title: "nyauth"},
 	}
 }
 

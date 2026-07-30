@@ -43,6 +43,8 @@ func TestValidateBrandingRejectsInvalidInput(t *testing.T) {
 	}{
 		{"empty title", "   ", ""},
 		{"overlong title", strings.Repeat("喵", 65), ""},
+		{"mail header title", "Nya\r\nBcc: attacker@example.test", ""},
+		{"bidirectional title", "Nya\u202eAuth", ""},
 		{"relative logo url", "Nya", "logo.png"},
 		{"scheme relative logo url", "Nya", "//tracker.example/logo.png"},
 		{"backslash logo url", "Nya", `/\\tracker.example/logo.png`},

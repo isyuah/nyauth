@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+	"unicode"
 	"unicode/utf8"
 
 	"github.com/nyasharp/nyauth/internal/settings"
@@ -74,6 +75,11 @@ func validateBranding(title, logoURL string) (settings.Branding, error) {
 	if utf8.RuneCountInString(title) > brandingTitleMaxLength {
 		return settings.Branding{}, fmt.Errorf("title must be at most %d characters", brandingTitleMaxLength)
 	}
+	for _, character := range title {
+		if unicode.IsControl(character) || isBidirectionalControl(character) {
+			return settings.Branding{}, fmt.Errorf("title contains unsupported control characters")
+		}
+	}
 	if logoURL != "" {
 		if len(logoURL) > brandingLogoURLMaxLength {
 			return settings.Branding{}, fmt.Errorf("logo_url must be at most %d characters", brandingLogoURLMaxLength)
@@ -86,4 +92,10 @@ func validateBranding(title, logoURL string) (settings.Branding, error) {
 		}
 	}
 	return settings.Branding{Title: title, LogoURL: logoURL}, nil
+}
+
+func isBidirectionalControl(character rune) bool {
+	return character == '\u200e' || character == '\u200f' ||
+		(character >= '\u202a' && character <= '\u202e') ||
+		(character >= '\u2066' && character <= '\u2069')
 }

@@ -73,6 +73,7 @@ const (
 	AuditMailSettingsActivated  = "mail.settings_activated"
 	AuditMailSettingsDisabled   = "mail.settings_disabled"
 	AuditMailSettingsRolledBack = "mail.settings_rolled_back"
+	AuditMailTemplateTested     = "mail.template_tested"
 	AuditMailCircuitOpened      = "mail.circuit_opened"
 	AuditMailCircuitRecovered   = "mail.circuit_recovered"
 	AuditMFAEnrolled            = "mfa.enrolled"

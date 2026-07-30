@@ -220,6 +220,9 @@ func (s *Server) mailSettingsFromRequest(request saveMailCandidateRequest) (mail
 		TLSMode: request.TLSMode, FromAddress: request.FromAddress, FromName: request.FromName,
 		PublicBaseURL: request.PublicBaseURL, ConnectTimeout: connectTimeout, SendTimeout: sendTimeout,
 	}
+	if !sameHTTPOrigin(settingsValue.PublicBaseURL, s.cfg.Auth.Issuer) {
+		return mailruntime.Settings{}, errors.New("public_base_url must use the issuer origin")
+	}
 	if s.cfg.IsProduction() {
 		if strings.EqualFold(strings.TrimSpace(settingsValue.TLSMode), mailruntime.TLSModePlain) {
 			return mailruntime.Settings{}, errors.New("plain SMTP is forbidden in production")
@@ -230,6 +233,17 @@ func (s *Server) mailSettingsFromRequest(request saveMailCandidateRequest) (mail
 		}
 	}
 	return settingsValue, nil
+}
+
+func sameHTTPOrigin(left, right string) bool {
+	leftURL, leftErr := url.Parse(strings.TrimSpace(left))
+	rightURL, rightErr := url.Parse(strings.TrimSpace(right))
+	if leftErr != nil || rightErr != nil || leftURL.User != nil || rightURL.User != nil {
+		return false
+	}
+	leftOrigin := (&url.URL{Scheme: leftURL.Scheme, Host: leftURL.Host}).String()
+	rightOrigin := (&url.URL{Scheme: rightURL.Scheme, Host: rightURL.Host}).String()
+	return leftURL.Host != "" && rightURL.Host != "" && strings.EqualFold(leftOrigin, rightOrigin)
 }
 
 func (s *Server) handleTestMailCandidate(w http.ResponseWriter, r *http.Request) {

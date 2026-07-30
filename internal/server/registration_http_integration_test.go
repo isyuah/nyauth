@@ -113,6 +113,7 @@ func newRegistrationHTTPTestApp(t *testing.T) *registrationHTTPTestApp {
 			},
 		},
 		Media: config.MediaConfig{Backend: "local", Local: config.LocalMediaConfig{Directory: t.TempDir()}},
+		Web:   config.WebConfig{Title: "nyauth"},
 	}
 	app, err := New(cfg, pool, rdb, embed.FS{}, telemetryRuntime)
 	if err != nil {

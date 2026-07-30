@@ -116,6 +116,45 @@ func TestRuntimePolicySettingsCASAuditRollbackAndRetention(t *testing.T) {
 		t.Fatalf("OAuth policy audit rows = %d, want 1", oauthAudits)
 	}
 
+	communications := DefaultCommunications()
+	communications.Announcement = Announcement{
+		Version: 1, Enabled: true, Severity: AnnouncementSeverityInfo,
+		Title: "Planned maintenance", Message: "Read-only mode starts soon.", Dismissible: true,
+	}
+	if revision, stored, err := managerA.SetCommunications(ctx, communications, 0, "policy-a", mutation("policy-a")); err != nil || revision != 1 || stored.Announcement.Version != 1 {
+		t.Fatalf("store communications revision=%d err=%v", revision, err)
+	}
+	if _, _, err := managerB.SetCommunications(ctx, DefaultCommunications(), 0, "policy-b", mutation("policy-b")); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("stale communications update error = %v", err)
+	}
+	staleWriter := NewManager(schema.pool, Branding{Title: "Stale writer"})
+	emailOnly := communications
+	emailOnly.Email.Footer = "Updated {{site_name}} footer"
+	if revision, stored, err := staleWriter.SetCommunications(ctx, emailOnly, 1, "policy-stale", mutation("policy-stale")); err != nil || revision != 2 || stored.Announcement.Version != 1 {
+		t.Fatalf("stale-instance email update revision=%d announcement=%d err=%v", revision, stored.Announcement.Version, err)
+	}
+	if err := managerB.Load(ctx); err != nil {
+		t.Fatalf("reload communications: %v", err)
+	}
+	if snapshot := managerB.CommunicationsSnapshot(); snapshot.Revision != 2 || snapshot.Value.Announcement.Title != "Planned maintenance" || snapshot.Value.Announcement.Version != 1 {
+		t.Fatalf("loaded communications = %#v", snapshot)
+	}
+	republished := managerB.Communications()
+	republished.Announcement.Message = "Read-only mode begins now."
+	if revision, stored, err := managerB.SetCommunications(ctx, republished, 2, "policy-b", mutation("policy-b")); err != nil || revision != 3 || stored.Announcement.Version != 2 {
+		t.Fatalf("republished communications revision=%d announcement=%d err=%v", revision, stored.Announcement.Version, err)
+	}
+	var communicationAudits int
+	if err := schema.pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM audit_event_outbox
+		WHERE event=$1 AND aggregate_type='settings' AND aggregate_id='communications'
+	`, models.AuditSettingsUpdated).Scan(&communicationAudits); err != nil {
+		t.Fatalf("count communication audits: %v", err)
+	}
+	if communicationAudits != 3 {
+		t.Fatalf("communication audit rows = %d, want 3", communicationAudits)
+	}
+
 	lifecycle := DefaultLifecycle(365)
 	lifecycle.AuditRetentionDays = 90
 	if _, err := managerA.SetLifecycle(ctx, lifecycle, 0, "policy-a", "", mutation("policy-a")); !errors.Is(err, ErrRetentionConfirmation) {

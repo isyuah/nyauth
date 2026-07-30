@@ -27,7 +27,8 @@
 - 管理后台：用户、客户端、Provider、审计与统计
 - 账户安全中心：设备会话、OAuth 授权、近期重新认证、TOTP、Passkey/WebAuthn、一次性恢复码、邮箱验证与密码恢复
 - 自助注册：关闭 / 邀请制 / 开放三种模式，域名白名单与邀请码均为运行时设置
-- 动态邮件：数据库版本化 SMTP 配置、真实测试邮件、免重启激活/回滚、共享熔断
+- 动态邮件：数据库版本化 SMTP 配置、结构化事务邮件模板、真实预览/测试、免重启激活/回滚与共享熔断
+- 站点公告：信息/警告/严重三级公告、定时发布与结束、浏览器按版本关闭，以及 SSE 实时同步
 - 安全头像：浏览器 1:1 裁剪、服务端重编码、本地持久化或私有 S3、Provider 首次异步导入，以及版本化运行时 S3 配置与可续跑迁移
 - 运行时服务控制：六类能力独立暂停、常用维护预设、多实例排空确认、定时恢复与 CLI 紧急解锁
 - 运行时运营策略：动态限流、会话与近期认证期限、审计保留和用户客户端配额，revision CAS 与多实例同步
@@ -330,6 +331,7 @@ Provider 不再从 YAML 或环境变量静态加载，只能由管理员写入�
 - `GET/PUT /api/admin/settings/operations`：六类能力的运行时暂停、恢复、到期和多实例应用进度；修改要求近期重新认证，使用 revision CAS 并与审计同事务提交。
 - `GET /api/admin/settings/media`、候选保存/测试、迁移及 `fallback/migrate` 接口：私有 S3 运行时配置、迁回已配置本地 fallback、真实对象测试、迁移进度和失败重试；凭据只加密保存且永不回显。
 - `GET/PUT /api/admin/settings/branding`、`registration`、`security`、`protection`、`lifecycle`、`oauth`：六组运行时设置统一使用 revision CAS；写入要求近期重新认证、固定保护限流，并与 `settings.updated` 审计同事务提交。
+- `GET/PUT /api/admin/settings/communications`、邮件模板 `preview/test`：动态管理结构化事务邮件模板和站点公告。模板只接受受限纯文本字段与按字段授权的变量，动作链接和安全提示由服务端生成；测试邮件只能发往当前管理员已验证邮箱。
 - `protection` 动态控制登录、账户操作、头像和 SMTP 管理限流，以及自助客户端全局默认配额。关闭限流组需要精确危险确认；每次 revision 都使用新的 Redis key namespace，旧计数自然过期。
 - `lifecycle` 动态控制浏览器会话绝对/空闲期限、每用户并发会话上限、近期认证期限、Access/Refresh Token、授权码和审计保留天数。缩短会话期限会在下一次请求时淘汰超龄会话；并发上限在下一次登录时原子淘汰最旧会话；延长不会恢复 Redis 中已经过期的会话。Token 与授权码策略只影响之后新签发或轮换的凭据，已签发凭据保持原到期时间。
 - `oauth` 动态控制用户自助创建、Public Client、可新增 Grant/Scope 与回调地址数量。收紧策略不修改或停用既有客户端；既有超限或已禁用项可以原样保留、等量替换或逐步减少，但不能继续扩大。
@@ -346,6 +348,8 @@ Provider 不再从 YAML 或环境变量静态加载，只能由管理员写入�
 - `GET/PUT /api/admin/settings/security`：TOTP/Passkey 注册开关与管理员强制 MFA（运行时设置，免重启生效；修改要求近期重新认证）。开关只阻止新注册，不停用已有因素。开启强制策略前所有活动管理员必须在当前 RP 下至少配置 TOTP 或 Passkey；策略生效后，无因素用户不能被激活/晋升为管理员，活动管理员也不能删除其最后一个因素。
 - `GET/POST /api/admin/invites`、`DELETE /api/admin/invites/{id}`：邀请码管理；明文 code 仅创建响应返回一次，库中只存哈希；列表分别返回已使用与待验证预占数。创建要求近期重新认证，紧急吊销不要求。
 - `GET /api/admin/settings/mail`、`PUT /api/admin/settings/mail/candidate`，以及邮件设置下的 `candidate/test`、`activate`、`rollback`、`disable` POST：数据库动态 SMTP；候选必须实际测试成功并在十分钟内激活，所有读取和变更均要求近期重新认证，写操作还受 CSRF、限流和审计保护。
+
+事务邮件模板和 SMTP 投递配置相互独立：模板保存后只影响之后新入队的邮件；已经入队的邮件正文在加密 outbox 中保持不变。模板不能注入任意 HTML、CSS、脚本或自定义动作链接，预览使用 `example.invalid` 的不可用示例 Token，真实测试不会生成账户操作 Token。
 
 注册与邮件趋势使用业务事务内的低基数日聚合，后台快照每分钟在 PostgreSQL advisory lock 下刷新。30 日注册完成率按“最近 30 天创建的注册 cohort 中已完成的比例”计算，分母为空时返回 `null`。全新 baseline 会把 `mail_stats_available_from` / `available_from` 初始化为该数据库开始观测邮件投递的时间，不能把此前不存在的数据解释为零。邮件成功投递不会逐封写审计日志；配置、熔断和现有注册/邀请生命周期事件仍按既定审计契约记录。
 

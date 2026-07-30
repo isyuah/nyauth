@@ -48,6 +48,7 @@ func KnownFilterOptions() FilterOptions {
 		models.AuditMailSettingsRolledBack,
 		models.AuditMailSettingsSaved,
 		models.AuditMailSettingsTested,
+		models.AuditMailTemplateTested,
 		models.AuditMediaSettingsSaved,
 		models.AuditMediaSettingsTested,
 		models.AuditMediaMigrationStarted,

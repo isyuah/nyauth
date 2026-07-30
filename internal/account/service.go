@@ -6,7 +6,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"html"
 	"net"
 	"net/mail"
 	"net/url"
@@ -42,6 +41,7 @@ type serviceStore interface {
 
 type ServiceOptions struct {
 	PublicBaseURL               string
+	ActionOrigin                string
 	ActiveKeyID                 string
 	MasterKeys                  map[string][]byte
 	PasswordResetTTL            time.Duration
@@ -49,6 +49,7 @@ type ServiceOptions struct {
 	EmailOutboxTTL              time.Duration
 	ReauthenticationTTL         time.Duration
 	ReauthenticationTTLProvider func() time.Duration
+	EmailPresentationProvider   func() EmailPresentation
 	Clock                       func() time.Time
 	GenerateToken               func() (string, error)
 	OnEmailVerified             func(context.Context, time.Duration)
@@ -57,6 +58,7 @@ type ServiceOptions struct {
 type Service struct {
 	store                       serviceStore
 	publicBaseURL               atomic.Pointer[url.URL]
+	actionOrigin                string
 	activeKeyID                 string
 	masterKeys                  map[string][]byte
 	passwordResetTTL            time.Duration
@@ -64,6 +66,7 @@ type Service struct {
 	emailOutboxTTL              time.Duration
 	reauthenticationTTL         time.Duration
 	reauthenticationTTLProvider func() time.Duration
+	emailPresentationProvider   func() EmailPresentation
 	clock                       func() time.Time
 	generateToken               func() (string, error)
 	onEmailVerified             func(context.Context, time.Duration)
@@ -80,6 +83,17 @@ func newService(store serviceStore, options ServiceOptions) (*Service, error) {
 	baseURL, err := url.Parse(strings.TrimSpace(options.PublicBaseURL))
 	if err != nil || baseURL.Scheme == "" || baseURL.Host == "" || (baseURL.Scheme != "http" && baseURL.Scheme != "https") || baseURL.User != nil || baseURL.RawQuery != "" || baseURL.Fragment != "" {
 		return nil, fmt.Errorf("public base URL must be an absolute HTTP(S) URL without credentials, query, or fragment")
+	}
+	actionOrigin := (&url.URL{Scheme: baseURL.Scheme, Host: baseURL.Host}).String()
+	if strings.TrimSpace(options.ActionOrigin) != "" {
+		originURL, originErr := parsePublicBaseURL(options.ActionOrigin)
+		if originErr != nil {
+			return nil, fmt.Errorf("action origin is invalid: %w", originErr)
+		}
+		actionOrigin = (&url.URL{Scheme: originURL.Scheme, Host: originURL.Host}).String()
+	}
+	if !sameURLOrigin(baseURL, actionOrigin) {
+		return nil, fmt.Errorf("public base URL must use the configured action origin")
 	}
 	if options.ActiveKeyID == "" {
 		return nil, fmt.Errorf("active envelope key ID is required")
@@ -116,10 +130,11 @@ func newService(store serviceStore, options ServiceOptions) (*Service, error) {
 		options.GenerateToken = func() (string, error) { return crypto.GenerateRandomString(32) }
 	}
 	service := &Service{
-		store: store, activeKeyID: options.ActiveKeyID, masterKeys: keys,
+		store: store, activeKeyID: options.ActiveKeyID, masterKeys: keys, actionOrigin: actionOrigin,
 		passwordResetTTL: options.PasswordResetTTL, emailActionTTL: options.EmailActionTTL,
 		emailOutboxTTL: options.EmailOutboxTTL, reauthenticationTTL: options.ReauthenticationTTL,
 		reauthenticationTTLProvider: options.ReauthenticationTTLProvider,
+		emailPresentationProvider:   options.EmailPresentationProvider,
 		clock:                       options.Clock, generateToken: options.GenerateToken, onEmailVerified: options.OnEmailVerified,
 	}
 	service.publicBaseURL.Store(baseURL)
@@ -133,8 +148,18 @@ func (s *Service) SetPublicBaseURL(value string) error {
 	if err != nil {
 		return err
 	}
+	if !sameURLOrigin(baseURL, s.actionOrigin) {
+		return fmt.Errorf("public base URL must use the configured action origin")
+	}
 	s.publicBaseURL.Store(baseURL)
 	return nil
+}
+
+func sameURLOrigin(value *url.URL, expected string) bool {
+	if value == nil {
+		return false
+	}
+	return strings.EqualFold((&url.URL{Scheme: value.Scheme, Host: value.Host}).String(), expected)
 }
 
 func parsePublicBaseURL(value string) (*url.URL, error) {
@@ -180,11 +205,11 @@ func (s *Service) ConfirmPasswordReset(ctx context.Context, rawToken, newPasswor
 	if err != nil {
 		return nil, fmt.Errorf("hashing replacement password: %w", err)
 	}
-	notice, err := s.newOutboxEmail(token.UserID, MessagePasswordChanged, EmailMessage{
-		To: claims.Email, Subject: "Nyauth 密码已重置",
-		TextBody: "您的 Nyauth 密码刚刚被重置。如果这不是您本人操作，请立即联系管理员。",
-		HTMLBody: "<p>您的 Nyauth 密码刚刚被重置。</p><p>如果这不是您本人操作，请立即联系管理员。</p>",
-	}, now)
+	message, err := s.templateMessage(MessagePasswordChanged, claims.Email, EmailRenderData{})
+	if err != nil {
+		return nil, err
+	}
+	notice, err := s.newOutboxEmail(token.UserID, MessagePasswordChanged, message, now)
 	if err != nil {
 		return nil, err
 	}
@@ -338,21 +363,21 @@ func (s *Service) ConfirmEmailChange(ctx context.Context, rawToken string) (*mod
 	}
 	notices := make([]*OutboxEmail, 0, 2)
 	if claims.PreviousEmail != "" {
-		oldNotice, err := s.newOutboxEmail(token.UserID, MessageEmailChangedOld, EmailMessage{
-			To: claims.PreviousEmail, Subject: "Nyauth 邮箱地址已变更",
-			TextBody: "您的 Nyauth 账户邮箱地址刚刚被变更。如果这不是您本人操作，请立即联系管理员。",
-			HTMLBody: "<p>您的 Nyauth 账户邮箱地址刚刚被变更。</p><p>如果这不是您本人操作，请立即联系管理员。</p>",
-		}, now)
+		message, err := s.templateMessage(MessageEmailChangedOld, claims.PreviousEmail, EmailRenderData{})
+		if err != nil {
+			return nil, err
+		}
+		oldNotice, err := s.newOutboxEmail(token.UserID, MessageEmailChangedOld, message, now)
 		if err != nil {
 			return nil, err
 		}
 		notices = append(notices, oldNotice)
 	}
-	newNotice, err := s.newOutboxEmail(token.UserID, MessageEmailChangedNew, EmailMessage{
-		To: claims.Email, Subject: "Nyauth 新邮箱已确认",
-		TextBody: "此邮箱现已绑定到您的 Nyauth 账户。",
-		HTMLBody: "<p>此邮箱现已绑定到您的 Nyauth 账户。</p>",
-	}, now)
+	message, err := s.templateMessage(MessageEmailChangedNew, claims.Email, EmailRenderData{})
+	if err != nil {
+		return nil, err
+	}
+	newNotice, err := s.newOutboxEmail(token.UserID, MessageEmailChangedNew, message, now)
 	if err != nil {
 		return nil, err
 	}
@@ -379,59 +404,43 @@ func (s *Service) BuildSecurityNotification(accountUser *models.User, notice Sec
 	if err != nil {
 		return nil, fmt.Errorf("security notification recipient is invalid: %w", err)
 	}
-	message, err := securityNotificationMessage(recipient, notice)
+	data, err := securityNotificationRenderData(notice)
+	if err != nil {
+		return nil, err
+	}
+	message, err := s.templateMessage(notice.MessageType, recipient, data)
 	if err != nil {
 		return nil, err
 	}
 	return s.newOutboxEmail(accountUser.ID, notice.MessageType, message, s.clock().UTC())
 }
 
-func securityNotificationMessage(recipient string, notice SecurityNotice) (EmailMessage, error) {
-	var subject, body string
+func securityNotificationRenderData(notice SecurityNotice) (EmailRenderData, error) {
+	data := EmailRenderData{}
 	switch notice.MessageType {
 	case MessageRoleChanged:
 		if notice.Role != "admin" && notice.Role != "user" {
-			return EmailMessage{}, fmt.Errorf("invalid security notification role")
+			return EmailRenderData{}, fmt.Errorf("invalid security notification role")
 		}
-		subject = "Nyauth 账户角色已变更"
-		body = "您的 Nyauth 账户角色已变更为“" + notice.Role + "”。"
+		data.Role = notice.Role
 	case MessageStatusChanged:
 		switch notice.Status {
 		case string(models.UserStatusActive), string(models.UserStatusSuspended), string(models.UserStatusPending):
 		default:
-			return EmailMessage{}, fmt.Errorf("invalid security notification status")
+			return EmailRenderData{}, fmt.Errorf("invalid security notification status")
 		}
-		subject = "Nyauth 账户状态已变更"
-		body = "您的 Nyauth 账户状态已变更为“" + notice.Status + "”。"
-	case MessagePasswordChanged:
-		subject = "Nyauth 密码已修改"
-		body = "您的 Nyauth 本地密码刚刚被修改。"
-	case MessagePasswordConfigured:
-		subject = "Nyauth 本地密码已设置"
-		body = "您的 Nyauth 账户刚刚设置了本地密码。"
-	case MessagePasswordResetAdmin:
-		subject = "Nyauth 密码已由管理员重置"
-		body = "您的 Nyauth 本地密码刚刚由管理员重置，下一次登录时必须修改密码。"
+		data.Status = notice.Status
+	case MessagePasswordChanged, MessagePasswordConfigured, MessagePasswordResetAdmin:
 	case MessageIdentityBound, MessageIdentityUnbound:
 		providerName := strings.TrimSpace(notice.Provider)
 		if !validSecurityNoticeProvider(providerName) {
-			return EmailMessage{}, fmt.Errorf("invalid security notification provider")
+			return EmailRenderData{}, fmt.Errorf("invalid security notification provider")
 		}
-		if notice.MessageType == MessageIdentityBound {
-			subject = "Nyauth 外部身份已绑定"
-			body = "您的 Nyauth 账户刚刚绑定了外部身份“" + providerName + "”。"
-		} else {
-			subject = "Nyauth 外部身份已解绑"
-			body = "您的 Nyauth 账户刚刚解绑了外部身份“" + providerName + "”。"
-		}
+		data.Provider = providerName
 	default:
-		return EmailMessage{}, fmt.Errorf("unsupported security notification type")
+		return EmailRenderData{}, fmt.Errorf("unsupported security notification type")
 	}
-	body += " 如果这不是您本人或您信任的管理员操作，请立即联系管理员。"
-	return EmailMessage{
-		To: recipient, Subject: subject, TextBody: body,
-		HTMLBody: "<p>" + html.EscapeString(body) + "</p>",
-	}, nil
+	return data, nil
 }
 
 func validSecurityNoticeProvider(value string) bool {
@@ -532,6 +541,9 @@ func (s *Service) loadAction(ctx context.Context, rawToken string, action Action
 }
 
 func (s *Service) newOutboxEmail(userID uuid.UUID, messageType string, message EmailMessage, now time.Time) (*OutboxEmail, error) {
+	if err := validateEmailMessage(message); err != nil {
+		return nil, fmt.Errorf("validating email before outbox encryption: %w", err)
+	}
 	id := uuid.New()
 	encoded, err := json.Marshal(message)
 	if err != nil {
@@ -553,20 +565,37 @@ func (s *Service) newOutboxEmail(userID uuid.UUID, messageType string, message E
 
 func (s *Service) actionMessage(action Action, recipient, username, rawToken string, ttl time.Duration) (EmailMessage, error) {
 	ttlText := formatActionTTL(ttl)
-	definition, err := accountActionEmailDefinitionFor(action, ttlText)
-	if err != nil {
-		return EmailMessage{}, err
+	var path, messageType string
+	switch action {
+	case ActionPasswordReset:
+		path, messageType = "/reset-password", MessagePasswordReset
+	case ActionEmailVerification:
+		path, messageType = "/verify-email", MessageEmailVerification
+	case ActionEmailChange:
+		path, messageType = "/change-email", MessageEmailChangeConfirm
+	default:
+		return EmailMessage{}, fmt.Errorf("unsupported account action %q", action)
 	}
 	baseURL := s.publicBaseURL.Load()
 	if baseURL == nil {
 		return EmailMessage{}, fmt.Errorf("public base URL is unavailable")
 	}
 	actionURL := *baseURL
-	actionURL.Path = strings.TrimSuffix(actionURL.Path, "/") + definition.Path
+	actionURL.Path = strings.TrimSuffix(actionURL.Path, "/") + path
 	query := actionURL.Query()
 	query.Set("token", rawToken)
 	actionURL.RawQuery = query.Encode()
-	return renderAccountActionEmail(recipient, username, actionURL.String(), ttlText, definition)
+	return s.templateMessage(messageType, recipient, EmailRenderData{
+		Username: username, TTL: ttlText, ActionURL: actionURL.String(),
+	})
+}
+
+func (s *Service) templateMessage(messageType, recipient string, data EmailRenderData) (EmailMessage, error) {
+	presentation := EmailPresentation{SiteName: "Nyauth", Settings: DefaultEmailTemplateSettings()}
+	if s.emailPresentationProvider != nil {
+		presentation = s.emailPresentationProvider()
+	}
+	return RenderEmailTemplate(messageType, recipient, presentation, data)
 }
 
 func formatActionTTL(ttl time.Duration) string {

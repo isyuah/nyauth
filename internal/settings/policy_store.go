@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -196,6 +197,85 @@ func (m *Manager) SetOAuthPolicy(
 	}
 	m.oauth.Store(&Versioned[OAuthPolicy]{Revision: revision, Value: value})
 	return revision, nil
+}
+
+func (m *Manager) SetCommunications(
+	ctx context.Context,
+	value Communications,
+	expectedRevision int64,
+	updatedBy string,
+	mutation audit.MutationAudit,
+) (int64, Communications, error) {
+	value, err := NormalizeCommunications(value)
+	if err != nil {
+		return 0, Communications{}, err
+	}
+	m.loadMu.Lock()
+	defer m.loadMu.Unlock()
+	if m.db == nil {
+		return 0, Communications{}, errors.New("runtime settings storage is unavailable")
+	}
+	if err := mutation.ValidateEvent(models.AuditSettingsUpdated); err != nil {
+		return 0, Communications{}, fmt.Errorf("validating communication settings audit: %w", err)
+	}
+	tx, err := m.db.Begin(ctx)
+	if err != nil {
+		return 0, Communications{}, fmt.Errorf("starting communication settings transaction: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	current := DefaultCommunications()
+	var currentRaw []byte
+	err = tx.QueryRow(ctx, `SELECT value FROM runtime_settings WHERE key=$1 FOR UPDATE`, communicationsKey).Scan(&currentRaw)
+	if errors.Is(err, pgx.ErrNoRows) {
+		err = nil
+	} else if err == nil {
+		if err := json.Unmarshal(currentRaw, &current); err != nil {
+			return 0, Communications{}, fmt.Errorf("decoding current communication settings: %w", err)
+		}
+		current, err = NormalizeCommunications(current)
+	} else {
+		return 0, Communications{}, fmt.Errorf("locking communication settings: %w", err)
+	}
+	if err != nil {
+		return 0, Communications{}, fmt.Errorf("decoding current communication settings: %w", err)
+	}
+	if SameAnnouncementContent(current.Announcement, value.Announcement) {
+		value.Announcement.Version = current.Announcement.Version
+	} else {
+		if current.Announcement.Version == math.MaxInt64 {
+			return 0, Communications{}, errors.New("announcement version is exhausted")
+		}
+		value.Announcement.Version = current.Announcement.Version + 1
+		if value.Announcement.Version < 1 {
+			value.Announcement.Version = 1
+		}
+	}
+	encoded, err := json.Marshal(value)
+	if err != nil {
+		return 0, Communications{}, fmt.Errorf("encoding communication settings: %w", err)
+	}
+	revision, err := storeSettingTx(ctx, tx, communicationsKey, encoded, expectedRevision, updatedBy)
+	if err != nil {
+		return 0, Communications{}, err
+	}
+	mutation = mutation.WithTarget("settings", communicationsKey).WithDetails(map[string]any{
+		"announcement_enabled":  value.Announcement.Enabled,
+		"announcement_severity": value.Announcement.Severity,
+		"announcement_version":  value.Announcement.Version,
+		"email_template_count":  len(value.Email.Templates),
+	})
+	if err := audit.EnqueueMutationTx(ctx, tx, mutation); err != nil {
+		return 0, Communications{}, fmt.Errorf("auditing communication settings: %w", err)
+	}
+	if err := notifySettingTx(ctx, tx, communicationsKey); err != nil {
+		return 0, Communications{}, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return 0, Communications{}, fmt.Errorf("committing communication settings: %w", err)
+	}
+	m.communications.Store(&Versioned[Communications]{Revision: revision, Value: value})
+	return revision, value, nil
 }
 
 // RequireOAuthPolicyTx verifies that a client write still uses the exact

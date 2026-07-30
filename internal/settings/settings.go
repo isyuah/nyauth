@@ -29,6 +29,7 @@ const (
 	protectionKey          = "protection"
 	lifecycleKey           = "lifecycle"
 	oauthKey               = "oauth"
+	communicationsKey      = "communications"
 	notificationChannel    = "nyauth_settings_changed"
 	reconciliationInterval = 60 * time.Second
 )
@@ -124,6 +125,7 @@ type Manager struct {
 	protection         atomic.Pointer[Versioned[Protection]]
 	lifecycle          atomic.Pointer[Versioned[Lifecycle]]
 	oauth              atomic.Pointer[Versioned[OAuthPolicy]]
+	communications     atomic.Pointer[Versioned[Communications]]
 	loadMu             sync.Mutex
 }
 
@@ -242,6 +244,17 @@ func (m *Manager) OAuthPolicySnapshot() Versioned[OAuthPolicy] {
 	return Versioned[OAuthPolicy]{Value: DefaultOAuthPolicy()}
 }
 
+func (m *Manager) Communications() Communications {
+	return m.CommunicationsSnapshot().Value
+}
+
+func (m *Manager) CommunicationsSnapshot() Versioned[Communications] {
+	if snapshot := m.communications.Load(); snapshot != nil {
+		return *snapshot
+	}
+	return Versioned[Communications]{Value: DefaultCommunications()}
+}
+
 func decodeLifecycle(raw []byte, defaults Lifecycle) (Lifecycle, error) {
 	value := defaults
 	var fields map[string]json.RawMessage
@@ -286,7 +299,7 @@ func (m *Manager) Load(ctx context.Context) error {
 		return nil
 	}
 	rows, err := m.db.Query(ctx, `SELECT key, value, revision FROM runtime_settings WHERE key = ANY($1)`,
-		[]string{brandingKey, registrationKey, securityKey, protectionKey, lifecycleKey, oauthKey})
+		[]string{brandingKey, registrationKey, securityKey, protectionKey, lifecycleKey, oauthKey, communicationsKey})
 	if err != nil {
 		return fmt.Errorf("loading runtime settings: %w", err)
 	}
@@ -376,6 +389,19 @@ func (m *Manager) Load(ctx context.Context) error {
 		oauthPolicy = &Versioned[OAuthPolicy]{Revision: storedValue.revision, Value: value}
 	}
 
+	var communications *Versioned[Communications]
+	if storedValue, ok := stored[communicationsKey]; ok {
+		value := DefaultCommunications()
+		if err := json.Unmarshal(storedValue.value, &value); err != nil {
+			return fmt.Errorf("decoding stored communication settings: %w", err)
+		}
+		value, err = NormalizeCommunications(value)
+		if err != nil {
+			return fmt.Errorf("decoding stored communication settings: %w", err)
+		}
+		communications = &Versioned[Communications]{Revision: storedValue.revision, Value: value}
+	}
+
 	// Publish only after every stored group decodes and validates, so a corrupt
 	// row cannot partially replace the last known-good process snapshot.
 	m.branding.Store(branding)
@@ -384,6 +410,7 @@ func (m *Manager) Load(ctx context.Context) error {
 	m.protection.Store(protection)
 	m.lifecycle.Store(lifecycle)
 	m.oauth.Store(oauthPolicy)
+	m.communications.Store(communications)
 	return nil
 }
 
