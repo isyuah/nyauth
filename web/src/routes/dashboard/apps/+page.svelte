@@ -1,7 +1,8 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { api, type CreateClientInput, type OAuthClient, type OAuthClientPolicy, type OAuthGrantType, type OAuthScope } from '$lib/api';
-  import { OAUTH_SCOPES } from '$lib/policy-settings';
+  import { DEFAULT_OAUTH_SETTINGS, OAUTH_SCOPES } from '$lib/policy-settings';
+  import { CLAIM_HELP, claimsForScopes, cloneScopeDefinitions, scopeHelp } from '$lib/oauth-catalog';
   import PageHeader from '$lib/components/layout/PageHeader.svelte';
   import CopyField from '$lib/components/data-display/CopyField.svelte';
   import Badge from '$lib/components/ui/Badge.svelte';
@@ -10,29 +11,34 @@
   import Input from '$lib/components/ui/Input.svelte';
   import Modal from '$lib/components/ui/Modal.svelte';
   import ResourceState from '$lib/components/ui/ResourceState.svelte';
+  import FieldHelp from '$lib/components/ui/FieldHelp.svelte';
   import SecretReveal from '$lib/components/ui/SecretReveal.svelte';
+  import { toast } from '$lib/toast';
   import { AppWindow, Plus, RefreshCw } from 'lucide-svelte';
 
   let clients = $state<OAuthClient[]>([]);
   let clientTotal = $state<number | null>(null);
   let clientLimit = $state<number | null>(null);
   let clientPolicy = $state<OAuthClientPolicy>({
-    self_service_client_creation_enabled: true,
-    public_clients_enabled: true,
-    allowed_grant_types: ['authorization_code', 'refresh_token', 'client_credentials'],
-    allowed_scopes: ['openid', 'profile', 'email', 'offline_access'],
-    max_redirect_uris: 20,
-    max_post_logout_redirect_uris: 20,
+    self_service_client_creation_enabled: DEFAULT_OAUTH_SETTINGS.self_service_client_creation_enabled,
+    public_clients_enabled: DEFAULT_OAUTH_SETTINGS.public_clients_enabled,
+    allowed_grant_types: [...DEFAULT_OAUTH_SETTINGS.allowed_grant_types],
+    allowed_scopes: [...DEFAULT_OAUTH_SETTINGS.allowed_scopes],
+    scope_definitions: cloneScopeDefinitions(DEFAULT_OAUTH_SETTINGS.scope_definitions),
+    claim_assignment_policies: { ...DEFAULT_OAUTH_SETTINGS.claim_assignment_policies },
+    max_redirect_uris: DEFAULT_OAUTH_SETTINGS.max_redirect_uris,
+    max_post_logout_redirect_uris: DEFAULT_OAUTH_SETTINGS.max_post_logout_redirect_uris,
   });
   let loading = $state(true);
   let showCreate = $state(false);
+  let openingCreate = $state(false);
   let creating = $state(false);
   let createError = $state('');
   let pageError = $state('');
   let createdSecret = $state('');
   let rotatedSecret = $state('');
   let rotatedClientName = $state('');
-  let newApp = $state<{ name: string; redirect_uris: string; post_logout_redirect_uris: string; is_public: boolean; grants: OAuthGrantType[]; scopes: OAuthScope[] }>({ name: '', redirect_uris: '', post_logout_redirect_uris: '', is_public: false, grants: ['authorization_code', 'refresh_token'], scopes: ['openid', 'profile', 'email', 'offline_access'] });
+  let newApp = $state<{ name: string; redirect_uris: string; post_logout_redirect_uris: string; is_public: boolean; grants: OAuthGrantType[]; scopes: OAuthScope[]; optional_scopes: OAuthScope[]; allowed_claims: string[] }>({ name: '', redirect_uris: '', post_logout_redirect_uris: '', is_public: false, grants: ['authorization_code', 'refresh_token'], scopes: ['openid', 'profile', 'email', 'offline_access'], optional_scopes: [], allowed_claims: claimsForScopes(DEFAULT_OAUTH_SETTINGS, ['openid', 'profile', 'email', 'offline_access'], false) });
   let deleteTarget = $state<OAuthClient | null>(null);
   let deleteOpen = $state(false);
   let deleteError = $state('');
@@ -50,7 +56,15 @@
     if (grants.length === 0 && policy.allowed_grant_types[0]) grants.push(policy.allowed_grant_types[0]);
     const scopes = policy.allowed_scopes.filter((scope) => OAUTH_SCOPES.some((standard) => standard === scope)
       && (scope !== 'offline_access' || grants.includes('refresh_token')));
-    return { name: '', redirect_uris: '', post_logout_redirect_uris: '', is_public: false, grants, scopes };
+    return { name: '', redirect_uris: '', post_logout_redirect_uris: '', is_public: false, grants, scopes, optional_scopes: [], allowed_claims: claimsForScopes(policy, scopes, false) };
+  }
+
+  function applyClientPage(result: Awaited<ReturnType<typeof api.my.getClients>>) {
+    clients = result.items;
+    clientTotal = result.quota_used;
+    clientLimit = result.quota_limit;
+    clientPolicy = result.client_policy;
+    newApp = defaultNewApp(result.client_policy);
   }
 
   function toggleGrant(grant: OAuthGrantType, checked: boolean) {
@@ -60,9 +74,13 @@
       selected.delete('refresh_token');
       newApp.is_public = false;
       newApp.scopes = newApp.scopes.filter((scope) => scope !== 'offline_access');
+      newApp.optional_scopes = [];
     }
     if (grant === 'refresh_token' && checked) selected.add('authorization_code');
-    if (grant === 'refresh_token' && !checked) newApp.scopes = newApp.scopes.filter((scope) => scope !== 'offline_access');
+    if (grant === 'refresh_token' && !checked) {
+      newApp.scopes = newApp.scopes.filter((scope) => scope !== 'offline_access');
+      newApp.optional_scopes = newApp.optional_scopes.filter((scope) => scope !== 'offline_access');
+    }
     newApp.grants = clientPolicy.allowed_grant_types.filter((item) => selected.has(item));
   }
 
@@ -70,7 +88,27 @@
     const selected = new Set(newApp.scopes);
     if (checked) selected.add(scope); else selected.delete(scope);
     newApp.scopes = clientPolicy.allowed_scopes.filter((item) => selected.has(item));
+    if (!checked) newApp.optional_scopes = newApp.optional_scopes.filter((item) => item !== scope);
+    const availableClaims = claimsForScopes(clientPolicy, newApp.scopes, false);
+    const previousClaims = new Set(newApp.allowed_claims);
+    if (checked) {
+      for (const claim of clientPolicy.scope_definitions[scope]?.claims || []) previousClaims.add(claim);
+    }
+    newApp.allowed_claims = availableClaims.filter((claim) => previousClaims.has(claim));
     if (scope === 'offline_access' && checked) toggleGrant('refresh_token', true);
+  }
+
+  function toggleClaim(claim: string, checked: boolean) {
+    const selected = new Set(newApp.allowed_claims);
+    if (checked) selected.add(claim); else selected.delete(claim);
+    newApp.allowed_claims = claimsForScopes(clientPolicy, newApp.scopes, false).filter((item) => selected.has(item));
+  }
+
+  function toggleOptionalScope(scope: OAuthScope, checked: boolean) {
+    if (scope === 'openid' || !newApp.scopes.includes(scope)) return;
+    const selected = new Set(newApp.optional_scopes);
+    if (checked) selected.add(scope); else selected.delete(scope);
+    newApp.optional_scopes = newApp.scopes.filter((item) => item !== 'openid' && selected.has(item));
   }
 
   async function loadApps() {
@@ -78,15 +116,25 @@
     pageError = '';
     try {
       const result = await api.my.getClients();
-      clients = result.items;
-      clientTotal = result.quota_used;
-      clientLimit = result.quota_limit;
-      clientPolicy = result.client_policy;
-      newApp = defaultNewApp(result.client_policy);
+      applyClientPage(result);
     } catch (cause) {
       pageError = cause instanceof Error ? cause.message : '应用列表加载失败';
     } finally {
       loading = false;
+    }
+  }
+
+  async function openCreate() {
+    openingCreate = true;
+    createError = '';
+    createdSecret = '';
+    try {
+      applyClientPage(await api.my.getClients());
+      showCreate = true;
+    } catch (cause) {
+      toast.error(cause instanceof Error ? cause.message : '最新 OAuth 权限策略加载失败，请稍后重试');
+    } finally {
+      openingCreate = false;
     }
   }
 
@@ -100,6 +148,7 @@
     try {
       if (creationDisabled) throw new Error('管理员已关闭用户自助创建客户端。');
       if (newApp.grants.length === 0) throw new Error('至少选择一种 Grant。');
+      if (newApp.scopes.length > 0 && newApp.optional_scopes.length === newApp.scopes.length) throw new Error('至少保留一个必需 Scope。');
       const redirectURIs = newApp.redirect_uris.split('\n').map((uri) => uri.trim()).filter(Boolean);
       const logoutURIs = newApp.post_logout_redirect_uris.split('\n').map((uri) => uri.trim()).filter(Boolean);
       if (authorizationCodeSelected && redirectURIs.length === 0) throw new Error('Authorization Code 客户端至少需要一个 Redirect URI。');
@@ -111,6 +160,8 @@
         post_logout_redirect_uris: logoutURIs,
         grants: [...newApp.grants],
         scopes: [...newApp.scopes],
+        optional_scopes: [...newApp.optional_scopes],
+        allowed_claims: [...newApp.allowed_claims],
         is_public: newApp.is_public,
       };
       const result = await api.my.createClient(payload);
@@ -182,7 +233,7 @@
   {#snippet action()}
     <div class="flex items-center gap-3">
       <span title="已创建应用 / 配额上限"><Badge variant={quotaReached ? 'warning' : 'default'}>{clientTotal === null || clientLimit === null ? '—/—' : `${clientTotal}/${clientLimit}`}</Badge></span>
-      <Button variant="primary" requiredCapability="account_mutations" disabled={quotaReached || creationDisabled} title={creationDisabled ? '管理员已关闭用户自助创建客户端' : undefined} onclick={() => { createdSecret = ''; showCreate = true; }}><Plus size={16} /> 创建应用</Button>
+      <Button variant="primary" requiredCapability="account_mutations" loading={openingCreate} disabled={quotaReached || creationDisabled} title={creationDisabled ? '管理员已关闭用户自助创建客户端' : undefined} onclick={openCreate}><Plus size={16} /> 创建应用</Button>
     </div>
   {/snippet}
 </PageHeader>
@@ -192,7 +243,7 @@
 {#if creationDisabled}<div class="mb-4 rounded-nya-sm bg-nya-surface-muted px-4 py-3 text-small text-nya-text-secondary">管理员已关闭用户自助创建客户端；已有应用仍可查看、轮换 Secret 或删除。</div>{/if}
 
 <ResourceState {loading} error={pageError} empty={clients.length === 0} emptyTitle="还没有创建应用" emptyDescription="创建第一个 OAuth / OIDC 客户端后即可接入项目。" onretry={loadApps}>
-  {#snippet emptyAction()}<Button variant="primary" requiredCapability="account_mutations" disabled={quotaReached || creationDisabled} onclick={() => (showCreate = true)}>创建应用</Button>{/snippet}
+  {#snippet emptyAction()}<Button variant="primary" requiredCapability="account_mutations" loading={openingCreate} disabled={quotaReached || creationDisabled} onclick={openCreate}>创建应用</Button>{/snippet}
   {#snippet children()}
     <div class="space-y-3">
       {#each clients as client}
@@ -204,6 +255,7 @@
           {#if !client.is_public}<p class="mt-3 text-small text-nya-text-tertiary">Secret 版本 {client.secret_version}{#if client.secret_hint} · 尾号 {client.secret_hint}{/if}{#if client.secret_rotated_at} · 最近轮换 {new Date(client.secret_rotated_at).toLocaleString()}{/if}</p>{/if}
           <div class="mt-4 flex flex-wrap gap-1.5">{#each client.redirect_uris as uri}<code class="break-all rounded-nya-xs bg-nya-surface-muted px-2 py-1 text-micro text-nya-text-secondary">{uri}</code>{/each}</div>
           {#if client.post_logout_redirect_uris.length > 0}<div class="mt-2 flex flex-wrap gap-1.5">{#each client.post_logout_redirect_uris as uri}<code class="break-all rounded-nya-xs bg-nya-surface-muted px-2 py-1 text-micro text-nya-text-tertiary">退出：{uri}</code>{/each}</div>{/if}
+          <div class="mt-3 flex flex-wrap gap-1.5">{#each client.scopes as scope}<Badge variant={client.optional_scopes.includes(scope) ? 'info' : 'default'}>{scope}{client.optional_scopes.includes(scope) ? ' · 可选' : ''}</Badge>{/each}{#each client.allowed_claims as claim}<Badge variant="default">{claim}</Badge>{/each}</div>
         </section>
       {/each}
     </div>
@@ -215,7 +267,8 @@
     {#if createError}<p class="rounded-nya-sm bg-nya-danger-soft px-3 py-2 text-small text-nya-danger" role="alert">{createError}</p>{/if}
     <Input id="my-client-name" label="应用名称" bind:value={newApp.name} required placeholder="我的应用" />
     <fieldset class="rounded-nya-sm border border-nya-border p-3"><legend class="px-1 text-body-medium text-nya-text-primary">Grant</legend><div class="grid gap-2 sm:grid-cols-2">{#each clientPolicy.allowed_grant_types as grant}<label class="flex items-center gap-2 text-small text-nya-text-primary"><input type="checkbox" checked={newApp.grants.includes(grant)} onchange={(event) => toggleGrant(grant, event.currentTarget.checked)} /> {grant}</label>{/each}</div></fieldset>
-    <fieldset class="rounded-nya-sm border border-nya-border p-3"><legend class="px-1 text-body-medium text-nya-text-primary">Scope</legend><div class="grid gap-2 sm:grid-cols-2">{#each clientPolicy.allowed_scopes as scope}<label class="flex items-center gap-2 font-mono text-small text-nya-text-primary"><input type="checkbox" checked={newApp.scopes.includes(scope)} onchange={(event) => toggleScope(scope, event.currentTarget.checked)} /> {scope}</label>{/each}</div></fieldset>
+    <fieldset class="rounded-nya-sm border border-nya-border p-3"><legend class="px-1 text-body-medium text-nya-text-primary">Scope</legend><div class="space-y-2">{#each clientPolicy.allowed_scopes as scope}{@const definition = clientPolicy.scope_definitions[scope]}<div class="flex flex-wrap items-center justify-between gap-2 rounded-nya-xs px-2 py-1.5 hover:bg-nya-surface-soft"><div class="flex items-center gap-2"><label class="flex items-center gap-2 font-mono text-small text-nya-text-primary"><input type="checkbox" checked={newApp.scopes.includes(scope)} onchange={(event) => toggleScope(scope, event.currentTarget.checked)} /> {scope}</label>{#if definition}<FieldHelp id={`my-client-${scope}-help`} text={scopeHelp(definition)} label={`查看 ${scope} Scope 说明`} />{/if}</div>{#if scope !== 'openid'}<label class="flex items-center gap-2 text-small text-nya-text-secondary"><input type="checkbox" aria-label={`${scope} 允许用户拒绝`} checked={newApp.optional_scopes.includes(scope)} disabled={!newApp.scopes.includes(scope) || !authorizationCodeSelected} onchange={(event) => toggleOptionalScope(scope, event.currentTarget.checked)} /> 允许用户拒绝</label>{:else}<span class="text-micro text-nya-text-tertiary">OIDC 身份必需</span>{/if}</div>{/each}</div><p class="mt-2 text-micro text-nya-text-tertiary">可选权限可以由用户在授权页逐项拒绝，应用必须能够处理缩减后的 Token Scope。</p></fieldset>
+    <fieldset class="rounded-nya-sm border border-nya-border p-3"><legend class="px-1 text-body-medium text-nya-text-primary">允许返回的 Claim</legend><div class="grid gap-2 sm:grid-cols-2">{#each claimsForScopes(clientPolicy, newApp.scopes, false) as claim}<label class="flex items-center gap-2 rounded-nya-xs px-2 py-1.5 text-small text-nya-text-secondary hover:bg-nya-surface-soft"><input type="checkbox" checked={newApp.allowed_claims.includes(claim)} disabled={claim === 'sub'} onchange={(event) => toggleClaim(claim, event.currentTarget.checked)} /><span>{CLAIM_HELP[claim]?.title || claim}</span><FieldHelp id={`my-client-claim-${claim}-help`} text={CLAIM_HELP[claim]?.description || claim} label={`查看 ${claim} Claim 说明`} /></label>{/each}</div></fieldset>
     <div><label for="my-client-redirects" class="mb-1.5 block text-body-medium text-nya-text-primary">Redirect URI <span class="text-small text-nya-text-tertiary">（每行一个，最多 {clientPolicy.max_redirect_uris} 个）</span></label><textarea id="my-client-redirects" bind:value={newApp.redirect_uris} required={authorizationCodeSelected} rows="3" placeholder="https://app.example.com/callback" class="w-full rounded-nya-sm border border-nya-border bg-nya-surface px-3 py-2 font-mono text-small focus:border-nya-primary focus:outline-none focus:ring-2 focus:ring-nya-primary/24"></textarea></div>
     <div><label for="my-client-logouts" class="mb-1.5 block text-body-medium text-nya-text-primary">Post-logout Redirect URI <span class="text-small text-nya-text-tertiary">（每行一个，最多 {clientPolicy.max_post_logout_redirect_uris} 个）</span></label><textarea id="my-client-logouts" bind:value={newApp.post_logout_redirect_uris} rows="2" placeholder="https://app.example.com/signed-out" disabled={clientPolicy.max_post_logout_redirect_uris === 0} class="w-full rounded-nya-sm border border-nya-border bg-nya-surface px-3 py-2 font-mono text-small focus:border-nya-primary focus:outline-none focus:ring-2 focus:ring-nya-primary/24 disabled:opacity-50"></textarea></div>
     <label class="flex cursor-pointer items-start gap-2 {clientPolicy.public_clients_enabled && authorizationCodeSelected ? '' : 'opacity-50'}"><input type="checkbox" bind:checked={newApp.is_public} disabled={!clientPolicy.public_clients_enabled || !authorizationCodeSelected} class="mt-0.5 rounded" /><span><span class="block text-body text-nya-text-primary">公共客户端</span><span class="block text-small text-nya-text-tertiary">仅用于无法安全保存 Secret 的原生应用；浏览器 SPA 暂不作为正式支持模式。</span></span></label>

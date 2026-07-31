@@ -149,12 +149,13 @@ func (m *Manager) SetOAuthPolicy(
 	updatedBy string,
 	mutation audit.MutationAudit,
 ) (int64, error) {
+	m.loadMu.Lock()
+	defer m.loadMu.Unlock()
+	value = PreserveRetiredOAuthScopeDefinitions(m.OAuthPolicySnapshot().Value, value)
 	value, err := NormalizeOAuthPolicy(value)
 	if err != nil {
 		return 0, err
 	}
-	m.loadMu.Lock()
-	defer m.loadMu.Unlock()
 	if m.db == nil {
 		return 0, errors.New("runtime settings storage is unavailable")
 	}
@@ -183,6 +184,8 @@ func (m *Manager) SetOAuthPolicy(
 		"public_clients_enabled":               value.PublicClientsEnabled,
 		"allowed_grant_types":                  value.AllowedGrantTypes,
 		"allowed_scopes":                       value.AllowedScopes,
+		"scope_definitions":                    value.ScopeDefinitions,
+		"claim_assignment_policies":            value.ClaimAssignmentPolicies,
 		"max_redirect_uris":                    value.MaxRedirectURIs,
 		"max_post_logout_redirect_uris":        value.MaxPostLogoutRedirectURIs,
 	})

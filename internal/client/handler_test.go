@@ -99,6 +99,9 @@ func TestHandlerMapsSafeClientErrors(t *testing.T) {
 		if response.Code != http.StatusBadRequest {
 			t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
 		}
+		if !strings.Contains(response.Body.String(), `"code":"client.configuration_invalid"`) {
+			t.Fatalf("missing stable client validation code: %s", response.Body.String())
+		}
 	})
 	t.Run("stale OAuth policy", func(t *testing.T) {
 		handler := &Handler{service: &fakeHandlerService{createErr: ErrOAuthPolicyChanged}}

@@ -1,11 +1,14 @@
 package auth
 
 import (
+	"bytes"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/url"
+	"slices"
 	"time"
 
 	"github.com/google/uuid"
@@ -25,6 +28,22 @@ type ConsentHandler struct {
 	sessionResolver    BrowserSessionResolver
 }
 
+type consentPermission struct {
+	Scope       string   `json:"scope"`
+	DisplayName string   `json:"display_name"`
+	Description string   `json:"description"`
+	RiskLevel   string   `json:"risk_level"`
+	Required    bool     `json:"required"`
+	Claims      []string `json:"claims"`
+}
+
+type consentDecisionRequest struct {
+	Challenge             string    `json:"challenge"`
+	GrantedOptionalScopes *[]string `json:"granted_optional_scopes"`
+}
+
+var errInvalidConsentScopes = errors.New("invalid consent scope selection")
+
 func (h *ConsentHandler) SetBrowserSessionResolver(resolver BrowserSessionResolver) {
 	h.sessionResolver = resolver
 }
@@ -34,6 +53,7 @@ func NewConsentHandler(sessionStore *session.Store, tokenService *TokenService, 
 }
 
 func (h *ConsentHandler) GetConsent(w http.ResponseWriter, r *http.Request) {
+	setOAuthNoStoreHeaders(w)
 	challenge := r.URL.Query().Get("challenge")
 	sess, ok := h.authenticatedSession(w, r)
 	if !ok {
@@ -61,27 +81,39 @@ func (h *ConsentHandler) GetConsent(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"challenge": challenge, "client_name": cl.Name, "client_id": cl.ID,
 		"scopes": data.Scopes, "redirect_uri": data.RedirectURI,
+		"permissions":     consentPermissions(data.Scopes, data.OptionalScopes, data.ScopeClaims, data.ScopeDetails),
 		"redirect_origin": redirectOrigin, "publisher_type": publisherType,
 		"verification_status": "unverified",
 	})
 }
 
 func (h *ConsentHandler) AcceptConsent(w http.ResponseWriter, r *http.Request) {
+	setOAuthNoStoreHeaders(w)
 	sess, ok := h.authorizeMutation(w, r)
 	if !ok {
 		writeError(w, http.StatusForbidden, "csrf_validation_failed")
 		return
 	}
-	challenge, ok := decodeConsentRequest(r)
+	decision, ok := decodeConsentDecisionRequest(r)
 	if !ok {
 		writeError(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	data, err := h.sessionStore.ConsumeConsentForUser(r.Context(), challenge, sess.UserID)
+	data, err := h.sessionStore.ConsumeConsentForUser(r.Context(), decision.Challenge, sess.UserID)
 	if err != nil || data.AuthVersion != sess.AuthVersion {
 		writeError(w, http.StatusBadRequest, "invalid_or_expired_challenge")
 		return
 	}
+	grantedOptionalScopes := data.OptionalScopes
+	if decision.GrantedOptionalScopes != nil {
+		grantedOptionalScopes = *decision.GrantedOptionalScopes
+	}
+	grantedScopes, err := resolveGrantedScopes(data.Scopes, data.OptionalScopes, grantedOptionalScopes)
+	if err != nil {
+		writeError(w, http.StatusBadRequest, "invalid_scope_selection")
+		return
+	}
+	grantedClaims := claimsForGrantedScopes(grantedScopes, data.ScopeClaims)
 	userID, err := uuid.Parse(data.UserID)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "server_error")
@@ -92,7 +124,7 @@ func (h *ConsentHandler) AcceptConsent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "server_error")
 		return
 	}
-	if err := h.authorizationStore.Upsert(r.Context(), userID, data.ClientID, data.Scopes, time.UnixMicro(authorizationIssuedAt).UTC()); err != nil {
+	if err := h.authorizationStore.Upsert(r.Context(), userID, data.ClientID, grantedScopes, grantedClaims, time.UnixMicro(authorizationIssuedAt).UTC()); err != nil {
 		writeError(w, http.StatusInternalServerError, "server_error")
 		return
 	}
@@ -102,7 +134,8 @@ func (h *ConsentHandler) AcceptConsent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	authorization := &session.AuthorizationData{
-		ClientID: data.ClientID, UserID: data.UserID, RedirectURI: data.RedirectURI, Scopes: data.Scopes,
+		ClientID: data.ClientID, UserID: data.UserID, RedirectURI: data.RedirectURI, Scopes: grantedScopes,
+		AllowedClaims: grantedClaims, ClaimNamesSet: true,
 		CodeChallenge: data.CodeChallenge, ChallengeMethod: "S256", Nonce: data.Nonce, AuthVersion: data.AuthVersion,
 		AuthorizationIssuedAt: authorizationIssuedAt,
 	}
@@ -110,7 +143,11 @@ func (h *ConsentHandler) AcceptConsent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "server_error")
 		return
 	}
-	target, err := addQuery(data.RedirectURI, map[string]string{"code": code, "state": data.State})
+	redirectValues := map[string]string{"code": code, "state": data.State}
+	if !slices.Equal(grantedScopes, data.Scopes) {
+		redirectValues["scope"] = joinScopes(grantedScopes)
+	}
+	target, err := addQuery(data.RedirectURI, redirectValues)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "server_error")
 		return
@@ -139,6 +176,7 @@ func (h *ConsentHandler) authorizationCodeTTL() time.Duration {
 }
 
 func (h *ConsentHandler) DenyConsent(w http.ResponseWriter, r *http.Request) {
+	setOAuthNoStoreHeaders(w)
 	sess, ok := h.authorizeMutation(w, r)
 	if !ok {
 		writeError(w, http.StatusForbidden, "csrf_validation_failed")
@@ -196,4 +234,146 @@ func decodeConsentRequest(r *http.Request) (string, bool) {
 		return "", false
 	}
 	return request.Challenge, true
+}
+
+func decodeConsentDecisionRequest(r *http.Request) (consentDecisionRequest, bool) {
+	var payload struct {
+		Challenge             string          `json:"challenge"`
+		GrantedOptionalScopes json.RawMessage `json:"granted_optional_scopes"`
+	}
+	decoder := json.NewDecoder(io.LimitReader(r.Body, int64(maxAuthorizationQueryBytes*2)))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&payload); err != nil || payload.Challenge == "" {
+		return consentDecisionRequest{}, false
+	}
+	if err := decoder.Decode(&struct{}{}); !errors.Is(err, io.EOF) {
+		return consentDecisionRequest{}, false
+	}
+	request := consentDecisionRequest{Challenge: payload.Challenge}
+	if len(payload.GrantedOptionalScopes) > 0 {
+		if bytes.Equal(bytes.TrimSpace(payload.GrantedOptionalScopes), []byte("null")) {
+			return consentDecisionRequest{}, false
+		}
+		var scopes []string
+		if err := json.Unmarshal(payload.GrantedOptionalScopes, &scopes); err != nil || scopes == nil {
+			return consentDecisionRequest{}, false
+		}
+		request.GrantedOptionalScopes = &scopes
+	}
+	return request, true
+}
+
+func consentPermissions(scopes, optionalScopes []string, scopeClaims map[string][]string, scopeDetails map[string]session.ConsentScopeDetails) []consentPermission {
+	optional := make(map[string]struct{}, len(optionalScopes))
+	for _, scope := range optionalScopes {
+		optional[scope] = struct{}{}
+	}
+	permissions := make([]consentPermission, 0, len(scopes))
+	for _, scope := range scopes {
+		_, isOptional := optional[scope]
+		claims := scopeClaims[scope]
+		if scopeClaims == nil {
+			claims = claimsForScope(scope)
+		}
+		if claims == nil {
+			claims = []string{}
+		}
+		details := scopeDetails[scope]
+		if details.DisplayName == "" {
+			details = legacyScopeDetails(scope)
+		}
+		permissions = append(permissions, consentPermission{
+			Scope: scope, DisplayName: details.DisplayName, Description: details.Description,
+			RiskLevel: details.RiskLevel, Required: !isOptional, Claims: slices.Clone(claims),
+		})
+	}
+	return permissions
+}
+
+func legacyScopeDetails(scope string) session.ConsentScopeDetails {
+	switch scope {
+	case "openid":
+		return session.ConsentScopeDetails{DisplayName: "确认身份", Description: "使用稳定的账户标识完成 OpenID Connect 登录。", RiskLevel: "low"}
+	case "profile":
+		return session.ConsentScopeDetails{DisplayName: "基本资料", Description: "读取用户名、显示名称和头像。", RiskLevel: "personal_data"}
+	case "email":
+		return session.ConsentScopeDetails{DisplayName: "邮箱信息", Description: "读取邮箱地址及邮箱验证状态。", RiskLevel: "personal_data"}
+	case "offline_access":
+		return session.ConsentScopeDetails{DisplayName: "离线访问", Description: "允许应用在用户离开后继续访问。", RiskLevel: "sensitive"}
+	default:
+		return session.ConsentScopeDetails{DisplayName: scope, Description: "使用该应用为此集成定义的权限。", RiskLevel: "sensitive"}
+	}
+}
+
+func claimsForGrantedScopes(scopes []string, scopeClaims map[string][]string) []string {
+	selected := make(map[string]bool)
+	for _, scope := range scopes {
+		claims := scopeClaims[scope]
+		if scopeClaims == nil {
+			claims = claimsForScope(scope)
+		}
+		for _, claim := range claims {
+			selected[claim] = true
+		}
+	}
+	ordered := []string{"sub", "preferred_username", "name", "picture", "email", "email_verified", "role"}
+	result := make([]string, 0, len(selected))
+	for _, claim := range ordered {
+		if selected[claim] {
+			result = append(result, claim)
+		}
+	}
+	return result
+}
+
+func claimsForScope(scope string) []string {
+	switch scope {
+	case "openid":
+		return []string{"sub"}
+	case "profile":
+		return []string{"preferred_username", "name", "picture"}
+	case "email":
+		return []string{"email", "email_verified"}
+	default:
+		return []string{}
+	}
+}
+
+func resolveGrantedScopes(requested, optional, selected []string) ([]string, error) {
+	requestedSet := make(map[string]struct{}, len(requested))
+	for _, scope := range requested {
+		if _, exists := requestedSet[scope]; exists {
+			return nil, errInvalidConsentScopes
+		}
+		requestedSet[scope] = struct{}{}
+	}
+	optionalSet := make(map[string]struct{}, len(optional))
+	for _, scope := range optional {
+		if _, exists := requestedSet[scope]; !exists || scope == "openid" {
+			return nil, errInvalidConsentScopes
+		}
+		if _, exists := optionalSet[scope]; exists {
+			return nil, errInvalidConsentScopes
+		}
+		optionalSet[scope] = struct{}{}
+	}
+	selectedSet := make(map[string]struct{}, len(selected))
+	for _, scope := range selected {
+		if _, exists := optionalSet[scope]; !exists {
+			return nil, errInvalidConsentScopes
+		}
+		if _, exists := selectedSet[scope]; exists {
+			return nil, errInvalidConsentScopes
+		}
+		selectedSet[scope] = struct{}{}
+	}
+	granted := make([]string, 0, len(requested))
+	for _, scope := range requested {
+		_, isOptional := optionalSet[scope]
+		_, isSelected := selectedSet[scope]
+		if !isOptional || isSelected {
+			granted = append(granted, scope)
+		}
+	}
+	return granted, nil
 }

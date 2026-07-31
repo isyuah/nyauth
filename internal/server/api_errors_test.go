@@ -97,6 +97,12 @@ func TestObservabilityErrorsHaveSpecificStableCodes(t *testing.T) {
 	}
 }
 
+func TestOAuthClientValidationUsesSpecificStableCode(t *testing.T) {
+	if got := apiErrorCodeForMessage(`invalid OAuth client: scope "profile" is disabled by OAuth policy`); got != "client.configuration_invalid" {
+		t.Fatalf("OAuth client validation code = %q", got)
+	}
+}
+
 func TestHumanVerificationErrorsHaveSpecificStableCodes(t *testing.T) {
 	tests := map[string]string{
 		"human verification is required":                                 "human_verification.required",

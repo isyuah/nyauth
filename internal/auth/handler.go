@@ -24,6 +24,7 @@ import (
 	"github.com/nyasharp/nyauth/internal/config"
 	internalcrypto "github.com/nyasharp/nyauth/internal/crypto"
 	"github.com/nyasharp/nyauth/internal/session"
+	"github.com/nyasharp/nyauth/internal/settings"
 	"github.com/nyasharp/nyauth/internal/user"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
@@ -65,6 +66,7 @@ type Handler struct {
 	metricSink         GrantMetricSink
 	issuanceMiddleware func(http.Handler) http.Handler
 	sessionResolver    BrowserSessionResolver
+	oauthPolicySource  func() settings.Versioned[settings.OAuthPolicy]
 }
 
 func NewHandler(tokenService *TokenService, jwkManager *JWKManager, userService *user.Service, clientStore *client.Store, sessionStore *session.Store, cfg *config.Config, maximumAccessTTLs ...time.Duration) *Handler {
@@ -90,6 +92,17 @@ func (h *Handler) SetIssuanceMiddleware(middleware func(http.Handler) http.Handl
 }
 func (h *Handler) SetBrowserSessionResolver(resolver BrowserSessionResolver) {
 	h.sessionResolver = resolver
+}
+
+func (h *Handler) SetOAuthPolicySource(source func() settings.Versioned[settings.OAuthPolicy]) {
+	h.oauthPolicySource = source
+}
+
+func (h *Handler) oauthPolicy() settings.OAuthPolicy {
+	if h.oauthPolicySource != nil {
+		return h.oauthPolicySource().Value
+	}
+	return settings.DefaultOAuthPolicy()
 }
 
 func (h *Handler) absolutePictureURL(value string) string {
@@ -243,9 +256,9 @@ func (h *Handler) Discovery(w http.ResponseWriter, _ *http.Request) {
 		"response_types_supported": []string{"code"},
 		"grant_types_supported":    []string{"authorization_code", "client_credentials", "refresh_token"},
 		"subject_types_supported":  []string{"public"}, "id_token_signing_alg_values_supported": []string{"RS256"},
-		"scopes_supported":                      []string{"openid", "profile", "email", "offline_access"},
+		"scopes_supported":                      h.oauthPolicy().AllowedScopes,
 		"token_endpoint_auth_methods_supported": []string{"client_secret_basic", "client_secret_post", "none"},
-		"claims_supported":                      []string{"sub", "iss", "aud", "exp", "iat", "jti", "nonce", "name", "email", "preferred_username", "picture"},
+		"claims_supported":                      []string{"sub", "iss", "aud", "exp", "iat", "jti", "nonce", "name", "email", "email_verified", "preferred_username", "picture", "role"},
 		"code_challenge_methods_supported":      []string{"S256"},
 	})
 }
@@ -317,6 +330,14 @@ func (h *Handler) Authorize(w http.ResponseWriter, r *http.Request) {
 		h.redirectAuthorizeError(w, r, redirectURI, state, "invalid_scope")
 		return
 	}
+	optionalScopes := intersectScopes(scopes, cl.OptionalScopes)
+	if len(scopes) > 0 && len(optionalScopes) == len(scopes) {
+		h.redirectAuthorizeError(w, r, redirectURI, state, "invalid_scope")
+		return
+	}
+	oauthPolicy := h.oauthPolicy()
+	scopeClaims := scopeClaimsForClient(scopes, cl, oauthPolicy)
+	scopeDetails := scopeDetailsForScopes(scopes, oauthPolicy)
 	challenge, method := q.Get("code_challenge"), q.Get("code_challenge_method")
 	if method != "S256" || !validPKCEChallenge(challenge) {
 		h.redirectAuthorizeError(w, r, redirectURI, state, "invalid_request")
@@ -358,6 +379,7 @@ func (h *Handler) Authorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	data := &session.ConsentData{ClientID: clientID, UserID: currentUser.ID.String(), RedirectURI: redirectURI, Scopes: scopes,
+		OptionalScopes: optionalScopes, ScopeClaims: scopeClaims, ScopeDetails: scopeDetails,
 		State: state, CodeChallenge: challenge, ChallengeMethod: "S256", Nonce: nonce, AuthVersion: currentUser.AuthVersion}
 	if err := h.sessionStore.SaveConsent(r.Context(), consentChallenge, data, 10*time.Minute); err != nil {
 		writeOAuthError(w, http.StatusInternalServerError, "server_error", "failed to persist consent challenge")
@@ -428,6 +450,13 @@ func (h *Handler) handleAuthorizationCodeGrant(w http.ResponseWriter, r *http.Re
 		writeTokenError(w, http.StatusBadRequest, "invalid_grant", "authorization scope is no longer allowed")
 		return
 	}
+	allowedClaims := effectiveClaimNames(stored.Scopes, stored.AllowedClaims, stored.ClaimNamesSet)
+	currentClaims := claimsForGrantedScopes(stored.Scopes, scopeClaimsForClient(stored.Scopes, cl, h.oauthPolicy()))
+	if !scopesAreSubset(allowedClaims, currentClaims) {
+		h.recordGrantAudit(r.Context(), models.AuditTokenGrantFailed, models.GrantAuthorizationCode, cl.ID, "failure", "high", "claim_no_longer_allowed")
+		writeTokenError(w, http.StatusBadRequest, "invalid_grant", "authorization claims are no longer allowed")
+		return
+	}
 	uid, err := uuid.Parse(stored.UserID)
 	if err != nil {
 		h.recordGrantAudit(r.Context(), models.AuditTokenGrantFailed, models.GrantAuthorizationCode, cl.ID, "failure", "high", "invalid_subject")
@@ -454,7 +483,7 @@ func (h *Handler) handleAuthorizationCodeGrant(w http.ResponseWriter, r *http.Re
 		return
 	}
 	issueRefresh := containsScope(stored.Scopes, "offline_access") && cl.HasGrant(models.GrantRefreshToken)
-	pair, err := h.tokenService.GenerateAuthorizationCodeTokenPair(r.Context(), cl.ID, stored.UserID, stored.Scopes, stored.AuthVersion, stored.AuthorizationIssuedAt, issueRefresh)
+	pair, err := h.tokenService.GenerateAuthorizationCodeTokenPairWithClaims(r.Context(), cl.ID, stored.UserID, stored.Scopes, allowedClaims, stored.AuthVersion, stored.AuthorizationIssuedAt, issueRefresh)
 	if err != nil {
 		if errors.Is(err, ErrInvalidToken) {
 			h.recordGrantAudit(r.Context(), models.AuditTokenGrantFailed, models.GrantAuthorizationCode, cl.ID, "failure", "high", "authorization_inactive")
@@ -466,20 +495,8 @@ func (h *Handler) handleAuthorizationCodeGrant(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if containsScope(stored.Scopes, "openid") {
-		info := make(map[string]interface{})
-		if containsScope(stored.Scopes, "profile") {
-			info["preferred_username"] = u.Username
-			if u.DisplayName != nil {
-				info["name"] = *u.DisplayName
-			}
-			if u.AvatarURL != nil {
-				info["picture"] = h.absolutePictureURL(*u.AvatarURL)
-			}
-		}
-		if containsScope(stored.Scopes, "email") && u.Email != nil {
-			info["email"] = *u.Email
-		}
-		pair.IDToken, err = h.tokenService.GenerateIDToken(r.Context(), cl.ID, stored.UserID, stored.Scopes, stored.Nonce, info)
+		info := h.userClaimsForAllowed(u, allowedClaims)
+		pair.IDToken, err = h.tokenService.GenerateIDTokenWithClaims(r.Context(), cl.ID, stored.UserID, stored.Scopes, allowedClaims, stored.Nonce, info)
 		if err != nil {
 			h.recordGrantAudit(r.Context(), models.AuditTokenGrantFailed, models.GrantAuthorizationCode, cl.ID, "failure", "high", "id_token_issuance_failed")
 			writeTokenError(w, http.StatusInternalServerError, "server_error", "failed to issue ID token")
@@ -550,7 +567,10 @@ func (h *Handler) handleRefreshTokenGrant(w http.ResponseWriter, r *http.Request
 		writeTokenError(w, http.StatusBadRequest, "invalid_grant", "refresh token is not valid for this client")
 		return
 	}
-	pair, err := h.tokenService.RefreshToken(r.Context(), refresh, clientID, cl.Scopes)
+	pair, err := h.tokenService.RefreshTokenWithClaimPolicy(
+		r.Context(), refresh, clientID, cl.Scopes,
+		scopeClaimsForClient(cl.Scopes, cl, h.oauthPolicy()),
+	)
 	if err != nil {
 		if errors.Is(err, ErrRefreshTokenReuse) {
 			h.recordGrantAudit(r.Context(), models.AuditRefreshTokenReuse, models.GrantRefreshToken, cl.ID, "failure", "critical", "refresh_reuse")
@@ -620,6 +640,12 @@ func (h *Handler) UserInfo(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusUnauthorized, "invalid_token")
 		return
 	}
+	allowedClaims := effectiveClaimNames(strings.Fields(claims.Scope), claims.AllowedClaims, claims.ClaimNamesSet)
+	if !containsScope(allowedClaims, "sub") {
+		w.Header().Set("WWW-Authenticate", `Bearer error="insufficient_scope", scope="openid"`)
+		writeError(w, http.StatusForbidden, "insufficient_scope")
+		return
+	}
 	id, err := uuid.Parse(claims.Subject)
 	if err != nil {
 		writeError(w, http.StatusUnauthorized, "invalid_token")
@@ -631,18 +657,8 @@ func (h *Handler) UserInfo(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	result := map[string]interface{}{"sub": claims.Subject}
-	scopes := strings.Fields(claims.Scope)
-	if containsScope(scopes, "profile") {
-		result["preferred_username"] = u.Username
-		if u.DisplayName != nil {
-			result["name"] = *u.DisplayName
-		}
-		if u.AvatarURL != nil {
-			result["picture"] = h.absolutePictureURL(*u.AvatarURL)
-		}
-	}
-	if containsScope(scopes, "email") && u.Email != nil {
-		result["email"] = *u.Email
+	for key, value := range h.userClaimsForAllowed(u, allowedClaims) {
+		result[key] = value
 	}
 	writeJSON(w, http.StatusOK, result)
 }
@@ -842,6 +858,81 @@ func parseAndValidateScopes(raw string, allowed []string) ([]string, error) {
 	}
 	sort.Strings(result)
 	return result, nil
+}
+
+func intersectScopes(scopes, allowed []string) []string {
+	allowedSet := make(map[string]struct{}, len(allowed))
+	for _, scope := range allowed {
+		allowedSet[scope] = struct{}{}
+	}
+	result := make([]string, 0, len(scopes))
+	for _, scope := range scopes {
+		if _, ok := allowedSet[scope]; ok {
+			result = append(result, scope)
+		}
+	}
+	return result
+}
+
+func (h *Handler) userClaimsForAllowed(u *models.User, allowedClaims []string) map[string]interface{} {
+	result := make(map[string]interface{})
+	if containsScope(allowedClaims, "preferred_username") {
+		result["preferred_username"] = u.Username
+	}
+	if containsScope(allowedClaims, "name") && u.DisplayName != nil {
+		result["name"] = *u.DisplayName
+	}
+	if containsScope(allowedClaims, "picture") && u.AvatarURL != nil {
+		result["picture"] = h.absolutePictureURL(*u.AvatarURL)
+	}
+	if containsScope(allowedClaims, "email") && u.Email != nil {
+		result["email"] = *u.Email
+	}
+	if containsScope(allowedClaims, "email_verified") {
+		result["email_verified"] = u.EmailVerifiedAt != nil
+	}
+	if containsScope(allowedClaims, "role") {
+		result["role"] = u.Role
+	}
+	return result
+}
+
+func scopeClaimsForClient(scopes []string, cl *models.OAuthClient, policy settings.OAuthPolicy) map[string][]string {
+	allowedClaims := cl.AllowedClaims
+	if allowedClaims == nil {
+		allowedClaims = policy.ClaimsForScopes(cl.Scopes, true)
+	}
+	allowedSet := make(map[string]struct{}, len(allowedClaims))
+	for _, claim := range allowedClaims {
+		allowedSet[claim] = struct{}{}
+	}
+	result := make(map[string][]string, len(scopes))
+	for _, scope := range scopes {
+		definition, ok := policy.ScopeDefinition(scope)
+		if !ok {
+			continue
+		}
+		for _, claim := range definition.Claims {
+			if _, ok := allowedSet[claim]; ok {
+				result[scope] = append(result[scope], claim)
+			}
+		}
+	}
+	return result
+}
+
+func scopeDetailsForScopes(scopes []string, policy settings.OAuthPolicy) map[string]session.ConsentScopeDetails {
+	result := make(map[string]session.ConsentScopeDetails, len(scopes))
+	for _, scope := range scopes {
+		definition, ok := policy.ScopeDefinition(scope)
+		if !ok {
+			continue
+		}
+		result[scope] = session.ConsentScopeDetails{
+			DisplayName: definition.DisplayName, Description: definition.Description, RiskLevel: definition.RiskLevel,
+		}
+	}
+	return result
 }
 
 func withoutScope(scopes []string, excluded string) []string {

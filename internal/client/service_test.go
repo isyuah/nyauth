@@ -3,6 +3,7 @@ package client
 import (
 	"context"
 	"errors"
+	"slices"
 	"testing"
 	"time"
 
@@ -215,5 +216,95 @@ func TestSelfServiceCreationCanBeDisabled(t *testing.T) {
 	_, err := service.CreateForOwner(context.Background(), "2f1c9f8d-8fb2-4741-8a7c-3e9ce813e2ee", models.CreateClientRequest{})
 	if !errors.Is(err, ErrSelfServiceDisabled) {
 		t.Fatalf("disabled self-service error = %v", err)
+	}
+}
+
+func TestSelfServiceCannotAssignAdministratorOnlyScopesOrClaims(t *testing.T) {
+	policy := settings.DefaultOAuthPolicy()
+	policy.AllowedScopes = append(policy.AllowedScopes, "tenant.read", "admin.role")
+	policy.ScopeDefinitions["tenant.read"] = settings.OAuthScopeDefinition{
+		DisplayName: "读取租户", Description: "读取当前用户可以访问的租户信息。",
+		Claims: []string{"preferred_username", "role"}, AssignmentPolicy: settings.OAuthAssignmentSelfService, RiskLevel: settings.OAuthRiskPersonalData,
+	}
+	policy.ScopeDefinitions["admin.role"] = settings.OAuthScopeDefinition{
+		DisplayName: "读取账户角色", Description: "读取用户在 Nyauth 中的账户角色。",
+		Claims: []string{"role"}, AssignmentPolicy: settings.OAuthAssignmentAdminOnly, RiskLevel: settings.OAuthRiskSensitive,
+	}
+	normalized, err := settings.NormalizeOAuthPolicyUpdate(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	service := NewService(nil)
+	base := models.CreateClientRequest{
+		Name: "Tenant App", RedirectURIs: []string{"https://app.example/callback"},
+		Grants: []string{models.GrantAuthorizationCode}, Scopes: []string{"openid", "tenant.read"},
+	}
+	created, _, err := service.buildClientForActor(base, false, settings.Versioned[settings.OAuthPolicy]{Value: normalized})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !slices.Equal(created.AllowedClaims, []string{"sub", "preferred_username"}) {
+		t.Fatalf("self-service default claims = %#v", created.AllowedClaims)
+	}
+	withRole := base
+	withRole.AllowedClaims = []string{"sub", "preferred_username", "role"}
+	if _, _, err := service.buildClientForActor(withRole, false, settings.Versioned[settings.OAuthPolicy]{Value: normalized}); !errors.Is(err, ErrInvalidClient) {
+		t.Fatalf("self-service role assignment error = %v", err)
+	}
+	adminScope := base
+	adminScope.Scopes = []string{"openid", "admin.role"}
+	if _, _, err := service.buildClientForActor(adminScope, false, settings.Versioned[settings.OAuthPolicy]{Value: normalized}); !errors.Is(err, ErrInvalidClient) {
+		t.Fatalf("self-service admin scope error = %v", err)
+	}
+	admin, _, err := service.buildClientForActor(adminScope, true, settings.Versioned[settings.OAuthPolicy]{Value: normalized})
+	if err != nil || !slices.Equal(admin.AllowedClaims, []string{"sub", "role"}) {
+		t.Fatalf("administrator assignment = %#v, %v", admin, err)
+	}
+}
+
+func TestOptionalScopesMustBeAValidAuthorizationCodeSubset(t *testing.T) {
+	t.Parallel()
+	service := NewService(nil)
+	base := models.CreateClientRequest{
+		Name: "Consent App", RedirectURIs: []string{"https://app.example/callback"},
+		Grants: []string{models.GrantAuthorizationCode, models.GrantRefreshToken},
+		Scopes: []string{"openid", "profile", "email", "offline_access"},
+	}
+	valid := base
+	valid.OptionalScopes = []string{"profile", "offline_access"}
+	created, _, err := service.buildClient(valid)
+	if err != nil {
+		t.Fatalf("valid optional scopes rejected: %v", err)
+	}
+	if len(created.OptionalScopes) != 2 || created.OptionalScopes[0] != "profile" || created.OptionalScopes[1] != "offline_access" {
+		t.Fatalf("stored optional scopes = %#v", created.OptionalScopes)
+	}
+
+	tests := []struct {
+		name   string
+		mutate func(*models.CreateClientRequest)
+	}{
+		{name: "openid cannot be optional", mutate: func(req *models.CreateClientRequest) { req.OptionalScopes = []string{"openid"} }},
+		{name: "scope must be allowed", mutate: func(req *models.CreateClientRequest) { req.OptionalScopes = []string{"groups"} }},
+		{name: "duplicates are rejected", mutate: func(req *models.CreateClientRequest) { req.OptionalScopes = []string{"profile", "profile"} }},
+		{name: "at least one scope remains required", mutate: func(req *models.CreateClientRequest) {
+			req.Scopes = []string{"profile"}
+			req.OptionalScopes = []string{"profile"}
+		}},
+		{name: "authorization code is required", mutate: func(req *models.CreateClientRequest) {
+			req.RedirectURIs = nil
+			req.Grants = []string{models.GrantClientCredentials}
+			req.Scopes = []string{"profile", "service.read"}
+			req.OptionalScopes = []string{"profile"}
+		}},
+	}
+	for _, testCase := range tests {
+		t.Run(testCase.name, func(t *testing.T) {
+			request := base
+			testCase.mutate(&request)
+			if _, _, err := service.buildClient(request); !errors.Is(err, ErrInvalidClient) {
+				t.Fatalf("invalid optional scopes error = %v", err)
+			}
+		})
 	}
 }

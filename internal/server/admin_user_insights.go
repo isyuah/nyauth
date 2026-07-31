@@ -17,12 +17,13 @@ import (
 )
 
 type adminUserAuthorization struct {
-	ID         uuid.UUID  `json:"id"`
-	ClientID   string     `json:"client_id"`
-	ClientName string     `json:"client_name"`
-	Scopes     []string   `json:"scopes"`
-	GrantedAt  time.Time  `json:"granted_at"`
-	LastUsedAt *time.Time `json:"last_used_at,omitempty"`
+	ID            uuid.UUID  `json:"id"`
+	ClientID      string     `json:"client_id"`
+	ClientName    string     `json:"client_name"`
+	Scopes        []string   `json:"scopes"`
+	AllowedClaims []string   `json:"allowed_claims"`
+	GrantedAt     time.Time  `json:"granted_at"`
+	LastUsedAt    *time.Time `json:"last_used_at,omitempty"`
 }
 
 type adminUserClientSummary struct {
@@ -32,6 +33,8 @@ type adminUserClientSummary struct {
 	AccessPolicy     string     `json:"access_policy"`
 	Grants           []string   `json:"grants"`
 	Scopes           []string   `json:"scopes"`
+	OptionalScopes   []string   `json:"optional_scopes"`
+	AllowedClaims    []string   `json:"allowed_claims"`
 	SecretHint       *string    `json:"secret_hint,omitempty"`
 	SecretLastUsedAt *time.Time `json:"secret_last_used_at,omitempty"`
 	CreatedAt        time.Time  `json:"created_at"`
@@ -153,7 +156,8 @@ func (s *Server) handleAdminUserAuthorizations(w http.ResponseWriter, r *http.Re
 		}
 		active = append(active, adminUserAuthorization{
 			ID: items[index].ID, ClientID: items[index].ClientID, ClientName: items[index].ClientName,
-			Scopes: items[index].Scopes, GrantedAt: items[index].GrantedAt, LastUsedAt: items[index].LastUsedAt,
+			Scopes: items[index].Scopes, AllowedClaims: items[index].AllowedClaims,
+			GrantedAt: items[index].GrantedAt, LastUsedAt: items[index].LastUsedAt,
 		})
 	}
 	writeJSON(w, http.StatusOK, active)
@@ -187,7 +191,7 @@ func (s *Server) handleAdminUserClients(w http.ResponseWriter, r *http.Request) 
 		item := items.Items[index]
 		result.Items = append(result.Items, adminUserClientSummary{
 			ID: item.ID, Name: item.Name, IsPublic: item.IsPublic, AccessPolicy: item.AccessPolicy,
-			Grants: item.Grants, Scopes: item.Scopes, SecretHint: item.SecretHint,
+			Grants: item.Grants, Scopes: item.Scopes, OptionalScopes: item.OptionalScopes, AllowedClaims: item.AllowedClaims, SecretHint: item.SecretHint,
 			SecretLastUsedAt: item.SecretLastUsedAt, CreatedAt: item.CreatedAt, UpdatedAt: item.UpdatedAt,
 		})
 	}

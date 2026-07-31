@@ -1,6 +1,7 @@
 package auth
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/rsa"
@@ -19,6 +20,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/nyasharp/nyauth/internal/config"
 	"github.com/nyasharp/nyauth/internal/session"
+	"github.com/nyasharp/nyauth/internal/settings"
 	"github.com/nyasharp/nyauth/pkg/models"
 	"github.com/redis/go-redis/v9"
 )
@@ -75,10 +77,11 @@ func TestIDTokenUserInfoIsLimitedByGrantedScopes(t *testing.T) {
 	}
 	email := scopedIDTokenUserInfo([]string{"openid", "email"}, all)
 	if email["email"] != "alice@example.com" || len(email) != 1 {
-		t.Fatalf("email claims were not minimized: %#v", email)
+		t.Fatalf("legacy email claims were expanded: %#v", email)
 	}
-	if _, ok := email["email_verified"]; ok {
-		t.Fatalf("unpersisted verification state was asserted: %#v", email)
+	currentEmail := claimLimitedUserInfo([]string{"email", "email_verified"}, all)
+	if currentEmail["email"] != "alice@example.com" || currentEmail["email_verified"] != true || len(currentEmail) != 2 {
+		t.Fatalf("current email claims were not emitted: %#v", currentEmail)
 	}
 }
 
@@ -98,6 +101,31 @@ func TestRefreshRejectsRemovedScopesBeforeRotation(t *testing.T) {
 	}
 	if _, err := store.GetRefreshToken(ctx, "refresh"); err == nil {
 		t.Fatal("scope-invalid refresh family was not revoked")
+	}
+}
+
+func TestRefreshRejectsRemovedClaimsBeforeRotation(t *testing.T) {
+	mini := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: mini.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+	store := session.NewStore(client)
+	ctx := context.Background()
+	data := &session.TokenData{
+		ClientID: "client", UserID: "client", Scopes: []string{"openid", "tenant.read"},
+		AllowedClaims: []string{"sub", "role"}, TokenUse: "refresh",
+	}
+	if err := store.SaveRefreshToken(ctx, "refresh", data, time.Hour); err != nil {
+		t.Fatal(err)
+	}
+	service := NewTokenService(nil, store, "", time.Minute, time.Hour)
+	currentScopeClaims := map[string][]string{"openid": {"sub"}, "tenant.read": {}}
+	if _, err := service.RefreshTokenWithClaimPolicy(
+		ctx, "refresh", "client", []string{"openid", "tenant.read"}, currentScopeClaims,
+	); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("refresh token retained a removed claim: %v", err)
+	}
+	if _, err := store.GetRefreshToken(ctx, "refresh"); err == nil {
+		t.Fatal("claim-invalid refresh family was not revoked")
 	}
 }
 
@@ -275,6 +303,148 @@ func TestParseAndValidateScopes(t *testing.T) {
 	}
 }
 
+func TestConsentScopeSelectionPreservesRequiredScopes(t *testing.T) {
+	t.Parallel()
+	requested := []string{"email", "offline_access", "openid", "profile"}
+	optional := []string{"email", "offline_access", "profile"}
+	granted, err := resolveGrantedScopes(requested, optional, []string{"profile"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := strings.Join(granted, " "); got != "openid profile" {
+		t.Fatalf("granted scopes = %q, want openid profile", got)
+	}
+	all, err := resolveGrantedScopes(requested, optional, optional)
+	if err != nil || strings.Join(all, " ") != strings.Join(requested, " ") {
+		t.Fatalf("all optional scopes grant = %v, %v", all, err)
+	}
+
+	invalid := []struct {
+		name     string
+		optional []string
+		selected []string
+	}{
+		{name: "optional scope not requested", optional: []string{"groups"}, selected: nil},
+		{name: "openid optional", optional: []string{"openid"}, selected: nil},
+		{name: "required scope selected as optional", optional: optional, selected: []string{"openid"}},
+		{name: "duplicate selection", optional: optional, selected: []string{"profile", "profile"}},
+	}
+	for _, testCase := range invalid {
+		t.Run(testCase.name, func(t *testing.T) {
+			if _, err := resolveGrantedScopes(requested, testCase.optional, testCase.selected); !errors.Is(err, errInvalidConsentScopes) {
+				t.Fatalf("selection error = %v", err)
+			}
+		})
+	}
+}
+
+func TestConsentPermissionsDescribeStandardClaims(t *testing.T) {
+	t.Parallel()
+	permissions := consentPermissions(
+		[]string{"openid", "profile", "email", "offline_access", "tenant.read"},
+		[]string{"profile", "email"},
+		nil,
+		nil,
+	)
+	if len(permissions) != 5 {
+		t.Fatalf("permissions = %#v", permissions)
+	}
+	if !permissions[0].Required || strings.Join(permissions[0].Claims, " ") != "sub" {
+		t.Fatalf("openid permission = %#v", permissions[0])
+	}
+	if permissions[1].Required || strings.Join(permissions[1].Claims, " ") != "preferred_username name picture" {
+		t.Fatalf("profile permission = %#v", permissions[1])
+	}
+	if permissions[2].Required || strings.Join(permissions[2].Claims, " ") != "email email_verified" {
+		t.Fatalf("email permission = %#v", permissions[2])
+	}
+	if permissions[3].Claims == nil || permissions[4].Claims == nil || len(permissions[3].Claims) != 0 || len(permissions[4].Claims) != 0 {
+		t.Fatalf("non-claim permissions leaked claims: %#v", permissions)
+	}
+	encodedPermissions, err := json.Marshal(permissions)
+	if err != nil {
+		t.Fatalf("marshal permissions: %v", err)
+	}
+	if bytes.Contains(encodedPermissions, []byte(`"claims":null`)) {
+		t.Fatalf("consent API encoded an absent claim list as null: %s", encodedPermissions)
+	}
+}
+
+func TestUserClaimsFollowAllowedClaimNamesInsteadOfStandardScopes(t *testing.T) {
+	t.Parallel()
+	displayName := "Alice Example"
+	email := "alice@example.test"
+	avatar := "/media/avatars/avatar-id/128.webp"
+	verifiedAt := time.Now().UTC()
+	handler := &Handler{config: &config.Config{Auth: config.AuthConfig{Issuer: "https://issuer.example"}}}
+	u := &models.User{
+		Username: "alice", DisplayName: &displayName, Email: &email, EmailVerifiedAt: &verifiedAt,
+		AvatarURL: &avatar, Role: "admin",
+	}
+	claims := handler.userClaimsForAllowed(u, []string{"role", "email_verified"})
+	if len(claims) != 2 || claims["role"] != "admin" || claims["email_verified"] != true {
+		t.Fatalf("custom-scope claims = %#v", claims)
+	}
+	for _, forbidden := range []string{"preferred_username", "name", "picture", "email"} {
+		if _, ok := claims[forbidden]; ok {
+			t.Fatalf("unapproved claim %q leaked: %#v", forbidden, claims)
+		}
+	}
+}
+
+func TestExplicitEmptyAllowedClaimsRemainDistinctFromLegacyJWTs(t *testing.T) {
+	t.Parallel()
+	encoded, err := json.Marshal(&Claims{AllowedClaims: []string{}, ClaimNamesSet: true, TokenUse: "access"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(encoded), `"claim_names_set":true`) {
+		t.Fatalf("explicit claim policy marker was omitted: %s", encoded)
+	}
+	var current Claims
+	if err := json.Unmarshal(encoded, &current); err != nil {
+		t.Fatal(err)
+	}
+	if !current.ClaimNamesSet || len(current.AllowedClaims) != 0 {
+		t.Fatalf("explicit empty claim names decoded as %#v", current)
+	}
+	effective := effectiveClaimNames([]string{"openid", "profile"}, current.AllowedClaims, current.ClaimNamesSet)
+	if effective == nil || len(effective) != 0 {
+		t.Fatalf("explicit empty claim policy became %#v", effective)
+	}
+	var legacy Claims
+	if err := json.Unmarshal([]byte(`{"token_use":"access"}`), &legacy); err != nil {
+		t.Fatal(err)
+	}
+	if legacy.ClaimNamesSet || legacy.AllowedClaims != nil {
+		t.Fatalf("legacy missing claim policy decoded as %#v", legacy)
+	}
+}
+
+func TestDecodeConsentDecisionDistinguishesMissingAndNullOptionalScopes(t *testing.T) {
+	t.Parallel()
+	missing := httptest.NewRequest(http.MethodPost, "/api/consent/accept", strings.NewReader(`{"challenge":"challenge"}`))
+	decoded, ok := decodeConsentDecisionRequest(missing)
+	if !ok || decoded.GrantedOptionalScopes != nil {
+		t.Fatalf("missing optional scopes decoded as %#v, ok=%v", decoded, ok)
+	}
+	empty := httptest.NewRequest(http.MethodPost, "/api/consent/accept", strings.NewReader(`{"challenge":"challenge","granted_optional_scopes":[]}`))
+	decoded, ok = decodeConsentDecisionRequest(empty)
+	if !ok || decoded.GrantedOptionalScopes == nil || len(*decoded.GrantedOptionalScopes) != 0 {
+		t.Fatalf("empty optional scopes decoded as %#v, ok=%v", decoded, ok)
+	}
+	for _, body := range []string{
+		`{"challenge":"challenge","granted_optional_scopes":null}`,
+		`{"challenge":"challenge","granted_optional_scopes":"profile"}`,
+		`{"challenge":"challenge","granted_optional_scopes":[],"unexpected":true}`,
+	} {
+		request := httptest.NewRequest(http.MethodPost, "/api/consent/accept", strings.NewReader(body))
+		if _, ok := decodeConsentDecisionRequest(request); ok {
+			t.Fatalf("invalid consent decision accepted: %s", body)
+		}
+	}
+}
+
 func TestAddQueryPreservesExistingParameters(t *testing.T) {
 	got, err := addQuery("https://client.example/cb?tenant=one", map[string]string{"code": "a+b&c", "state": "x y"})
 	if err != nil {
@@ -305,7 +475,22 @@ func TestOAuthOpaqueParameterBounds(t *testing.T) {
 }
 
 func TestDiscoveryAdvertisesOnlySupportedFlows(t *testing.T) {
-	handler := &Handler{config: &config.Config{Auth: config.AuthConfig{Issuer: "https://issuer.example"}}}
+	policy := settings.DefaultOAuthPolicy()
+	policy.AllowedScopes = append(policy.AllowedScopes, "tenant.read")
+	policy.ScopeDefinitions["tenant.read"] = settings.OAuthScopeDefinition{
+		DisplayName: "读取租户", Description: "读取当前用户可以访问的租户信息。",
+		Claims: []string{"role"}, AssignmentPolicy: settings.OAuthAssignmentAdminOnly, RiskLevel: settings.OAuthRiskSensitive,
+	}
+	policy, err := settings.NormalizeOAuthPolicyUpdate(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	handler := &Handler{
+		config: &config.Config{Auth: config.AuthConfig{Issuer: "https://issuer.example"}},
+		oauthPolicySource: func() settings.Versioned[settings.OAuthPolicy] {
+			return settings.Versioned[settings.OAuthPolicy]{Revision: 2, Value: policy}
+		},
+	}
 	recorder := httptest.NewRecorder()
 	handler.Discovery(recorder, httptest.NewRequest("GET", "/.well-known/openid-configuration", nil))
 	var body map[string]interface{}
@@ -319,6 +504,10 @@ func TestDiscoveryAdvertisesOnlySupportedFlows(t *testing.T) {
 	methods := body["code_challenge_methods_supported"].([]interface{})
 	if len(methods) != 1 || methods[0] != "S256" {
 		t.Fatalf("unexpected PKCE methods: %v", methods)
+	}
+	scopes := body["scopes_supported"].([]interface{})
+	if scopes[len(scopes)-1] != "tenant.read" {
+		t.Fatalf("discovery scopes = %v", scopes)
 	}
 }
 

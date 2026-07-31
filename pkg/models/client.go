@@ -21,6 +21,8 @@ type OAuthClient struct {
 	PostLogoutRedirectURIs []string          `json:"post_logout_redirect_uris" db:"post_logout_redirect_uris"`
 	Grants                 []string          `json:"grants" db:"grants"`
 	Scopes                 []string          `json:"scopes" db:"scopes"`
+	OptionalScopes         []string          `json:"optional_scopes" db:"optional_scopes"`
+	AllowedClaims          []string          `json:"allowed_claims" db:"allowed_claims"`
 	IsPublic               bool              `json:"is_public" db:"is_public"`
 	AccessPolicy           string            `json:"access_policy" db:"access_policy"`
 	OwnerID                *string           `json:"owner_id,omitempty" db:"owner_id"`
@@ -54,6 +56,8 @@ type CreateClientRequest struct {
 	PostLogoutRedirectURIs []string          `json:"post_logout_redirect_uris,omitempty"`
 	Grants                 []string          `json:"grants" validate:"required,min=1"`
 	Scopes                 []string          `json:"scopes"`
+	OptionalScopes         []string          `json:"optional_scopes,omitempty"`
+	AllowedClaims          []string          `json:"allowed_claims,omitempty"`
 	IsPublic               bool              `json:"is_public"`
 	AccessPolicy           string            `json:"access_policy,omitempty"`
 	OwnerID                *string           `json:"owner_id,omitempty"`
@@ -67,6 +71,8 @@ type UpdateClientRequest struct {
 	PostLogoutRedirectURIs []string          `json:"post_logout_redirect_uris,omitempty"`
 	Grants                 []string          `json:"grants,omitempty"`
 	Scopes                 []string          `json:"scopes,omitempty"`
+	OptionalScopes         []string          `json:"optional_scopes,omitempty"`
+	AllowedClaims          []string          `json:"allowed_claims,omitempty"`
 	IsPublic               *bool             `json:"is_public,omitempty"`
 	AccessPolicy           *string           `json:"access_policy,omitempty"`
 	Metadata               map[string]string `json:"metadata,omitempty"`

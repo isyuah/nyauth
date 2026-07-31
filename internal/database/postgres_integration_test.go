@@ -171,6 +171,9 @@ func TestConcurrentBaselineMigrationInIsolatedSchema(t *testing.T) {
 	assertColumn(t, schema, "oauth_clients", "secret_version", "NO")
 	assertColumn(t, schema, "oauth_clients", "secret_rotated_at", "YES")
 	assertColumn(t, schema, "oauth_clients", "secret_last_used_at", "YES")
+	assertColumn(t, schema, "oauth_clients", "optional_scopes", "NO")
+	assertColumn(t, schema, "oauth_clients", "allowed_claims", "NO")
+	assertColumn(t, schema, "oauth_authorizations", "allowed_claims", "NO")
 	assertColumn(t, schema, "oauth_providers", "revision", "NO")
 	assertColumn(t, schema, "oauth_providers", "display_name", "NO")
 	assertColumn(t, schema, "oauth_providers", "icon_key", "NO")
@@ -779,7 +782,7 @@ func TestClientQuotaIsAtomicAcrossConcurrentCreates(t *testing.T) {
 				ID: fmt.Sprintf("quota-client-%02d-%s", index, uuid.NewString()), SecretHash: &secret,
 				Name: fmt.Sprintf("Quota client %d", index), RedirectURIs: []string{"https://client.example/callback"},
 				PostLogoutRedirectURIs: []string{}, Grants: []string{models.GrantAuthorizationCode},
-				Scopes: []string{"openid"}, IsPublic: false, Metadata: map[string]string{},
+				Scopes: []string{"openid"}, AllowedClaims: []string{"sub"}, IsPublic: false, Metadata: map[string]string{},
 			}
 			results <- store.CreateForOwner(ctx, registered, ownerID.String())
 		}(i)
@@ -1218,14 +1221,14 @@ func TestOAuthAuthorizationStoreUpsertListRevokeAndReauthorize(t *testing.T) {
 
 	store := authorization.NewStore(schema.pool)
 	grantedAt := time.Date(2026, 7, 26, 10, 0, 0, 0, time.UTC)
-	if err := store.Upsert(ctx, userID, registered.ID, []string{"profile", "openid", "profile"}, grantedAt); err != nil {
+	if err := store.Upsert(ctx, userID, registered.ID, []string{"profile", "openid", "profile"}, []string{"sub", "name", "preferred_username"}, grantedAt); err != nil {
 		t.Fatalf("upsert authorization: %v", err)
 	}
 	items, err := store.ListByUser(ctx, userID)
 	if err != nil {
 		t.Fatalf("list authorizations: %v", err)
 	}
-	if len(items) != 1 || items[0].ClientName != "Authorization client" || strings.Join(items[0].Scopes, " ") != "openid profile" {
+	if len(items) != 1 || items[0].ClientName != "Authorization client" || strings.Join(items[0].Scopes, " ") != "openid profile" || strings.Join(items[0].AllowedClaims, " ") != "name preferred_username sub" {
 		t.Fatalf("unexpected authorization list: %#v", items)
 	}
 
@@ -1240,7 +1243,7 @@ func TestOAuthAuthorizationStoreUpsertListRevokeAndReauthorize(t *testing.T) {
 	if len(items) != 0 {
 		t.Fatalf("revoked authorization remained active: %#v", items)
 	}
-	if err := store.Upsert(ctx, userID, registered.ID, []string{"profile"}, grantedAt.Add(30*time.Minute)); err != nil {
+	if err := store.Upsert(ctx, userID, registered.ID, []string{"profile"}, []string{"name"}, grantedAt.Add(30*time.Minute)); err != nil {
 		t.Fatalf("apply stale consent after revocation: %v", err)
 	}
 	items, err = store.ListByUser(ctx, userID)
@@ -1252,14 +1255,14 @@ func TestOAuthAuthorizationStoreUpsertListRevokeAndReauthorize(t *testing.T) {
 	}
 
 	reauthorizedAt := revokedAt.Add(time.Hour)
-	if err := store.Upsert(ctx, userID, registered.ID, []string{"openid"}, reauthorizedAt); err != nil {
+	if err := store.Upsert(ctx, userID, registered.ID, []string{"openid"}, []string{"sub"}, reauthorizedAt); err != nil {
 		t.Fatalf("reauthorize: %v", err)
 	}
 	items, err = store.ListByUser(ctx, userID)
 	if err != nil {
 		t.Fatalf("list reauthorized grant: %v", err)
 	}
-	if len(items) != 1 || items[0].RevokedAt != nil || !items[0].GrantedAt.Equal(reauthorizedAt) || strings.Join(items[0].Scopes, " ") != "openid" {
+	if len(items) != 1 || items[0].RevokedAt != nil || !items[0].GrantedAt.Equal(reauthorizedAt) || strings.Join(items[0].Scopes, " ") != "openid" || strings.Join(items[0].AllowedClaims, " ") != "sub" {
 		t.Fatalf("unexpected reauthorized grant: %#v", items)
 	}
 	if err := store.Revoke(ctx, userID, registered.ID, revokedAt); !errors.Is(err, authorization.ErrAuthorizationNewer) {

@@ -37,7 +37,7 @@ type OwnerQuota struct {
 	Override *int  `json:"quota_override"`
 }
 
-const clientSelectCols = `id, secret_hash, secret_hint, secret_version, secret_rotated_at, secret_last_used_at, name, redirect_uris, post_logout_redirect_uris, grants, scopes, is_public, access_policy, owner_id, metadata, created_at, updated_at`
+const clientSelectCols = `id, secret_hash, secret_hint, secret_version, secret_rotated_at, secret_last_used_at, name, redirect_uris, post_logout_redirect_uris, grants, scopes, optional_scopes, allowed_claims, is_public, access_policy, owner_id, metadata, created_at, updated_at`
 
 type rowScanner interface{ Scan(dest ...any) error }
 
@@ -50,7 +50,7 @@ func scanClient(row rowScanner) (*models.OAuthClient, error) {
 	if err := row.Scan(
 		&c.ID, &c.SecretHash, &c.SecretHint, &c.SecretVersion, &c.SecretRotatedAt,
 		&c.SecretLastUsedAt, &c.Name, &c.RedirectURIs, &c.PostLogoutRedirectURIs,
-		&c.Grants, &c.Scopes, &c.IsPublic, &c.AccessPolicy, &c.OwnerID, &c.Metadata, &c.CreatedAt, &c.UpdatedAt,
+		&c.Grants, &c.Scopes, &c.OptionalScopes, &c.AllowedClaims, &c.IsPublic, &c.AccessPolicy, &c.OwnerID, &c.Metadata, &c.CreatedAt, &c.UpdatedAt,
 	); err != nil {
 		return nil, err
 	}
@@ -82,13 +82,19 @@ func insertClient(ctx context.Context, execer clientExecer, c *models.OAuthClien
 	if c.AccessPolicy == "" {
 		c.AccessPolicy = models.ClientAccessOpen
 	}
+	if c.OptionalScopes == nil {
+		c.OptionalScopes = []string{}
+	}
+	if c.AllowedClaims == nil {
+		c.AllowedClaims = []string{}
+	}
 	_, err := execer.Exec(ctx, `
 		INSERT INTO oauth_clients (
 			id,secret_hash,secret_hint,secret_version,secret_rotated_at,name,redirect_uris,
-			post_logout_redirect_uris,grants,scopes,is_public,access_policy,owner_id,metadata
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+			post_logout_redirect_uris,grants,scopes,optional_scopes,allowed_claims,is_public,access_policy,owner_id,metadata
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
 	`, c.ID, c.SecretHash, c.SecretHint, c.SecretVersion, c.SecretRotatedAt, c.Name,
-		c.RedirectURIs, c.PostLogoutRedirectURIs, c.Grants, c.Scopes, c.IsPublic, c.AccessPolicy, c.OwnerID, c.Metadata)
+		c.RedirectURIs, c.PostLogoutRedirectURIs, c.Grants, c.Scopes, c.OptionalScopes, c.AllowedClaims, c.IsPublic, c.AccessPolicy, c.OwnerID, c.Metadata)
 	if err != nil {
 		return fmt.Errorf("creating OAuth client: %w", err)
 	}
@@ -180,7 +186,7 @@ func (s *Store) Update(ctx context.Context, c *models.OAuthClient, mutation audi
 	name, isPublic, accessPolicy := c.Name, c.IsPublic, c.AccessPolicy
 	_, err := s.UpdateRequestWithOAuthPolicy(ctx, c.ID, models.UpdateClientRequest{
 		Name: &name, RedirectURIs: c.RedirectURIs, PostLogoutRedirectURIs: c.PostLogoutRedirectURIs,
-		Grants: c.Grants, Scopes: c.Scopes, IsPublic: &isPublic, AccessPolicy: &accessPolicy, Metadata: c.Metadata,
+		Grants: c.Grants, Scopes: c.Scopes, OptionalScopes: c.OptionalScopes, AllowedClaims: c.AllowedClaims, IsPublic: &isPublic, AccessPolicy: &accessPolicy, Metadata: c.Metadata,
 	}, mutation, settings.Versioned[settings.OAuthPolicy]{Value: settings.DefaultOAuthPolicy()})
 	return err
 }
@@ -205,7 +211,7 @@ func (s *Store) UpdateRequestWithOAuthPolicy(ctx context.Context, id string, req
 	if err := validateUpdatedClientPolicy(current, &updated, request, policy.Value); err != nil {
 		return nil, err
 	}
-	result, err := tx.Exec(ctx, `UPDATE oauth_clients SET name=$2,redirect_uris=$3,post_logout_redirect_uris=$4,grants=$5,scopes=$6,metadata=$7,access_policy=$8,updated_at=NOW() WHERE id=$1`, updated.ID, updated.Name, updated.RedirectURIs, updated.PostLogoutRedirectURIs, updated.Grants, updated.Scopes, updated.Metadata, updated.AccessPolicy)
+	result, err := tx.Exec(ctx, `UPDATE oauth_clients SET name=$2,redirect_uris=$3,post_logout_redirect_uris=$4,grants=$5,scopes=$6,optional_scopes=$7,allowed_claims=$8,metadata=$9,access_policy=$10,updated_at=NOW() WHERE id=$1`, updated.ID, updated.Name, updated.RedirectURIs, updated.PostLogoutRedirectURIs, updated.Grants, updated.Scopes, updated.OptionalScopes, updated.AllowedClaims, updated.Metadata, updated.AccessPolicy)
 	if err != nil {
 		return nil, fmt.Errorf("updating client: %w", err)
 	}

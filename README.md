@@ -9,7 +9,7 @@
 - 第一方后台仅使用 `HttpOnly + SameSite=Lax` 会话 Cookie，并对修改请求强制校验 CSRF。
 - OAuth 授权码客户端强制使用 PKCE S256；不支持 plain、implicit 或 hybrid 流程。
 - JWT 固定使用 RS256，refresh token 采用 family 轮换与重复使用检测。
-- 数据库以嵌入二进制的 `000001_baseline` 建立破坏性发布基线，并通过兼容的 `000002` 至 `000010_human_verification` 加法迁移演进；当前 `0.5.0-dev` 要求 schema version 10，可从正式 `0.3.0` 的 schema version 3 依次迁移。服务启动只校验 schema，不再隐式迁移。
+- 数据库以嵌入二进制的 `000001_baseline` 建立破坏性发布基线，并通过兼容的 `000002` 至 `000012_oauth_client_claims` 加法迁移演进；当前 `0.5.0-dev` 要求 schema version 12，可从正式 `0.3.0` 的 schema version 3 依次迁移。服务启动只校验 schema，不再隐式迁移。
 - 旧数据库、session、token、JWK、Provider 凭据和 OAuth 客户端注册均不兼容。
 - 旧 Go/TypeScript SDK 已删除；OAuth/OIDC 集成以标准协议和成熟语言库为准。
 
@@ -22,6 +22,7 @@
 
 - OAuth 2.0：Authorization Code + S256、Client Credentials、Refresh Token
 - OpenID Connect：Discovery、JWKS、ID Token、UserInfo、RP-Initiated Logout
+- OIDC 授权体验：运行时 Scope Catalog、客户端级 Scope/Claim 上限、可选权限声明、详细 Consent 和实际授权收敛
 - 控制面认证：HttpOnly 会话、CSRF、强制首次改密、会话与令牌即时失效
 - 外部身份：GitHub、Google、通用 HTTPS OIDC Provider；不按邮箱自动合并账户
 - 管理后台：用户、客户端、Provider、审计与统计
@@ -279,6 +280,8 @@ await fetch('/api/me', {
 
 只有 authorization-code 请求显式申请并获准 `offline_access` 时才会签发 refresh token。Client Credentials 不会获得 refresh token。
 
+每个客户端的 `scopes` 是可请求权限上限；`optional_scopes` 必须是其中的子集，并只作用于 Authorization Code 用户授权；`allowed_claims` 再限制 ID Token 与 UserInfo 可以返回的用户字段。`openid` 始终是必需权限，且客户端至少保留一个必需 Scope。授权页从运行时 Scope Catalog 展示名称、说明、风险等级和实际 Claim，将请求分成必需和可选两组；用户可以逐项关闭可选权限，授权记录、授权码、Access/Refresh Token 都只保存实际获准集合与 Claim 白名单。若实际集合比请求集合更小，授权回调和 Token 响应都会返回实际 `scope`。现有客户端升级后 `optional_scopes` 默认为空，`allowed_claims` 按旧版本真实返回过的标准字段回填；例如旧 `email` 授权不会在升级后自动增加 `email_verified`。
+
 OAuth 客户端支持 `post_logout_redirect_uris`。`/end_session` 仅允许跳转到与 ID token 客户端匹配的已注册 URI。
 
 ## 账户操作 API
@@ -341,7 +344,8 @@ Provider 不再从 YAML 或环境变量静态加载，只能由管理员写入�
 - `GET/PUT /api/admin/settings/human-verification` 及其 `candidate`、`candidate/test`、`activate`、`rollback`、`disable`、`enable` 接口：管理 Turnstile 不可变候选版本和注册、登录、密码恢复、验证邮件重发、Provider 登录策略；Secret 加密保存且永不回显，激活要求同一候选版本在最近十分钟内真实验证成功，禁用只关闭运行开关并保留当前配置。
 - `protection` 动态控制登录、账户操作、头像和 SMTP 管理限流，以及自助客户端全局默认配额。关闭限流组需要精确危险确认；每次 revision 都使用新的 Redis key namespace，旧计数自然过期。
 - `lifecycle` 动态控制浏览器会话绝对/空闲期限、每用户并发会话上限、近期认证期限、Access/Refresh Token、授权码和审计保留天数。缩短会话期限会在下一次请求时淘汰超龄会话；并发上限在下一次登录时原子淘汰最旧会话；延长不会恢复 Redis 中已经过期的会话。Token 与授权码策略只影响之后新签发或轮换的凭据，已签发凭据保持原到期时间。
-- `oauth` 动态控制用户自助创建、Public Client、可新增 Grant/Scope 与回调地址数量。收紧策略不修改或停用既有客户端；既有超限或已禁用项可以原样保留、等量替换或逐步减少，但不能继续扩大。
+- `oauth` 动态控制用户自助创建、Public Client、可新增 Grant/Scope、Scope Catalog、Claim 分配权限与回调地址数量。标准 Scope 的 Claim 语义固定；自定义 Scope 可映射受支持的内置 Claim。Scope 或 Claim 可设为仅管理员分配，普通用户的客户端目录与创建接口不会暴露这些项目，但最终 Consent 仍会如实显示。每个客户端再以 `scopes`、`optional_scopes` 和 `allowed_claims` 限制请求、用户可拒绝项与字段上限。收紧全局策略不修改或停用既有客户端；既有超限或已禁用项可以原样保留、等量替换或逐步减少，但不能继续扩大。
+- `/admin/oauth/test`：管理员可在生产构建中使用真实 Authorization Code + S256 PKCE 流程检查 Scope Catalog、Consent、Token 与 UserInfo；Confidential Client Secret 只保存在当前页面内存中。测试前必须把页面显示的回调地址登记到目标客户端。
 - `GET /api/admin/stats`：快照化的用户、会话、注册、邮件 backlog、24 小时失败尝试和 SMTP 熔断摘要。
 - `GET /api/admin/stats/login-trend`、`registration-trend`、`mail-trend`：按 UTC 返回 7–90 天的补零趋势；注册趋势含邀请预占/消费/释放，邮件趋势区分其他失败尝试（不含永久拒收）、永久拒收与过期。
 - `GET /api/admin/audit-logs/options`：返回有界、静态的事件、结果、风险和目标类型筛选目录，不扫描审计分区。
@@ -366,7 +370,7 @@ Provider 不再从 YAML 或环境变量静态加载，只能由管理员写入�
 
 Nyauth 不要求使用专有 SDK。服务端应用应通过 Discovery 配置成熟的 OAuth/OIDC 库，并默认采用 BFF + HttpOnly 应用会话。请求 `openid` scope 时必须同时发送随机 `nonce`，授权码流程必须使用 S256 PKCE，并完整验证 ID Token 的签名、issuer、audience、时间和 nonce。
 
-推荐库及安全约束见 [标准 OAuth/OIDC 集成指南](docs/oauth-oidc-integration.md)。近期不支持在浏览器中配置 confidential client secret，也不把 access/refresh token 持久化到 `localStorage`。
+推荐库、安全约束及管理员测试台步骤见 [标准 OAuth/OIDC 集成指南](docs/oauth-oidc-integration.md)。业务应用仍不应在浏览器中持久化 confidential client secret，也不得把 access/refresh token 写入 `localStorage`；管理测试台的 Secret 仅用于人工诊断并停留在页面内存。
 
 单机备份、WAL/PITR、master key、local media/S3 恢复与演练见 [备份与恢复](docs/operations/backup-restore.md)；双实例拓扑、共享私有 S3 与故障语义见 [高可用部署](docs/operations/high-availability.md)；人机验证配置、故障语义和紧急禁用见 [运行时人机验证](docs/operations/human-verification.md)；头像输入、存储、Provider 导入和清理边界见 [安全头像媒体契约](docs/avatar-storage-design.md)。仓库还提供受保护环境下手动触发的 `Isolated recovery drill` 工作流，用一次性 PostgreSQL、空 Redis、带资源计数 manifest 的备份产物和只读 `nyauth verify-recovery` 命令验证 JWK、Provider、TOTP、Passkey 与邮件 envelope 并生成恢复证据；当前该自动化不恢复或抽查头像对象，媒体恢复必须按备份手册另行留证。
 

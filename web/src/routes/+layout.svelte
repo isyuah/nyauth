@@ -1,6 +1,7 @@
 <script lang="ts">
   import '../app.css';
   import { onMount } from 'svelte';
+  import { Tooltip } from 'bits-ui';
   import { initializeBranding } from '$lib/stores';
   import { siteBannerStore } from '$lib/site-banner';
   import { serviceStatusStore } from '$lib/service-control';
@@ -30,10 +31,12 @@
   });
 </script>
 
-<div bind:this={globalBannerStack} data-testid="global-banner-stack" class="fixed inset-x-0 top-0 z-30">
-  <SiteWideBanner />
-  <ServiceStatusBanner />
-</div>
-<div aria-hidden="true" style="height: var(--nya-global-banner-height, 0px);"></div>
-{@render children()}
-<Toast />
+<Tooltip.Provider delayDuration={180} skipDelayDuration={250}>
+  <div bind:this={globalBannerStack} data-testid="global-banner-stack" class="fixed inset-x-0 top-0 z-30">
+    <SiteWideBanner />
+    <ServiceStatusBanner />
+  </div>
+  <div aria-hidden="true" style="height: var(--nya-global-banner-height, 0px);"></div>
+  {@render children()}
+  <Toast />
+</Tooltip.Provider>

@@ -508,7 +508,7 @@ func (s *Server) handleListMyClients(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusInternalServerError, "failed to load application quota")
 		return
 	}
-	policy := s.settingsMgr.OAuthPolicy()
+	policy := s.settingsMgr.OAuthPolicy().SelfServiceView()
 	writeJSON(w, http.StatusOK, clientQuotaPage[models.OAuthClient]{
 		PaginatedResponse: result, OwnerQuota: quota, ClientPolicy: &policy,
 	})

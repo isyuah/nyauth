@@ -180,6 +180,7 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 		return nil, fmt.Errorf("configuring avatar media service: %w", err)
 	}
 	authHandler := auth.NewHandler(tokenService, jwkManager, userService, clientStore, sessionStore, cfg, settings.MaxAccessTokenTTL)
+	authHandler.SetOAuthPolicySource(settingsMgr.OAuthPolicySnapshot)
 	consentHandler := auth.NewConsentHandler(sessionStore, tokenService, clientStore, authorizationStore, cfg)
 	mfaService, err := mfa.NewService(db, mfa.Options{
 		ActiveKeyID: "primary", MasterKeys: map[string][]byte{"primary": cfg.Auth.MasterKey},

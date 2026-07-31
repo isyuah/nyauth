@@ -7,6 +7,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"slices"
 	"strings"
 	"time"
 
@@ -136,13 +137,19 @@ type TokenPair struct {
 
 type Claims struct {
 	jwt.RegisteredClaims
-	Scope       string `json:"scope,omitempty"`
-	TokenUse    string `json:"token_use"`
-	AuthVersion int64  `json:"auth_version,omitempty"`
-	Nonce       string `json:"nonce,omitempty"`
+	Scope         string   `json:"scope,omitempty"`
+	AllowedClaims []string `json:"claim_names,omitempty"`
+	ClaimNamesSet bool     `json:"claim_names_set,omitempty"`
+	TokenUse      string   `json:"token_use"`
+	AuthVersion   int64    `json:"auth_version,omitempty"`
+	Nonce         string   `json:"nonce,omitempty"`
 }
 
 func (ts *TokenService) GenerateAuthorizationCodeTokenPair(ctx context.Context, clientID, userID string, scopes []string, authVersion, authorizationIssuedAt int64, issueRefresh bool) (*TokenPair, error) {
+	return ts.GenerateAuthorizationCodeTokenPairWithClaims(ctx, clientID, userID, scopes, legacyClaimNamesForScopes(scopes), authVersion, authorizationIssuedAt, issueRefresh)
+}
+
+func (ts *TokenService) GenerateAuthorizationCodeTokenPairWithClaims(ctx context.Context, clientID, userID string, scopes, allowedClaims []string, authVersion, authorizationIssuedAt int64, issueRefresh bool) (*TokenPair, error) {
 	if authVersion <= 0 || authorizationIssuedAt <= 0 {
 		return nil, fmt.Errorf("invalid user auth version")
 	}
@@ -151,16 +158,16 @@ func (ts *TokenService) GenerateAuthorizationCodeTokenPair(ctx context.Context, 
 	}); err != nil {
 		return nil, err
 	}
-	return ts.generateTokenPair(ctx, clientID, userID, scopes, authVersion, issueRefresh, "", authorizationIssuedAt)
+	return ts.generateTokenPair(ctx, clientID, userID, scopes, allowedClaims, authVersion, issueRefresh, "", authorizationIssuedAt)
 }
 
 func (ts *TokenService) GenerateClientTokenPair(ctx context.Context, clientID string, scopes []string) (*TokenPair, error) {
-	return ts.generateTokenPair(ctx, clientID, clientID, scopes, 0, false, "", 0)
+	return ts.generateTokenPair(ctx, clientID, clientID, scopes, nil, 0, false, "", 0)
 }
 
-func (ts *TokenService) generateTokenPair(ctx context.Context, clientID, subject string, scopes []string, authVersion int64, issueRefresh bool, familyKey string, authorizationIssuedAt int64) (*TokenPair, error) {
+func (ts *TokenService) generateTokenPair(ctx context.Context, clientID, subject string, scopes, allowedClaims []string, authVersion int64, issueRefresh bool, familyKey string, authorizationIssuedAt int64) (*TokenPair, error) {
 	lifetimes := ts.Lifetimes()
-	access, jti, err := ts.signAccessToken(ctx, clientID, subject, scopes, authVersion, lifetimes.AccessToken)
+	access, jti, err := ts.signAccessToken(ctx, clientID, subject, scopes, allowedClaims, authVersion, lifetimes.AccessToken)
 	if err != nil {
 		return nil, err
 	}
@@ -170,13 +177,13 @@ func (ts *TokenService) generateTokenPair(ctx context.Context, clientID, subject
 		if err != nil {
 			return nil, fmt.Errorf("generating refresh token: %w", err)
 		}
-		refreshData := &session.TokenData{ClientID: clientID, UserID: subject, Scopes: scopes, TokenUse: "refresh", AuthVersion: authVersion, AuthorizationIssuedAt: authorizationIssuedAt}
+		refreshData := &session.TokenData{ClientID: clientID, UserID: subject, Scopes: scopes, AllowedClaims: allowedClaims, ClaimNamesSet: allowedClaims != nil, TokenUse: "refresh", AuthVersion: authVersion, AuthorizationIssuedAt: authorizationIssuedAt}
 		if err := ts.session.SaveRefreshToken(ctx, refresh, refreshData, lifetimes.RefreshToken); err != nil {
 			return nil, fmt.Errorf("storing refresh token: %w", err)
 		}
 		familyKey = refreshData.FamilyKey
 	}
-	data := &session.TokenData{ClientID: clientID, UserID: subject, Scopes: scopes, TokenUse: "access", AuthVersion: authVersion, FamilyKey: familyKey, AuthorizationIssuedAt: authorizationIssuedAt}
+	data := &session.TokenData{ClientID: clientID, UserID: subject, Scopes: scopes, AllowedClaims: allowedClaims, ClaimNamesSet: allowedClaims != nil, TokenUse: "access", AuthVersion: authVersion, FamilyKey: familyKey, AuthorizationIssuedAt: authorizationIssuedAt}
 	var saveErr error
 	if familyKey == "" {
 		saveErr = ts.session.SaveToken(ctx, jti, data, lifetimes.AccessToken)
@@ -197,7 +204,7 @@ func (ts *TokenService) generateTokenPair(ctx context.Context, clientID, subject
 	return result, nil
 }
 
-func (ts *TokenService) signAccessToken(ctx context.Context, clientID, subject string, scopes []string, authVersion int64, accessTTL time.Duration) (string, string, error) {
+func (ts *TokenService) signAccessToken(ctx context.Context, clientID, subject string, scopes, allowedClaims []string, authVersion int64, accessTTL time.Duration) (string, string, error) {
 	privateKey, kid, err := ts.jwkManager.GetPrivateKey(ctx)
 	if err != nil {
 		return "", "", fmt.Errorf("getting signing key: %w", err)
@@ -207,7 +214,7 @@ func (ts *TokenService) signAccessToken(ctx context.Context, clientID, subject s
 	claims := &Claims{RegisteredClaims: jwt.RegisteredClaims{
 		Issuer: ts.issuer, Subject: subject, Audience: jwt.ClaimStrings{clientID},
 		ExpiresAt: jwt.NewNumericDate(now.Add(accessTTL)), IssuedAt: jwt.NewNumericDate(now), NotBefore: jwt.NewNumericDate(now), ID: jti,
-	}, Scope: joinScopes(scopes), TokenUse: "access", AuthVersion: authVersion}
+	}, Scope: joinScopes(scopes), AllowedClaims: allowedClaims, ClaimNamesSet: allowedClaims != nil, TokenUse: "access", AuthVersion: authVersion}
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
 	token.Header["kid"] = kid
 	signed, err := token.SignedString(privateKey)
@@ -218,6 +225,10 @@ func (ts *TokenService) signAccessToken(ctx context.Context, clientID, subject s
 }
 
 func (ts *TokenService) GenerateIDToken(ctx context.Context, clientID, userID string, scopes []string, nonce string, userInfo map[string]interface{}) (string, error) {
+	return ts.GenerateIDTokenWithClaims(ctx, clientID, userID, scopes, legacyClaimNamesForScopes(scopes), nonce, userInfo)
+}
+
+func (ts *TokenService) GenerateIDTokenWithClaims(ctx context.Context, clientID, userID string, scopes, allowedClaims []string, nonce string, userInfo map[string]interface{}) (string, error) {
 	authVersion := int64(0)
 	if id, err := uuid.Parse(userID); err == nil && ts.users != nil {
 		u, err := ts.users.GetByID(ctx, id)
@@ -239,7 +250,7 @@ func (ts *TokenService) GenerateIDToken(ctx context.Context, clientID, userID st
 	if nonce != "" {
 		claims["nonce"] = nonce
 	}
-	for key, value := range scopedIDTokenUserInfo(scopes, userInfo) {
+	for key, value := range claimLimitedUserInfo(allowedClaims, userInfo) {
 		claims[key] = value
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
@@ -266,7 +277,8 @@ func (ts *TokenService) ValidateAccessToken(ctx context.Context, tokenString str
 		return nil, fmt.Errorf("%w: loading access-token metadata: %v", ErrTokenValidationUnavailable, err)
 	}
 	if metadata.TokenUse != "access" || metadata.ClientID != claims.Audience[0] || metadata.UserID != claims.Subject ||
-		metadata.AuthVersion != claims.AuthVersion || joinScopes(metadata.Scopes) != claims.Scope {
+		metadata.AuthVersion != claims.AuthVersion || joinScopes(metadata.Scopes) != claims.Scope ||
+		metadata.ClaimNamesSet != claims.ClaimNamesSet || !slices.Equal(metadata.AllowedClaims, claims.AllowedClaims) {
 		return nil, ErrInvalidToken
 	}
 	if err := ts.validateUser(ctx, claims.Subject, claims.AuthVersion); err != nil {
@@ -324,6 +336,10 @@ func (ts *TokenService) parseSignedToken(ctx context.Context, tokenString string
 }
 
 func (ts *TokenService) RefreshToken(ctx context.Context, refreshToken, clientID string, allowedScopes []string) (*TokenPair, error) {
+	return ts.RefreshTokenWithClaimPolicy(ctx, refreshToken, clientID, allowedScopes, nil)
+}
+
+func (ts *TokenService) RefreshTokenWithClaimPolicy(ctx context.Context, refreshToken, clientID string, allowedScopes []string, scopeClaims map[string][]string) (*TokenPair, error) {
 	lifetimes := ts.Lifetimes()
 	data, used, err := ts.session.GetRefreshTokenState(ctx, refreshToken)
 	if err != nil {
@@ -333,6 +349,11 @@ func (ts *TokenService) RefreshToken(ctx context.Context, refreshToken, clientID
 		return nil, ErrClientMismatch
 	}
 	if !scopesAreSubset(data.Scopes, allowedScopes) {
+		_ = ts.session.RevokeRefreshTokenForClient(ctx, refreshToken, clientID, ts.revocationTTL)
+		return nil, ErrInvalidToken
+	}
+	effectiveClaims := effectiveClaimNames(data.Scopes, data.AllowedClaims, data.ClaimNamesSet)
+	if scopeClaims != nil && !scopesAreSubset(effectiveClaims, claimsForGrantedScopes(data.Scopes, scopeClaims)) {
 		_ = ts.session.RevokeRefreshTokenForClient(ctx, refreshToken, clientID, ts.revocationTTL)
 		return nil, ErrInvalidToken
 	}
@@ -358,12 +379,12 @@ func (ts *TokenService) RefreshToken(ctx context.Context, refreshToken, clientID
 	if err != nil {
 		return nil, fmt.Errorf("generating refresh token: %w", err)
 	}
-	access, jti, err := ts.signAccessToken(ctx, data.ClientID, data.UserID, data.Scopes, data.AuthVersion, lifetimes.AccessToken)
+	access, jti, err := ts.signAccessToken(ctx, data.ClientID, data.UserID, data.Scopes, effectiveClaims, data.AuthVersion, lifetimes.AccessToken)
 	if err != nil {
 		return nil, err
 	}
 	accessData := &session.TokenData{
-		ClientID: data.ClientID, UserID: data.UserID, Scopes: data.Scopes, TokenUse: "access",
+		ClientID: data.ClientID, UserID: data.UserID, Scopes: data.Scopes, AllowedClaims: effectiveClaims, ClaimNamesSet: true, TokenUse: "access",
 		AuthVersion: data.AuthVersion, FamilyKey: data.FamilyKey, AuthorizationIssuedAt: data.AuthorizationIssuedAt,
 	}
 	_, err = ts.session.RotateRefreshTokenAndStoreAccess(
@@ -558,17 +579,43 @@ func scopesAreSubset(requested, allowed []string) bool {
 }
 
 func scopedIDTokenUserInfo(scopes []string, userInfo map[string]interface{}) map[string]interface{} {
-	result := make(map[string]interface{})
+	return claimLimitedUserInfo(legacyClaimNamesForScopes(scopes), userInfo)
+}
+
+func legacyClaimNamesForScopes(scopes []string) []string {
+	result := make([]string, 0, 6)
+	if containsScope(scopes, "openid") {
+		result = append(result, "sub")
+	}
 	if containsScope(scopes, "profile") {
-		for _, key := range []string{"name", "preferred_username", "picture"} {
-			if value, ok := userInfo[key]; ok {
-				result[key] = value
-			}
-		}
+		result = append(result, "preferred_username", "name", "picture")
 	}
 	if containsScope(scopes, "email") {
-		if value, ok := userInfo["email"]; ok {
-			result["email"] = value
+		// Tokens issued before schema 12 exposed only email for this scope.
+		// Keep legacy Redis/JWT records at their original disclosure level.
+		result = append(result, "email")
+	}
+	return result
+}
+
+func effectiveClaimNames(scopes, allowedClaims []string, claimNamesSet bool) []string {
+	if claimNamesSet {
+		return append([]string{}, allowedClaims...)
+	}
+	if allowedClaims != nil {
+		return allowedClaims
+	}
+	return legacyClaimNamesForScopes(scopes)
+}
+
+func claimLimitedUserInfo(allowedClaims []string, userInfo map[string]interface{}) map[string]interface{} {
+	result := make(map[string]interface{})
+	for _, key := range allowedClaims {
+		if key == "sub" {
+			continue
+		}
+		if value, ok := userInfo[key]; ok {
+			result[key] = value
 		}
 	}
 	return result

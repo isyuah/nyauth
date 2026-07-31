@@ -112,11 +112,28 @@ describe('runtime policy validation', () => {
       public_clients_enabled: DEFAULT_OAUTH_SETTINGS.public_clients_enabled,
       allowed_grant_types: [...DEFAULT_OAUTH_SETTINGS.allowed_grant_types],
       allowed_scopes: [...DEFAULT_OAUTH_SETTINGS.allowed_scopes],
+      scope_definitions: DEFAULT_OAUTH_SETTINGS.scope_definitions,
+      claim_assignment_policies: DEFAULT_OAUTH_SETTINGS.claim_assignment_policies,
       max_redirect_uris: DEFAULT_OAUTH_SETTINGS.max_redirect_uris,
       max_post_logout_redirect_uris: DEFAULT_OAUTH_SETTINGS.max_post_logout_redirect_uris,
     };
     expect(oauthPolicyValidationError(valid)).toBeNull();
-    expect(oauthPolicyValidationError({ ...valid, allowed_scopes: ['openid', 'tenant.read'] })).toBeNull();
+    const customScope = {
+      ...valid,
+      allowed_scopes: ['openid', 'tenant.read'],
+      scope_definitions: {
+        ...valid.scope_definitions,
+        'tenant.read': {
+          display_name: '读取租户',
+          description: '读取当前用户可以访问的租户信息。',
+          claims: [],
+          assignment_policy: 'self_service' as const,
+          risk_level: 'sensitive' as const,
+        },
+      },
+    };
+    expect(oauthPolicyValidationError(customScope)).toBeNull();
+    expect(oauthPolicyValidationError({ ...valid, allowed_scopes: ['openid', 'tenant.read'] })?.field).toBe('oauth-scopes');
     expect(oauthPolicyValidationError({ ...valid, allowed_scopes: [] })).toBeNull();
     expect(oauthPolicyValidationError({ ...valid, allowed_scopes: ['tenant read'] })?.field).toBe('oauth-scopes');
     expect(oauthPolicyValidationError({

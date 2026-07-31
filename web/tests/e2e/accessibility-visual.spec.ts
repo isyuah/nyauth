@@ -1,5 +1,6 @@
 import AxeBuilder from '@axe-core/playwright';
 import { expect, test, type Page, type Route } from '@playwright/test';
+import { DEFAULT_CLAIM_ASSIGNMENT_POLICIES, DEFAULT_SCOPE_DEFINITIONS } from '../../src/lib/oauth-catalog';
 
 async function fulfillJSON(route: Route, status: number, body: unknown) {
   await route.fulfill({
@@ -55,6 +56,8 @@ async function installAdminMocks(page: Page) {
           post_logout_redirect_uris: ['https://app.example.test/signed-out'],
           grants: ['authorization_code', 'refresh_token'],
           scopes: ['openid', 'profile', 'email'],
+          optional_scopes: [],
+          allowed_claims: ['sub', 'preferred_username', 'name', 'picture', 'email', 'email_verified'],
           is_public: false,
           secret_hint: 'test1234',
           secret_version: 1,
@@ -77,6 +80,8 @@ async function installAdminMocks(page: Page) {
         public_clients_enabled: true,
         allowed_grant_types: ['authorization_code', 'refresh_token', 'client_credentials'],
         allowed_scopes: ['openid', 'profile', 'email', 'offline_access'],
+        scope_definitions: DEFAULT_SCOPE_DEFINITIONS,
+        claim_assignment_policies: DEFAULT_CLAIM_ASSIGNMENT_POLICIES,
         max_redirect_uris: 20,
         max_post_logout_redirect_uris: 20,
       });

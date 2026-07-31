@@ -11,11 +11,13 @@ import type {
   MailConfig,
   MailSettings,
   MailTrend,
+  OAuthClient,
   OAuthSettings,
   RegistrationTrend,
   StatsTrendDays,
   User,
 } from '../../src/lib/api';
+import { DEFAULT_CLAIM_ASSIGNMENT_POLICIES, DEFAULT_SCOPE_DEFINITIONS } from '../../src/lib/oauth-catalog';
 
 type Role = 'admin' | 'user';
 
@@ -151,19 +153,23 @@ const oauthAuthorization = {
   client_id: 'example-client',
   client_name: 'Example App',
   scopes: ['openid', 'profile', 'offline_access'],
+  optional_scopes: [],
+  allowed_claims: ['sub', 'preferred_username', 'name', 'picture'],
   granted_at: '2026-01-01T00:00:00Z',
   last_used_at: '2026-01-02T00:00:00Z',
   created_at: '2026-01-01T00:00:00Z',
   updated_at: '2026-01-02T00:00:00Z',
 };
 
-const oauthClient = {
+const oauthClient: OAuthClient = {
   id: 'example-client',
   name: 'Example App',
   redirect_uris: ['https://app.example/callback'],
   post_logout_redirect_uris: ['https://app.example/signed-out'],
   grants: ['authorization_code', 'refresh_token'],
   scopes: ['openid', 'profile', 'offline_access'],
+  optional_scopes: [],
+  allowed_claims: ['sub', 'preferred_username', 'name', 'picture'],
   is_public: false,
   secret_hint: 'abcd1234',
   secret_version: 1,
@@ -179,6 +185,8 @@ const oauthSettings: OAuthSettings = {
   public_clients_enabled: true,
   allowed_grant_types: ['authorization_code', 'refresh_token', 'client_credentials'],
   allowed_scopes: ['openid', 'profile', 'email', 'offline_access'],
+  scope_definitions: DEFAULT_SCOPE_DEFINITIONS,
+  claim_assignment_policies: DEFAULT_CLAIM_ASSIGNMENT_POLICIES,
   max_redirect_uris: 20,
   max_post_logout_redirect_uris: 20,
 };
@@ -439,6 +447,8 @@ function adminClientSummaryFor(client: typeof oauthClient): AdminUserClientSumma
     access_policy: 'open',
     grants: client.grants,
     scopes: client.scopes,
+    optional_scopes: client.optional_scopes,
+    allowed_claims: client.allowed_claims,
     secret_hint: client.secret_hint,
     secret_last_used_at: null,
     created_at: client.created_at,
@@ -702,6 +712,8 @@ async function installAPIMocks(page: Page, state: MockState) {
           public_clients_enabled: true,
           allowed_grant_types: ['authorization_code', 'refresh_token', 'client_credentials'],
           allowed_scopes: ['openid', 'profile', 'email', 'offline_access'],
+          scope_definitions: DEFAULT_SCOPE_DEFINITIONS,
+          claim_assignment_policies: DEFAULT_CLAIM_ASSIGNMENT_POLICIES,
           max_redirect_uris: 20,
           max_post_logout_redirect_uris: 20,
         },
@@ -774,6 +786,7 @@ async function installAPIMocks(page: Page, state: MockState) {
         post_logout_redirect_uris: string[];
         grants: string[];
         scopes: string[];
+        optional_scopes: string[];
         is_public: boolean;
         owner_id: string | null;
       };
@@ -851,6 +864,7 @@ async function installAPIMocks(page: Page, state: MockState) {
           client_id: oauthAuthorization.client_id,
           client_name: oauthAuthorization.client_name,
           scopes: oauthAuthorization.scopes,
+          allowed_claims: oauthAuthorization.allowed_claims,
           granted_at: oauthAuthorization.granted_at,
           last_used_at: oauthAuthorization.last_used_at,
         }]);
@@ -1287,6 +1301,7 @@ test('all profile deep links load only their own account data', async ({ page })
   await page.goto('/profile/authorizations');
   await expect(page.getByRole('heading', { name: 'OAuth 应用授权', exact: true, level: 1 })).toBeVisible();
   await expect(page.getByRole('link', { name: '应用授权', exact: true })).toHaveAttribute('aria-current', 'page');
+  await expect(page.getByText('可返回字段：稳定用户 ID、用户名、显示名称、头像')).toBeVisible();
   await expect.poll(() => state.authorizationListRequests || 0).toBeGreaterThan(0);
   expect(state.meRequests || 0).toBe(0);
   expect(state.mfaStatusRequests || 0).toBe(0);
@@ -2356,18 +2371,20 @@ test('a failed registration trend does not hide mail or existing dashboard data 
 });
 
 test('administrators can edit OAuth clients without mutating immutable ownership fields', async ({ page }) => {
+  const clientWithLegacyClaim = { ...oauthClient, allowed_claims: [...oauthClient.allowed_claims, 'role'] };
   const state: MockState = {
     authenticated: true,
     mustChangePassword: false,
     role: 'admin',
     csrfToken: 'csrf-admin',
-    adminClients: [oauthClient],
+    adminClients: [clientWithLegacyClaim],
   };
   await installAPIMocks(page, state);
 
   await page.goto('/admin/clients');
   await page.getByRole('button', { name: '编辑', exact: true }).click();
   const dialog = page.getByRole('dialog');
+  await expect(dialog.getByText('现有 · 当前 Scope 不返回')).toBeVisible();
   await dialog.getByLabel('应用名称').fill('Renamed App');
   await dialog.locator('#edit-client-redirects').fill([
     'https://new.example/callback',
@@ -2375,6 +2392,7 @@ test('administrators can edit OAuth clients without mutating immutable ownership
   ].join('\n'));
   await dialog.locator('#edit-client-logouts').fill('https://new.example/signed-out');
   await dialog.getByLabel('Scopes（空格、逗号或换行分隔）').fill('openid email\nprofile');
+  await dialog.getByLabel('profile 允许用户拒绝').check();
   await dialog.getByLabel('Metadata（JSON 字符串键值）').fill(JSON.stringify({
     environment: 'production',
     team: 'identity',
@@ -2389,6 +2407,8 @@ test('administrators can edit OAuth clients without mutating immutable ownership
     post_logout_redirect_uris: ['https://new.example/signed-out'],
     grants: ['authorization_code', 'refresh_token'],
     scopes: ['openid', 'email', 'profile'],
+    optional_scopes: ['profile'],
+    allowed_claims: ['sub', 'preferred_username', 'name', 'picture', 'role'],
     metadata: { environment: 'production', team: 'identity' },
     access_policy: 'open',
   });
@@ -2497,6 +2517,8 @@ test('administrators can select an active owner while creating a client', async 
     post_logout_redirect_uris: [],
     grants: ['authorization_code', 'refresh_token'],
     scopes: ['openid', 'profile', 'email', 'offline_access'],
+    optional_scopes: [],
+    allowed_claims: ['sub', 'preferred_username', 'name', 'picture', 'email', 'email_verified'],
     is_public: false,
     owner_id: ownerUser.id,
   });
@@ -2703,6 +2725,7 @@ test('admin user details preserve the filtered list return path across every dee
   await page.getByRole('link', { name: '访问', exact: true }).click();
   await expectReturnToPreserved(`/admin/users/${target.id}/access`);
   await expect(page.getByRole('heading', { name: 'OAuth 授权' })).toBeVisible();
+  await expect(page.getByText('Claim：sub preferred_username name picture')).toBeVisible();
 
   await page.getByRole('link', { name: '活动', exact: true }).click();
   await expectReturnToPreserved(`/admin/users/${target.id}/activity`);

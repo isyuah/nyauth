@@ -96,7 +96,7 @@ func (h *Handler) Create(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, ErrOAuthPolicyChanged):
 			writeCodedError(w, http.StatusConflict, "client.policy_changed", "OAuth client policy changed; reload and retry")
 		case IsInvalidClient(err):
-			writeError(w, http.StatusBadRequest, err.Error())
+			writeCodedError(w, http.StatusBadRequest, "client.configuration_invalid", err.Error())
 		case errors.Is(err, ErrClientQuotaExceeded):
 			writeError(w, http.StatusConflict, "client quota exceeded")
 		case errors.Is(err, ErrClientOwnerUnavailable):
@@ -144,7 +144,7 @@ func (h *Handler) Update(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, ErrOAuthPolicyChanged):
 			writeCodedError(w, http.StatusConflict, "client.policy_changed", "OAuth client policy changed; reload and retry")
 		case IsInvalidClient(err):
-			writeError(w, http.StatusBadRequest, err.Error())
+			writeCodedError(w, http.StatusBadRequest, "client.configuration_invalid", err.Error())
 		case errors.Is(err, pgx.ErrNoRows):
 			writeError(w, http.StatusNotFound, "client not found")
 		default:

@@ -5,6 +5,7 @@
   import Button from '$lib/components/ui/Button.svelte';
   import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
   import { AppWindow } from 'lucide-svelte';
+  import { CLAIM_HELP } from '$lib/oauth-catalog';
 
   let authorizations = $state<OAuthAuthorization[]>([]);
   let loading = $state(true);
@@ -72,6 +73,7 @@
                 <p class="text-body-medium font-semibold text-nya-text-primary">{authorization.client_name}</p>
                 <p class="mt-1 text-small text-nya-text-tertiary">授权于 {new Date(authorization.granted_at).toLocaleString()}{#if authorization.last_used_at} · 最近使用 {new Date(authorization.last_used_at).toLocaleString()}{/if}</p>
                 <div class="mt-2 flex flex-wrap gap-1.5">{#each authorization.scopes as scope}<Badge variant={scope === 'offline_access' ? 'warning' : 'default'}>{scope}</Badge>{/each}</div>
+                {#if authorization.allowed_claims.length > 0}<p class="mt-2 text-micro text-nya-text-tertiary">可返回字段：{authorization.allowed_claims.map((claim) => CLAIM_HELP[claim]?.title || claim).join('、')}</p>{/if}
               </div>
             </div>
             <Button variant="ghost" size="sm" onclick={() => requestRevocation(authorization)}>撤销授权</Button>

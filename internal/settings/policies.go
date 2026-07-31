@@ -261,15 +261,37 @@ var supportedOAuthGrantTypes = []string{
 	models.GrantClientCredentials,
 }
 
+const (
+	OAuthAssignmentSelfService = "self_service"
+	OAuthAssignmentAdminOnly   = "admin_only"
+	OAuthRiskLow               = "low"
+	OAuthRiskPersonalData      = "personal_data"
+	OAuthRiskSensitive         = "sensitive"
+)
+
+var supportedOAuthClaims = []string{
+	"sub", "preferred_username", "name", "picture", "email", "email_verified", "role",
+}
+
+type OAuthScopeDefinition struct {
+	DisplayName      string   `json:"display_name"`
+	Description      string   `json:"description"`
+	Claims           []string `json:"claims"`
+	AssignmentPolicy string   `json:"assignment_policy"`
+	RiskLevel        string   `json:"risk_level"`
+}
+
 // OAuthPolicy controls future client registrations. Tightening it does not
 // mutate or disable clients that were valid when they were registered.
 type OAuthPolicy struct {
-	SelfServiceClientCreationEnabled bool     `json:"self_service_client_creation_enabled"`
-	PublicClientsEnabled             bool     `json:"public_clients_enabled"`
-	AllowedGrantTypes                []string `json:"allowed_grant_types"`
-	AllowedScopes                    []string `json:"allowed_scopes"`
-	MaxRedirectURIs                  int      `json:"max_redirect_uris"`
-	MaxPostLogoutRedirectURIs        int      `json:"max_post_logout_redirect_uris"`
+	SelfServiceClientCreationEnabled bool                            `json:"self_service_client_creation_enabled"`
+	PublicClientsEnabled             bool                            `json:"public_clients_enabled"`
+	AllowedGrantTypes                []string                        `json:"allowed_grant_types"`
+	AllowedScopes                    []string                        `json:"allowed_scopes"`
+	ScopeDefinitions                 map[string]OAuthScopeDefinition `json:"scope_definitions"`
+	ClaimAssignmentPolicies          map[string]string               `json:"claim_assignment_policies"`
+	MaxRedirectURIs                  int                             `json:"max_redirect_uris"`
+	MaxPostLogoutRedirectURIs        int                             `json:"max_post_logout_redirect_uris"`
 }
 
 func DefaultOAuthPolicy() OAuthPolicy {
@@ -278,6 +300,8 @@ func DefaultOAuthPolicy() OAuthPolicy {
 		PublicClientsEnabled:             true,
 		AllowedGrantTypes:                slices.Clone(supportedOAuthGrantTypes),
 		AllowedScopes:                    slices.Clone(supportedOAuthScopes),
+		ScopeDefinitions:                 defaultOAuthScopeDefinitions(),
+		ClaimAssignmentPolicies:          defaultOAuthClaimAssignmentPolicies(),
 		MaxRedirectURIs:                  20,
 		MaxPostLogoutRedirectURIs:        20,
 	}
@@ -285,6 +309,37 @@ func DefaultOAuthPolicy() OAuthPolicy {
 
 func SupportedOAuthGrantTypes() []string { return slices.Clone(supportedOAuthGrantTypes) }
 func SupportedOAuthScopes() []string     { return slices.Clone(supportedOAuthScopes) }
+func SupportedOAuthClaims() []string     { return slices.Clone(supportedOAuthClaims) }
+
+func defaultOAuthScopeDefinitions() map[string]OAuthScopeDefinition {
+	return map[string]OAuthScopeDefinition{
+		"openid": {
+			DisplayName: "确认身份", Description: "使用稳定的账户标识完成 OpenID Connect 登录。",
+			Claims: []string{"sub"}, AssignmentPolicy: OAuthAssignmentSelfService, RiskLevel: OAuthRiskLow,
+		},
+		"profile": {
+			DisplayName: "基本资料", Description: "读取用户名、显示名称和头像。",
+			Claims: []string{"preferred_username", "name", "picture"}, AssignmentPolicy: OAuthAssignmentSelfService, RiskLevel: OAuthRiskPersonalData,
+		},
+		"email": {
+			DisplayName: "邮箱信息", Description: "读取邮箱地址及邮箱验证状态。",
+			Claims: []string{"email", "email_verified"}, AssignmentPolicy: OAuthAssignmentSelfService, RiskLevel: OAuthRiskPersonalData,
+		},
+		"offline_access": {
+			DisplayName: "离线访问", Description: "允许应用在用户离开后使用可轮换的 Refresh Token 继续访问。",
+			Claims: []string{}, AssignmentPolicy: OAuthAssignmentSelfService, RiskLevel: OAuthRiskSensitive,
+		},
+	}
+}
+
+func defaultOAuthClaimAssignmentPolicies() map[string]string {
+	result := make(map[string]string, len(supportedOAuthClaims))
+	for _, claim := range supportedOAuthClaims {
+		result[claim] = OAuthAssignmentSelfService
+	}
+	result["role"] = OAuthAssignmentAdminOnly
+	return result
+}
 
 func NormalizeOAuthPolicy(value OAuthPolicy) (OAuthPolicy, error) {
 	grants, err := normalizeAllowedValues("allowed_grant_types", value.AllowedGrantTypes, supportedOAuthGrantTypes)
@@ -297,6 +352,16 @@ func NormalizeOAuthPolicy(value OAuthPolicy) (OAuthPolicy, error) {
 	}
 	value.AllowedGrantTypes = grants
 	value.AllowedScopes = scopes
+	definitions, err := normalizeOAuthScopeDefinitions(scopes, value.ScopeDefinitions)
+	if err != nil {
+		return OAuthPolicy{}, err
+	}
+	claimPolicies, err := normalizeOAuthClaimAssignmentPolicies(value.ClaimAssignmentPolicies)
+	if err != nil {
+		return OAuthPolicy{}, err
+	}
+	value.ScopeDefinitions = definitions
+	value.ClaimAssignmentPolicies = claimPolicies
 	if value.MaxRedirectURIs < MinRedirectURILimit || value.MaxRedirectURIs > MaxRedirectURILimit {
 		return OAuthPolicy{}, fmt.Errorf("max_redirect_uris must be between %d and %d", MinRedirectURILimit, MaxRedirectURILimit)
 	}
@@ -313,6 +378,171 @@ func NormalizeOAuthPolicy(value OAuthPolicy) (OAuthPolicy, error) {
 		return OAuthPolicy{}, errors.New("allowing public clients requires authorization_code")
 	}
 	return value, nil
+}
+
+// NormalizeOAuthPolicyUpdate applies the strict write contract. The general
+// normalizer remains tolerant of legacy C5 values that predate scope metadata.
+func NormalizeOAuthPolicyUpdate(value OAuthPolicy) (OAuthPolicy, error) {
+	for _, scope := range value.AllowedScopes {
+		if slices.Contains(supportedOAuthScopes, scope) {
+			continue
+		}
+		if _, ok := value.ScopeDefinitions[scope]; !ok {
+			return OAuthPolicy{}, fmt.Errorf("custom scope %q requires an explicit definition", scope)
+		}
+	}
+	return NormalizeOAuthPolicy(value)
+}
+
+func normalizeOAuthScopeDefinitions(scopes []string, provided map[string]OAuthScopeDefinition) (map[string]OAuthScopeDefinition, error) {
+	defaults := defaultOAuthScopeDefinitions()
+	definitionScopes := slices.Clone(scopes)
+	retiredScopes := make([]string, 0, len(provided))
+	for scope := range provided {
+		if !models.ValidOAuthScope(scope) {
+			return nil, fmt.Errorf("scope_definitions contains invalid scope %q", scope)
+		}
+		if !slices.Contains(scopes, scope) {
+			retiredScopes = append(retiredScopes, scope)
+		}
+	}
+	slices.Sort(retiredScopes)
+	definitionScopes = append(definitionScopes, retiredScopes...)
+	result := make(map[string]OAuthScopeDefinition, len(definitionScopes))
+	for _, scope := range definitionScopes {
+		definition, ok := provided[scope]
+		if !ok {
+			definition, ok = defaults[scope]
+		}
+		if !ok {
+			definition = OAuthScopeDefinition{
+				DisplayName: scope, Description: "由管理员定义的应用权限。", Claims: []string{},
+				AssignmentPolicy: OAuthAssignmentSelfService, RiskLevel: OAuthRiskSensitive,
+			}
+		}
+		definition.DisplayName = strings.TrimSpace(definition.DisplayName)
+		definition.Description = strings.TrimSpace(definition.Description)
+		if definition.DisplayName == "" || utf8.RuneCountInString(definition.DisplayName) > 80 || containsSiteBannerControl(definition.DisplayName, false) {
+			return nil, fmt.Errorf("scope %q display_name is invalid", scope)
+		}
+		if definition.Description == "" || utf8.RuneCountInString(definition.Description) > 300 || containsSiteBannerControl(definition.Description, false) {
+			return nil, fmt.Errorf("scope %q description is invalid", scope)
+		}
+		if definition.AssignmentPolicy != OAuthAssignmentSelfService && definition.AssignmentPolicy != OAuthAssignmentAdminOnly {
+			return nil, fmt.Errorf("scope %q assignment_policy is unsupported", scope)
+		}
+		if definition.RiskLevel != OAuthRiskLow && definition.RiskLevel != OAuthRiskPersonalData && definition.RiskLevel != OAuthRiskSensitive {
+			return nil, fmt.Errorf("scope %q risk_level is unsupported", scope)
+		}
+		claims, err := normalizeOAuthScopeClaims(scope, definition.Claims)
+		if err != nil {
+			return nil, err
+		}
+		definition.Claims = claims
+		result[scope] = definition
+	}
+	return result, nil
+}
+
+// PreserveRetiredOAuthScopeDefinitions keeps the last trusted meaning of a
+// scope after administrators stop allowing it for new client assignments.
+// Existing clients can therefore continue to show accurate consent text and
+// claim mappings without making the scope discoverable or newly assignable.
+func PreserveRetiredOAuthScopeDefinitions(current, next OAuthPolicy) OAuthPolicy {
+	if next.ScopeDefinitions == nil {
+		next.ScopeDefinitions = make(map[string]OAuthScopeDefinition)
+	} else {
+		cloned := make(map[string]OAuthScopeDefinition, len(next.ScopeDefinitions)+len(current.ScopeDefinitions))
+		for scope, definition := range next.ScopeDefinitions {
+			definition.Claims = slices.Clone(definition.Claims)
+			cloned[scope] = definition
+		}
+		next.ScopeDefinitions = cloned
+	}
+	for scope, definition := range current.ScopeDefinitions {
+		if _, exists := next.ScopeDefinitions[scope]; exists || slices.Contains(next.AllowedScopes, scope) {
+			continue
+		}
+		definition.Claims = slices.Clone(definition.Claims)
+		next.ScopeDefinitions[scope] = definition
+	}
+	return next
+}
+
+func normalizeOAuthScopeClaims(scope string, claims []string) ([]string, error) {
+	if claims == nil {
+		claims = []string{}
+	}
+	seen := make(map[string]bool, len(claims))
+	for _, claim := range claims {
+		if !slices.Contains(supportedOAuthClaims, claim) {
+			return nil, fmt.Errorf("scope %q contains unsupported claim %q", scope, claim)
+		}
+		if seen[claim] {
+			return nil, fmt.Errorf("scope %q contains duplicate claim %q", scope, claim)
+		}
+		seen[claim] = true
+	}
+	switch scope {
+	case "openid":
+		if len(claims) != 1 || claims[0] != "sub" {
+			return nil, errors.New("openid must expose only the sub claim")
+		}
+	case "profile":
+		if !sameStringSet(claims, []string{"preferred_username", "name", "picture"}) {
+			return nil, errors.New("profile claim mapping is fixed")
+		}
+	case "email":
+		if !sameStringSet(claims, []string{"email", "email_verified"}) {
+			return nil, errors.New("email claim mapping is fixed")
+		}
+	case "offline_access":
+		if len(claims) != 0 {
+			return nil, errors.New("offline_access does not expose identity claims")
+		}
+	default:
+		if seen["sub"] {
+			return nil, fmt.Errorf("custom scope %q cannot expose sub", scope)
+		}
+	}
+	ordered := make([]string, 0, len(claims))
+	for _, claim := range supportedOAuthClaims {
+		if seen[claim] {
+			ordered = append(ordered, claim)
+		}
+	}
+	return ordered, nil
+}
+
+func normalizeOAuthClaimAssignmentPolicies(provided map[string]string) (map[string]string, error) {
+	defaults := defaultOAuthClaimAssignmentPolicies()
+	result := make(map[string]string, len(defaults))
+	for _, claim := range supportedOAuthClaims {
+		policy := provided[claim]
+		if policy == "" {
+			policy = defaults[claim]
+		}
+		if claim == "sub" {
+			policy = OAuthAssignmentSelfService
+		}
+		if policy != OAuthAssignmentSelfService && policy != OAuthAssignmentAdminOnly {
+			return nil, fmt.Errorf("claim %q assignment policy is unsupported", claim)
+		}
+		result[claim] = policy
+	}
+	return result, nil
+}
+
+func sameStringSet(left, right []string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for _, value := range left {
+		if !slices.Contains(right, value) {
+			return false
+		}
+	}
+	return true
 }
 
 func normalizeAllowedValues(name string, values, supported []string) ([]string, error) {
@@ -369,13 +599,110 @@ func (p OAuthPolicy) AllowsGrant(grant string) bool {
 }
 func (p OAuthPolicy) AllowsScope(scope string) bool { return slices.Contains(p.AllowedScopes, scope) }
 
+func (p OAuthPolicy) ScopeDefinition(scope string) (OAuthScopeDefinition, bool) {
+	definition, ok := p.ScopeDefinitions[scope]
+	return definition, ok
+}
+
+func (p OAuthPolicy) ScopeAssignable(scope string, administrator bool) bool {
+	definition, ok := p.ScopeDefinition(scope)
+	return ok && (administrator || definition.AssignmentPolicy == OAuthAssignmentSelfService)
+}
+
+func (p OAuthPolicy) ClaimAssignable(claim string, administrator bool) bool {
+	policy, ok := p.ClaimAssignmentPolicies[claim]
+	return ok && (administrator || policy == OAuthAssignmentSelfService)
+}
+
+func (p OAuthPolicy) ClaimsForScopes(scopes []string, administrator bool) []string {
+	selected := make(map[string]bool)
+	for _, scope := range scopes {
+		definition, ok := p.ScopeDefinition(scope)
+		if !ok {
+			continue
+		}
+		for _, claim := range definition.Claims {
+			if p.ClaimAssignable(claim, administrator) {
+				selected[claim] = true
+			}
+		}
+	}
+	result := make([]string, 0, len(selected))
+	for _, claim := range supportedOAuthClaims {
+		if selected[claim] {
+			result = append(result, claim)
+		}
+	}
+	return result
+}
+
+func (p OAuthPolicy) SelfServiceView() OAuthPolicy {
+	result := p
+	result.AllowedGrantTypes = slices.Clone(p.AllowedGrantTypes)
+	result.AllowedScopes = make([]string, 0, len(p.AllowedScopes))
+	result.ScopeDefinitions = make(map[string]OAuthScopeDefinition)
+	for _, scope := range p.AllowedScopes {
+		definition, ok := p.ScopeDefinition(scope)
+		if !ok || definition.AssignmentPolicy != OAuthAssignmentSelfService {
+			continue
+		}
+		filteredClaims := make([]string, 0, len(definition.Claims))
+		for _, claim := range definition.Claims {
+			if p.ClaimAssignable(claim, false) {
+				filteredClaims = append(filteredClaims, claim)
+			}
+		}
+		definition.Claims = filteredClaims
+		result.AllowedScopes = append(result.AllowedScopes, scope)
+		result.ScopeDefinitions[scope] = definition
+	}
+	result.ClaimAssignmentPolicies = make(map[string]string)
+	for claim, policy := range p.ClaimAssignmentPolicies {
+		if policy == OAuthAssignmentSelfService {
+			result.ClaimAssignmentPolicies[claim] = policy
+		}
+	}
+	return result
+}
+
 func SameOAuthPolicy(left, right OAuthPolicy) bool {
 	return left.SelfServiceClientCreationEnabled == right.SelfServiceClientCreationEnabled &&
 		left.PublicClientsEnabled == right.PublicClientsEnabled &&
 		slices.Equal(left.AllowedGrantTypes, right.AllowedGrantTypes) &&
 		slices.Equal(left.AllowedScopes, right.AllowedScopes) &&
+		sameOAuthScopeDefinitions(left.ScopeDefinitions, right.ScopeDefinitions) &&
+		sameStringMap(left.ClaimAssignmentPolicies, right.ClaimAssignmentPolicies) &&
 		left.MaxRedirectURIs == right.MaxRedirectURIs &&
 		left.MaxPostLogoutRedirectURIs == right.MaxPostLogoutRedirectURIs
+}
+
+func sameOAuthScopeDefinitions(left, right map[string]OAuthScopeDefinition) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for scope, leftDefinition := range left {
+		rightDefinition, ok := right[scope]
+		if !ok || leftDefinition.DisplayName != rightDefinition.DisplayName ||
+			leftDefinition.Description != rightDefinition.Description ||
+			leftDefinition.AssignmentPolicy != rightDefinition.AssignmentPolicy ||
+			leftDefinition.RiskLevel != rightDefinition.RiskLevel ||
+			!slices.Equal(leftDefinition.Claims, rightDefinition.Claims) {
+			return false
+		}
+	}
+	return true
+}
+
+func sameStringMap(left, right map[string]string) bool {
+	if len(left) != len(right) {
+		return false
+	}
+	for key, value := range left {
+		if right[key] != value {
+			return false
+		}
+	}
+	return true
 }
 
 const (

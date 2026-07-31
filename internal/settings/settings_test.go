@@ -57,6 +57,69 @@ func TestOAuthPolicyDefaultsAndNormalization(t *testing.T) {
 	}
 }
 
+func TestOAuthPolicyUpdateRequiresCustomScopeDefinitionAndFiltersSelfServiceCatalog(t *testing.T) {
+	policy := DefaultOAuthPolicy()
+	policy.AllowedScopes = append(policy.AllowedScopes, "tenant.read", "admin.role")
+	if _, err := NormalizeOAuthPolicyUpdate(policy); err == nil {
+		t.Fatal("strict update accepted a custom scope without an explicit definition")
+	}
+	policy.ScopeDefinitions["tenant.read"] = OAuthScopeDefinition{
+		DisplayName: "读取租户", Description: "读取当前用户可以访问的租户信息。",
+		Claims: []string{"preferred_username"}, AssignmentPolicy: OAuthAssignmentSelfService, RiskLevel: OAuthRiskPersonalData,
+	}
+	policy.ScopeDefinitions["admin.role"] = OAuthScopeDefinition{
+		DisplayName: "读取账户角色", Description: "读取用户在 Nyauth 中的账户角色。",
+		Claims: []string{"role"}, AssignmentPolicy: OAuthAssignmentAdminOnly, RiskLevel: OAuthRiskSensitive,
+	}
+	normalized, err := NormalizeOAuthPolicyUpdate(policy)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selfService := normalized.SelfServiceView()
+	if !selfService.AllowsScope("tenant.read") || selfService.AllowsScope("admin.role") {
+		t.Fatalf("self-service scopes = %#v", selfService.AllowedScopes)
+	}
+	if !slices.Equal(selfService.ClaimsForScopes([]string{"tenant.read"}, false), []string{"preferred_username"}) {
+		t.Fatalf("tenant.read claims = %#v", selfService.ClaimsForScopes([]string{"tenant.read"}, false))
+	}
+	if _, exposed := selfService.ClaimAssignmentPolicies["role"]; exposed {
+		t.Fatal("admin-only role policy was exposed in the self-service catalog")
+	}
+}
+
+func TestOAuthPolicyPreservesRetiredScopeDefinitionsForExistingClients(t *testing.T) {
+	current := DefaultOAuthPolicy()
+	current.AllowedScopes = append(current.AllowedScopes, "tenant.read")
+	current.ScopeDefinitions["tenant.read"] = OAuthScopeDefinition{
+		DisplayName: "读取租户", Description: "读取当前用户可以访问的租户信息。",
+		Claims: []string{"preferred_username"}, AssignmentPolicy: OAuthAssignmentAdminOnly, RiskLevel: OAuthRiskSensitive,
+	}
+	current, err := NormalizeOAuthPolicyUpdate(current)
+	if err != nil {
+		t.Fatal(err)
+	}
+	next := DefaultOAuthPolicy()
+	delete(next.ScopeDefinitions, "tenant.read")
+	next = PreserveRetiredOAuthScopeDefinitions(current, next)
+	next, err = NormalizeOAuthPolicy(next)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if next.AllowsScope("tenant.read") {
+		t.Fatal("retired scope remained assignable")
+	}
+	definition, ok := next.ScopeDefinition("tenant.read")
+	if !ok || definition.DisplayName != "读取租户" || !slices.Equal(definition.Claims, []string{"preferred_username"}) {
+		t.Fatalf("retired scope definition = %#v, exists=%v", definition, ok)
+	}
+	if claims := next.ClaimsForScopes([]string{"tenant.read"}, true); !slices.Equal(claims, []string{"preferred_username"}) {
+		t.Fatalf("retired scope claims = %#v", claims)
+	}
+	if selfService := next.SelfServiceView(); selfService.AllowsScope("tenant.read") {
+		t.Fatal("retired scope leaked into self-service catalog")
+	}
+}
+
 func TestOAuthPolicyRejectsImpossibleCombinationsAndBounds(t *testing.T) {
 	tests := []struct {
 		name   string

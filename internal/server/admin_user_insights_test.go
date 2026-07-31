@@ -97,10 +97,10 @@ func TestAdminUserInsightsHTTPContract(t *testing.T) {
 		t.Fatalf("create revoked client: %v", err)
 	}
 	grantedAt := time.Now().UTC().Add(-time.Minute)
-	if err := cluster.apps[0].authorizationStore.Upsert(ctx, created.ID, activeClient.ID, []string{"openid", "profile"}, grantedAt); err != nil {
+	if err := cluster.apps[0].authorizationStore.Upsert(ctx, created.ID, activeClient.ID, []string{"openid", "profile"}, []string{"sub", "name"}, grantedAt); err != nil {
 		t.Fatalf("create active authorization: %v", err)
 	}
-	if err := cluster.apps[0].authorizationStore.Upsert(ctx, created.ID, revokedClient.ID, []string{"openid"}, grantedAt); err != nil {
+	if err := cluster.apps[0].authorizationStore.Upsert(ctx, created.ID, revokedClient.ID, []string{"openid"}, []string{"sub"}, grantedAt); err != nil {
 		t.Fatalf("create revoked authorization: %v", err)
 	}
 	if _, err := cluster.apps[0].sessionStore.RevokeUserClientAuthorization(ctx, created.ID.String(), revokedClient.ID, time.Hour); err != nil {
@@ -160,7 +160,7 @@ func TestAdminUserInsightsHTTPContract(t *testing.T) {
 	assertAdminInsightsNoStore(t, response)
 	var authorizations []adminUserAuthorization
 	decodeHAResponse(t, response, &authorizations)
-	if len(authorizations) != 1 || authorizations[0].ClientID != activeClient.ID {
+	if len(authorizations) != 1 || authorizations[0].ClientID != activeClient.ID || strings.Join(authorizations[0].AllowedClaims, " ") != "name sub" {
 		t.Fatalf("effective authorizations = %#v", authorizations)
 	}
 

@@ -32,6 +32,7 @@ const (
 type oauthConsentSecurityFixture struct {
 	authorizeHandler *auth.Handler
 	consentHandler   *auth.ConsentHandler
+	tokenService     *auth.TokenService
 	sessions         *session.Store
 }
 
@@ -53,6 +54,7 @@ func TestOAuthAuthorizeAndConsentSecuritySemantics(t *testing.T) {
 		PostLogoutRedirectURIs: []string{},
 		Grants:                 []string{models.GrantAuthorizationCode},
 		Scopes:                 []string{"openid", "profile"},
+		AllowedClaims:          []string{"sub", "preferred_username", "name", "picture"},
 		IsPublic:               true,
 		AccessPolicy:           models.ClientAccessOpen,
 		Metadata:               map[string]string{},
@@ -69,10 +71,19 @@ func TestOAuthAuthorizeAndConsentSecuritySemantics(t *testing.T) {
 	}}
 	sessionStore := session.NewStore(rdb)
 	jwkManager := auth.NewJWKManager(schema.pool, 2048, 24*time.Hour)
+	if err := jwkManager.Configure(cfg.Auth.MasterKey, cfg.Auth.RefreshTokenTTL); err != nil {
+		t.Fatalf("configure JWK manager: %v", err)
+	}
+	if err := jwkManager.EnsureActiveKey(context.Background()); err != nil {
+		t.Fatalf("ensure active JWK: %v", err)
+	}
+	userService := user.NewService(user.NewStore(schema.pool))
 	tokenService := auth.NewTokenService(jwkManager, sessionStore, cfg.Auth.Issuer, cfg.Auth.AccessTokenTTL, cfg.Auth.RefreshTokenTTL)
+	tokenService.SetUserService(userService)
 	fixture := &oauthConsentSecurityFixture{
-		authorizeHandler: auth.NewHandler(tokenService, jwkManager, user.NewService(user.NewStore(schema.pool)), clientStore, sessionStore, cfg),
+		authorizeHandler: auth.NewHandler(tokenService, jwkManager, userService, clientStore, sessionStore, cfg),
 		consentHandler:   auth.NewConsentHandler(sessionStore, tokenService, clientStore, authorization.NewStore(schema.pool), cfg),
+		tokenService:     tokenService,
 		sessions:         sessionStore,
 	}
 
@@ -259,6 +270,119 @@ func TestOAuthAuthorizeAndConsentSecuritySemantics(t *testing.T) {
 			t.Fatalf("successfully retried challenge lookup error = %v, want ErrNotFound", err)
 		}
 	})
+
+	t.Run("accepting selected optional scopes narrows the authorization grant", func(t *testing.T) {
+		userID := uuid.New()
+		if _, err := schema.pool.Exec(context.Background(), `
+			INSERT INTO users (id,username,status,role,creation_source)
+			VALUES ($1,$2,'active','user','legacy')
+		`, userID, "optional-consent-"+strings.ReplaceAll(userID.String(), "-", "")); err != nil {
+			t.Fatalf("insert optional consent user: %v", err)
+		}
+		sessionID, csrf := fixture.saveSession(t, userID.String(), 1)
+		challenge := "optional-scope-" + uuid.NewString()
+		if err := fixture.sessions.SaveConsent(context.Background(), challenge, &session.ConsentData{
+			ClientID: oauthConsentClientID, UserID: userID.String(), RedirectURI: oauthConsentRedirectURI,
+			Scopes:         []string{"email", "offline_access", "openid", "profile"},
+			OptionalScopes: []string{"email", "offline_access", "profile"},
+			State:          "optional-state", CodeChallenge: strings.Repeat("A", 43), ChallengeMethod: "S256",
+			Nonce: "optional-nonce", AuthVersion: 1,
+		}, 10*time.Minute); err != nil {
+			t.Fatalf("save optional consent: %v", err)
+		}
+
+		getRequest := httptest.NewRequest(http.MethodGet, "/api/consent?challenge="+url.QueryEscape(challenge), nil)
+		getRequest.AddCookie(&http.Cookie{Name: oauthSessionCookieName, Value: sessionID})
+		getRecorder := httptest.NewRecorder()
+		fixture.consentHandler.GetConsent(getRecorder, getRequest)
+		if getRecorder.Code != http.StatusOK {
+			t.Fatalf("get consent status = %d, body=%s", getRecorder.Code, getRecorder.Body.String())
+		}
+		if getRecorder.Header().Get("Cache-Control") != "no-store" {
+			t.Fatalf("get consent Cache-Control = %q", getRecorder.Header().Get("Cache-Control"))
+		}
+		getBody := decodeOAuthSecurityJSON(t, getRecorder)
+		permissions, ok := getBody["permissions"].([]any)
+		if !ok || len(permissions) != 4 {
+			t.Fatalf("consent permissions = %#v", getBody["permissions"])
+		}
+		for _, rawPermission := range permissions {
+			permission, ok := rawPermission.(map[string]any)
+			if !ok {
+				t.Fatalf("consent permission = %#v", rawPermission)
+			}
+			if _, ok := permission["claims"].([]any); !ok {
+				t.Fatalf("consent permission claims must be a JSON array: %#v", permission)
+			}
+		}
+		openidPermission, ok := permissions[2].(map[string]any)
+		if !ok || openidPermission["required"] != true {
+			t.Fatalf("openid permission = %#v", permissions[2])
+		}
+
+		accepted := fixture.consentDecisionMutation(t, sessionID, csrf, challenge, []string{"profile"})
+		if accepted.Code != http.StatusOK {
+			t.Fatalf("accept status = %d, body=%s", accepted.Code, accepted.Body.String())
+		}
+		if accepted.Header().Get("Cache-Control") != "no-store" {
+			t.Fatalf("accept consent Cache-Control = %q", accepted.Header().Get("Cache-Control"))
+		}
+		redirectValue, ok := decodeOAuthSecurityJSON(t, accepted)["redirect_url"].(string)
+		if !ok {
+			t.Fatalf("accept response has no redirect URL: %s", accepted.Body.String())
+		}
+		redirectURL, err := url.Parse(redirectValue)
+		if err != nil {
+			t.Fatalf("parse accepted redirect: %v", err)
+		}
+		if redirectURL.Query().Get("scope") != "openid profile" || redirectURL.Query().Get("state") != "optional-state" {
+			t.Fatalf("accepted redirect query = %v", redirectURL.Query())
+		}
+		codeData, err := fixture.sessions.GetAuthorizationCode(context.Background(), redirectURL.Query().Get("code"))
+		if err != nil {
+			t.Fatalf("load authorization code: %v", err)
+		}
+		if strings.Join(codeData.Scopes, " ") != "openid profile" {
+			t.Fatalf("authorization code scopes = %#v", codeData.Scopes)
+		}
+		var storedScopes, storedClaims []string
+		if err := schema.pool.QueryRow(context.Background(), `
+			SELECT scopes,allowed_claims FROM oauth_authorizations WHERE user_id=$1 AND client_id=$2
+		`, userID, oauthConsentClientID).Scan(&storedScopes, &storedClaims); err != nil {
+			t.Fatalf("load authorization record: %v", err)
+		}
+		if strings.Join(storedScopes, " ") != "openid profile" {
+			t.Fatalf("authorization record scopes = %#v", storedScopes)
+		}
+		if strings.Join(storedClaims, " ") != "name picture preferred_username sub" {
+			t.Fatalf("authorization record claims = %#v", storedClaims)
+		}
+	})
+
+	t.Run("userinfo rejects user tokens without the sub claim", func(t *testing.T) {
+		userID := uuid.New()
+		if _, err := schema.pool.Exec(context.Background(), `
+			INSERT INTO users (id,username,status,role,creation_source)
+			VALUES ($1,$2,'active','user','legacy')
+		`, userID, "userinfo-no-openid-"+strings.ReplaceAll(userID.String(), "-", "")); err != nil {
+			t.Fatalf("insert UserInfo user: %v", err)
+		}
+		pair, err := fixture.tokenService.GenerateAuthorizationCodeTokenPairWithClaims(
+			context.Background(), oauthConsentClientID, userID.String(), []string{"profile"},
+			[]string{"preferred_username"}, 1, time.Now().UTC().UnixMicro(), false,
+		)
+		if err != nil {
+			t.Fatalf("generate profile-only access token: %v", err)
+		}
+		request := httptest.NewRequest(http.MethodGet, "/userinfo", nil)
+		request.Header.Set("Authorization", "Bearer "+pair.AccessToken)
+		recorder := httptest.NewRecorder()
+		fixture.authorizeHandler.UserInfo(recorder, request)
+		assertOAuthSecurityJSONError(t, recorder, http.StatusForbidden, "insufficient_scope")
+		if got := recorder.Header().Get("WWW-Authenticate"); got != `Bearer error="insufficient_scope", scope="openid"` {
+			t.Fatalf("WWW-Authenticate = %q", got)
+		}
+	})
 }
 
 func (f *oauthConsentSecurityFixture) authorize(query url.Values) *httptest.ResponseRecorder {
@@ -307,6 +431,25 @@ func (f *oauthConsentSecurityFixture) consentMutation(
 	request.AddCookie(&http.Cookie{Name: oauthSessionCookieName, Value: sessionID})
 	recorder := httptest.NewRecorder()
 	handler(recorder, request)
+	return recorder
+}
+
+func (f *oauthConsentSecurityFixture) consentDecisionMutation(
+	t *testing.T, sessionID, csrf, challenge string, grantedOptionalScopes []string,
+) *httptest.ResponseRecorder {
+	t.Helper()
+	body, err := json.Marshal(map[string]any{
+		"challenge": challenge, "granted_optional_scopes": grantedOptionalScopes,
+	})
+	if err != nil {
+		t.Fatalf("encode consent decision: %v", err)
+	}
+	request := httptest.NewRequest(http.MethodPost, "/api/consent/accept", strings.NewReader(string(body)))
+	request.Header.Set("Content-Type", "application/json")
+	request.Header.Set("X-CSRF-Token", csrf)
+	request.AddCookie(&http.Cookie{Name: oauthSessionCookieName, Value: sessionID})
+	recorder := httptest.NewRecorder()
+	f.consentHandler.AcceptConsent(recorder, request)
 	return recorder
 }
 

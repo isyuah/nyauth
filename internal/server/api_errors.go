@@ -171,6 +171,9 @@ func apiErrorCodeForMessage(message string) string {
 	if strings.HasPrefix(normalized, "invalid human verification configuration:") {
 		return "human_verification.configuration_invalid"
 	}
+	if strings.HasPrefix(normalized, "invalid oauth client:") {
+		return "client.configuration_invalid"
+	}
 	if strings.HasPrefix(normalized, "mail_backlog_count must be between ") ||
 		strings.HasPrefix(normalized, "audit_outbox_backlog_count must be between ") ||
 		strings.HasPrefix(normalized, "avatar_cleanup_pending_count must be between ") ||

@@ -37,6 +37,7 @@
     { href: '/admin', icon: LayoutDashboard, label: '仪表盘' },
     { href: '/admin/users', icon: Users, label: '用户管理' },
     { href: '/admin/clients', icon: AppWindow, label: '应用管理' },
+    { href: '/admin/oauth/test', icon: FlaskConical, label: 'OAuth 测试' },
     { href: '/admin/providers', icon: KeyRound, label: '身份提供者' },
     { href: '/admin/invites', icon: Ticket, label: '邀请管理' },
     { href: '/admin/audit', icon: ScrollText, label: '审计日志' },
@@ -50,7 +51,6 @@
     { href: '/profile', icon: UserRound, label: '个人资料' },
   ];
 
-  const testClientEnabled = import.meta.env.DEV || import.meta.env.VITE_ENABLE_TEST_CLIENT === 'true';
   let visible = $derived(mobile ? mobileOpen : true);
   let width = $derived(mobile ? '248px' : (collapsed ? '72px' : '248px'));
   let showLabels = $derived(mobile || !collapsed);
@@ -119,17 +119,6 @@
         </a>
       {/if}
 
-      {#if testClientEnabled}
-        <a
-          href="/test-client"
-          onclick={onNavigate}
-          class="mb-0.5 flex h-11 items-center gap-3 rounded-nya-md px-3.5 text-body-medium text-nya-text-tertiary transition-colors hover:bg-nya-surface-muted hover:text-nya-text-primary"
-          title={!showLabels ? 'OAuth 测试' : undefined}
-        >
-          <FlaskConical size={18} class="shrink-0" />
-          {#if showLabels}<span>OAuth 测试</span>{/if}
-        </a>
-      {/if}
     </nav>
 
     <div class="shrink-0 p-3">

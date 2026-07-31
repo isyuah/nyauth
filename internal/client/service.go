@@ -107,12 +107,44 @@ func validateRequest(req models.CreateClientRequest) error {
 		}
 		scopeSeen[scope] = true
 	}
+	optionalSeen := make(map[string]bool, len(req.OptionalScopes))
+	for _, scope := range req.OptionalScopes {
+		if !scopeSeen[scope] {
+			return fmt.Errorf("%w: optional scope %q is not an allowed client scope", ErrInvalidClient, scope)
+		}
+		if scope == "openid" {
+			return fmt.Errorf("%w: openid must remain a required scope", ErrInvalidClient)
+		}
+		if optionalSeen[scope] {
+			return fmt.Errorf("%w: duplicate optional scope %q", ErrInvalidClient, scope)
+		}
+		optionalSeen[scope] = true
+	}
+	if len(req.OptionalScopes) > 0 && !seen[models.GrantAuthorizationCode] {
+		return fmt.Errorf("%w: optional scopes require authorization_code", ErrInvalidClient)
+	}
+	if len(req.Scopes) > 0 && len(req.OptionalScopes) == len(req.Scopes) {
+		return fmt.Errorf("%w: at least one client scope must remain required", ErrInvalidClient)
+	}
+	claimSeen := make(map[string]bool, len(req.AllowedClaims))
+	for _, claim := range req.AllowedClaims {
+		if !slices.Contains(settings.SupportedOAuthClaims(), claim) {
+			return fmt.Errorf("%w: unsupported claim %q", ErrInvalidClient, claim)
+		}
+		if claimSeen[claim] {
+			return fmt.Errorf("%w: duplicate claim %q", ErrInvalidClient, claim)
+		}
+		claimSeen[claim] = true
+	}
+	if scopeSeen["openid"] != claimSeen["sub"] {
+		return fmt.Errorf("%w: the sub claim is required exactly when openid is allowed", ErrInvalidClient)
+	}
 	if req.AccessPolicy != "" && !models.ValidClientAccessPolicy(req.AccessPolicy) {
 		return fmt.Errorf("%w: unsupported access policy %q", ErrInvalidClient, req.AccessPolicy)
 	}
 	return nil
 }
-func applyRequestDefaults(req *models.CreateClientRequest, policy settings.OAuthPolicy) {
+func applyRequestDefaults(req *models.CreateClientRequest, policy settings.OAuthPolicy, administrator bool) {
 	if req.RedirectURIs == nil {
 		req.RedirectURIs = []string{}
 	}
@@ -133,9 +165,19 @@ func applyRequestDefaults(req *models.CreateClientRequest, policy settings.OAuth
 	if req.PostLogoutRedirectURIs == nil {
 		req.PostLogoutRedirectURIs = []string{}
 	}
+	if req.OptionalScopes == nil {
+		req.OptionalScopes = []string{}
+	}
+	if req.AllowedClaims == nil {
+		req.AllowedClaims = policy.ClaimsForScopes(req.Scopes, administrator)
+	}
 }
 
 func validateNewClientPolicy(req models.CreateClientRequest, policy settings.OAuthPolicy) error {
+	return validateNewClientPolicyForActor(req, policy, true)
+}
+
+func validateNewClientPolicyForActor(req models.CreateClientRequest, policy settings.OAuthPolicy, administrator bool) error {
 	if slices.Contains(req.Scopes, "offline_access") && !slices.Contains(req.Grants, models.GrantRefreshToken) {
 		return fmt.Errorf("%w: offline_access requires refresh_token", ErrInvalidClient)
 	}
@@ -156,6 +198,15 @@ func validateNewClientPolicy(req models.CreateClientRequest, policy settings.OAu
 	for _, scope := range req.Scopes {
 		if !policy.AllowsScope(scope) {
 			return fmt.Errorf("%w: scope %q is disabled by OAuth policy", ErrInvalidClient, scope)
+		}
+		if !policy.ScopeAssignable(scope, administrator) {
+			return fmt.Errorf("%w: scope %q requires administrator assignment", ErrInvalidClient, scope)
+		}
+	}
+	availableClaims := policy.ClaimsForScopes(req.Scopes, administrator)
+	for _, claim := range req.AllowedClaims {
+		if !slices.Contains(availableClaims, claim) {
+			return fmt.Errorf("%w: claim %q is not assignable for the selected scopes", ErrInvalidClient, claim)
 		}
 	}
 	return nil
@@ -187,19 +238,31 @@ func validateUpdatedClientPolicy(previous, next *models.OAuthClient, request mod
 			}
 		}
 	}
+	if request.AllowedClaims != nil {
+		availableClaims := policy.ClaimsForScopes(next.Scopes, true)
+		for _, claim := range next.AllowedClaims {
+			if !slices.Contains(previous.AllowedClaims, claim) && !slices.Contains(availableClaims, claim) {
+				return fmt.Errorf("%w: claim %q is not assignable for the selected scopes", ErrInvalidClient, claim)
+			}
+		}
+	}
 	return nil
 }
 
 func (s *Service) buildClient(req models.CreateClientRequest, snapshots ...settings.Versioned[settings.OAuthPolicy]) (*models.OAuthClient, string, error) {
+	return s.buildClientForActor(req, true, snapshots...)
+}
+
+func (s *Service) buildClientForActor(req models.CreateClientRequest, administrator bool, snapshots ...settings.Versioned[settings.OAuthPolicy]) (*models.OAuthClient, string, error) {
 	policySnapshot := s.oauthPolicySnapshot()
 	if len(snapshots) > 0 {
 		policySnapshot = snapshots[0]
 	}
-	applyRequestDefaults(&req, policySnapshot.Value)
+	applyRequestDefaults(&req, policySnapshot.Value, administrator)
 	if err := validateRequest(req); err != nil {
 		return nil, "", err
 	}
-	if err := validateNewClientPolicy(req, policySnapshot.Value); err != nil {
+	if err := validateNewClientPolicyForActor(req, policySnapshot.Value, administrator); err != nil {
 		return nil, "", err
 	}
 	id, err := crypto.GenerateClientID()
@@ -219,7 +282,7 @@ func (s *Service) buildClient(req models.CreateClientRequest, snapshots ...setti
 	if req.AccessPolicy == "" {
 		req.AccessPolicy = models.ClientAccessOpen
 	}
-	c := &models.OAuthClient{ID: id, SecretHash: secretHash, Name: strings.TrimSpace(req.Name), RedirectURIs: req.RedirectURIs, PostLogoutRedirectURIs: req.PostLogoutRedirectURIs, Grants: req.Grants, Scopes: req.Scopes, IsPublic: req.IsPublic, AccessPolicy: req.AccessPolicy, Metadata: req.Metadata}
+	c := &models.OAuthClient{ID: id, SecretHash: secretHash, Name: strings.TrimSpace(req.Name), RedirectURIs: req.RedirectURIs, PostLogoutRedirectURIs: req.PostLogoutRedirectURIs, Grants: req.Grants, Scopes: req.Scopes, OptionalScopes: req.OptionalScopes, AllowedClaims: req.AllowedClaims, IsPublic: req.IsPublic, AccessPolicy: req.AccessPolicy, Metadata: req.Metadata}
 	if !req.IsPublic {
 		hint := clientSecretHint(secret)
 		rotatedAt := s.clock().UTC()
@@ -279,7 +342,7 @@ func (s *Service) CreateForOwner(ctx context.Context, ownerID string, req models
 	if !policy.Value.SelfServiceClientCreationEnabled {
 		return nil, ErrSelfServiceDisabled
 	}
-	c, secret, err := s.buildClient(req, policy)
+	c, secret, err := s.buildClientForActor(req, false, policy)
 	if err != nil {
 		return nil, err
 	}
@@ -318,6 +381,12 @@ func applyClientUpdate(c *models.OAuthClient, req models.UpdateClientRequest) er
 	if req.Scopes != nil {
 		c.Scopes = req.Scopes
 	}
+	if req.OptionalScopes != nil {
+		c.OptionalScopes = req.OptionalScopes
+	}
+	if req.AllowedClaims != nil {
+		c.AllowedClaims = req.AllowedClaims
+	}
 	if req.Metadata != nil {
 		c.Metadata = req.Metadata
 	}
@@ -327,7 +396,7 @@ func applyClientUpdate(c *models.OAuthClient, req models.UpdateClientRequest) er
 	if c.AccessPolicy == "" {
 		c.AccessPolicy = models.ClientAccessOpen
 	}
-	check := models.CreateClientRequest{Name: c.Name, RedirectURIs: c.RedirectURIs, PostLogoutRedirectURIs: c.PostLogoutRedirectURIs, Grants: c.Grants, Scopes: c.Scopes, IsPublic: c.IsPublic, AccessPolicy: c.AccessPolicy, Metadata: c.Metadata}
+	check := models.CreateClientRequest{Name: c.Name, RedirectURIs: c.RedirectURIs, PostLogoutRedirectURIs: c.PostLogoutRedirectURIs, Grants: c.Grants, Scopes: c.Scopes, OptionalScopes: c.OptionalScopes, AllowedClaims: c.AllowedClaims, IsPublic: c.IsPublic, AccessPolicy: c.AccessPolicy, Metadata: c.Metadata}
 	if err := validateRequest(check); err != nil {
 		return err
 	}

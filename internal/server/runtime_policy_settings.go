@@ -130,7 +130,7 @@ func (s *Server) handleUpdateOAuthSettings(w http.ResponseWriter, r *http.Reques
 		writeAPIError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	value, err := settings.NormalizeOAuthPolicy(request.OAuthPolicy)
+	value, err := settings.NormalizeOAuthPolicyUpdate(request.OAuthPolicy)
 	if err != nil {
 		writeAPIError(w, http.StatusBadRequest, err.Error())
 		return
@@ -147,7 +147,7 @@ func (s *Server) handleUpdateOAuthSettings(w http.ResponseWriter, r *http.Reques
 		}
 		return
 	}
-	writeJSON(w, http.StatusOK, oauthSettingsResponse{Revision: revision, OAuthPolicy: value})
+	writeJSON(w, http.StatusOK, oauthSettingsResponse{Revision: revision, OAuthPolicy: s.settingsMgr.OAuthPolicySnapshot().Value})
 }
 
 func (s *Server) authorizePolicySettingsMutation(

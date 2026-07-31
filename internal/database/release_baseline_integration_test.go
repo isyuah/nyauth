@@ -175,7 +175,7 @@ func assertReleaseBaseline(t *testing.T, schema *postgresTestSchema) {
 
 	for _, column := range []struct{ table, name string }{
 		{"users", "current_avatar_id"}, {"users", "creation_source"}, {"users", "created_by"},
-		{"oauth_clients", "access_policy"}, {"oauth_providers", "import_avatar"},
+		{"oauth_clients", "access_policy"}, {"oauth_clients", "optional_scopes"}, {"oauth_clients", "allowed_claims"}, {"oauth_authorizations", "allowed_claims"}, {"oauth_providers", "import_avatar"},
 		{"oauth_providers", "avatar_allowed_hosts"},
 		{"user_avatars", "storage_profile_id"},
 		{"media_storage_migrations", "target_backend"},

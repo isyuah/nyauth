@@ -65,6 +65,7 @@ export interface AdminUserAuthorization {
   client_id: string;
   client_name: string;
   scopes: string[];
+  allowed_claims: string[];
   granted_at: string;
   last_used_at?: string | null;
 }
@@ -76,6 +77,8 @@ export interface AdminUserClientSummary {
   access_policy: string;
   grants: string[];
   scopes: string[];
+  optional_scopes: string[];
+  allowed_claims: string[];
   secret_hint?: string | null;
   secret_last_used_at?: string | null;
   created_at: string;
@@ -209,6 +212,8 @@ export interface OAuthClient {
   post_logout_redirect_uris: string[];
   grants: string[];
   scopes: string[];
+  optional_scopes: string[];
+  allowed_claims: string[];
   is_public: boolean;
   access_policy?: ClientAccessPolicy;
   secret_hint?: string | null;
@@ -237,6 +242,8 @@ export interface CreateClientInput {
   post_logout_redirect_uris?: string[];
   grants: string[];
   scopes: string[];
+  optional_scopes?: string[];
+  allowed_claims?: string[];
   is_public: boolean;
   access_policy?: ClientAccessPolicy;
   owner_id?: string | null;
@@ -249,6 +256,8 @@ export interface UpdateClientInput {
   post_logout_redirect_uris?: string[];
   grants?: string[];
   scopes?: string[];
+  optional_scopes?: string[];
+  allowed_claims?: string[];
   access_policy?: ClientAccessPolicy;
   metadata?: Record<string, string>;
 }
@@ -270,6 +279,7 @@ export interface OAuthAuthorization {
   client_id: string;
   client_name: string;
   scopes: string[];
+  allowed_claims: string[];
   granted_at: string;
   last_used_at?: string | null;
   created_at: string;
@@ -357,12 +367,24 @@ export interface ClientQuotaPage<T> extends PaginatedResponse<T>, ClientQuota {}
 
 export type OAuthGrantType = 'authorization_code' | 'refresh_token' | 'client_credentials';
 export type OAuthScope = string;
+export type OAuthAssignmentPolicy = 'self_service' | 'admin_only';
+export type OAuthRiskLevel = 'low' | 'personal_data' | 'sensitive';
+
+export interface OAuthScopeDefinition {
+  display_name: string;
+  description: string;
+  claims: string[];
+  assignment_policy: OAuthAssignmentPolicy;
+  risk_level: OAuthRiskLevel;
+}
 
 export interface OAuthClientPolicy {
   self_service_client_creation_enabled: boolean;
   public_clients_enabled: boolean;
   allowed_grant_types: OAuthGrantType[];
   allowed_scopes: OAuthScope[];
+  scope_definitions: Record<string, OAuthScopeDefinition>;
+  claim_assignment_policies: Record<string, OAuthAssignmentPolicy>;
   max_redirect_uris: number;
   max_post_logout_redirect_uris: number;
 }
@@ -445,10 +467,20 @@ export interface ConsentRequest {
   client_name: string;
   client_id: string;
   scopes: string[];
+  permissions: ConsentPermission[];
   redirect_uri: string;
   redirect_origin: string;
   publisher_type: 'system_managed' | 'user_registered';
   verification_status: 'unverified';
+}
+
+export interface ConsentPermission {
+  scope: string;
+  display_name: string;
+  description: string;
+  risk_level: OAuthRiskLevel;
+  required: boolean;
+  claims: string[];
 }
 
 export interface AuditLog {
@@ -1379,6 +1411,8 @@ const API_ERROR_TRANSLATIONS: Record<string, string> = {
   'application limit reached': '已达到该账户的应用配额上限',
   'self-service client creation is disabled': '管理员已关闭用户自助创建客户端',
   'oauth client policy changed; reload and retry': 'OAuth 客户端策略已更新，请重新加载后再试',
+  'invalid_scope_selection': '可选权限选择无效，请重新发起授权',
+  'invalid_or_expired_challenge': '授权请求无效或已过期，请重新发起登录',
   'service capability is paused': '该操作因服务维护而暂时停用',
   'service control revision conflict': '运行状态已被其他管理员修改，请重新加载后再试',
   'registration settings conflict with service control': '当前运行控制状态不允许启用该注册策略，请先调整注册或邮件投递能力',
@@ -1533,13 +1567,26 @@ const API_ERROR_MESSAGES_BY_CODE: Record<string, string> = {
   'client.quota_exceeded': 'application limit reached',
   'client.self_service_disabled': 'self-service client creation is disabled',
   'client.policy_changed': 'oauth client policy changed; reload and retry',
+  'client.configuration_invalid': 'invalid oauth client',
 };
 
 export function localizeAPIErrorMessage(message: string, code = ''): string {
+  const normalized = message.trim().toLowerCase();
+  if (code === 'client.configuration_invalid' || normalized.startsWith('invalid oauth client:')) {
+    const disabledScope = message.match(/scope "([^"]+)" is disabled by OAuth policy/i);
+    if (disabledScope) return `Scope “${disabledScope[1]}” 已被管理员停用，请重新打开窗口后选择当前可用权限`;
+    const administratorScope = message.match(/scope "([^"]+)" requires administrator assignment/i);
+    if (administratorScope) return `Scope “${administratorScope[1]}” 只能由管理员分配`;
+    const disabledGrant = message.match(/grant "([^"]+)" is disabled by OAuth policy/i);
+    if (disabledGrant) return `Grant “${disabledGrant[1]}” 已被管理员停用，请重新打开窗口后选择当前可用类型`;
+    const unavailableClaim = message.match(/claim "([^"]+)" is not assignable for the selected scopes/i);
+    if (unavailableClaim) return `Claim “${unavailableClaim[1]}” 已不再适用于当前 Scope，请重新打开窗口检查权限`;
+    if (normalized.includes('public client creation is disabled by oauth policy')) return '管理员已停用 Public Client 创建，请重新打开窗口检查配置';
+    return '应用配置不符合当前 OAuth 策略，请重新打开窗口检查后重试';
+  }
   const stableMessage = API_ERROR_MESSAGES_BY_CODE[code];
   if (stableMessage && API_ERROR_TRANSLATIONS[stableMessage]) return API_ERROR_TRANSLATIONS[stableMessage];
   if (code === 'auth.password_policy_violation') return PASSWORD_REQUIREMENT;
-  const normalized = message.trim().toLowerCase();
   if (normalized.includes(PASSWORD_POLICY_ERROR)) return PASSWORD_REQUIREMENT;
   if (API_ERROR_TRANSLATIONS[normalized]) return API_ERROR_TRANSLATIONS[normalized];
   if (normalized.startsWith('invalid otlp configuration:')) return API_ERROR_TRANSLATIONS['invalid otlp configuration'];
@@ -1783,12 +1830,12 @@ export const api = {
 
   consent: {
     get: (challenge: string) => req<ConsentRequest>(`/api/consent?challenge=${encodeURIComponent(challenge)}`),
-    accept: (challenge: string) => req<{ redirect_url: string }>('/api/consent/accept', { method: 'POST', body: JSON.stringify({ challenge }) }),
+    accept: (challenge: string, grantedOptionalScopes: string[]) => req<{ redirect_url: string }>('/api/consent/accept', { method: 'POST', body: JSON.stringify({ challenge, granted_optional_scopes: grantedOptionalScopes }) }),
     deny: (challenge: string) => req<{ redirect_url: string }>('/api/consent/deny', { method: 'POST', body: JSON.stringify({ challenge }) }),
   },
 
   my: {
-    getClients: () => req<MyClientPage>('/api/my/clients'),
+    getClients: () => req<MyClientPage>('/api/my/clients', { cache: 'no-store' }),
     createClient: (data: CreateClientInput) => req<CreateClientResult>('/api/my/clients', { method: 'POST', body: JSON.stringify(data) }),
     deleteClient: (id: string) => req<void>(`/api/my/clients/${encodeURIComponent(id)}`, { method: 'DELETE' }),
     rotateClientSecret: (id: string) => req<RotateClientSecretResult>(`/api/my/clients/${encodeURIComponent(id)}/rotate-secret`, { method: 'POST' }),

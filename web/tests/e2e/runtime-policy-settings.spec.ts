@@ -16,6 +16,7 @@ import type {
   UpdateProtectionSettingsInput,
   User,
 } from '../../src/lib/api';
+import { DEFAULT_CLAIM_ASSIGNMENT_POLICIES, DEFAULT_SCOPE_DEFINITIONS } from '../../src/lib/oauth-catalog';
 
 const adminID = '11111111-1111-1111-1111-111111111111';
 const targetUserID = '22222222-2222-2222-2222-222222222222';
@@ -100,6 +101,8 @@ const oauthSettings: OAuthSettings = {
   public_clients_enabled: true,
   allowed_grant_types: ['authorization_code', 'refresh_token', 'client_credentials'],
   allowed_scopes: ['openid', 'profile', 'email', 'offline_access'],
+  scope_definitions: DEFAULT_SCOPE_DEFINITIONS,
+  claim_assignment_policies: DEFAULT_CLAIM_ASSIGNMENT_POLICIES,
   max_redirect_uris: 20,
   max_post_logout_redirect_uris: 20,
 };
@@ -111,6 +114,8 @@ const ownedClient: OAuthClient = {
   post_logout_redirect_uris: [],
   grants: ['authorization_code', 'refresh_token'],
   scopes: ['openid', 'profile'],
+  optional_scopes: [],
+  allowed_claims: ['sub', 'preferred_username', 'name', 'picture'],
   is_public: false,
   secret_hint: 'abcd1234',
   secret_version: 1,
@@ -471,8 +476,22 @@ test('OAuth client policy saves a revisioned restricted policy', async ({ page }
   await expect(page.getByRole('heading', { name: 'OAuth 客户端', exact: true })).toBeVisible();
   await page.getByRole('switch', { name: '允许 Public Client' }).click();
   await page.getByLabel('Client Credentials').uncheck();
-  await page.getByLabel('offline_access').uncheck();
-  await page.getByLabel(/自定义 Scope/).fill('tenant.read');
+  await page.getByRole('checkbox', { name: 'offline_access', exact: true }).uncheck();
+  await expect(page.locator('#oauth-scope-openid-name')).toHaveCount(0);
+  await page.getByRole('button', { name: '展开 openid 配置' }).click();
+  await expect(page.locator('#oauth-scope-openid-name')).toBeVisible();
+  await page.getByRole('button', { name: '添加自定义 Scope' }).click();
+  const addScopeDialog = page.getByRole('dialog', { name: '添加自定义 Scope' });
+  await addScopeDialog.getByLabel('Scope 标识').fill('tenant.read');
+  await addScopeDialog.getByLabel('Scope 显示名称', { exact: true }).fill('读取租户');
+  await addScopeDialog.getByLabel('授权说明').fill('读取当前用户可以访问的租户和账户角色。');
+  await addScopeDialog.getByRole('checkbox', { name: /账户角色/ }).check();
+  await addScopeDialog.getByRole('button', { name: '添加到目录' }).click();
+  await expect(addScopeDialog).toBeHidden();
+  const tenantScope = page.locator('[data-scope="tenant.read"]');
+  await expect(tenantScope).toBeVisible();
+  await expect(page.locator('#oauth-scope-openid-name')).toHaveCount(0);
+  await expect(page.locator('[id="oauth-scope-tenant.read-name"]')).toBeVisible();
   await page.locator('#oauth-max-redirects').fill('12');
   await page.locator('#oauth-max-logouts').fill('4');
   await page.getByRole('button', { name: '保存 OAuth 客户端策略' }).click();
@@ -484,10 +503,73 @@ test('OAuth client policy saves a revisioned restricted policy', async ({ page }
     public_clients_enabled: false,
     allowed_grant_types: ['authorization_code', 'refresh_token'],
     allowed_scopes: ['openid', 'profile', 'email', 'tenant.read'],
+    scope_definitions: {
+      openid: DEFAULT_SCOPE_DEFINITIONS.openid,
+      profile: DEFAULT_SCOPE_DEFINITIONS.profile,
+      email: DEFAULT_SCOPE_DEFINITIONS.email,
+      'tenant.read': {
+        display_name: '读取租户',
+        description: '读取当前用户可以访问的租户和账户角色。',
+        claims: ['role'],
+        assignment_policy: 'admin_only',
+        risk_level: 'sensitive',
+      },
+    },
+    claim_assignment_policies: DEFAULT_CLAIM_ASSIGNMENT_POLICIES,
     max_redirect_uris: 12,
     max_post_logout_redirect_uris: 4,
   });
   await expect(page.getByText('OAuth 客户端策略已保存')).toBeVisible();
+});
+
+test('administrator OAuth console is available in production routes and uses the live Scope Catalog', async ({ page }) => {
+  await installAPIMocks(page, 'admin', async (route, path, method) => {
+    if (path === '/api/admin/settings/oauth' && method === 'GET') {
+      await json(route, 200, oauthSettings);
+      return true;
+    }
+    return false;
+  });
+
+  await page.goto('/admin/oauth/test');
+  await expect(page.getByRole('heading', { name: 'OAuth 2.0 流程测试' })).toBeVisible();
+  await expect(page.getByLabel('Client ID')).toHaveValue('nya-test-client');
+  await expect(page.getByLabel('Redirect URI')).toHaveValue(/\/admin\/oauth\/test$/);
+  await expect(page.getByText('Secret 只保存在当前页面内存中')).toBeVisible();
+  await expect(page.getByRole('button', { name: 'openid', exact: true })).toBeVisible();
+  await expect(page.getByLabel('查看 openid Scope 说明')).toBeVisible();
+});
+
+test('confidential OAuth test callback never persists the secret and asks for it again before exchange', async ({ page }) => {
+  let tokenBody = '';
+  await page.addInitScript(() => {
+    sessionStorage.setItem('nya_pkce_verifier', 'a'.repeat(43));
+    sessionStorage.setItem('nya_state', 'expected-state');
+    sessionStorage.setItem('nya_oauth_test_client_id', 'confidential-client');
+    sessionStorage.setItem('nya_oauth_test_secret_required', 'true');
+  });
+  await page.route('**/token', async (route) => {
+    tokenBody = route.request().postData() || '';
+    await json(route, 200, { access_token: 'access-token', token_type: 'Bearer', expires_in: 3600 });
+  });
+  await installAPIMocks(page, 'admin', async (route, path, method) => {
+    if (path === '/api/admin/settings/oauth' && method === 'GET') {
+      await json(route, 200, oauthSettings);
+      return true;
+    }
+    return false;
+  });
+
+  await page.goto('/admin/oauth/test?code=authorization-code&state=expected-state');
+  await expect(page.getByRole('heading', { name: '重新输入 Client Secret' })).toBeVisible();
+  expect(tokenBody).toBe('');
+  const secret = page.getByLabel('回调后的 Client Secret');
+  await secret.fill('one-time-test-secret');
+  await page.getByRole('button', { name: '换取 Token' }).click();
+  await expect.poll(() => tokenBody).toContain('client_id=confidential-client');
+  expect(tokenBody).toContain('client_secret=one-time-test-secret');
+  await expect(secret).toHaveCount(0);
+  await expect(page.locator('pre').filter({ hasText: '"access_token": "access-token"' })).toBeVisible();
 });
 
 test('OAuth policy revision conflict keeps the draft until the administrator reloads', async ({ page }) => {
@@ -518,6 +600,7 @@ test('OAuth policy revision conflict keeps the draft until the administrator rel
 
 test('my applications build new clients only from the current OAuth policy', async ({ page }) => {
   const bodies: unknown[] = [];
+  let policyLoads = 0;
   const result: MyClientPage = {
     items: [], total: 0, page: 1, page_size: 50, total_pages: 0,
     quota_used: 0, quota_limit: 10, quota_override: null,
@@ -526,12 +609,15 @@ test('my applications build new clients only from the current OAuth policy', asy
       public_clients_enabled: false,
       allowed_grant_types: ['client_credentials'],
       allowed_scopes: ['email'],
+      scope_definitions: DEFAULT_SCOPE_DEFINITIONS,
+      claim_assignment_policies: DEFAULT_CLAIM_ASSIGNMENT_POLICIES,
       max_redirect_uris: 2,
       max_post_logout_redirect_uris: 0,
     },
   };
   await installAPIMocks(page, 'user', async (route, path, method) => {
     if (path === '/api/my/clients' && method === 'GET') {
+      policyLoads++;
       await json(route, 200, result);
       return true;
     }
@@ -545,10 +631,18 @@ test('my applications build new clients only from the current OAuth policy', asy
 
   await page.goto('/dashboard/apps');
   await page.getByRole('button', { name: '创建应用' }).first().click();
+  await expect.poll(() => policyLoads).toBe(2);
+  const dialog = page.getByRole('dialog', { name: '创建应用' });
+  const scrollWidthBefore = await dialog.evaluate((element) => element.scrollWidth);
+  await dialog.getByRole('button', { name: '查看 email Scope 说明' }).hover();
+  const tooltip = page.locator('[data-tooltip-content]');
+  await expect(tooltip).toBeVisible();
+  expect(await tooltip.evaluate((element) => element.closest('[role="dialog"]') === null)).toBe(true);
+  expect(await dialog.evaluate((element) => element.scrollWidth)).toBe(scrollWidthBefore);
   await expect(page.getByLabel('client_credentials')).toBeChecked();
-  await expect(page.getByLabel('email')).toBeChecked();
-  await expect(page.getByLabel('authorization_code')).toHaveCount(0);
-  await expect(page.getByLabel('offline_access')).toHaveCount(0);
+  await expect(page.getByRole('checkbox', { name: 'email', exact: true })).toBeChecked();
+  await expect(page.getByRole('checkbox', { name: 'authorization_code', exact: true })).toHaveCount(0);
+  await expect(page.getByRole('checkbox', { name: 'offline_access', exact: true })).toHaveCount(0);
   await expect(page.getByLabel('公共客户端')).toBeDisabled();
   await expect(page.getByLabel(/Post-logout Redirect URI/)).toBeDisabled();
   await page.getByLabel('应用名称').fill('Machine Client');
@@ -560,8 +654,49 @@ test('my applications build new clients only from the current OAuth policy', asy
     post_logout_redirect_uris: [],
     grants: ['client_credentials'],
     scopes: ['email'],
+    optional_scopes: [],
+    allowed_claims: ['email', 'email_verified'],
     is_public: false,
   });
+});
+
+test('my applications explain a policy change that races with an open create dialog', async ({ page }) => {
+  const result: MyClientPage = {
+    items: [], total: 0, page: 1, page_size: 50, total_pages: 0,
+    quota_used: 0, quota_limit: 10, quota_override: null,
+    client_policy: {
+      self_service_client_creation_enabled: true,
+      public_clients_enabled: true,
+      allowed_grant_types: ['authorization_code', 'refresh_token'],
+      allowed_scopes: ['openid', 'profile'],
+      scope_definitions: DEFAULT_SCOPE_DEFINITIONS,
+      claim_assignment_policies: DEFAULT_CLAIM_ASSIGNMENT_POLICIES,
+      max_redirect_uris: 2,
+      max_post_logout_redirect_uris: 2,
+    },
+  };
+  await installAPIMocks(page, 'user', async (route, path, method) => {
+    if (path === '/api/my/clients' && method === 'GET') {
+      await json(route, 200, result);
+      return true;
+    }
+    if (path === '/api/my/clients' && method === 'POST') {
+      await json(route, 400, {
+        code: 'client.configuration_invalid',
+        error: 'invalid OAuth client: scope "profile" is disabled by OAuth policy',
+      });
+      return true;
+    }
+    return false;
+  });
+
+  await page.goto('/dashboard/apps');
+  await page.getByRole('button', { name: '创建应用' }).first().click();
+  const dialog = page.getByRole('dialog', { name: '创建应用' });
+  await dialog.getByLabel('应用名称').fill('Stale Policy App');
+  await dialog.getByLabel(/Redirect URI/).first().fill('https://client.example/callback');
+  await dialog.getByRole('button', { name: '创建', exact: true }).click();
+  await expect(dialog.getByRole('alert')).toHaveText('Scope “profile” 已被管理员停用，请重新打开窗口后选择当前可用权限');
 });
 
 test('my applications use the server quota and disable creation when it is full', async ({ page }) => {
@@ -579,6 +714,8 @@ test('my applications use the server quota and disable creation when it is full'
       public_clients_enabled: true,
       allowed_grant_types: ['authorization_code', 'refresh_token', 'client_credentials'],
       allowed_scopes: ['openid', 'profile', 'email', 'offline_access'],
+      scope_definitions: DEFAULT_SCOPE_DEFINITIONS,
+      claim_assignment_policies: DEFAULT_CLAIM_ASSIGNMENT_POLICIES,
       max_redirect_uris: 20,
       max_post_logout_redirect_uris: 20,
     },

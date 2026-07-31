@@ -11,6 +11,12 @@ import type {
   UpdateProtectionSettingsInput,
 } from './api';
 import { writable } from 'svelte/store';
+import {
+  cloneScopeDefinitions,
+  DEFAULT_CLAIM_ASSIGNMENT_POLICIES,
+  DEFAULT_SCOPE_DEFINITIONS,
+  OAUTH_CLAIMS,
+} from './oauth-catalog';
 
 export const DISABLE_RATE_LIMITS_CONFIRMATION = 'DISABLE RATE LIMITS';
 
@@ -23,6 +29,8 @@ export const DEFAULT_OAUTH_SETTINGS: OAuthSettings = {
   public_clients_enabled: true,
   allowed_grant_types: [...OAUTH_GRANT_TYPES],
   allowed_scopes: [...OAUTH_SCOPES],
+  scope_definitions: cloneScopeDefinitions(DEFAULT_SCOPE_DEFINITIONS),
+  claim_assignment_policies: { ...DEFAULT_CLAIM_ASSIGNMENT_POLICIES },
   max_redirect_uris: 20,
   max_post_logout_redirect_uris: 20,
 };
@@ -304,6 +312,29 @@ export function oauthPolicyValidationError(input: UpdateOAuthSettingsInput): Fie
     || input.allowed_scopes.some((scope) => !/^[\x21\x23-\x5B\x5D-\x7E]+$/.test(scope))) {
     return { field: 'oauth-scopes', message: 'Scope 不能重复，且必须是符合 OAuth 2.0 的可见 ASCII scope-token。' };
   }
+  for (const scope of input.allowed_scopes) {
+    const definition = input.scope_definitions[scope];
+    if (!definition || !definition.display_name.trim() || !definition.description.trim()) {
+      return { field: 'oauth-scopes', message: `Scope ${scope} 需要完整的名称和授权说明。` };
+    }
+    if (definition.display_name.length > 80 || definition.description.length > 300) {
+      return { field: 'oauth-scopes', message: `Scope ${scope} 的名称或说明过长。` };
+    }
+    if (!['self_service', 'admin_only'].includes(definition.assignment_policy)
+      || !['low', 'personal_data', 'sensitive'].includes(definition.risk_level)) {
+      return { field: 'oauth-scopes', message: `Scope ${scope} 的分配策略或风险等级无效。` };
+    }
+    const claimSet = new Set(definition.claims);
+    if (claimSet.size !== definition.claims.length
+      || definition.claims.some((claim) => !OAUTH_CLAIMS.includes(claim as typeof OAUTH_CLAIMS[number]))) {
+      return { field: 'oauth-scopes', message: `Scope ${scope} 包含不受支持或重复的 Claim。` };
+    }
+  }
+  for (const claim of OAUTH_CLAIMS) {
+    if (!['self_service', 'admin_only'].includes(input.claim_assignment_policies[claim])) {
+      return { field: 'oauth-scopes', message: `Claim ${claim} 缺少有效的分配策略。` };
+    }
+  }
   if (grants.has('refresh_token') && !grants.has('authorization_code')) {
     return { field: 'oauth-grants', message: '允许 Refresh Token 时必须同时允许 Authorization Code。' };
   }
@@ -334,6 +365,8 @@ export function oauthSettingsFromInput(
     public_clients_enabled: input.public_clients_enabled,
     allowed_grant_types: [...input.allowed_grant_types],
     allowed_scopes: [...input.allowed_scopes],
+    scope_definitions: cloneScopeDefinitions(input.scope_definitions),
+    claim_assignment_policies: { ...input.claim_assignment_policies },
     max_redirect_uris: input.max_redirect_uris,
     max_post_logout_redirect_uris: input.max_post_logout_redirect_uris,
   };

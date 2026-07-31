@@ -27,24 +27,26 @@ func NewStore(db *pgxpool.Pool) *Store {
 	return &Store{db: db}
 }
 
-// Upsert records the exact scope set most recently approved by the user. A
-// grant that was previously revoked is reactivated without deleting its audit
-// history or any Redis revocation marker.
-func (s *Store) Upsert(ctx context.Context, userID uuid.UUID, clientID string, scopes []string, grantedAt time.Time) error {
+// Upsert records the exact scope and claim set most recently approved by the
+// user. A grant that was previously revoked is reactivated without deleting
+// its audit history or any Redis revocation marker.
+func (s *Store) Upsert(ctx context.Context, userID uuid.UUID, clientID string, scopes, allowedClaims []string, grantedAt time.Time) error {
 	scopes = canonicalScopes(scopes)
+	allowedClaims = canonicalScopes(allowedClaims)
 	if userID == uuid.Nil || strings.TrimSpace(clientID) == "" {
 		return fmt.Errorf("invalid OAuth authorization")
 	}
 	_, err := s.db.Exec(ctx, `
 		INSERT INTO oauth_authorizations (
-			id,user_id,client_id,scopes,granted_at,last_used_at,revoked_at,created_at,updated_at
-		) VALUES ($1,$2,$3,$4,$5,$5,NULL,$5,$5)
+			id,user_id,client_id,scopes,allowed_claims,granted_at,last_used_at,revoked_at,created_at,updated_at
+		) VALUES ($1,$2,$3,$4,$5,$6,$6,NULL,$6,$6)
 		ON CONFLICT (user_id,client_id) DO UPDATE SET
-			scopes=EXCLUDED.scopes,granted_at=EXCLUDED.granted_at,last_used_at=EXCLUDED.last_used_at,
+			scopes=EXCLUDED.scopes,allowed_claims=EXCLUDED.allowed_claims,
+			granted_at=EXCLUDED.granted_at,last_used_at=EXCLUDED.last_used_at,
 			revoked_at=NULL,updated_at=EXCLUDED.updated_at
 		WHERE oauth_authorizations.granted_at <= EXCLUDED.granted_at
 		  AND (oauth_authorizations.revoked_at IS NULL OR oauth_authorizations.revoked_at < EXCLUDED.granted_at)
-	`, uuid.New(), userID, clientID, scopes, grantedAt)
+	`, uuid.New(), userID, clientID, scopes, allowedClaims, grantedAt)
 	if err != nil {
 		return fmt.Errorf("upserting OAuth authorization: %w", err)
 	}
@@ -54,7 +56,7 @@ func (s *Store) Upsert(ctx context.Context, userID uuid.UUID, clientID string, s
 func (s *Store) ListByUser(ctx context.Context, userID uuid.UUID) ([]models.OAuthAuthorization, error) {
 	rows, err := s.db.Query(ctx, `
 		SELECT grant_record.id,grant_record.user_id,grant_record.client_id,client.name,
-		       grant_record.scopes,grant_record.granted_at,grant_record.last_used_at,
+		       grant_record.scopes,grant_record.allowed_claims,grant_record.granted_at,grant_record.last_used_at,
 		       grant_record.revoked_at,grant_record.created_at,grant_record.updated_at
 		FROM oauth_authorizations AS grant_record
 		JOIN oauth_clients AS client ON client.id=grant_record.client_id
@@ -69,7 +71,7 @@ func (s *Store) ListByUser(ctx context.Context, userID uuid.UUID) ([]models.OAut
 	for rows.Next() {
 		var item models.OAuthAuthorization
 		if err := rows.Scan(
-			&item.ID, &item.UserID, &item.ClientID, &item.ClientName, &item.Scopes,
+			&item.ID, &item.UserID, &item.ClientID, &item.ClientName, &item.Scopes, &item.AllowedClaims,
 			&item.GrantedAt, &item.LastUsedAt, &item.RevokedAt, &item.CreatedAt, &item.UpdatedAt,
 		); err != nil {
 			return nil, fmt.Errorf("scanning OAuth authorization: %w", err)

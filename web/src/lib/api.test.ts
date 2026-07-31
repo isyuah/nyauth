@@ -13,6 +13,7 @@ import {
   type SessionInfo,
 } from './api';
 import { PASSWORD_REQUIREMENT } from './password-policy';
+import { DEFAULT_CLAIM_ASSIGNMENT_POLICIES, DEFAULT_SCOPE_DEFINITIONS } from './oauth-catalog';
 
 describe('localizeAPIErrorMessage', () => {
   it.each([
@@ -70,6 +71,17 @@ describe('localizeAPIErrorMessage', () => {
 
   it('uses a Chinese fallback for an unknown coded backend error', () => {
     expect(localizeAPIErrorMessage('new backend wording', 'request_failed')).toBe('请求失败，请稍后重试');
+  });
+
+  it('keeps the actionable reason for OAuth client policy validation errors', () => {
+    expect(localizeAPIErrorMessage(
+      'invalid OAuth client: scope "tenant.read" is disabled by OAuth policy',
+      'client.configuration_invalid',
+    )).toBe('Scope “tenant.read” 已被管理员停用，请重新打开窗口后选择当前可用权限');
+    expect(localizeAPIErrorMessage(
+      'invalid OAuth client: claim "role" is not assignable for the selected scopes',
+      'request_failed',
+    )).toBe('Claim “role” 已不再适用于当前 Scope，请重新打开窗口检查权限');
   });
 
   it('localizes detailed observability validation errors even while the backend uses request_failed', () => {
@@ -658,6 +670,8 @@ describe('runtime policy settings API contract', () => {
       public_clients_enabled: false,
       allowed_grant_types: ['authorization_code', 'refresh_token'],
       allowed_scopes: ['openid', 'profile', 'email'],
+      scope_definitions: DEFAULT_SCOPE_DEFINITIONS,
+      claim_assignment_policies: DEFAULT_CLAIM_ASSIGNMENT_POLICIES,
       max_redirect_uris: 12,
       max_post_logout_redirect_uris: 4,
     };
@@ -699,6 +713,8 @@ describe('runtime policy settings API contract', () => {
       public_clients_enabled: oauth.public_clients_enabled,
       allowed_grant_types: oauth.allowed_grant_types as Array<'authorization_code' | 'refresh_token'>,
       allowed_scopes: oauth.allowed_scopes as Array<'openid' | 'profile' | 'email'>,
+      scope_definitions: oauth.scope_definitions,
+      claim_assignment_policies: oauth.claim_assignment_policies,
       max_redirect_uris: oauth.max_redirect_uris,
       max_post_logout_redirect_uris: oauth.max_post_logout_redirect_uris,
     });
@@ -741,6 +757,8 @@ describe('runtime policy settings API contract', () => {
       public_clients_enabled: false,
       allowed_grant_types: ['authorization_code', 'refresh_token'],
       allowed_scopes: ['openid', 'profile', 'email'],
+      scope_definitions: DEFAULT_SCOPE_DEFINITIONS,
+      claim_assignment_policies: DEFAULT_CLAIM_ASSIGNMENT_POLICIES,
       max_redirect_uris: 12,
       max_post_logout_redirect_uris: 4,
     });

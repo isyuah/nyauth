@@ -1,6 +1,11 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { goto } from '$app/navigation';
+  import { api, type OAuthScopeDefinition } from '$lib/api';
+  import FieldHelp from '$lib/components/ui/FieldHelp.svelte';
+  import { scopeHelp } from '$lib/oauth-catalog';
+
+  let { adminMode = false }: { adminMode?: boolean } = $props();
 
   interface TokenResponse {
     access_token?: string;
@@ -13,10 +18,14 @@
 
   type UserInfo = Record<string, unknown>;
 
-  const enabled = import.meta.env.DEV || import.meta.env.VITE_ENABLE_TEST_CLIENT === 'true';
+  const enabled = $derived(adminMode || import.meta.env.DEV || import.meta.env.VITE_ENABLE_TEST_CLIENT === 'true');
+  const consolePath = $derived(adminMode ? '/admin/oauth/test' : '/test-client');
+  const pendingClientIDKey = 'nya_oauth_test_client_id';
+  const pendingSecretRequiredKey = 'nya_oauth_test_secret_required';
 
   // Config
   let clientId = $state('nya-test-client');
+  let clientSecret = $state('');
   let redirectUri = $state('');
   let scopes = $state(['openid', 'profile', 'email']);
 
@@ -32,6 +41,9 @@
   let userInfo = $state<UserInfo | null>(null);
   let error = $state('');
   let logs = $state<string[]>([]);
+  let scopeOptions = $state(['openid', 'profile', 'email', 'offline_access']);
+  let scopeDefinitions = $state<Record<string, OAuthScopeDefinition>>({});
+  let secretRequiredForExchange = $state(false);
 
   function log(msg: string) {
     logs = [...logs, `[${new Date().toLocaleTimeString()}] ${msg}`];
@@ -41,6 +53,8 @@
     sessionStorage.removeItem('nya_pkce_verifier');
     sessionStorage.removeItem('nya_state');
     sessionStorage.removeItem('nya_nonce');
+    sessionStorage.removeItem(pendingClientIDKey);
+    sessionStorage.removeItem(pendingSecretRequiredKey);
   }
 
   function secureEqual(left: string, right: string): boolean {
@@ -52,13 +66,24 @@
     return difference === 0;
   }
 
-  onMount(() => {
+  onMount(async () => {
     if (!enabled) {
       goto('/dashboard', { replaceState: true });
       return;
     }
     if (typeof window !== 'undefined') {
-      redirectUri = `${window.location.origin}/test-client`;
+      redirectUri = `${window.location.origin}${consolePath}`;
+    }
+    if (adminMode) {
+      try {
+        const policy = await api.admin.getOAuthSettings();
+        scopeOptions = [...policy.allowed_scopes];
+        scopeDefinitions = policy.scope_definitions;
+        scopes = scopes.filter((scope) => scopeOptions.includes(scope));
+        if (scopes.length === 0 && scopeOptions.includes('openid')) scopes = ['openid'];
+      } catch (cause) {
+        error = cause instanceof Error ? cause.message : '无法加载 OAuth Scope Catalog';
+      }
     }
     // Check if we have a callback (code + state in URL)
     const url = new URL(window.location.href);
@@ -68,7 +93,7 @@
 
     if (err) {
       clearPendingAuthorization();
-      window.history.replaceState({}, '', '/test-client');
+      window.history.replaceState({}, '', consolePath);
       error = `授权失败: ${err} - ${url.searchParams.get('error_description') || ''}`;
       step = 0;
       log(`错误: ${error}`);
@@ -76,7 +101,7 @@
     }
 
     if (code || returnedSt) {
-      window.history.replaceState({}, '', '/test-client');
+      window.history.replaceState({}, '', consolePath);
       if (!code || !returnedSt) {
         clearPendingAuthorization();
         error = '授权回调缺少 code 或 state，已拒绝继续。';
@@ -92,14 +117,17 @@
       // Recover and immediately consume the one-time PKCE state.
       const savedVerifier = sessionStorage.getItem('nya_pkce_verifier');
       const savedState = sessionStorage.getItem('nya_state');
+      const savedClientID = sessionStorage.getItem(pendingClientIDKey);
+      const savedSecretRequired = sessionStorage.getItem(pendingSecretRequiredKey) === 'true';
       clearPendingAuthorization();
-      if (!savedVerifier || !savedState) {
-        error = '缺少一次性 PKCE 状态，无法安全换取令牌。';
-        log('错误: 缺少 PKCE verifier 或 state');
+      if (!savedVerifier || !savedState || !savedClientID) {
+        error = '缺少一次性 OAuth 测试状态，无法安全换取令牌。';
+        log('错误: 缺少 PKCE verifier、state 或 Client ID');
         step = 0;
         return;
       }
       codeVerifier = savedVerifier;
+      clientId = savedClientID;
       if (!secureEqual(savedState, returnedSt)) {
         error = 'State 不匹配！可能存在 CSRF 攻击。';
         log('错误: state 不匹配');
@@ -107,8 +135,12 @@
         return;
       }
 
-      // Auto-exchange
-      exchangeCode();
+      secretRequiredForExchange = savedSecretRequired;
+      if (secretRequiredForExchange) {
+        log('Confidential Client 需要重新输入 Secret 后换取 Token');
+        return;
+      }
+      void exchangeCode();
     }
   });
 
@@ -147,7 +179,14 @@
 
   async function startAuth() {
     error = '';
+    if (!clientId.trim()) {
+      error = '请输入 Client ID';
+      return;
+    }
     step = 1;
+
+    sessionStorage.setItem(pendingClientIDKey, clientId.trim());
+    sessionStorage.setItem(pendingSecretRequiredKey, String(clientSecret.length > 0));
 
     generateState();
     await generatePKCE();
@@ -170,6 +209,10 @@
   }
 
   async function exchangeCode() {
+    if (secretRequiredForExchange && !clientSecret) {
+      error = '请重新输入 Client Secret 后换取 Token';
+      return;
+    }
     log('正在用授权码换取 Token...');
     const params = new URLSearchParams({
       grant_type: 'authorization_code',
@@ -184,6 +227,8 @@
       return;
     }
     params.set('code_verifier', codeVerifier);
+    if (clientSecret) params.set('client_secret', clientSecret);
+    clientSecret = '';
 
     try {
       const res = await fetch('/token', {
@@ -194,6 +239,7 @@
       const data = await res.json() as TokenResponse & { error?: string; error_description?: string };
       if (res.ok) {
         tokens = data;
+        secretRequiredForExchange = false;
         step = 3;
         log('Token 获取成功！');
         log(`Access Token: ${data.access_token?.substring(0, 30)}...`);
@@ -216,7 +262,13 @@
       const res = await fetch('/userinfo', {
         headers: { Authorization: `Bearer ${tokens.access_token}` },
       });
-      userInfo = await res.json() as UserInfo;
+      const data = await res.json() as UserInfo & { error?: string };
+      if (!res.ok) {
+        error = `UserInfo 请求失败: ${data.error || `HTTP ${res.status}`}`;
+        log(`错误: ${error}`);
+        return;
+      }
+      userInfo = data;
       step = 4;
       log('用户信息获取成功！');
     } catch (e) {
@@ -229,12 +281,12 @@
     tokens = null;
     userInfo = null;
     authCode = '';
+    clientSecret = '';
+    secretRequiredForExchange = false;
     error = '';
     logs = [];
-	clearPendingAuthorization();
+    clearPendingAuthorization();
   }
-
-  const scopeOptions = ['openid', 'profile', 'email', 'offline_access'];
 
   function toggleScope(s: string) {
     if (scopes.includes(s)) scopes = scopes.filter(x => x !== s);
@@ -242,11 +294,11 @@
   }
 </script>
 
-<svelte:head><title>OAuth 测试客户端 - Nya</title></svelte:head>
+<svelte:head><title>OAuth 流程测试 - Nya</title></svelte:head>
 
 <div class="min-h-screen bg-[var(--nya-bg)] p-6" style="max-width: 800px; margin: 0 auto;">
-  <h1 style="font-size: 24px; font-weight: 700; color: var(--nya-text-primary); margin-bottom: 4px;">OAuth 2.0 测试客户端</h1>
-  <p style="font-size: 14px; color: var(--nya-text-secondary); margin-bottom: 24px;">测试完整的 Authorization Code + PKCE 流程</p>
+  <h1 style="font-size: 24px; font-weight: 700; color: var(--nya-text-primary); margin-bottom: 4px;">OAuth 2.0 流程测试</h1>
+  <p style="font-size: 14px; color: var(--nya-text-secondary); margin-bottom: 24px;">使用真实 Authorization Code + PKCE 流程检查 Consent、Token 和 UserInfo</p>
 
   {#if error}
     <div class="mb-4 px-4 py-3 rounded-lg" style="background: var(--nya-danger-soft); color: var(--nya-danger); font-size: 14px;">
@@ -285,16 +337,24 @@
           <input id="test-redirect-uri" bind:value={redirectUri} style="width: 100%; height: 38px; padding: 0 12px; border: 1px solid var(--nya-border-strong); border-radius: 9px; font-size: 14px; font-family: monospace;" />
         </div>
         <div>
+          <label for="test-client-secret" style="font-size: 13px; font-weight: 500; color: var(--nya-text-secondary); display: block; margin-bottom: 4px;">Client Secret <span style="font-weight: 400; color: var(--nya-text-tertiary);">（Public Client 留空）</span></label>
+          <input id="test-client-secret" type="password" bind:value={clientSecret} autocomplete="off" data-1p-ignore data-bwignore="true" style="width: 100%; height: 38px; padding: 0 12px; border: 1px solid var(--nya-border-strong); border-radius: 9px; font-size: 14px; font-family: monospace;" />
+          <p style="margin-top: 4px; font-size: 12px; color: var(--nya-text-tertiary);">Secret 只保存在当前页面内存中，不写入 URL、日志或浏览器存储。</p>
+        </div>
+        <div>
           <span id="test-scopes-label" style="font-size: 13px; font-weight: 500; color: var(--nya-text-secondary); display: block; margin-bottom: 8px;">Scopes</span>
           <div class="flex flex-wrap gap-2" aria-labelledby="test-scopes-label">
             {#each scopeOptions as s}
-              <button
-                onclick={() => toggleScope(s)}
-                style="padding: 4px 12px; border-radius: var(--nya-radius-pill); font-size: 12px; font-weight: 550;
-                  background: {scopes.includes(s) ? 'var(--nya-primary-soft)' : 'var(--nya-surface-muted)'};
-                  color: {scopes.includes(s) ? 'var(--nya-primary)' : 'var(--nya-text-tertiary)'};
-                  border: 1px solid {scopes.includes(s) ? 'var(--nya-primary-border)' : 'var(--nya-divider)'};"
-              >{s}</button>
+              <span class="inline-flex items-center gap-1">
+                <button
+                  onclick={() => toggleScope(s)}
+                  style="padding: 4px 12px; border-radius: var(--nya-radius-pill); font-size: 12px; font-weight: 550;
+                    background: {scopes.includes(s) ? 'var(--nya-primary-soft)' : 'var(--nya-surface-muted)'};
+                    color: {scopes.includes(s) ? 'var(--nya-primary)' : 'var(--nya-text-tertiary)'};
+                    border: 1px solid {scopes.includes(s) ? 'var(--nya-primary-border)' : 'var(--nya-divider)'};"
+                >{s}</button>
+                {#if scopeDefinitions[s]}<FieldHelp id={`oauth-test-${s}-help`} text={scopeHelp(scopeDefinitions[s])} label={`查看 ${s} Scope 说明`} />{/if}
+              </span>
             {/each}
           </div>
         </div>
@@ -315,7 +375,14 @@
 
   {#if step === 2}
     <div class="bg-[var(--nya-surface)] border border-[var(--nya-border)] rounded-xl p-5" style="box-shadow: var(--nya-shadow-card);">
-      <p style="color: var(--nya-text-secondary);">正在换取 Token...</p>
+      {#if secretRequiredForExchange}
+        <h3 style="font-size: 16px; font-weight: 650; margin-bottom: 8px;">重新输入 Client Secret</h3>
+        <p style="color: var(--nya-text-secondary); font-size: 13px; margin-bottom: 12px;">为避免持久化 Secret，授权回调后需要再次输入。该值只用于本次 Token 请求。</p>
+        <input aria-label="回调后的 Client Secret" type="password" bind:value={clientSecret} autocomplete="off" data-1p-ignore data-bwignore="true" style="width: 100%; height: 38px; padding: 0 12px; border: 1px solid var(--nya-border-strong); border-radius: 9px; font-size: 14px; font-family: monospace;" />
+        <button onclick={exchangeCode} style="height: 38px; margin-top: 12px; padding: 0 16px; background: var(--nya-primary); color: #fff; border-radius: 9px; font-size: 13px; font-weight: 550;">换取 Token</button>
+      {:else}
+        <p style="color: var(--nya-text-secondary);">正在换取 Token...</p>
+      {/if}
     </div>
   {/if}
 

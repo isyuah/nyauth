@@ -316,6 +316,42 @@ func TestAuthorizationCodeOnlyConsumesMatchingValue(t *testing.T) {
 	}
 }
 
+func TestExplicitEmptyAllowedClaimsSurviveRedisRoundTrips(t *testing.T) {
+	store, _ := testStore(t)
+	ctx := context.Background()
+	emptyClaims := []string{}
+	codeData := &AuthorizationData{
+		ClientID: "client", UserID: "user", RedirectURI: "https://app.example/callback",
+		Scopes: []string{"profile"}, AllowedClaims: emptyClaims, ClaimNamesSet: true,
+		CodeChallenge: "challenge", ChallengeMethod: "S256",
+	}
+	if err := store.SaveAuthorizationCode(ctx, "empty-claims-code", codeData, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	storedCode, err := store.GetAuthorizationCode(ctx, "empty-claims-code")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !storedCode.ClaimNamesSet || len(storedCode.AllowedClaims) != 0 {
+		t.Fatalf("authorization-code claim policy = set:%v claims:%#v", storedCode.ClaimNamesSet, storedCode.AllowedClaims)
+	}
+
+	tokenData := &TokenData{
+		ClientID: "client", UserID: "user", Scopes: []string{"profile"},
+		AllowedClaims: emptyClaims, ClaimNamesSet: true, TokenUse: "access", AuthVersion: 1,
+	}
+	if err := store.SaveToken(ctx, "empty-claims-token", tokenData, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	storedToken, err := store.GetToken(ctx, "empty-claims-token")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !storedToken.ClaimNamesSet || len(storedToken.AllowedClaims) != 0 {
+		t.Fatalf("token claim policy = set:%v claims:%#v", storedToken.ClaimNamesSet, storedToken.AllowedClaims)
+	}
+}
+
 func TestConcurrentRefreshOnlyOneSucceedsAndReuseRevokesFamily(t *testing.T) {
 	store, _ := testStore(t)
 	ctx := context.Background()

@@ -4,6 +4,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"maps"
+	"slices"
 	"sync"
 	"testing"
 	"time"
@@ -93,6 +95,11 @@ func TestRuntimePolicySettingsCASAuditRollbackAndRetention(t *testing.T) {
 	oauthPolicy := DefaultOAuthPolicy()
 	oauthPolicy.SelfServiceClientCreationEnabled = false
 	oauthPolicy.MaxRedirectURIs = 8
+	oauthPolicy.AllowedScopes = append(oauthPolicy.AllowedScopes, "legacy.read")
+	oauthPolicy.ScopeDefinitions["legacy.read"] = OAuthScopeDefinition{
+		DisplayName: "Legacy read", Description: "Read an existing integration resource.",
+		Claims: []string{"preferred_username"}, AssignmentPolicy: OAuthAssignmentAdminOnly, RiskLevel: OAuthRiskSensitive,
+	}
 	if revision, err := managerA.SetOAuthPolicy(ctx, oauthPolicy, 0, "policy-a", mutation("policy-a")); err != nil || revision != 1 {
 		t.Fatalf("store OAuth policy revision=%d err=%v", revision, err)
 	}
@@ -105,6 +112,23 @@ func TestRuntimePolicySettingsCASAuditRollbackAndRetention(t *testing.T) {
 	if snapshot := managerB.OAuthPolicySnapshot(); snapshot.Revision != 1 || !SameOAuthPolicy(snapshot.Value, oauthPolicy) {
 		t.Fatalf("loaded OAuth policy = %#v", snapshot)
 	}
+	retiredPolicy := oauthPolicy
+	retiredPolicy.AllowedScopes = slices.DeleteFunc(slices.Clone(oauthPolicy.AllowedScopes), func(scope string) bool { return scope == "legacy.read" })
+	retiredPolicy.ScopeDefinitions = maps.Clone(oauthPolicy.ScopeDefinitions)
+	delete(retiredPolicy.ScopeDefinitions, "legacy.read")
+	if revision, err := managerA.SetOAuthPolicy(ctx, retiredPolicy, 1, "policy-a", mutation("policy-a")); err != nil || revision != 2 {
+		t.Fatalf("retire OAuth scope revision=%d err=%v", revision, err)
+	}
+	if err := managerB.Load(ctx); err != nil {
+		t.Fatalf("reload retired OAuth policy: %v", err)
+	}
+	retiredSnapshot := managerB.OAuthPolicySnapshot()
+	if retiredSnapshot.Revision != 2 || retiredSnapshot.Value.AllowsScope("legacy.read") {
+		t.Fatalf("retired OAuth policy snapshot = %#v", retiredSnapshot)
+	}
+	if definition, ok := retiredSnapshot.Value.ScopeDefinition("legacy.read"); !ok || definition.DisplayName != "Legacy read" {
+		t.Fatalf("retired OAuth scope definition = %#v, exists=%v", definition, ok)
+	}
 	var oauthAudits int
 	if err := schema.pool.QueryRow(ctx, `
 		SELECT COUNT(*) FROM audit_event_outbox
@@ -112,8 +136,8 @@ func TestRuntimePolicySettingsCASAuditRollbackAndRetention(t *testing.T) {
 	`, models.AuditSettingsUpdated).Scan(&oauthAudits); err != nil {
 		t.Fatalf("count OAuth policy audits: %v", err)
 	}
-	if oauthAudits != 1 {
-		t.Fatalf("OAuth policy audit rows = %d, want 1", oauthAudits)
+	if oauthAudits != 2 {
+		t.Fatalf("OAuth policy audit rows = %d, want 2", oauthAudits)
 	}
 
 	communications := DefaultCommunications()
