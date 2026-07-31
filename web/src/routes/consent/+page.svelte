@@ -102,12 +102,25 @@
             <dl class="space-y-2 text-small">
               <div class="grid grid-cols-[88px_1fr] gap-3"><dt class="text-nya-text-tertiary">Client ID</dt><dd class="break-all font-mono text-nya-text-primary">{consentData.client_id}</dd></div>
               <div class="grid grid-cols-[88px_1fr] gap-3"><dt class="text-nya-text-tertiary">注册来源</dt><dd class="text-nya-text-primary">{consentData.publisher_type === 'system_managed' ? '系统管理员配置' : '用户注册应用'}</dd></div>
+              <div class="grid grid-cols-[88px_1fr] gap-3"><dt class="text-nya-text-tertiary">发布者状态</dt><dd class="text-nya-text-primary">{consentData.verification_status === 'verified' ? '已由管理员审核' : consentData.verification_status === 'not_applicable' ? '系统管理' : '尚未验证'}</dd></div>
               <div class="grid grid-cols-[88px_1fr] gap-3"><dt class="text-nya-text-tertiary">回调来源</dt><dd class="break-all font-mono text-nya-text-primary">{consentData.redirect_origin || '不可用'}</dd></div>
             </dl>
-            <div class="mt-3 flex items-start gap-2 rounded-nya-sm bg-nya-warning-soft px-3 py-2 text-small text-nya-warning" role="status">
-              <TriangleAlert size={15} class="mt-0.5 shrink-0" />
-              <span>Nyauth 尚未验证此应用的发布者，请仅在确认应用身份和回调来源后授权。</span>
-            </div>
+            {#if consentData.verification_status === 'unverified'}
+              <div class="mt-3 flex items-start gap-2 rounded-nya-sm bg-nya-warning-soft px-3 py-2 text-small text-nya-warning" role="status">
+                <TriangleAlert size={15} class="mt-0.5 shrink-0" />
+                <span>Nyauth 尚未验证此应用的发布者，请仅在确认应用身份和回调来源后授权。</span>
+              </div>
+            {:else if consentData.verification_status === 'verified'}
+              <div class="mt-3 flex items-start gap-2 rounded-nya-sm bg-nya-success-soft px-3 py-2 text-small text-nya-success" role="status">
+                <CheckCircle size={15} class="mt-0.5 shrink-0" />
+                <span>此用户注册应用已经由 Nyauth 管理员审核；仍请确认回调来源属于预期应用。</span>
+              </div>
+            {:else}
+              <div class="mt-3 flex items-start gap-2 rounded-nya-sm bg-nya-info-soft px-3 py-2 text-small text-nya-info" role="status">
+                <Shield size={15} class="mt-0.5 shrink-0" />
+                <span>此应用由 Nyauth 管理员直接配置和管理。</span>
+              </div>
+            {/if}
           </div>
 
           {#if requiredPermissions.length > 0}

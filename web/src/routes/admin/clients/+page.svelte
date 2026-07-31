@@ -2,7 +2,7 @@
   import { goto } from '$app/navigation';
   import { page as pageStore } from '$app/stores';
   import { onDestroy, onMount } from 'svelte';
-  import { api, type ClientAccessPolicy, type ClientAccessUser, type CreateClientInput, type OAuthClient, type OAuthClientPolicy, type OAuthGrantType, type OAuthScope, type UpdateClientInput, type User } from '$lib/api';
+  import { api, isRecentAuthenticationError, type ClientAccessPolicy, type ClientAccessUser, type CreateClientInput, type OAuthClient, type OAuthClientPolicy, type OAuthGrantType, type OAuthScope, type UpdateClientInput, type User } from '$lib/api';
   import { formatStringMetadata, parseLineList, parseStringMetadata } from '$lib/admin-form-utils';
   import { DEFAULT_OAUTH_SETTINGS, OAUTH_SCOPES } from '$lib/policy-settings';
   import PageHeader from '$lib/components/layout/PageHeader.svelte';
@@ -16,9 +16,10 @@
   import Modal from '$lib/components/ui/Modal.svelte';
   import ResourceState from '$lib/components/ui/ResourceState.svelte';
   import OAuthClientAuthorizationEditor from '$lib/components/oauth/OAuthClientAuthorizationEditor.svelte';
+  import ReauthenticationDialog from '$lib/components/account/ReauthenticationDialog.svelte';
   import SecretReveal from '$lib/components/ui/SecretReveal.svelte';
   import { toast } from '$lib/toast';
-  import { AppWindow, ChevronLeft, ChevronRight, Pencil, Plus, RefreshCw, Users } from 'lucide-svelte';
+  import { AppWindow, ChevronLeft, ChevronRight, Pencil, Plus, RefreshCw, ShieldCheck, Users } from 'lucide-svelte';
   import { ASSIGNMENT_LABELS, claimsForScopes, cloneScopeDefinitions } from '$lib/oauth-catalog';
 
   type ClientForm = {
@@ -41,6 +42,8 @@
     access_policy: ClientAccessPolicy;
   };
 
+  type PublisherReviewAction = 'verify' | 'revoke';
+
   const accessPolicyOptions: Array<{ value: ClientAccessPolicy; label: string; description: string }> = [
     { value: 'open', label: '开放', description: '所有活跃用户都可以授权此应用' },
     { value: 'admins_only', label: '仅管理员', description: '只有管理员角色可以授权' },
@@ -53,6 +56,8 @@
 
   const pageSize = 20;
   const ownerPageSize = 8;
+  const publisherReviewStorageKey = 'nyauth:reauth:client-publisher-review';
+  let returnTo = $derived(`${$pageStore.url.pathname}${$pageStore.url.search}`);
   const requestedPage = Number($pageStore.url.searchParams.get('page'));
 
   let clients = $state<OAuthClient[]>([]);
@@ -121,6 +126,13 @@
   let ownerConfirmOpen = $state(false);
   let ownerChangeError = $state('');
   let ownerNotice = $state('');
+  let publisherTarget = $state<OAuthClient | null>(null);
+  let publisherAction = $state<PublisherReviewAction>('verify');
+  let publisherConfirmOpen = $state(false);
+  let publisherError = $state('');
+  let publisherPendingAction = $state<{ clientID: string; action: PublisherReviewAction } | null>(null);
+  let publisherReauthOpen = $state(false);
+  let publisherRestoreChecked = false;
   let currentURLKey = '';
   let listRequestVersion = 0;
   let createAuthorizationCodeSelected = $derived(newClient.grants.includes('authorization_code'));
@@ -262,6 +274,75 @@
     }
   }
 
+  function requestPublisherReview(client: OAuthClient, action: PublisherReviewAction) {
+    publisherTarget = client;
+    publisherAction = action;
+    publisherError = '';
+    publisherConfirmOpen = true;
+  }
+
+  async function executePublisherReview(client: OAuthClient, action: PublisherReviewAction, allowReauthentication: boolean) {
+    publisherError = '';
+    try {
+      const updated = action === 'verify'
+        ? await api.admin.verifyClientPublisher(client.id)
+        : await api.admin.revokeClientPublisherVerification(client.id);
+      clients = clients.map((item) => item.id === updated.id ? updated : item);
+      publisherTarget = updated;
+      publisherPendingAction = null;
+      toast.success(action === 'verify' ? `已将“${updated.name}”标记为发布者已验证。` : `已撤销“${updated.name}”的发布者验证。`);
+    } catch (cause) {
+      if (allowReauthentication && isRecentAuthenticationError(cause)) {
+        publisherPendingAction = { clientID: client.id, action };
+        publisherReauthOpen = true;
+        return;
+      }
+      publisherError = cause instanceof Error ? cause.message : '发布者可信状态更新失败';
+      throw cause;
+    }
+  }
+
+  async function confirmPublisherReview() {
+    const target = publisherTarget;
+    if (!target) return;
+    await executePublisherReview(target, publisherAction, true);
+  }
+
+  function persistPublisherReview() {
+    if (!publisherPendingAction) return;
+    sessionStorage.setItem(publisherReviewStorageKey, JSON.stringify(publisherPendingAction));
+  }
+
+  async function retryPublisherReview() {
+    const pending = publisherPendingAction;
+    if (!pending) return;
+    const target = clients.find((client) => client.id === pending.clientID);
+    if (!target) {
+      publisherPendingAction = null;
+      toast.error('待审核的 OAuth 客户端已不存在或不在当前列表。');
+      return;
+    }
+    try {
+      await executePublisherReview(target, pending.action, false);
+    } catch {
+      toast.error(publisherError || '发布者可信状态更新失败');
+    }
+  }
+
+  async function restorePublisherReview() {
+    const raw = sessionStorage.getItem(publisherReviewStorageKey);
+    sessionStorage.removeItem(publisherReviewStorageKey);
+    if (!raw) return;
+    try {
+      const parsed = JSON.parse(raw) as Partial<{ clientID: string; action: PublisherReviewAction }>;
+      if (typeof parsed.clientID !== 'string' || (parsed.action !== 'verify' && parsed.action !== 'revoke')) return;
+      publisherPendingAction = { clientID: parsed.clientID, action: parsed.action };
+      await retryPublisherReview();
+    } catch {
+      toast.error('无法恢复发布者审核操作，请重新发起。');
+    }
+  }
+
   async function loadClients() {
     const requestVersion = ++listRequestVersion;
     loading = true;
@@ -283,7 +364,13 @@
     } catch (cause) {
       if (requestVersion === listRequestVersion) pageError = cause instanceof Error ? cause.message : '应用列表加载失败';
     } finally {
-      if (requestVersion === listRequestVersion) loading = false;
+      if (requestVersion === listRequestVersion) {
+        loading = false;
+        if (!publisherRestoreChecked) {
+          publisherRestoreChecked = true;
+          void restorePublisherReview();
+        }
+      }
     }
   }
 
@@ -649,6 +736,38 @@
             <div class="flex flex-wrap items-center gap-2">{#if client.is_public}<Badge variant="warning">Public</Badge>{:else}<Badge variant="default">Confidential</Badge><Button variant="secondary" size="sm" requiredCapability="admin_mutations" onclick={() => requestRotation(client)}><RefreshCw size={14} /> 轮换 Secret</Button>{/if}{#if client.access_policy && client.access_policy !== 'open'}<Badge variant="warning">访问：{accessPolicyLabel(client.access_policy)}</Badge>{/if}<Badge variant="primary">{client.grants.join(', ')}</Badge>{#if client.access_policy === 'allowlist'}<Button variant="secondary" size="sm" requiredCapability="admin_mutations" ariaLabel={`管理 ${client.name} 访问名单`} onclick={() => openAccessUsers(client)}><Users size={14} /> 访问名单</Button>{/if}<Button variant="ghost" size="sm" requiredCapability="admin_mutations" loading={openingEditID === client.id} disabled={openingEditID !== null && openingEditID !== client.id} onclick={() => openEdit(client)}><Pencil size={14} /> 编辑</Button><Button variant="ghost" size="sm" requiredCapability="admin_mutations" onclick={() => requestDelete(client)}>删除</Button></div>
           </div>
           <div class="mt-3 flex flex-wrap items-center justify-between gap-2"><p class="min-w-0 text-small text-nya-text-tertiary">Owner：<code class="break-all font-mono">{client.owner_id || '未分配'}</code> · Client 类型为只读，创建后不可更改。</p><Button variant="secondary" size="sm" requiredCapability="admin_mutations" ariaLabel={`管理 ${client.name} Owner`} onclick={() => openOwnerManager(client)}><Users size={14} /> 管理 Owner</Button></div>
+          <div class="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-nya-sm bg-nya-surface-soft px-3 py-2">
+            <div class="min-w-0">
+              <div class="flex flex-wrap items-center gap-2">
+                {#if client.publisher_type === 'system_managed'}
+                  <Badge variant="info">系统管理</Badge>
+                {:else if client.publisher_verification_status === 'verified'}
+                  <Badge variant="success">发布者已验证</Badge>
+                {:else}
+                  <Badge variant="warning">发布者未验证</Badge>
+                {/if}
+                <span class="text-small text-nya-text-secondary">
+                  {#if client.publisher_type === 'system_managed'}
+                    由管理员直接创建，不需要额外发布者审核。
+                  {:else if client.publisher_verification_status === 'verified'}
+                    已于 {client.publisher_verified_at ? new Date(client.publisher_verified_at).toLocaleString() : '未知时间'} 完成管理员审核。
+                  {:else}
+                    用户自助注册的应用，授权页会显示未验证警告。
+                  {/if}
+                </span>
+              </div>
+            </div>
+            {#if client.publisher_type === 'user_registered'}
+              <Button
+                variant={client.publisher_verification_status === 'verified' ? 'ghost' : 'secondary'}
+                size="sm"
+                requiredCapability="admin_mutations"
+                onclick={() => requestPublisherReview(client, client.publisher_verification_status === 'verified' ? 'revoke' : 'verify')}
+              >
+                <ShieldCheck size={14} /> {client.publisher_verification_status === 'verified' ? '撤销审核' : '审核发布者'}
+              </Button>
+            {/if}
+          </div>
           {#if !client.is_public}<p class="mt-3 text-small text-nya-text-tertiary">Secret 版本 {client.secret_version}{#if client.secret_hint} · 尾号 {client.secret_hint}{/if}{#if client.secret_rotated_at} · 最近轮换 {new Date(client.secret_rotated_at).toLocaleString()}{/if}{#if client.secret_last_used_at} · 最近使用 {new Date(client.secret_last_used_at).toLocaleString()}{/if}</p>{/if}
           <div class="mt-4"><p class="mb-1 text-small font-semibold text-nya-text-tertiary">Redirect URI</p><div class="flex flex-wrap gap-1.5">{#each client.redirect_uris as uri}<code class="break-all rounded-nya-xs bg-nya-surface-muted px-2 py-1 text-micro text-nya-text-secondary">{uri}</code>{/each}</div></div>
           {#if client.post_logout_redirect_uris.length > 0}<div class="mt-3"><p class="mb-1 text-small font-semibold text-nya-text-tertiary">Post-logout Redirect URI</p><div class="flex flex-wrap gap-1.5">{#each client.post_logout_redirect_uris as uri}<code class="break-all rounded-nya-xs bg-nya-surface-muted px-2 py-1 text-micro text-nya-text-secondary">{uri}</code>{/each}</div></div>{/if}
@@ -757,6 +876,26 @@
     <div class="flex justify-end gap-2"><Button variant="secondary" onclick={() => (ownerModalOpen = false)}>取消</Button><Button variant="primary" requiredCapability="admin_mutations" onclick={requestOwnerChange} disabled={pendingOwnerID === (ownerTarget?.owner_id || null)}>继续</Button></div>
   </div>
 </Modal>
+
+<ConfirmDialog
+  bind:open={publisherConfirmOpen}
+  title={publisherAction === 'verify' ? '审核应用发布者' : '撤销发布者审核'}
+  description={publisherAction === 'verify'
+    ? `确认“${publisherTarget?.name || ''}”的应用身份与回调来源已经由管理员人工核对。此操作不会验证域名所有权。`
+    : `撤销后，“${publisherTarget?.name || ''}”的授权确认页会重新显示发布者未验证警告。`}
+  confirmLabel={publisherAction === 'verify' ? '标记为已验证' : '撤销审核'}
+  confirmVariant={publisherAction === 'verify' ? 'primary' : 'danger'}
+  error={publisherError}
+  onconfirm={confirmPublisherReview}
+/>
+
+<ReauthenticationDialog
+  bind:open={publisherReauthOpen}
+  {returnTo}
+  description="审核或撤销 OAuth 应用发布者状态前需要完成近期身份验证"
+  onauthenticated={retryPublisherReview}
+  onbeforeprovider={persistPublisherReview}
+/>
 
 <ConfirmDialog
   bind:open={deleteOpen}

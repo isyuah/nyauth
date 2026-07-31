@@ -9,6 +9,7 @@
     title = '确认操作',
     description,
     confirmLabel = '确认',
+    confirmVariant = 'danger',
     confirmationText = '',
     error = '',
     onconfirm,
@@ -17,6 +18,7 @@
     title?: string;
     description: string;
     confirmLabel?: string;
+    confirmVariant?: 'primary' | 'danger';
     confirmationText?: string;
     error?: string;
     onconfirm: () => void | Promise<void>;
@@ -69,7 +71,7 @@
     {/if}
     <div class="flex justify-end gap-2 pt-1">
       <Button variant="secondary" onclick={() => (open = false)} disabled={pending}>取消</Button>
-      <Button variant="danger" onclick={confirm} loading={pending} disabled={!allowed}>{confirmLabel}</Button>
+      <Button variant={confirmVariant} onclick={confirm} loading={pending} disabled={!allowed}>{confirmLabel}</Button>
     </div>
   </div>
 </Modal>

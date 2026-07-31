@@ -37,7 +37,7 @@ type OwnerQuota struct {
 	Override *int  `json:"quota_override"`
 }
 
-const clientSelectCols = `id, secret_hash, secret_hint, secret_version, secret_rotated_at, secret_last_used_at, name, redirect_uris, post_logout_redirect_uris, grants, scopes, optional_scopes, allowed_claims, is_public, access_policy, owner_id, metadata, created_at, updated_at`
+const clientSelectCols = `id, secret_hash, secret_hint, secret_version, secret_rotated_at, secret_last_used_at, name, redirect_uris, post_logout_redirect_uris, grants, scopes, optional_scopes, allowed_claims, is_public, access_policy, owner_id, publisher_type, publisher_verification_status, publisher_verified_at, publisher_verified_by, metadata, created_at, updated_at`
 
 type rowScanner interface{ Scan(dest ...any) error }
 
@@ -50,7 +50,9 @@ func scanClient(row rowScanner) (*models.OAuthClient, error) {
 	if err := row.Scan(
 		&c.ID, &c.SecretHash, &c.SecretHint, &c.SecretVersion, &c.SecretRotatedAt,
 		&c.SecretLastUsedAt, &c.Name, &c.RedirectURIs, &c.PostLogoutRedirectURIs,
-		&c.Grants, &c.Scopes, &c.OptionalScopes, &c.AllowedClaims, &c.IsPublic, &c.AccessPolicy, &c.OwnerID, &c.Metadata, &c.CreatedAt, &c.UpdatedAt,
+		&c.Grants, &c.Scopes, &c.OptionalScopes, &c.AllowedClaims, &c.IsPublic, &c.AccessPolicy, &c.OwnerID,
+		&c.PublisherType, &c.PublisherVerification, &c.PublisherVerifiedAt, &c.PublisherVerifiedBy,
+		&c.Metadata, &c.CreatedAt, &c.UpdatedAt,
 	); err != nil {
 		return nil, err
 	}
@@ -88,13 +90,25 @@ func insertClient(ctx context.Context, execer clientExecer, c *models.OAuthClien
 	if c.AllowedClaims == nil {
 		c.AllowedClaims = []string{}
 	}
+	if c.PublisherType == "" {
+		c.PublisherType = models.PublisherTypeSystemManaged
+	}
+	if c.PublisherVerification == "" {
+		if c.PublisherType == models.PublisherTypeUserRegistered {
+			c.PublisherVerification = models.PublisherVerificationUnverified
+		} else {
+			c.PublisherVerification = models.PublisherVerificationNotApplicable
+		}
+	}
 	_, err := execer.Exec(ctx, `
 		INSERT INTO oauth_clients (
 			id,secret_hash,secret_hint,secret_version,secret_rotated_at,name,redirect_uris,
-			post_logout_redirect_uris,grants,scopes,optional_scopes,allowed_claims,is_public,access_policy,owner_id,metadata
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16)
+			post_logout_redirect_uris,grants,scopes,optional_scopes,allowed_claims,is_public,access_policy,owner_id,
+			publisher_type,publisher_verification_status,publisher_verified_at,publisher_verified_by,metadata
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
 	`, c.ID, c.SecretHash, c.SecretHint, c.SecretVersion, c.SecretRotatedAt, c.Name,
-		c.RedirectURIs, c.PostLogoutRedirectURIs, c.Grants, c.Scopes, c.OptionalScopes, c.AllowedClaims, c.IsPublic, c.AccessPolicy, c.OwnerID, c.Metadata)
+		c.RedirectURIs, c.PostLogoutRedirectURIs, c.Grants, c.Scopes, c.OptionalScopes, c.AllowedClaims, c.IsPublic, c.AccessPolicy, c.OwnerID,
+		c.PublisherType, c.PublisherVerification, c.PublisherVerifiedAt, c.PublisherVerifiedBy, c.Metadata)
 	if err != nil {
 		return fmt.Errorf("creating OAuth client: %w", err)
 	}
@@ -287,6 +301,53 @@ func (s *Store) UpdateOwner(ctx context.Context, clientID string, ownerID *strin
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("committing client owner update: %w", err)
+	}
+	return updated, nil
+}
+
+func (s *Store) UpdatePublisherVerification(ctx context.Context, clientID, status, reviewerID string, reviewedAt time.Time, mutation audit.MutationAudit) (*models.OAuthClient, error) {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("starting publisher verification update: %w", err)
+	}
+	defer tx.Rollback(ctx)
+
+	current, err := scanClient(tx.QueryRow(ctx, `SELECT `+clientSelectCols+` FROM oauth_clients WHERE id=$1 FOR UPDATE`, clientID))
+	if err != nil {
+		return nil, err
+	}
+	if current.PublisherType != models.PublisherTypeUserRegistered {
+		return nil, ErrPublisherVerificationNotApplicable
+	}
+	if current.PublisherVerification == status {
+		return nil, ErrPublisherVerificationUnchanged
+	}
+
+	var verifiedAt any
+	var verifiedBy any
+	if status == models.PublisherVerificationVerified {
+		verifiedAt = reviewedAt
+		verifiedBy = reviewerID
+	}
+	updated, err := scanClient(tx.QueryRow(ctx, `
+		UPDATE oauth_clients
+		SET publisher_verification_status=$2,publisher_verified_at=$3,publisher_verified_by=$4,updated_at=$5
+		WHERE id=$1
+		RETURNING `+clientSelectCols,
+		clientID, status, verifiedAt, verifiedBy, reviewedAt,
+	))
+	if err != nil {
+		return nil, fmt.Errorf("updating publisher verification: %w", err)
+	}
+	audited := mutation.WithTarget("client", clientID).WithDetails(map[string]any{
+		"old_status": current.PublisherVerification,
+		"new_status": status,
+	})
+	if err := audit.EnqueueMutationTx(ctx, tx, audited); err != nil {
+		return nil, fmt.Errorf("auditing publisher verification update: %w", err)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, fmt.Errorf("committing publisher verification update: %w", err)
 	}
 	return updated, nil
 }

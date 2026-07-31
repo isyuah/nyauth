@@ -221,10 +221,16 @@ export interface OAuthClient {
   secret_rotated_at?: string | null;
   secret_last_used_at?: string | null;
   owner_id?: string | null;
+  publisher_type: OAuthPublisherType;
+  publisher_verification_status: OAuthPublisherVerificationStatus;
+  publisher_verified_at?: string | null;
   metadata?: Record<string, string>;
   created_at: string;
   updated_at: string;
 }
+
+export type OAuthPublisherType = 'system_managed' | 'user_registered';
+export type OAuthPublisherVerificationStatus = 'not_applicable' | 'unverified' | 'verified';
 
 export type ClientAccessPolicy = 'open' | 'admins_only' | 'allowlist';
 
@@ -470,8 +476,8 @@ export interface ConsentRequest {
   permissions: ConsentPermission[];
   redirect_uri: string;
   redirect_origin: string;
-  publisher_type: 'system_managed' | 'user_registered';
-  verification_status: 'unverified';
+  publisher_type: OAuthPublisherType;
+  verification_status: OAuthPublisherVerificationStatus;
 }
 
 export interface ConsentPermission {
@@ -1411,6 +1417,9 @@ const API_ERROR_TRANSLATIONS: Record<string, string> = {
   'application limit reached': '已达到该账户的应用配额上限',
   'self-service client creation is disabled': '管理员已关闭用户自助创建客户端',
   'oauth client policy changed; reload and retry': 'OAuth 客户端策略已更新，请重新加载后再试',
+  'publisher verification is not applicable to system-managed clients': '系统管理客户端不需要发布者审核',
+  'publisher verification status is unchanged': '发布者可信状态已经是目标状态',
+  'failed to update publisher verification': '发布者可信状态更新失败，请稍后重试',
   'invalid_scope_selection': '可选权限选择无效，请重新发起授权',
   'invalid_or_expired_challenge': '授权请求无效或已过期，请重新发起登录',
   'service capability is paused': '该操作因服务维护而暂时停用',
@@ -1568,6 +1577,8 @@ const API_ERROR_MESSAGES_BY_CODE: Record<string, string> = {
   'client.self_service_disabled': 'self-service client creation is disabled',
   'client.policy_changed': 'oauth client policy changed; reload and retry',
   'client.configuration_invalid': 'invalid oauth client',
+  'client.publisher_verification_not_applicable': 'publisher verification is not applicable to system-managed clients',
+  'client.publisher_verification_unchanged': 'publisher verification status is unchanged',
 };
 
 export function localizeAPIErrorMessage(message: string, code = ''): string {
@@ -2014,6 +2025,10 @@ export const api = {
     updateClient: (id: string, data: UpdateClientInput) => req<OAuthClient>(`/api/admin/clients/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
     updateClientOwner: (id: string, data: { owner_id: string | null }) =>
       req<OAuthClient>(`/api/admin/clients/${encodeURIComponent(id)}/owner`, { method: 'PUT', body: JSON.stringify(data) }),
+    verifyClientPublisher: (id: string) =>
+      req<OAuthClient>(`/api/admin/clients/${encodeURIComponent(id)}/publisher-verification`, { method: 'POST' }),
+    revokeClientPublisherVerification: (id: string) =>
+      req<OAuthClient>(`/api/admin/clients/${encodeURIComponent(id)}/publisher-verification`, { method: 'DELETE' }),
     getClientAccessUsers: (id: string) => req<ClientAccessUser[]>(`/api/admin/clients/${encodeURIComponent(id)}/access-users`),
     updateClientAccessUsers: (id: string, userIDs: string[]) =>
       req<ClientAccessUser[]>(`/api/admin/clients/${encodeURIComponent(id)}/access-users`, { method: 'PUT', body: JSON.stringify({ user_ids: userIDs }) }),

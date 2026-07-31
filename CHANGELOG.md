@@ -13,10 +13,11 @@
 - 人机验证未配置时使用通用保护基线：公开注册、密码恢复、验证邮件重发和 Provider 登录默认保护，密码登录采用三次失败后触发的 Adaptive 模式；已保存策略不会被覆盖
 - 可独立保护自助注册、密码登录、密码恢复、验证邮件重发和 Provider 登录；密码登录支持关闭、失败次数触发或每次必须验证
 - `nyauth human-verification disable -reason <text>` 紧急恢复命令、管理状态卡、低基数 Prometheus 指标和审计事件
+- OAuth 客户端发布者可信状态：用户自助客户端默认未验证，管理员可在近期重新认证后审核或撤销；Consent 区分系统管理、已审核和未验证应用
 
 ### 变更
 
-- 开发版本进入 `0.5.0-dev`；新增兼容迁移 `000010_human_verification`、`000011_oidc_optional_scopes` 和 `000012_oauth_client_claims`，schema version 从 9 提升到 12
+- 开发版本进入 `0.5.0-dev`；新增兼容迁移 `000010_human_verification` 至 `000013_oauth_publisher_trust`，schema version 从 9 提升到 13
 - 禁用人机验证时保留当前验证器配置和策略，并提供语义独立的重新启用操作
 
 ## [0.4.0-rc.1] — 2026-07-31

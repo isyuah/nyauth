@@ -658,6 +658,8 @@ func (s *Server) buildRouter() *chi.Mux {
 			r.Get("/admin/clients/{id}", clientHandler.Get)
 			r.With(adminMutations).Put("/admin/clients/{id}", clientHandler.Update)
 			r.With(adminMutations).Put("/admin/clients/{id}/owner", clientHandler.UpdateOwner)
+			r.With(adminMutations, s.recentAuthenticationMiddleware).Post("/admin/clients/{id}/publisher-verification", clientHandler.VerifyPublisher)
+			r.With(adminMutations, s.recentAuthenticationMiddleware).Delete("/admin/clients/{id}/publisher-verification", clientHandler.RevokePublisherVerification)
 			r.Get("/admin/clients/{id}/access-users", clientHandler.ListAccessUsers)
 			r.With(adminMutations).Put("/admin/clients/{id}/access-users", clientHandler.ReplaceAccessUsers)
 			r.With(adminMutations).Post("/admin/clients/{id}/rotate-secret", clientHandler.RotateSecret)

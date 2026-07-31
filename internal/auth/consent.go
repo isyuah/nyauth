@@ -70,10 +70,6 @@ func (h *ConsentHandler) GetConsent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_or_expired_challenge")
 		return
 	}
-	publisherType := "user_registered"
-	if cl.OwnerID == nil {
-		publisherType = "system_managed"
-	}
 	redirectOrigin := ""
 	if parsed, parseErr := url.Parse(data.RedirectURI); parseErr == nil && parsed.Scheme != "" && parsed.Host != "" {
 		redirectOrigin = parsed.Scheme + "://" + parsed.Host
@@ -82,8 +78,8 @@ func (h *ConsentHandler) GetConsent(w http.ResponseWriter, r *http.Request) {
 		"challenge": challenge, "client_name": cl.Name, "client_id": cl.ID,
 		"scopes": data.Scopes, "redirect_uri": data.RedirectURI,
 		"permissions":     consentPermissions(data.Scopes, data.OptionalScopes, data.ScopeClaims, data.ScopeDetails),
-		"redirect_origin": redirectOrigin, "publisher_type": publisherType,
-		"verification_status": "unverified",
+		"redirect_origin": redirectOrigin, "publisher_type": cl.PublisherType,
+		"verification_status": cl.PublisherVerification,
 	})
 }
 

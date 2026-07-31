@@ -56,6 +56,8 @@ const (
 	AuditClientOwnerChanged          = "client.owner_changed"
 	AuditClientDeleted               = "client.deleted"
 	AuditClientSecretRotated         = "client.secret_rotated"
+	AuditClientPublisherVerified     = "client.publisher_verified"
+	AuditClientPublisherRevoked      = "client.publisher_verification_revoked"
 	AuditAuthorizationRevoked        = "authorization.revoked"
 	AuditAuthorizeDenied             = "authorize.access_denied"
 	AuditClientAccessChanged         = "client.access_users_changed"

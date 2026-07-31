@@ -23,6 +23,8 @@ type handlerService interface {
 	GetByID(ctx context.Context, id string) (*models.OAuthClient, error)
 	Update(ctx context.Context, id string, req models.UpdateClientRequest, mutation audit.MutationAudit) (*models.OAuthClient, error)
 	UpdateOwner(ctx context.Context, id string, req models.UpdateClientOwnerRequest, mutation audit.MutationAudit) (*models.OAuthClient, error)
+	VerifyPublisher(ctx context.Context, id string, mutation audit.MutationAudit) (*models.OAuthClient, error)
+	RevokePublisherVerification(ctx context.Context, id string, mutation audit.MutationAudit) (*models.OAuthClient, error)
 	Delete(ctx context.Context, id string, mutation audit.MutationAudit) error
 	RotateSecret(ctx context.Context, id string, mutation audit.MutationAudit) (*models.RotateClientSecretResponse, error)
 	ListAccessUsers(ctx context.Context, id string) ([]models.ClientAccessUser, error)
@@ -61,10 +63,51 @@ func (h *Handler) Routes() chi.Router {
 		r.Get("/", h.Get)
 		r.Put("/", h.Update)
 		r.Put("/owner", h.UpdateOwner)
+		r.Post("/publisher-verification", h.VerifyPublisher)
+		r.Delete("/publisher-verification", h.RevokePublisherVerification)
 		r.Delete("/", h.Delete)
 		r.Post("/rotate-secret", h.RotateSecret)
 	})
 	return r
+}
+
+func (h *Handler) VerifyPublisher(w http.ResponseWriter, r *http.Request) {
+	h.updatePublisherVerification(w, r, true)
+}
+
+func (h *Handler) RevokePublisherVerification(w http.ResponseWriter, r *http.Request) {
+	h.updatePublisherVerification(w, r, false)
+}
+
+func (h *Handler) updatePublisherVerification(w http.ResponseWriter, r *http.Request, verified bool) {
+	mutation, ok := audit.MutationAuditFromContext(r.Context())
+	if !ok {
+		writeError(w, http.StatusInternalServerError, "audit context unavailable")
+		return
+	}
+	var (
+		updated *models.OAuthClient
+		err     error
+	)
+	if verified {
+		updated, err = h.service.VerifyPublisher(r.Context(), chi.URLParam(r, "id"), mutation)
+	} else {
+		updated, err = h.service.RevokePublisherVerification(r.Context(), chi.URLParam(r, "id"), mutation)
+	}
+	if err != nil {
+		switch {
+		case errors.Is(err, pgx.ErrNoRows):
+			writeError(w, http.StatusNotFound, "client not found")
+		case errors.Is(err, ErrPublisherVerificationNotApplicable):
+			writeCodedError(w, http.StatusConflict, "client.publisher_verification_not_applicable", err.Error())
+		case errors.Is(err, ErrPublisherVerificationUnchanged):
+			writeCodedError(w, http.StatusConflict, "client.publisher_verification_unchanged", err.Error())
+		default:
+			writeError(w, http.StatusInternalServerError, "failed to update publisher verification")
+		}
+		return
+	}
+	writeJSON(w, http.StatusOK, updated)
 }
 
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {

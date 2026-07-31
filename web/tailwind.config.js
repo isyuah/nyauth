@@ -24,6 +24,7 @@ export default {
           success: 'var(--nya-success)',
           'success-soft': 'var(--nya-success-soft)',
           warning: alphaColor('warning'),
+          'warning-strong': 'var(--nya-warning-strong)',
           'warning-soft': 'var(--nya-warning-soft)',
           danger: alphaColor('danger'),
           'danger-soft': 'var(--nya-danger-soft)',

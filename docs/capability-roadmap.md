@@ -43,6 +43,7 @@
 - 浏览器会话绝对/空闲期限、每用户并发会话上限、近期认证期限、Access/Refresh Token 和授权码期限均可动态调整。空闲活动续期不会突破绝对期限；降低并发上限后在用户下一次登录时原子淘汰最旧会话。Token 策略只影响之后新签发或轮换的凭据，不批量改写或恢复现有凭据。
 - 审计保留天数可动态调整；缩短只保存策略，删除仍由受控 `maintenance` 执行。
 - OAuth 客户端策略可动态控制自助创建、Public Client、可新增 Grant/Scope、Scope Catalog、Claim 分配权限和 URI 上限。标准 Scope 映射固定，自定义 Scope 可映射受支持的内置 Claim；Scope/Claim 均可限制为仅管理员分配。移除 Scope 会停止新分配并从 Discovery 隐藏，但保留最后一版可信定义供既有客户端使用；直接收紧 Claim 映射则会阻止尚未兑换的授权码和后续 Refresh Token 继续获得该字段。客户端写入与策略 revision 使用事务锁建立明确提交边界。
+- OAuth 客户端发布者状态区分管理员直接创建的系统管理客户端与用户自助注册客户端。后者默认未验证，管理员可在近期重新认证后人工审核或撤销；Consent 同时展示可信状态与实际回调来源。该状态不冒充自动域名所有权验证。
 - 沟通设置可动态管理结构化事务邮件模板和一个全站横幅。模板只开放纯文本字段和按字段授权的变量，动作链接、有效期说明及 HTML 外壳固定由服务端生成；全站横幅支持开始与结束时间独立省略、严重程度、按版本关闭与 SSE 实时同步，公开 API 使用 `/api/site-banner`。
 - 可观测性设置可动态管理 `info/warn/error` 日志基线、最长 24 小时且自动恢复的临时 Debug，以及邮件 outbox、审计 outbox 和头像清理的五项固定低基数告警阈值。告警只进入管理状态与 Prometheus，不改变 `/readyz`。
 - OTLP 与 SMTP 一样使用专门的不可变候选、真实连接测试、十分钟激活门槛、回滚和显式禁用状态；Authorization 单独信封加密。静态 OTLP 只在数据库模式仍为 `fallback` 时生效，详见 [运行时可观测性](operations/runtime-observability.md)。
@@ -86,7 +87,7 @@ OAuth 客户端已支持 `open`、`admins_only` 和 `allowlist`。策略在用�
 ## 实施顺序建议
 
 ```
-当前 0.5.0-dev: Phase H、人机验证、Scope Catalog、客户端级 Claim 白名单、可选 Scope 与详细 Consent 已实现，schema 演进到 12
+当前 0.5.0-dev: Phase H、人机验证、Scope Catalog、客户端级 Claim 白名单、可选 Scope、详细 Consent 与发布者可信状态已实现，schema 演进到 13
 下一步: 验收并收口 0.5.0 候选版本；首次公开发布前再将开发期迁移压缩为单一基线
 后续: 自动化管理 API、Webhook、自动更新和用户组继续推迟
 ```

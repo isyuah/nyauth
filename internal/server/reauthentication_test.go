@@ -2,6 +2,7 @@ package server
 
 import (
 	"context"
+	"net/http"
 	"net/http/httptest"
 	"testing"
 	"time"
@@ -35,6 +36,36 @@ func TestRecentAuthenticationWindow(t *testing.T) {
 				t.Fatalf("isRecentAuthentication() = %v, want %v", got, test.want)
 			}
 		})
+	}
+}
+
+func TestRecentAuthenticationMiddlewareRejectsStaleSessions(t *testing.T) {
+	t.Parallel()
+	server := &Server{}
+	called := false
+	handler := server.recentAuthenticationMiddleware(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		called = true
+		w.WriteHeader(http.StatusNoContent)
+	}))
+
+	staleRequest := httptest.NewRequest(http.MethodPost, "/api/admin/clients/client-1/publisher-verification", nil)
+	staleRequest = staleRequest.WithContext(withAuthenticatedSession(staleRequest.Context(), &AuthenticatedSession{
+		Data: &session.SessionData{AuthenticatedAt: time.Now().UTC().Add(-account.DefaultReauthenticationTTL - time.Minute)},
+	}))
+	staleResponse := httptest.NewRecorder()
+	handler.ServeHTTP(staleResponse, staleRequest)
+	if staleResponse.Code != http.StatusForbidden || called {
+		t.Fatalf("stale response=%d called=%v body=%s", staleResponse.Code, called, staleResponse.Body.String())
+	}
+
+	freshRequest := httptest.NewRequest(http.MethodPost, "/api/admin/clients/client-1/publisher-verification", nil)
+	freshRequest = freshRequest.WithContext(withAuthenticatedSession(freshRequest.Context(), &AuthenticatedSession{
+		Data: &session.SessionData{AuthenticatedAt: time.Now().UTC()},
+	}))
+	freshResponse := httptest.NewRecorder()
+	handler.ServeHTTP(freshResponse, freshRequest)
+	if freshResponse.Code != http.StatusNoContent || !called {
+		t.Fatalf("fresh response=%d called=%v body=%s", freshResponse.Code, called, freshResponse.Body.String())
 	}
 }
 

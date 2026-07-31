@@ -42,6 +42,15 @@ func (s *Server) requireRecentAuthentication(w http.ResponseWriter, r *http.Requ
 	return true
 }
 
+func (s *Server) recentAuthenticationMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.requireRecentAuthentication(w, r) {
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
 func (s *Server) handlePasswordReauthentication(w http.ResponseWriter, r *http.Request) {
 	setSessionNoStoreHeaders(w)
 	current := currentUserFromContext(r)

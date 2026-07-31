@@ -18,11 +18,13 @@ import (
 )
 
 var (
-	ErrInvalidClient       = errors.New("invalid OAuth client")
-	ErrPublicClientSecret  = errors.New("public OAuth clients do not have a client secret")
-	ErrClientNotOwned      = errors.New("OAuth client is not owned by current user")
-	ErrOAuthPolicyChanged  = errors.New("OAuth client policy changed")
-	ErrSelfServiceDisabled = errors.New("self-service client creation is disabled")
+	ErrInvalidClient                      = errors.New("invalid OAuth client")
+	ErrPublicClientSecret                 = errors.New("public OAuth clients do not have a client secret")
+	ErrClientNotOwned                     = errors.New("OAuth client is not owned by current user")
+	ErrOAuthPolicyChanged                 = errors.New("OAuth client policy changed")
+	ErrSelfServiceDisabled                = errors.New("self-service client creation is disabled")
+	ErrPublisherVerificationNotApplicable = errors.New("publisher verification is not applicable to system-managed clients")
+	ErrPublisherVerificationUnchanged     = errors.New("publisher verification status is unchanged")
 )
 
 type Service struct {
@@ -282,7 +284,19 @@ func (s *Service) buildClientForActor(req models.CreateClientRequest, administra
 	if req.AccessPolicy == "" {
 		req.AccessPolicy = models.ClientAccessOpen
 	}
-	c := &models.OAuthClient{ID: id, SecretHash: secretHash, Name: strings.TrimSpace(req.Name), RedirectURIs: req.RedirectURIs, PostLogoutRedirectURIs: req.PostLogoutRedirectURIs, Grants: req.Grants, Scopes: req.Scopes, OptionalScopes: req.OptionalScopes, AllowedClaims: req.AllowedClaims, IsPublic: req.IsPublic, AccessPolicy: req.AccessPolicy, Metadata: req.Metadata}
+	publisherType := models.PublisherTypeSystemManaged
+	publisherVerification := models.PublisherVerificationNotApplicable
+	if !administrator {
+		publisherType = models.PublisherTypeUserRegistered
+		publisherVerification = models.PublisherVerificationUnverified
+	}
+	c := &models.OAuthClient{
+		ID: id, SecretHash: secretHash, Name: strings.TrimSpace(req.Name),
+		RedirectURIs: req.RedirectURIs, PostLogoutRedirectURIs: req.PostLogoutRedirectURIs,
+		Grants: req.Grants, Scopes: req.Scopes, OptionalScopes: req.OptionalScopes, AllowedClaims: req.AllowedClaims,
+		IsPublic: req.IsPublic, AccessPolicy: req.AccessPolicy, Metadata: req.Metadata,
+		PublisherType: publisherType, PublisherVerification: publisherVerification,
+	}
 	if !req.IsPublic {
 		hint := clientSecretHint(secret)
 		rotatedAt := s.clock().UTC()
@@ -411,6 +425,24 @@ func (s *Service) UpdateOwner(ctx context.Context, id string, req models.UpdateC
 		return nil, err
 	}
 	return s.store.UpdateOwner(ctx, id, ownerID, mutation)
+}
+
+func (s *Service) VerifyPublisher(ctx context.Context, id string, mutation audit.MutationAudit) (*models.OAuthClient, error) {
+	if err := mutation.ValidateEvent(models.AuditClientPublisherVerified); err != nil {
+		return nil, fmt.Errorf("invalid publisher verification audit context: %w", err)
+	}
+	return s.store.UpdatePublisherVerification(
+		ctx, id, models.PublisherVerificationVerified, mutation.ActorID.String(), s.clock().UTC(), mutation,
+	)
+}
+
+func (s *Service) RevokePublisherVerification(ctx context.Context, id string, mutation audit.MutationAudit) (*models.OAuthClient, error) {
+	if err := mutation.ValidateEvent(models.AuditClientPublisherRevoked); err != nil {
+		return nil, fmt.Errorf("invalid publisher verification revocation audit context: %w", err)
+	}
+	return s.store.UpdatePublisherVerification(
+		ctx, id, models.PublisherVerificationUnverified, mutation.ActorID.String(), s.clock().UTC(), mutation,
+	)
 }
 func (s *Service) Delete(ctx context.Context, id string, mutation audit.MutationAudit) error {
 	if err := mutation.ValidateEvent(models.AuditClientDeleted); err != nil {

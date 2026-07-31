@@ -57,6 +57,9 @@ interface MockState {
   adminClientUpdateCSRF?: string | null;
   adminClientOwnerUpdateBodies?: Array<{ owner_id: string | null }>;
   adminClientOwnerUpdateCSRFs?: Array<string | null>;
+  adminClientPublisherReviewCSRFs?: Array<string | null>;
+  adminClientPublisherReviewMethods?: string[];
+  adminClientPublisherReviewRecentAuthenticationFailures?: number;
   adminUsers?: Array<typeof user>;
   adminUserQueries?: string[];
   adminUserIdentities?: Array<typeof githubIdentity>;
@@ -175,6 +178,8 @@ const oauthClient: OAuthClient = {
   secret_version: 1,
   secret_rotated_at: '2026-01-01T00:00:00Z',
   owner_id: user.id as string | null,
+  publisher_type: 'user_registered',
+  publisher_verification_status: 'unverified',
   created_at: '2026-01-01T00:00:00Z',
   updated_at: '2026-01-01T00:00:00Z',
 };
@@ -833,6 +838,32 @@ async function installAPIMocks(page: Page, state: MockState) {
       state.adminClientOwnerUpdateCSRFs ||= [];
       state.adminClientOwnerUpdateCSRFs.push(await request.headerValue('x-csrf-token'));
       await fulfillJSON(route, 200, { ...oauthClient, owner_id: body.owner_id, updated_at: '2026-01-05T00:00:00Z' });
+      return;
+    }
+
+    if (path === `/api/admin/clients/${oauthClient.id}/publisher-verification`
+      && (request.method() === 'POST' || request.method() === 'DELETE') && state.adminClients) {
+      state.adminClientPublisherReviewCSRFs ||= [];
+      state.adminClientPublisherReviewCSRFs.push(await request.headerValue('x-csrf-token'));
+      state.adminClientPublisherReviewMethods ||= [];
+      state.adminClientPublisherReviewMethods.push(request.method());
+      if ((state.adminClientPublisherReviewRecentAuthenticationFailures || 0) > 0) {
+        state.adminClientPublisherReviewRecentAuthenticationFailures = (state.adminClientPublisherReviewRecentAuthenticationFailures || 0) - 1;
+        await fulfillJSON(route, 403, {
+          error: 'recent authentication is required',
+          code: 'auth.recent_authentication_required',
+        });
+        return;
+      }
+      const status = request.method() === 'POST' ? 'verified' : 'unverified';
+      const updated = {
+        ...state.adminClients[0],
+        publisher_verification_status: status,
+        publisher_verified_at: status === 'verified' ? '2026-07-31T08:00:00Z' : null,
+        updated_at: '2026-07-31T08:00:00Z',
+      } as OAuthClient;
+      state.adminClients = [updated];
+      await fulfillJSON(route, 200, updated);
       return;
     }
 
@@ -2416,6 +2447,39 @@ test('administrators can edit OAuth clients without mutating immutable ownership
   });
   expect(state.adminClientUpdateBody).not.toHaveProperty('is_public');
   expect(state.adminClientUpdateBody).not.toHaveProperty('owner_id');
+});
+
+test('administrators can review and revoke a user-registered OAuth publisher after recent authentication', async ({ page }) => {
+  const state: MockState = {
+    authenticated: true,
+    mustChangePassword: false,
+    role: 'admin',
+    csrfToken: 'csrf-publisher-review',
+    hasPassword: true,
+    adminClients: [{ ...oauthClient }],
+    adminClientPublisherReviewRecentAuthenticationFailures: 1,
+  };
+  await installAPIMocks(page, state);
+
+  await page.goto('/admin/clients');
+  await expect(page.getByText('发布者未验证', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: '审核发布者' }).click();
+  const confirmation = page.getByRole('dialog', { name: '审核应用发布者' });
+  await expect(confirmation.getByText(/不会验证域名所有权/)).toBeVisible();
+  await confirmation.getByRole('button', { name: '标记为已验证' }).click();
+
+  const reauthentication = page.getByRole('dialog', { name: '重新验证身份' });
+  await reauthentication.getByLabel('当前密码').fill('correct-password');
+  await reauthentication.getByRole('button', { name: '使用密码验证' }).click();
+  await expect(page.getByText('发布者已验证', { exact: true })).toBeVisible();
+  expect(state.adminClientPublisherReviewMethods).toEqual(['POST', 'POST']);
+  expect(state.adminClientPublisherReviewCSRFs).toEqual(['csrf-publisher-review', 'csrf-reauthenticated']);
+
+  await page.getByRole('button', { name: '撤销审核' }).click();
+  const revocation = page.getByRole('dialog', { name: '撤销发布者审核' });
+  await revocation.getByRole('button', { name: '撤销审核' }).click();
+  await expect(page.getByText('发布者未验证', { exact: true })).toBeVisible();
+  expect(state.adminClientPublisherReviewMethods).toEqual(['POST', 'POST', 'DELETE']);
 });
 
 test('an allowlist client exposes its access list and saves changes with CSRF', async ({ page }) => {

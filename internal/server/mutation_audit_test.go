@@ -39,6 +39,8 @@ func TestDescribeMutation(t *testing.T) {
 		{http.MethodPost, "/api/admin/clients", "/api/admin/clients", "", models.AuditClientCreated, "client", true},
 		{http.MethodPut, "/api/admin/clients/client-1", "/api/admin/clients/{id}", "client-1", models.AuditClientUpdated, "client", true},
 		{http.MethodPut, "/api/admin/clients/client-1/owner", "/api/admin/clients/{id}/owner", "client-1", models.AuditClientOwnerChanged, "client", true},
+		{http.MethodPost, "/api/admin/clients/client-1/publisher-verification", "/api/admin/clients/{id}/publisher-verification", "client-1", models.AuditClientPublisherVerified, "client", true},
+		{http.MethodDelete, "/api/admin/clients/client-1/publisher-verification", "/api/admin/clients/{id}/publisher-verification", "client-1", models.AuditClientPublisherRevoked, "client", true},
 		{http.MethodPost, "/api/admin/clients/client-1/rotate-secret", "/api/admin/clients/{id}/rotate-secret", "client-1", models.AuditClientSecretRotated, "client", true},
 		{http.MethodDelete, "/api/admin/clients/client-1", "/api/admin/clients/{id}", "client-1", models.AuditClientDeleted, "client", true},
 		{http.MethodPost, "/api/my/clients/client-1/rotate-secret", "/api/my/clients/{id}/rotate-secret", "client-1", models.AuditClientSecretRotated, "client", true},

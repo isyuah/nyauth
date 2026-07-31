@@ -231,6 +231,10 @@ func describeMutation(r *http.Request, actor *models.User) (mutationAuditDescrip
 		return mutationAuditDescriptor{event: models.AuditClientSecretRotated, targetType: "client", targetID: param("id"), riskLevel: "high", successAlreadyAudited: true}, true
 	case r.Method == http.MethodPut && strings.HasSuffix(path, "/owner") && strings.HasPrefix(path, "/api/admin/clients/"):
 		return mutationAuditDescriptor{event: models.AuditClientOwnerChanged, targetType: "client", targetID: param("id"), riskLevel: "high", successAlreadyAudited: true}, true
+	case r.Method == http.MethodPost && strings.HasSuffix(path, "/publisher-verification") && strings.HasPrefix(path, "/api/admin/clients/"):
+		return mutationAuditDescriptor{event: models.AuditClientPublisherVerified, targetType: "client", targetID: param("id"), riskLevel: "high", successAlreadyAudited: true}, true
+	case r.Method == http.MethodDelete && strings.HasSuffix(path, "/publisher-verification") && strings.HasPrefix(path, "/api/admin/clients/"):
+		return mutationAuditDescriptor{event: models.AuditClientPublisherRevoked, targetType: "client", targetID: param("id"), riskLevel: "high", successAlreadyAudited: true}, true
 	case r.Method == http.MethodPut && strings.HasSuffix(path, "/access-users") && strings.HasPrefix(path, "/api/admin/clients/"):
 		return mutationAuditDescriptor{event: models.AuditClientAccessChanged, targetType: "client", targetID: param("id"), riskLevel: "high", successAlreadyAudited: true}, true
 	case r.Method == http.MethodPut && strings.HasPrefix(path, "/api/admin/clients/"):

@@ -4,7 +4,13 @@ async function fulfillJSON(route: Route, status: number, body: unknown) {
   await route.fulfill({ status, contentType: 'application/json', body: JSON.stringify(body) });
 }
 
-async function installConsentMocks(page: Page, decision: { body?: unknown }) {
+async function installConsentMocks(
+  page: Page,
+  decision: { body?: unknown },
+  publisher: { type: 'system_managed' | 'user_registered'; status: 'not_applicable' | 'unverified' | 'verified' } = {
+    type: 'system_managed', status: 'not_applicable',
+  },
+) {
   await page.route('**/api/**', async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
@@ -31,7 +37,7 @@ async function installConsentMocks(page: Page, decision: { body?: unknown }) {
           { scope: 'admin.role', display_name: '账户角色', description: '读取当前账户的管理员或普通用户角色。', risk_level: 'sensitive', required: true, claims: ['role'] },
         ],
         redirect_uri: 'https://client.example/callback', redirect_origin: 'https://client.example',
-        publisher_type: 'system_managed', verification_status: 'unverified',
+        publisher_type: publisher.type, verification_status: publisher.status,
       });
       return;
     }
@@ -68,6 +74,8 @@ test('consent separates required permissions and submits only selected optional 
   await expect(page.getByText('用户名、显示名称、头像')).toBeVisible();
   await expect(page.getByText('账户角色', { exact: true })).toBeVisible();
   await expect(page.getByText('读取当前账户的管理员或普通用户角色。')).toBeVisible();
+  await expect(page.getByText('此应用由 Nyauth 管理员直接配置和管理。')).toBeVisible();
+  await expect(page.getByText('Nyauth 尚未验证此应用的发布者')).toHaveCount(0);
 
   const profile = page.getByRole('checkbox', { name: /基本资料/ });
   const email = page.getByRole('checkbox', { name: /邮箱信息/ });
@@ -82,4 +90,18 @@ test('consent separates required permissions and submits only selected optional 
   await expect.poll(() => decision.body).toEqual({
     challenge: 'consent-challenge', granted_optional_scopes: ['profile'],
   });
+});
+
+test('consent distinguishes verified and unverified user-registered publishers', async ({ page }) => {
+  const decision: { body?: unknown } = {};
+  await installConsentMocks(page, decision, { type: 'user_registered', status: 'verified' });
+  await page.goto('/consent?challenge=consent-challenge');
+  await expect(page.getByText('已由管理员审核', { exact: true })).toBeVisible();
+  await expect(page.getByText(/此用户注册应用已经由 Nyauth 管理员审核/)).toBeVisible();
+
+  await page.unrouteAll({ behavior: 'wait' });
+  await installConsentMocks(page, decision, { type: 'user_registered', status: 'unverified' });
+  await page.reload();
+  await expect(page.getByText('尚未验证', { exact: true })).toBeVisible();
+  await expect(page.getByText(/Nyauth 尚未验证此应用的发布者/)).toBeVisible();
 });

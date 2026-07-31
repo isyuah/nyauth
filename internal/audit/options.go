@@ -25,6 +25,8 @@ func KnownFilterOptions() FilterOptions {
 		models.AuditClientCreated,
 		models.AuditClientDeleted,
 		models.AuditClientOwnerChanged,
+		models.AuditClientPublisherRevoked,
+		models.AuditClientPublisherVerified,
 		models.AuditClientSecretRotated,
 		models.AuditClientUpdated,
 		models.AuditConsentAccepted,

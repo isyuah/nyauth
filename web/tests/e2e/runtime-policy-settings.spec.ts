@@ -121,6 +121,8 @@ const ownedClient: OAuthClient = {
   secret_version: 1,
   secret_rotated_at: '2026-01-03T00:00:00Z',
   owner_id: targetUserID,
+  publisher_type: 'user_registered',
+  publisher_verification_status: 'unverified',
   created_at: '2026-01-03T00:00:00Z',
   updated_at: '2026-01-03T00:00:00Z',
 };

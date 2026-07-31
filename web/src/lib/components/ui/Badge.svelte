@@ -13,7 +13,7 @@
     default: 'bg-nya-surface-soft text-nya-text-secondary',
     primary: 'bg-nya-primary-soft text-nya-primary',
     success: 'bg-nya-success-soft text-nya-success',
-    warning: 'bg-nya-warning-soft text-nya-warning',
+    warning: 'bg-nya-warning-soft text-nya-warning-strong',
     danger: 'bg-nya-danger-soft text-nya-danger',
     info: 'bg-nya-info-soft text-nya-info',
     pink: 'bg-nya-pink-soft text-nya-pink',

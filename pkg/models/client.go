@@ -26,6 +26,10 @@ type OAuthClient struct {
 	IsPublic               bool              `json:"is_public" db:"is_public"`
 	AccessPolicy           string            `json:"access_policy" db:"access_policy"`
 	OwnerID                *string           `json:"owner_id,omitempty" db:"owner_id"`
+	PublisherType          string            `json:"publisher_type" db:"publisher_type"`
+	PublisherVerification  string            `json:"publisher_verification_status" db:"publisher_verification_status"`
+	PublisherVerifiedAt    *time.Time        `json:"publisher_verified_at,omitempty" db:"publisher_verified_at"`
+	PublisherVerifiedBy    *string           `json:"-" db:"publisher_verified_by"`
 	Metadata               map[string]string `json:"metadata,omitempty" db:"metadata"`
 	CreatedAt              time.Time         `json:"created_at" db:"created_at"`
 	UpdatedAt              time.Time         `json:"updated_at" db:"updated_at"`
@@ -38,6 +42,15 @@ const (
 	ClientAccessOpen       = "open"
 	ClientAccessAdminsOnly = "admins_only"
 	ClientAccessAllowlist  = "allowlist"
+)
+
+const (
+	PublisherTypeSystemManaged  = "system_managed"
+	PublisherTypeUserRegistered = "user_registered"
+
+	PublisherVerificationNotApplicable = "not_applicable"
+	PublisherVerificationUnverified    = "unverified"
+	PublisherVerificationVerified      = "verified"
 )
 
 // ValidClientAccessPolicy reports whether the value is a known access policy.

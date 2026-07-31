@@ -25,6 +25,9 @@ type fakeHandlerService struct {
 	updateOwnerErr    error
 	updateOwnerResult *models.OAuthClient
 	updateOwnerReq    models.UpdateClientOwnerRequest
+	publisherResult   *models.OAuthClient
+	publisherErr      error
+	publisherEvent    string
 	deleteErr         error
 	rotateErr         error
 	rotateResult      *models.RotateClientSecretResponse
@@ -48,6 +51,14 @@ func (f *fakeHandlerService) Update(context.Context, string, models.UpdateClient
 func (f *fakeHandlerService) UpdateOwner(_ context.Context, _ string, req models.UpdateClientOwnerRequest, _ audit.MutationAudit) (*models.OAuthClient, error) {
 	f.updateOwnerReq = req
 	return f.updateOwnerResult, f.updateOwnerErr
+}
+func (f *fakeHandlerService) VerifyPublisher(_ context.Context, _ string, mutation audit.MutationAudit) (*models.OAuthClient, error) {
+	f.publisherEvent = mutation.Event
+	return f.publisherResult, f.publisherErr
+}
+func (f *fakeHandlerService) RevokePublisherVerification(_ context.Context, _ string, mutation audit.MutationAudit) (*models.OAuthClient, error) {
+	f.publisherEvent = mutation.Event
+	return f.publisherResult, f.publisherErr
 }
 func (f *fakeHandlerService) Delete(context.Context, string, audit.MutationAudit) error {
 	return f.deleteErr
@@ -278,6 +289,53 @@ func TestUpdateOwnerRequiresAuditContext(t *testing.T) {
 	handler.UpdateOwner(response, request)
 	if response.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+	}
+}
+
+func TestPublisherVerificationUsesAuditedActionsAndStableErrors(t *testing.T) {
+	t.Parallel()
+	verified := &models.OAuthClient{
+		ID: "client-1", PublisherType: models.PublisherTypeUserRegistered,
+		PublisherVerification: models.PublisherVerificationVerified,
+	}
+	tests := []struct {
+		name       string
+		method     string
+		event      string
+		err        error
+		wantStatus int
+		wantCode   string
+	}{
+		{name: "verify", method: http.MethodPost, event: models.AuditClientPublisherVerified, wantStatus: http.StatusOK},
+		{name: "revoke", method: http.MethodDelete, event: models.AuditClientPublisherRevoked, wantStatus: http.StatusOK},
+		{name: "system managed", method: http.MethodPost, event: models.AuditClientPublisherVerified, err: ErrPublisherVerificationNotApplicable, wantStatus: http.StatusConflict, wantCode: "client.publisher_verification_not_applicable"},
+		{name: "unchanged", method: http.MethodDelete, event: models.AuditClientPublisherRevoked, err: ErrPublisherVerificationUnchanged, wantStatus: http.StatusConflict, wantCode: "client.publisher_verification_unchanged"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			service := &fakeHandlerService{publisherResult: verified, publisherErr: test.err}
+			handler := &Handler{service: service}
+			request := httptest.NewRequest(test.method, "/clients/client-1/publisher-verification", nil)
+			routeContext := chi.NewRouteContext()
+			routeContext.URLParams.Add("id", "client-1")
+			request = request.WithContext(context.WithValue(request.Context(), chi.RouteCtxKey, routeContext))
+			request = withTestMutationAuditEvent(request, test.event)
+			response := httptest.NewRecorder()
+			if test.method == http.MethodPost {
+				handler.VerifyPublisher(response, request)
+			} else {
+				handler.RevokePublisherVerification(response, request)
+			}
+			if response.Code != test.wantStatus {
+				t.Fatalf("status = %d, body = %s", response.Code, response.Body.String())
+			}
+			if service.publisherEvent != test.event {
+				t.Fatalf("audit event = %q, want %q", service.publisherEvent, test.event)
+			}
+			if test.wantCode != "" && !strings.Contains(response.Body.String(), `"code":"`+test.wantCode+`"`) {
+				t.Fatalf("missing stable error code in %s", response.Body.String())
+			}
+		})
 	}
 }
 
