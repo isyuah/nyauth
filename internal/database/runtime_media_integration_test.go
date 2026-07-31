@@ -107,7 +107,7 @@ func TestRuntimeMediaCandidateEncryptionAndMigrationStateMachine(t *testing.T) {
 	instanceID := uuid.New()
 	if _, err := schema.pool.Exec(ctx, `
 		INSERT INTO media_storage_instances(instance_id,version,started_at,heartbeat_at,loaded_revision,prepared_profile_id)
-		VALUES($1,'0.4.0-rc.1',NOW(),NOW(),$2,NULL)
+		VALUES($1,'0.5.0-rc.1',NOW(),NOW(),$2,NULL)
 	`, instanceID, testedState.Revision); err != nil {
 		t.Fatalf("insert unprepared media instance: %v", err)
 	}
@@ -202,7 +202,7 @@ func TestRuntimeMediaCandidateEncryptionAndMigrationStateMachine(t *testing.T) {
 	}
 
 	otherInstanceID := uuid.New()
-	if _, err := schema.pool.Exec(ctx, `INSERT INTO media_storage_instances(instance_id,version,started_at,heartbeat_at,loaded_revision) VALUES($1,'0.4.0-rc.1',NOW(),NOW(),$2)`, otherInstanceID, state.Revision); err != nil {
+	if _, err := schema.pool.Exec(ctx, `INSERT INTO media_storage_instances(instance_id,version,started_at,heartbeat_at,loaded_revision) VALUES($1,'0.5.0-rc.1',NOW(),NOW(),$2)`, otherInstanceID, state.Revision); err != nil {
 		t.Fatalf("insert second media instance: %v", err)
 	}
 	localInput := mediaruntime.StartMigrationInput{ExpectedRevision: state.Revision, TargetBackend: "local", SourceBackend: "s3", InstanceID: instanceID, ServiceControlRevision: controlRevision, ServiceControlPrevious: map[string]any{"auto_added_media_writes": false}, Audit: runtimeMediaAudit(models.AuditMediaMigrationStarted, actorID)}

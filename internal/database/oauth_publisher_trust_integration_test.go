@@ -108,7 +108,7 @@ func TestOAuthPublisherTrustMigrationAndTransactionalReview(t *testing.T) {
 		t.Fatalf("verified publisher state = %#v", verified)
 	}
 	var verifiedAudits int
-	if err := schema.pool.QueryRow(ctx, `SELECT COUNT(*) FROM audit_outbox WHERE event=$1 AND aggregate_id=$2`, models.AuditClientPublisherVerified, created.ID).Scan(&verifiedAudits); err != nil {
+	if err := schema.pool.QueryRow(ctx, `SELECT COUNT(*) FROM audit_event_outbox WHERE event=$1 AND aggregate_id=$2`, models.AuditClientPublisherVerified, created.ID).Scan(&verifiedAudits); err != nil {
 		t.Fatalf("count verification audits: %v", err)
 	}
 	if verifiedAudits != 1 {

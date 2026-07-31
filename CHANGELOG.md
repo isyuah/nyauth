@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.5.0-rc.1] — 2026-07-31
+
 ### 新增
 
 - 客户端级可选 Scope 声明、必需/可选权限分组 Consent、标准 OIDC Claim 明细和按用户选择收敛的授权码、Token 与授权记录
@@ -17,8 +19,14 @@
 
 ### 变更
 
-- 开发版本进入 `0.5.0-dev`；新增兼容迁移 `000010_human_verification` 至 `000013_oauth_publisher_trust`，schema version 从 9 提升到 13
+- 版本进入 `0.5.0-rc.1`；新增兼容迁移 `000010_human_verification` 至 `000013_oauth_publisher_trust`，schema version 从 9 提升到 13，可从 `0.4.0-rc.1` 或正式 `v0.3.0` 依次迁移
 - 禁用人机验证时保留当前验证器配置和策略，并提供语义独立的重新启用操作
+
+### 已知限制
+
+- `/api/v1`、Service Account、OpenAPI、事件 Webhook、自动更新和用户组不包含在本候选版本中
+- 发布者可信状态是部署管理员的人工审核结论，不代表自动完成 DNS、TLS 或域名所有权验证
+- issuer、签名密钥、数据库/Redis 连接、可信代理和本地媒体目录仍属于部署拓扑配置，修改后需要受控重启
 
 ## [0.4.0-rc.1] — 2026-07-31
 

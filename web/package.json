@@ -1,6 +1,6 @@
 {
   "name": "nyauth-web",
-  "version": "0.5.0-dev",
+  "version": "0.5.0-rc.1",
   "private": true,
   "scripts": {
     "dev": "vite dev",

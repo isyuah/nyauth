@@ -87,7 +87,7 @@ OAuth 客户端已支持 `open`、`admins_only` 和 `allowlist`。策略在用�
 ## 实施顺序建议
 
 ```
-当前 0.5.0-dev: Phase H、人机验证、Scope Catalog、客户端级 Claim 白名单、可选 Scope、详细 Consent 与发布者可信状态已实现，schema 演进到 13
-下一步: 验收并收口 0.5.0 候选版本；首次公开发布前再将开发期迁移压缩为单一基线
+当前 0.5.0-rc.1: Phase H、人机验证、Scope Catalog、客户端级 Claim 白名单、可选 Scope、详细 Consent 与发布者可信状态已实现，schema 演进到 13
+下一步: 完成候选版本稳定运行观察；首次公开发布前再决定是否压缩开发期迁移
 后续: 自动化管理 API、Webhook、自动更新和用户组继续推迟
 ```

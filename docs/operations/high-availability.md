@@ -121,7 +121,7 @@ docker compose -f docker-compose.ha.yml ps
 
 ## 发布顺序
 
-`0.3.0-rc.1` 是 schema version 1 的破坏性 release baseline，不支持从早期开发数据库滚动升级。正式 `0.3.0` 通过兼容迁移演进到 schema version 3；`0.4.0-rc.1` 通过 `000004` 至 `000009_runtime_observability` 升级到 schema version 9，`0.5.0-dev` 再通过 `000010_human_verification` 至 `000013_oauth_publisher_trust` 兼容升级到 schema version 13。必须先由迁移任务完成加法迁移，再逐个替换应用实例。首次部署仍必须使用全新 PostgreSQL/Redis；启动单个新实例完成 smoke test 后再扩容第二实例。后续版本只有在发布说明明确承诺兼容时才可滚动升级，不得让要求不同数据库契约的应用版本同时处理流量。
+`0.3.0-rc.1` 是 schema version 1 的破坏性 release baseline，不支持从早期开发数据库滚动升级。正式 `0.3.0` 通过兼容迁移演进到 schema version 3；`0.4.0-rc.1` 通过 `000004` 至 `000009_runtime_observability` 升级到 schema version 9，`0.5.0-rc.1` 再通过 `000010_human_verification` 至 `000013_oauth_publisher_trust` 兼容升级到 schema version 13。必须先由迁移任务完成加法迁移，再逐个替换应用实例。首次部署仍必须使用全新 PostgreSQL/Redis；启动单个新实例完成 smoke test 后再扩容第二实例。后续版本只有在发布说明明确承诺兼容时才可滚动升级，不得让要求不同数据库契约的应用版本同时处理流量。
 
 运行时暂停变更后，管理 API 最多等待 5 秒收集所有活动实例的排空确认；返回 `202 applying` 时设置已经生效且不会自动回滚，应轮询管理状态直至所有活动实例 applied。无限期暂停的 HA 紧急解锁可从任一相同版本服务定义执行：
 

@@ -37,7 +37,7 @@ const operationsSettings: OperationsSettings = {
   applied_instances: 1,
   instances: [{
     instance_id: 'instance-a',
-    version: '0.4.0-rc.1',
+    version: '0.5.0-rc.1',
     started_at: '2026-07-28T09:00:00Z',
     heartbeat_at: '2026-07-28T10:00:00Z',
     loaded_revision: 7,
