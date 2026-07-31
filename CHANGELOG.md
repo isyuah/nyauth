@@ -4,6 +4,18 @@
 
 ## [Unreleased]
 
+### 新增
+
+- 运行时人机验证适配器，首个 Provider 为 Cloudflare Turnstile；支持候选保存、真实验证、十分钟激活门槛、回滚、禁用、加密 Secret 和多实例同步
+- 人机验证未配置时使用通用保护基线：公开注册、密码恢复、验证邮件重发和 Provider 登录默认保护，密码登录采用三次失败后触发的 Adaptive 模式；已保存策略不会被覆盖
+- 可独立保护自助注册、密码登录、密码恢复、验证邮件重发和 Provider 登录；密码登录支持关闭、失败次数触发或每次必须验证
+- `nyauth human-verification disable -reason <text>` 紧急恢复命令、管理状态卡、低基数 Prometheus 指标和审计事件
+
+### 变更
+
+- 开发版本进入 `0.5.0-dev`；新增兼容迁移 `000010_human_verification`，schema version 从 9 提升到 10
+- 禁用人机验证时保留当前验证器配置和策略，并提供语义独立的重新启用操作
+
 ## [0.4.0-rc.1] — 2026-07-31
 
 ### 新增

@@ -54,6 +54,7 @@ type Runtime struct {
 	oauthGrants            metric.Int64Counter
 	refreshReuse           metric.Int64Counter
 	providerEvents         metric.Int64Counter
+	humanVerification      metric.Int64Counter
 	jwkRotations           metric.Int64Counter
 	rateLimitEvents        metric.Int64Counter
 	registrationEvents     metric.Int64Counter
@@ -307,6 +308,10 @@ func New(ctx context.Context, options Options) (*Runtime, error) {
 	if err != nil {
 		return nil, err
 	}
+	humanVerification, err := meter.Int64Counter("nyauth.human_verification.events", metric.WithDescription("Human-verification decisions and provider outcomes by bounded action and reason"))
+	if err != nil {
+		return nil, err
+	}
 	jwkRotations, err := meter.Int64Counter("nyauth.jwk.rotations", metric.WithDescription("JWK signing-key lifecycle outcomes"))
 	if err != nil {
 		return nil, err
@@ -389,7 +394,8 @@ func New(ctx context.Context, options Options) (*Runtime, error) {
 		meter: meter, httpRequests: httpRequests, httpDuration: httpDuration,
 		authEvents: authEvents, dependencyDuration: dependencyDuration, auditFailures: auditFailures,
 		csrfRejections: csrfRejections, oauthGrants: oauthGrants, refreshReuse: refreshReuse,
-		providerEvents: providerEvents, jwkRotations: jwkRotations, rateLimitEvents: rateLimitEvents,
+		providerEvents: providerEvents, humanVerification: humanVerification,
+		jwkRotations: jwkRotations, rateLimitEvents: rateLimitEvents,
 		registrationEvents: registrationEvents, verificationTime: verificationTime,
 		smtpDeliveries: smtpDeliveries, smtpRetries: smtpRetries, smtpFailures: smtpFailures,
 		smtpBacklog: smtpBacklog, smtpOldestAge: smtpOldestAge, smtpCircuitOpen: smtpCircuitOpen,
@@ -517,14 +523,14 @@ func (r *Runtime) BindPolicySettingsObservers(manager *settings.Manager) error {
 			observer.ObserveInt64(r.rateLimitEnabled, value, metric.WithAttributes(attribute.String("group", group)))
 		}
 		for group, revision := range map[string]int64{
-			"branding":      manager.BrandingSnapshot().Revision,
-			"registration":  manager.RegistrationSnapshot().Revision,
-			"security":      manager.SecuritySnapshot().Revision,
-			"protection":    protection.Revision,
-			"lifecycle":     manager.LifecycleSnapshot().Revision,
-			"oauth":         manager.OAuthPolicySnapshot().Revision,
+			"branding":       manager.BrandingSnapshot().Revision,
+			"registration":   manager.RegistrationSnapshot().Revision,
+			"security":       manager.SecuritySnapshot().Revision,
+			"protection":     protection.Revision,
+			"lifecycle":      manager.LifecycleSnapshot().Revision,
+			"oauth":          manager.OAuthPolicySnapshot().Revision,
 			"communications": manager.CommunicationsSnapshot().Revision,
-			"observability": manager.ObservabilitySnapshot().Revision,
+			"observability":  manager.ObservabilitySnapshot().Revision,
 		} {
 			observer.ObserveInt64(r.settingsRevision, revision, metric.WithAttributes(attribute.String("group", group)))
 		}
@@ -718,6 +724,30 @@ func (r *Runtime) RecordProviderEvent(ctx context.Context, operation, intent, re
 		r.dependencyDuration.Record(ctx, duration.Seconds(), metric.WithAttributes(
 			attribute.String("dependency.name", "provider"),
 			attribute.String("dependency.operation", operation),
+			attribute.String("dependency.result", result),
+		))
+	}
+}
+
+func (r *Runtime) RecordHumanVerification(ctx context.Context, provider, action, result, reason string, duration time.Duration) {
+	if r == nil {
+		return
+	}
+	provider = boundedValue(provider, "none", "none", "turnstile")
+	action = boundedValue(action, "other", "register", "login", "password_reset", "email_verification_resend", "provider_login", "admin_test")
+	result = boundedValue(result, "unavailable", "success", "rejected", "required", "unavailable")
+	reason = boundedValue(reason, "other", "none", "missing_proof", "provider_rejected", "provider_unavailable")
+	attributes := []attribute.KeyValue{
+		attribute.String("human_verification.provider", provider),
+		attribute.String("human_verification.action", action),
+		attribute.String("human_verification.result", result),
+		attribute.String("human_verification.reason", reason),
+	}
+	r.humanVerification.Add(ctx, 1, metric.WithAttributes(attributes...))
+	if duration >= 0 {
+		r.dependencyDuration.Record(ctx, duration.Seconds(), metric.WithAttributes(
+			attribute.String("dependency.name", "human_verification"),
+			attribute.String("dependency.operation", action),
 			attribute.String("dependency.result", result),
 		))
 	}

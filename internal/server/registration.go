@@ -9,6 +9,7 @@ import (
 
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/nyasharp/nyauth/internal/account"
+	"github.com/nyasharp/nyauth/internal/humanverification"
 	"github.com/nyasharp/nyauth/internal/invite"
 	"github.com/nyasharp/nyauth/internal/mailruntime"
 	"github.com/nyasharp/nyauth/internal/registration"
@@ -111,7 +112,10 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusServiceUnavailable, "registration is temporarily unavailable")
 		return
 	}
-	var request models.RegisterRequest
+	var request struct {
+		models.RegisterRequest
+		HumanVerification *humanVerificationProof `json:"human_verification,omitempty"`
+	}
 	if err := decodeJSON(w, r, &request); err != nil {
 		s.telemetry.RecordRegistrationOutcome(r.Context(), "rejected", "invalid_input")
 		writeAPIError(w, http.StatusBadRequest, "invalid request body")
@@ -136,6 +140,9 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.telemetry.RecordRateLimit(r.Context(), "account_action", "register", "allowed")
+	if !s.requireHumanVerification(w, r, humanverification.ActionRegistration, 0, request.HumanVerification) {
+		return
+	}
 
 	verificationRequired := registrationVerificationRequired(reg)
 	if verificationRequired && s.accountService == nil {
@@ -143,7 +150,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusServiceUnavailable, "registration requires email delivery, which is not configured")
 		return
 	}
-	if err := s.userService.ValidateRegistration(request); err != nil {
+	if err := s.userService.ValidateRegistration(request.RegisterRequest); err != nil {
 		s.telemetry.RecordRegistrationOutcome(r.Context(), "rejected", "invalid_input")
 		writeAPIError(w, http.StatusBadRequest, err.Error())
 		return
@@ -190,7 +197,7 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 			return s.accountService.PrepareEmailVerification(created, metadata, verificationExpiresAt)
 		}
 	}
-	_, _, err = s.userService.Register(r.Context(), request, registerOptions)
+	_, _, err = s.userService.Register(r.Context(), request.RegisterRequest, registerOptions)
 	if err != nil {
 		switch {
 		case user.IsInvalidInput(err):

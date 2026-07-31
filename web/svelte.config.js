@@ -9,12 +9,13 @@ const config = {
       mode: 'hash',
       directives: {
         'default-src': ['self'],
-        'script-src': ['self'],
+        'script-src': ['self', 'https://challenges.cloudflare.com'],
         'script-src-attr': ['none'],
         'style-src': ['self', 'unsafe-inline'],
         'img-src': ['self', 'data:', 'https:'],
         'font-src': ['self', 'data:'],
-        'connect-src': ['self'],
+        'connect-src': ['self', 'https://challenges.cloudflare.com'],
+        'frame-src': ['https://challenges.cloudflare.com'],
         'object-src': ['none'],
         'base-uri': ['self'],
         'form-action': ['self']

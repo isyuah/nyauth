@@ -57,6 +57,7 @@ func TestParseCommand(t *testing.T) {
 		{name: "verify recovery", args: []string{"verify-recovery", "-config", "config.yaml"}, command: commandVerifyRecovery, rest: []string{"-config", "config.yaml"}},
 		{name: "service control reset", args: []string{"service-control", "reset", "-reason", "incident resolved"}, command: commandServiceControl, rest: []string{"reset", "-reason", "incident resolved"}},
 		{name: "MFA reset", args: []string{"mfa", "reset", "-username", "admin"}, command: commandMFA, rest: []string{"reset", "-username", "admin"}},
+		{name: "human verification disable", args: []string{"human-verification", "disable", "-reason", "provider incident"}, command: commandHumanVerification, rest: []string{"disable", "-reason", "provider incident"}},
 		{name: "unknown", args: []string{"rollback"}, wantErr: true},
 	}
 	for _, tt := range tests {
@@ -75,6 +76,29 @@ func TestParseCommand(t *testing.T) {
 				if rest[i] != tt.rest[i] {
 					t.Errorf("rest[%d] = %q, want %q", i, rest[i], tt.rest[i])
 				}
+			}
+		})
+	}
+}
+
+func TestRunHumanVerificationRejectsInvalidArgumentsBeforeLoadingConfiguration(t *testing.T) {
+	tests := []struct {
+		name string
+		args []string
+		want string
+	}{
+		{name: "missing subcommand", want: "human-verification disable"},
+		{name: "unknown subcommand", args: []string{"status"}, want: "human-verification disable"},
+		{name: "missing reason", args: []string{"disable"}, want: "3 to 500"},
+		{name: "short reason", args: []string{"disable", "-reason", "x"}, want: "3 to 500"},
+		{name: "unsafe reason", args: []string{"disable", "-reason", "line\nbreak"}, want: "safe characters"},
+		{name: "unexpected argument", args: []string{"disable", "-reason", "provider incident", "extra"}, want: "unexpected human verification arguments"},
+	}
+	for _, test := range tests {
+		t.Run(test.name, func(t *testing.T) {
+			err := runHumanVerification(test.args)
+			if err == nil || !strings.Contains(err.Error(), test.want) {
+				t.Fatalf("runHumanVerification(%v) error = %v, want containing %q", test.args, err, test.want)
 			}
 		})
 	}

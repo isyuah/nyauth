@@ -1,24 +1,40 @@
 <script lang="ts">
-  import { api, ApiError } from '$lib/api';
+  import { api, ApiError, type HumanVerificationChallenge, type HumanVerificationProof } from '$lib/api';
   import AccountActionCard from '$lib/components/account/AccountActionCard.svelte';
   import Button from '$lib/components/ui/Button.svelte';
   import Input from '$lib/components/ui/Input.svelte';
+  import HumanVerificationWidget from '$lib/components/security/HumanVerificationWidget.svelte';
+  import { onMount } from 'svelte';
   import { MailCheck, Send } from 'lucide-svelte';
 
   let email = $state('');
   let loading = $state(false);
   let accepted = $state(false);
   let error = $state('');
+  let humanChallenge = $state<HumanVerificationChallenge | null>(null);
+  let humanProof = $state<HumanVerificationProof | null>(null);
+  let humanWidgetKey = $state(0);
+
+  onMount(async () => {
+    try { humanChallenge = await api.getHumanVerification('email_verification_resend'); }
+    catch { error = '暂时无法加载人机验证配置。'; }
+  });
 
   async function submit(event: SubmitEvent) {
     event.preventDefault();
     accepted = false;
     error = '';
     loading = true;
+    if (humanChallenge?.required && !humanProof) {
+      loading = false;
+      error = '请先完成人机验证。';
+      return;
+    }
     try {
-      await api.resendPendingEmailVerification(email.trim());
+      await api.resendPendingEmailVerification(email.trim(), humanProof ?? undefined);
       accepted = true;
     } catch (cause) {
+      if (humanChallenge?.required) { humanProof = null; humanWidgetKey += 1; }
       if (cause instanceof ApiError && cause.status === 429 && cause.retryAfter) {
         error = `请求过于频繁，请在 ${cause.retryAfter} 秒后重试。`;
       } else {
@@ -47,6 +63,9 @@
     <form onsubmit={submit} class="space-y-4">
       {#if error}<p class="rounded-nya-sm bg-nya-danger-soft px-3 py-2 text-small text-nya-danger" role="alert">{error}</p>{/if}
       <Input id="resend-verification-email" label="注册邮箱" type="email" bind:value={email} required autocomplete="email" placeholder="name@example.com" />
+      {#if humanChallenge?.required}
+        {#key humanWidgetKey}<HumanVerificationWidget challenge={humanChallenge} bind:proof={humanProof} onerror={(message) => (error = message)} />{/key}
+      {/if}
       <Button type="submit" variant="primary" size="lg" loading={loading} fullWidth><Send size={16} /> 提交重发请求</Button>
       <p class="text-center"><a href="/login" class="text-small text-nya-primary hover:underline">返回登录</a></p>
     </form>

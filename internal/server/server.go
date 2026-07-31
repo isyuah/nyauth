@@ -31,6 +31,7 @@ import (
 	"github.com/nyasharp/nyauth/internal/client"
 	"github.com/nyasharp/nyauth/internal/config"
 	"github.com/nyasharp/nyauth/internal/crypto"
+	"github.com/nyasharp/nyauth/internal/humanverification"
 	"github.com/nyasharp/nyauth/internal/identity"
 	"github.com/nyasharp/nyauth/internal/invite"
 	"github.com/nyasharp/nyauth/internal/mailruntime"
@@ -83,6 +84,8 @@ type Server struct {
 	policySettingsLimiter     *PolicySettingsLimiter
 	avatarLimiter             *AvatarLimiter
 	mailManager               *mailruntime.Manager
+	humanVerification         humanVerificationRuntime
+	humanLoginFailures        *HumanVerificationLoginLimiter
 	observabilityManager      *observabilityruntime.Manager
 	operationalAlerts         *operationalAlertMonitor
 	mfaService                *mfa.Service
@@ -188,6 +191,25 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 	if err != nil {
 		return nil, fmt.Errorf("configuring MFA service: %w", err)
 	}
+	humanVerificationStore, err := humanverification.NewStore(db, humanverification.StoreOptions{
+		ActiveKeyID: "primary", MasterKeys: map[string][]byte{"primary": cfg.Auth.MasterKey},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("configuring human verification storage: %w", err)
+	}
+	humanVerificationManager, err := humanverification.NewManager(humanVerificationStore, humanverification.ManagerOptions{
+		ExpectedHostname: issuerURL.Hostname(),
+		OnError:          func(err error) { slog.Error("human verification synchronization failed", "error", err) },
+	})
+	if err != nil {
+		return nil, fmt.Errorf("configuring human verification manager: %w", err)
+	}
+	if err := humanVerificationManager.Load(context.Background()); err != nil {
+		if humanVerificationManager.Status().StateRevision == 0 {
+			return nil, fmt.Errorf("loading initial human verification state: %w", err)
+		}
+		slog.Error("initial human verification load failed", "error", err)
+	}
 	s := &Server{
 		cfg: cfg, db: db, rdb: rdb, webFS: webFS,
 		trustedProxies: parseTrustedProxyCIDRs(cfg.Server.TrustedProxyCIDRs),
@@ -205,7 +227,9 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 		settingsMgr: settingsMgr, inviteStore: invite.NewStore(db),
 		registrationStore: registration.NewStore(db), telemetry: telemetryRuntime,
 		mfaService: mfaService, avatarService: avatarService, avatarRepository: avatarRepository,
-		avatarStore: avatarStore, mediaManager: mediaManager, avatarProcessing: make(chan struct{}, 1),
+		humanVerification:  humanVerificationManager,
+		humanLoginFailures: NewHumanVerificationLoginLimiter(rdb, humanVerificationManager, settingsMgr),
+		avatarStore:        avatarStore, mediaManager: mediaManager, avatarProcessing: make(chan struct{}, 1),
 	}
 	var otlpFallback *observabilityruntime.Config
 	if cfg.Telemetry.OTLP.Enabled {
@@ -473,11 +497,13 @@ func (s *Server) buildRouter() *chi.Mux {
 		r.Get("/{provider}/callback", s.handleProviderCallback)
 	})
 	r.Route("/api", func(r chi.Router) {
+		r.Get("/human-verification", s.handleGetHumanVerification)
 		r.Get("/service-status", s.handleServiceStatus)
 		r.Get("/service-status/events", s.handleServiceStatusEvents)
 		r.Get("/site-banner", s.handleSiteBanner)
 		r.Get("/site-banner/events", s.handleSiteBannerEvents)
 		r.With(authIssuance).Post("/login", s.handleLogin)
+		r.With(authIssuance).Post("/provider-login/{provider}", s.handleProviderLoginStart)
 		r.With(authIssuance).Post("/login/passkey/options", s.handleBeginPasskeyLogin)
 		r.With(authIssuance).Post("/login/passkey/verify", s.handleFinishPasskeyLogin)
 		r.Get("/login/mfa", s.handleGetMFAChallenge)
@@ -571,6 +597,14 @@ func (s *Server) buildRouter() *chi.Mux {
 			r.With(adminMutations).Post("/admin/settings/observability/otlp/activate", s.handleActivateOTLPCandidate)
 			r.With(adminMutations).Post("/admin/settings/observability/otlp/rollback", s.handleRollbackOTLP)
 			r.With(adminMutations).Post("/admin/settings/observability/otlp/disable", s.handleDisableOTLP)
+			r.Get("/admin/settings/human-verification", s.handleGetHumanVerificationSettings)
+			r.With(adminMutations).Put("/admin/settings/human-verification/candidate", s.handleSaveHumanVerificationCandidate)
+			r.With(adminMutations).Post("/admin/settings/human-verification/candidate/test", s.handleTestHumanVerificationCandidate)
+			r.With(adminMutations).Post("/admin/settings/human-verification/activate", s.handleActivateHumanVerification)
+			r.With(adminMutations).Put("/admin/settings/human-verification/policy", s.handleUpdateHumanVerificationPolicy)
+			r.With(adminMutations).Post("/admin/settings/human-verification/rollback", s.handleRollbackHumanVerification)
+			r.With(adminMutations).Post("/admin/settings/human-verification/disable", s.handleDisableHumanVerification)
+			r.With(adminMutations).Post("/admin/settings/human-verification/enable", s.handleEnableHumanVerification)
 			r.Get("/admin/settings/mail", s.handleGetMailSettings)
 			r.With(adminMutations).Put("/admin/settings/mail/candidate", s.handleSaveMailCandidate)
 			r.With(adminMutations).Post("/admin/settings/mail/candidate/test", s.handleTestMailCandidate)
@@ -711,6 +745,9 @@ func (s *Server) Run(ctx context.Context) error {
 	}
 	if s.observabilityManager != nil {
 		s.observabilityManager.StartSynchronization(runCtx)
+	}
+	if s.humanVerification != nil {
+		s.humanVerification.StartSynchronization(runCtx)
 	}
 	if s.auditDispatcher != nil {
 		go func() {

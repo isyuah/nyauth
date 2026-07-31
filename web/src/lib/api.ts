@@ -889,6 +889,97 @@ export interface RegisterInput {
   email: string;
   password: string;
   invite_code?: string;
+	 human_verification?: HumanVerificationProof;
+}
+
+export type HumanVerificationProvider = 'turnstile';
+export type HumanVerificationAction = 'register' | 'login' | 'password_reset' | 'email_verification_resend' | 'provider_login' | 'admin_test';
+export type HumanVerificationLoginMode = 'off' | 'adaptive' | 'always';
+
+export interface HumanVerificationProof {
+  token: string;
+  idempotency_key: string;
+}
+
+export interface HumanVerificationChallenge {
+  enabled: boolean;
+  required: boolean;
+  available: boolean;
+  provider?: HumanVerificationProvider;
+  site_key?: string;
+  widget_mode?: 'managed' | 'non-interactive' | 'invisible';
+  action: HumanVerificationAction;
+}
+
+export interface HumanVerificationPolicy {
+  registration: boolean;
+  login_mode: HumanVerificationLoginMode;
+  login_trigger_after: number;
+  password_reset: boolean;
+  email_verification_resend: boolean;
+  provider_login: boolean;
+}
+
+export interface HumanVerificationVersion {
+  id: string;
+  revision: number;
+  provider: HumanVerificationProvider;
+  site_key: string;
+  widget_mode: 'managed' | 'non-interactive' | 'invisible';
+  secret_configured: boolean;
+  created_by?: string | null;
+  created_at: string;
+}
+
+export interface HumanVerificationTestRecord {
+  id: string;
+  version_id: string;
+  result: 'success' | 'failure';
+  error_code?: string | null;
+  tested_by?: string | null;
+  created_at: string;
+}
+
+export interface HumanVerificationState {
+  mode: 'active' | 'disabled';
+  active_version_id?: string | null;
+  candidate_version_id?: string | null;
+  previous_version_id?: string | null;
+  policy: HumanVerificationPolicy;
+  revision: number;
+  updated_at: string;
+}
+
+export interface HumanVerificationSettings extends HumanVerificationState {
+  active?: HumanVerificationVersion | null;
+  candidate?: HumanVerificationVersion | null;
+  previous?: HumanVerificationVersion | null;
+  candidate_last_test?: HumanVerificationTestRecord | null;
+  runtime: {
+    mode: 'active' | 'disabled';
+    configured: boolean;
+    available: boolean;
+    provider?: HumanVerificationProvider;
+    state_revision: number;
+  };
+}
+
+export interface SaveHumanVerificationCandidateInput {
+  expected_revision: number;
+  provider: HumanVerificationProvider;
+  site_key: string;
+  widget_mode: 'managed' | 'non-interactive' | 'invisible';
+  secret?: string;
+}
+
+export interface HumanVerificationCandidateResult {
+  version: HumanVerificationVersion;
+  state: HumanVerificationState;
+}
+
+export interface HumanVerificationTestResult {
+  record: HumanVerificationTestRecord;
+  state: HumanVerificationState;
 }
 
 export interface Invite {
@@ -1091,6 +1182,13 @@ export interface SystemStatus {
       last_error_at?: string;
       last_error_code?: string;
     };
+    human_verification: {
+      status: ComponentStatus;
+      mode: 'active' | 'disabled';
+      configured: boolean;
+      available: boolean;
+      provider?: HumanVerificationProvider;
+    };
   };
   operational_alerts: OperationalAlertSnapshot;
   active_signing_key?: {
@@ -1153,6 +1251,18 @@ export function missingAdminsFromError(cause: unknown): string[] {
   return cause.response.missing_admins.filter((value): value is string => typeof value === 'string' && value.trim() !== '');
 }
 
+export function humanVerificationChallengeFromError(cause: unknown): HumanVerificationChallenge | null {
+  if (!(cause instanceof ApiError) || cause.code !== 'human_verification.required') return null;
+  const challenge = cause.response?.challenge as Partial<HumanVerificationChallenge> | undefined;
+  const actions: HumanVerificationAction[] = ['register', 'login', 'password_reset', 'email_verification_resend', 'provider_login', 'admin_test'];
+  const widgetModes: NonNullable<HumanVerificationChallenge['widget_mode']>[] = ['managed', 'non-interactive', 'invisible'];
+  if (!challenge || challenge.enabled !== true || challenge.required !== true || challenge.available !== true
+    || challenge.provider !== 'turnstile' || typeof challenge.site_key !== 'string' || challenge.site_key.trim() === ''
+    || !actions.includes(challenge.action as HumanVerificationAction)
+    || !widgetModes.includes(challenge.widget_mode as NonNullable<HumanVerificationChallenge['widget_mode']>)) return null;
+  return challenge as HumanVerificationChallenge;
+}
+
 const PASSWORD_POLICY_ERROR = 'password must be valid utf-8 and 12 to 1024 bytes';
 const API_ERROR_TRANSLATIONS: Record<string, string> = {
   'invalid credentials': '认证凭据不正确',
@@ -1167,6 +1277,19 @@ const API_ERROR_TRANSLATIONS: Record<string, string> = {
   'csrf_validation_failed': '安全校验失败，请刷新页面后重试',
   'invalid csrf token': '安全校验失败，请刷新页面后重试',
   'password change required': '请先修改密码后再继续',
+  'human verification is required': '请完成人机验证后继续',
+  'human verification failed': '人机验证未通过，请重新尝试',
+  'human verification is temporarily unavailable': '人机验证暂时不可用，请稍后重试',
+  'human verification provider is unavailable': 'Cloudflare Turnstile 暂时不可用',
+  'human verification test was rejected': '候选人机验证配置未能通过测试',
+  'human verification settings are unavailable': '人机验证设置暂时不可用',
+  'human verification settings revision conflict': '人机验证设置已被其他管理员修改',
+  'human verification candidate changed': '人机验证候选配置已变化，请重新加载',
+  'a human verification secret is required': '首次配置必须填写 Secret Key',
+  'a successful human verification candidate test is required': '激活前必须完成一次成功的候选配置测试',
+  'the successful human verification candidate test has expired': '候选配置测试已超过十分钟，请重新测试',
+  'no previous human verification configuration is available': '没有可回滚的人机验证配置',
+  'human verification is already disabled': '人机验证已经处于禁用状态',
   'email verification is required before signing in': '邮箱尚未验证，请先完成验证邮件中的确认再登录',
   'registration is closed': '当前未开放注册',
   'invite code is required': '需要邀请码才能注册',
@@ -1508,9 +1631,9 @@ async function req<T>(path: string, opts: RequestInit = {}, redirectOnUnauthoriz
 }
 
 export const api = {
-  login: (username: string, password: string, returnTo: string) =>
+  login: (username: string, password: string, returnTo: string, humanVerification?: HumanVerificationProof) =>
     req<LoginResponse>('/api/login', {
-      method: 'POST', body: JSON.stringify({ username, password, return_to: returnTo }),
+      method: 'POST', body: JSON.stringify({ username, password, return_to: returnTo, human_verification: humanVerification }),
     }, false),
   getLoginMFA: () => req<MFARequiredResponse>('/api/login/mfa', { cache: 'no-store' }, false),
   verifyLoginMFA: (method: CodeMFAMethod, code: string, pendingCsrf: string) => req<SessionInfo>('/api/login/mfa', {
@@ -1542,11 +1665,17 @@ export const api = {
   getServiceStatus: () => req<ServiceStatus>('/api/service-status', { cache: 'no-store' }, false),
   getSiteBanner: () => req<PublicSiteBannerResponse>('/api/site-banner', { cache: 'no-store' }, false),
   getRegistrationOptions: () => req<RegistrationOptions>('/api/registration', {}, false),
+  getHumanVerification: (action: HumanVerificationAction) =>
+    req<HumanVerificationChallenge>(`/api/human-verification?action=${encodeURIComponent(action)}`, { cache: 'no-store' }, false),
   register: (data: RegisterInput) =>
     req<RegisterResult>('/api/register', { method: 'POST', body: JSON.stringify(data) }, false),
-  resendPendingEmailVerification: (email: string) =>
+  resendPendingEmailVerification: (email: string, humanVerification?: HumanVerificationProof) =>
     req<{ status: 'accepted' }>('/api/email/verification/resend', {
-      method: 'POST', body: JSON.stringify({ email }),
+      method: 'POST', body: JSON.stringify({ email, human_verification: humanVerification }),
+    }, false),
+  startProviderLogin: (provider: string, returnTo: string, humanVerification?: HumanVerificationProof) =>
+    req<{ redirect_url: string }>(`/api/provider-login/${encodeURIComponent(provider)}`, {
+      method: 'POST', body: JSON.stringify({ return_to: returnTo, human_verification: humanVerification }),
     }, false),
   getProviders: () => req<ProviderSummary[]>('/api/providers'),
   getMyIdentities: () => req<ExternalIdentity[]>('/api/me/identities'),
@@ -1629,9 +1758,9 @@ export const api = {
   discovery: () => req<OIDCDiscoveryDocument>('/.well-known/openid-configuration', {}, false),
 
   account: {
-    requestPasswordReset: (email: string) => req<void>('/api/password/forgot', {
+    requestPasswordReset: (email: string, humanVerification?: HumanVerificationProof) => req<void>('/api/password/forgot', {
       method: 'POST',
-      body: JSON.stringify({ email }),
+      body: JSON.stringify({ email, human_verification: humanVerification }),
     }, false),
     confirmPasswordReset: (token: string, newPassword: string) => req<void>('/api/password/reset', {
       method: 'POST',
@@ -1674,6 +1803,33 @@ export const api = {
       req<MailTrend>(`/api/admin/stats/mail-trend?days=${days}`),
     getRecentLogins: (limit = 5) => req<RecentLogin[]>(`/api/admin/stats/recent-logins?limit=${limit}`),
     getSystemStatus: () => req<SystemStatus>('/api/admin/system/status'),
+    getHumanVerificationSettings: () => req<HumanVerificationSettings>('/api/admin/settings/human-verification', { cache: 'no-store' }),
+    saveHumanVerificationCandidate: (input: SaveHumanVerificationCandidateInput) =>
+      req<HumanVerificationCandidateResult>('/api/admin/settings/human-verification/candidate', { method: 'PUT', body: JSON.stringify(input) }),
+    testHumanVerificationCandidate: (expectedRevision: number, versionID: string, proof: HumanVerificationProof) =>
+      req<HumanVerificationTestResult>('/api/admin/settings/human-verification/candidate/test', {
+        method: 'POST', body: JSON.stringify({ expected_revision: expectedRevision, version_id: versionID, ...proof }),
+      }),
+    activateHumanVerification: (expectedRevision: number, versionID: string, policy: HumanVerificationPolicy) =>
+      req<HumanVerificationState>('/api/admin/settings/human-verification/activate', {
+        method: 'POST', body: JSON.stringify({ expected_revision: expectedRevision, version_id: versionID, policy }),
+      }),
+    updateHumanVerificationPolicy: (expectedRevision: number, policy: HumanVerificationPolicy) =>
+      req<HumanVerificationState>('/api/admin/settings/human-verification/policy', {
+        method: 'PUT', body: JSON.stringify({ expected_revision: expectedRevision, policy }),
+      }),
+    rollbackHumanVerification: (expectedRevision: number) =>
+      req<HumanVerificationState>('/api/admin/settings/human-verification/rollback', {
+        method: 'POST', body: JSON.stringify({ expected_revision: expectedRevision }),
+      }),
+    disableHumanVerification: (expectedRevision: number) =>
+      req<HumanVerificationState>('/api/admin/settings/human-verification/disable', {
+        method: 'POST', body: JSON.stringify({ expected_revision: expectedRevision }),
+      }),
+    enableHumanVerification: (expectedRevision: number) =>
+      req<HumanVerificationState>('/api/admin/settings/human-verification/enable', {
+        method: 'POST', body: JSON.stringify({ expected_revision: expectedRevision }),
+      }),
     getOperationsSettings: () => req<OperationsSettings>('/api/admin/settings/operations', { cache: 'no-store' }),
     updateOperationsSettings: (settings: UpdateOperationsSettingsInput) =>
       req<OperationsSettings>('/api/admin/settings/operations', { method: 'PUT', body: JSON.stringify(settings) }),

@@ -15,6 +15,7 @@
     { href: '/admin/settings/media', label: '媒体' },
     { href: '/admin/settings/security', label: '登录安全' },
     { href: '/admin/settings/protection', label: '访问保护' },
+    { href: '/admin/settings/human-verification', label: '人机验证' },
     { href: '/admin/settings/lifecycle', label: '生命周期' },
     { href: '/admin/settings/oauth', label: 'OAuth 客户端' },
     { href: '/admin/settings/observability', label: '可观测性' },

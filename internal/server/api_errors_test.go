@@ -97,6 +97,23 @@ func TestObservabilityErrorsHaveSpecificStableCodes(t *testing.T) {
 	}
 }
 
+func TestHumanVerificationErrorsHaveSpecificStableCodes(t *testing.T) {
+	tests := map[string]string{
+		"human verification is required":                                 "human_verification.required",
+		"human verification failed":                                      "human_verification.failed",
+		"human verification is temporarily unavailable":                  "human_verification.unavailable",
+		"human verification settings revision conflict":                  "human_verification.revision_conflict",
+		"a successful human verification candidate test is required":     "human_verification.test_required",
+		"the successful human verification candidate test has expired":   "human_verification.test_expired",
+		"invalid human verification configuration: unsupported provider": "human_verification.configuration_invalid",
+	}
+	for message, expected := range tests {
+		if got := apiErrorCodeForMessage(message); got != expected {
+			t.Fatalf("error code for %q = %q, want %q", message, got, expected)
+		}
+	}
+}
+
 func TestAPIErrorMappingKeysAreNormalized(t *testing.T) {
 	for message := range apiErrorCodesByMessage {
 		if normalized := strings.ToLower(strings.TrimSpace(message)); message != normalized {

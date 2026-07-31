@@ -1,6 +1,6 @@
 <script lang="ts">
   import { page } from '$app/stores';
-  import { api, ApiError, isAPIErrorCode, isMFARequiredResponse, type ProviderSummary } from '$lib/api';
+  import { api, ApiError, humanVerificationChallengeFromError, isAPIErrorCode, isMFARequiredResponse, type HumanVerificationChallenge, type HumanVerificationProof, type ProviderSummary } from '$lib/api';
   import { brandingStore, consumeProviderAuthError, safeReturnPath, sessionStore } from '$lib/stores';
   import { capabilityPauseReason, isCapabilityPaused, serviceStatusStore } from '$lib/service-control';
   import { goto } from '$app/navigation';
@@ -8,6 +8,7 @@
   import Button from '$lib/components/ui/Button.svelte';
   import Input from '$lib/components/ui/Input.svelte';
   import ProviderIcon from '$lib/components/identity/ProviderIcon.svelte';
+  import HumanVerificationWidget from '$lib/components/security/HumanVerificationWidget.svelte';
   import {
     WEBAUTHN_ERROR_CODES,
     authenticationCredentialToJSON,
@@ -40,6 +41,13 @@
   let mounted = false;
   let explicitPasskeyController: AbortController | null = null;
   let explicitPasskeyGeneration = 0;
+  let loginChallenge = $state<HumanVerificationChallenge | null>(null);
+  let loginProof = $state<HumanVerificationProof | null>(null);
+  let loginWidgetKey = $state(0);
+  let providerChallenge = $state<HumanVerificationChallenge | null>(null);
+  let providerProof = $state<HumanVerificationProof | null>(null);
+  let providerWidgetKey = $state(0);
+  let providerStarting = $state('');
 
   async function loadProviders() {
     providersLoading = true;
@@ -91,7 +99,13 @@
     } catch (cause) {
       error = cause instanceof Error ? `会话检查失败：${cause.message}` : '暂时无法连接认证服务';
     }
-    await Promise.all([loadProviders(), loadRegistrationOptions()]);
+    const [, , loginConfig, providerConfig] = await Promise.all([
+      loadProviders(), loadRegistrationOptions(),
+      api.getHumanVerification('login').catch(() => null),
+      api.getHumanVerification('provider_login').catch(() => null),
+    ]);
+    loginChallenge = loginConfig?.required ? loginConfig : null;
+    providerChallenge = providerConfig?.required ? providerConfig : null;
     if (!mounted) return;
     passkeySupported = typeof PublicKeyCredential !== 'undefined' && navigator.credentials !== undefined;
     conditionalAvailable = passkeySupported && await isConditionalMediationAvailable();
@@ -243,7 +257,7 @@
     loading = true;
     let completed = false;
     try {
-      const result = await api.login(username, password, returnTo);
+      const result = await api.login(username, password, returnTo, loginProof ?? undefined);
       password = '';
       if (isMFARequiredResponse(result)) {
         completed = true;
@@ -253,6 +267,15 @@
       await completeLogin(result);
       completed = true;
     } catch (err) {
+      const requiredChallenge = humanVerificationChallengeFromError(err);
+      if (requiredChallenge) {
+        loginChallenge = requiredChallenge;
+        loginProof = null;
+        loginWidgetKey += 1;
+      } else if (loginChallenge?.required) {
+        loginProof = null;
+        loginWidgetKey += 1;
+      }
       pendingVerification = err instanceof ApiError
         && err.status === 403
         && isAPIErrorCode(err, 'account.email_verification_required');
@@ -267,14 +290,31 @@
     }
   }
 
-  function handleOAuth(name: string) {
+  async function handleOAuth(name: string) {
     if (authPaused) {
       error = capabilityPauseReason($serviceStatusStore.value, 'auth_issuance');
       return;
     }
     abortConditional();
     abortExplicitPasskey();
-    window.location.href = `/auth/${encodeURIComponent(name)}/authorize?return_to=${encodeURIComponent(returnTo)}`;
+    if (providerChallenge?.required && !providerProof) {
+      error = '请先完成外部登录所需的人机验证。';
+      return;
+    }
+    if (!providerChallenge?.required) {
+      window.location.href = `/auth/${encodeURIComponent(name)}/authorize?return_to=${encodeURIComponent(returnTo)}`;
+      return;
+    }
+    providerStarting = name;
+    try {
+      const result = await api.startProviderLogin(name, returnTo, providerProof ?? undefined);
+      window.location.href = result.redirect_url;
+    } catch (cause) {
+      providerProof = null;
+      providerWidgetKey += 1;
+      error = cause instanceof Error ? cause.message : '无法启动外部登录';
+      providerStarting = '';
+    }
   }
 </script>
 
@@ -301,6 +341,10 @@
       <form onsubmit={handleLogin} class="space-y-4">
         <Input id="username" label="用户名" bind:value={username} required autocomplete="username webauthn" placeholder="输入用户名" />
         <Input id="password" type="password" label="密码" bind:value={password} required autocomplete="current-password" placeholder="输入密码" />
+
+        {#if loginChallenge?.required}
+          {#key loginWidgetKey}<HumanVerificationWidget challenge={loginChallenge} bind:proof={loginProof} onerror={(message) => (error = message)} />{/key}
+        {/if}
 
         <div class="flex items-center justify-between">
           {#if registrationOpen}<a href="/register" class="text-small text-nya-primary hover:underline">注册账号</a>{:else}<span></span>{/if}
@@ -334,16 +378,19 @@
             <div class="relative flex justify-center text-small"><span class="px-3 bg-nya-surface text-nya-text-tertiary">或使用以下方式登录</span></div>
           </div>
           <div class="space-y-2">
+            {#if providerChallenge?.required}
+              {#key providerWidgetKey}<HumanVerificationWidget challenge={providerChallenge} bind:proof={providerProof} onerror={(message) => (error = message)} />{/key}
+            {/if}
             {#each providers as p}
               <button
                 type="button"
-                disabled={authPaused}
+                disabled={authPaused || providerStarting !== ''}
                 title={authPaused ? capabilityPauseReason($serviceStatusStore.value, 'auth_issuance') : undefined}
-                onclick={() => handleOAuth(p.name)}
+                onclick={() => void handleOAuth(p.name)}
                 class="w-full h-10 flex items-center justify-center gap-2 border border-nya-border rounded-nya-sm text-body-medium text-nya-text-primary hover:bg-nya-surface-hover transition-colors duration-fast disabled:cursor-not-allowed disabled:opacity-50"
               >
                 <ProviderIcon type={p.type} iconKey={p.icon_key} size={18} />
-                <span>{p.display_name || p.name}</span>
+                <span>{providerStarting === p.name ? '正在跳转…' : (p.display_name || p.name)}</span>
               </button>
             {/each}
           </div>

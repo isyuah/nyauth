@@ -1,0 +1,7 @@
+DROP TRIGGER IF EXISTS human_verification_config_tests_append_only ON human_verification_config_tests;
+DROP TRIGGER IF EXISTS human_verification_config_versions_append_only ON human_verification_config_versions;
+DROP FUNCTION IF EXISTS protect_human_verification_test_history();
+DROP FUNCTION IF EXISTS protect_human_verification_config_history();
+DROP TABLE IF EXISTS human_verification_runtime_state;
+DROP TABLE IF EXISTS human_verification_config_tests;
+DROP TABLE IF EXISTS human_verification_config_versions;

@@ -14,6 +14,7 @@ const providerAuthErrors: Record<string, string> = {
   account_changed: '账户安全状态已变化，请重新登录后再试。',
   account_unavailable: '该账户当前不可用，请联系管理员。',
   session_failed: '登录会话创建失败，请稍后重试。',
+  human_verification_required: '请先完成人机验证，再继续使用外部身份登录。',
 };
 
 export interface ProviderAuthErrorResult {

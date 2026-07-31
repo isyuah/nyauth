@@ -82,6 +82,8 @@ func TestSecurityMetricsBoundAllLabelValues(t *testing.T) {
 	runtime.RecordProviderEvent(t.Context(), "callback", "login", "failure", "provider_authentication_failed", time.Millisecond)
 	runtime.RecordProviderEvent(t.Context(), "synchronization", "none", "degraded", "provider_rows_skipped", time.Millisecond)
 	runtime.RecordProviderEvent(t.Context(), "provider-name-123", "user-id-123", "unexpected", "upstream-secret", time.Millisecond)
+	runtime.RecordHumanVerification(t.Context(), "turnstile", "register", "success", "none", time.Millisecond)
+	runtime.RecordHumanVerification(t.Context(), "private-provider", "private-action", "unexpected", "token-secret", time.Millisecond)
 	runtime.RecordJWKRotation(t.Context(), "scheduled", "success", "none", time.Millisecond)
 	runtime.RecordRateLimit(t.Context(), "account_action", "email_change", "rejected")
 	runtime.RecordRateLimit(t.Context(), "account_action", "register", "rejected")
@@ -98,7 +100,7 @@ func TestSecurityMetricsBoundAllLabelValues(t *testing.T) {
 	body := scrapeMetrics(t, runtime)
 	for _, metricName := range []string{
 		"nyauth_security_csrf_rejections", "nyauth_oauth_grants", "nyauth_oauth_refresh_token_reuse",
-		"nyauth_provider_events", "nyauth_jwk_rotations", "nyauth_rate_limit_events",
+		"nyauth_provider_events", "nyauth_human_verification_events", "nyauth_jwk_rotations", "nyauth_rate_limit_events",
 		"nyauth_registration_outcomes", "nyauth_registration_verification_duration",
 		"nyauth_smtp_outbox_deliveries", "nyauth_smtp_outbox_retries", "nyauth_smtp_outbox_failures",
 		"nyauth_smtp_outbox_backlog", "nyauth_smtp_outbox_oldest_pending_age", "nyauth_smtp_circuit_open",
@@ -107,7 +109,7 @@ func TestSecurityMetricsBoundAllLabelValues(t *testing.T) {
 			t.Fatalf("expected metric %q was not exported:\n%s", metricName, body)
 		}
 	}
-	for _, secret := range []string{"token-for-user-123", "refresh-token-secret", "provider-name-123", "user-id-123", "upstream-secret", "ip-address", "private-registration-reason", "smtp-host-secret"} {
+	for _, secret := range []string{"token-for-user-123", "refresh-token-secret", "provider-name-123", "user-id-123", "upstream-secret", "ip-address", "private-registration-reason", "smtp-host-secret", "private-provider", "private-action", "token-secret"} {
 		if strings.Contains(body, secret) {
 			t.Fatalf("unbounded or sensitive metric label %q was exported:\n%s", secret, body)
 		}

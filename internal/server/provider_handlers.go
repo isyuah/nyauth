@@ -16,6 +16,7 @@ import (
 	"github.com/nyasharp/nyauth/internal/audit"
 	"github.com/nyasharp/nyauth/internal/avatar"
 	"github.com/nyasharp/nyauth/internal/crypto"
+	"github.com/nyasharp/nyauth/internal/humanverification"
 	"github.com/nyasharp/nyauth/internal/identity"
 	"github.com/nyasharp/nyauth/internal/provider"
 	"github.com/nyasharp/nyauth/internal/servicecontrol"
@@ -120,8 +121,33 @@ func (s *Server) beginProviderFlow(w http.ResponseWriter, r *http.Request, provi
 	http.Redirect(w, r, redirect, http.StatusFound)
 }
 func (s *Server) handleProviderAuthorize(w http.ResponseWriter, r *http.Request) {
+	if s.humanVerification != nil && s.humanVerification.PublicChallenge(humanverification.ActionProviderLogin, 0).Required {
+		returnTo := safeReturnPath(r.URL.Query().Get("return_to"), "/dashboard")
+		target := "/login?auth_error=human_verification_required&return_to=" + url.QueryEscape(returnTo)
+		http.Redirect(w, r, target, http.StatusFound)
+		return
+	}
 	name := chi.URLParam(r, "provider")
 	s.beginProviderFlow(w, r, name, "login", "", safeReturnPath(r.URL.Query().Get("return_to"), "/dashboard"), false)
+}
+
+func (s *Server) handleProviderLoginStart(w http.ResponseWriter, r *http.Request) {
+	if !s.validSameOriginRequest(r) {
+		writeAPIError(w, http.StatusForbidden, "invalid request origin")
+		return
+	}
+	var request struct {
+		ReturnTo          string                  `json:"return_to"`
+		HumanVerification *humanVerificationProof `json:"human_verification,omitempty"`
+	}
+	if err := decodeJSON(w, r, &request); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	if !s.requireHumanVerification(w, r, humanverification.ActionProviderLogin, 0, request.HumanVerification) {
+		return
+	}
+	s.beginProviderFlow(w, r, chi.URLParam(r, "provider"), "login", "", safeReturnPath(request.ReturnTo, "/dashboard"), true)
 }
 func (s *Server) handleProviderBind(w http.ResponseWriter, r *http.Request) {
 	current := currentUserFromContext(r)

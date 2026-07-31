@@ -5,7 +5,7 @@
   import PageHeader from '$lib/components/layout/PageHeader.svelte';
   import ResourceState from '$lib/components/ui/ResourceState.svelte';
   import StatusBadge from '$lib/components/data-display/StatusBadge.svelte';
-  import { Activity, AlertTriangle, BellRing, Database, HardDrive, KeyRound, Mail, Network, RadioTower, Server } from 'lucide-svelte';
+  import { Activity, AlertTriangle, BellRing, Database, HardDrive, KeyRound, Mail, Network, RadioTower, Server, ShieldCheck } from 'lucide-svelte';
 
   let systemStatus = $state<SystemStatus | null>(null);
   let loading = $state(true);
@@ -164,6 +164,13 @@
                 {#if systemStatus.services.observability.debug_until}<p class="mt-3 text-small text-nya-text-tertiary">Debug 截止：{formatDateTime(systemStatus.services.observability.debug_until)}</p>{/if}
                 {#if systemStatus.services.observability.last_export_at}<p class="mt-2 text-small text-nya-text-tertiary">最近导出：{formatDateTime(systemStatus.services.observability.last_export_at)}</p>{/if}
                 {#if systemStatus.services.observability.last_error_at}<p class="mt-2 text-small text-nya-danger">最近错误：{formatDateTime(systemStatus.services.observability.last_error_at)}{systemStatus.services.observability.last_error_code ? ` · ${systemStatus.services.observability.last_error_code}` : ''}</p>{/if}
+              </article>
+            {/if}
+            {#if systemStatus.services.human_verification}
+              <article class="rounded-nya-md border border-nya-border p-4">
+                <div class="flex items-center justify-between gap-3"><div class="flex items-center gap-2"><ShieldCheck size={16} class="text-nya-primary" /><h3 class="text-body-medium font-semibold text-nya-text-primary">人机验证</h3></div><StatusBadge status={systemStatus.services.human_verification.status} /></div>
+                <dl class="mt-3 grid grid-cols-2 gap-3 text-small"><div><dt class="text-nya-text-tertiary">运行模式</dt><dd class="mt-1 text-nya-text-primary">{systemStatus.services.human_verification.mode === 'active' ? '动态配置' : '已禁用'}</dd></div><div><dt class="text-nya-text-tertiary">验证器</dt><dd class="mt-1 text-nya-text-primary">{systemStatus.services.human_verification.provider === 'turnstile' ? 'Turnstile' : '无'}</dd></div></dl>
+                <a href="/admin/settings/human-verification" class="mt-3 inline-block text-small font-semibold text-nya-primary hover:underline">查看人机验证设置</a>
               </article>
             {/if}
           </div>

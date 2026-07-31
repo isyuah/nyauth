@@ -8,6 +8,7 @@ import (
 	"github.com/nyasharp/nyauth/internal/avatar"
 	"github.com/nyasharp/nyauth/internal/buildinfo"
 	"github.com/nyasharp/nyauth/internal/database"
+	"github.com/nyasharp/nyauth/internal/humanverification"
 	"github.com/nyasharp/nyauth/internal/mailruntime"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
@@ -50,6 +51,14 @@ type systemObservabilityStatus struct {
 	LastErrorCode  string     `json:"last_error_code,omitempty"`
 }
 
+type systemHumanVerificationStatus struct {
+	Status     string `json:"status"`
+	Mode       string `json:"mode"`
+	Configured bool   `json:"configured"`
+	Available  bool   `json:"available"`
+	Provider   string `json:"provider,omitempty"`
+}
+
 type systemSchemaStatus struct {
 	Status          string `json:"status"`
 	Version         int64  `json:"version"`
@@ -69,13 +78,14 @@ type systemStatusResponse struct {
 	Version        string             `json:"version"`
 	Schema         systemSchemaStatus `json:"schema"`
 	Services       struct {
-		PostgreSQL    systemDependencyStatus    `json:"postgresql"`
-		Redis         systemDependencyStatus    `json:"redis"`
-		Providers     systemProviderStatus      `json:"providers"`
-		JWK           systemDependencyStatus    `json:"jwk"`
-		Mail          systemMailStatus          `json:"mail"`
-		Media         systemMediaStatus         `json:"media"`
-		Observability systemObservabilityStatus `json:"observability"`
+		PostgreSQL        systemDependencyStatus        `json:"postgresql"`
+		Redis             systemDependencyStatus        `json:"redis"`
+		Providers         systemProviderStatus          `json:"providers"`
+		JWK               systemDependencyStatus        `json:"jwk"`
+		Mail              systemMailStatus              `json:"mail"`
+		Media             systemMediaStatus             `json:"media"`
+		Observability     systemObservabilityStatus     `json:"observability"`
+		HumanVerification systemHumanVerificationStatus `json:"human_verification"`
 	} `json:"services"`
 	ActiveSigningKey        *systemSigningKeyStatus  `json:"active_signing_key,omitempty"`
 	DisabledRateLimitGroups []string                 `json:"disabled_rate_limit_groups"`
@@ -175,6 +185,21 @@ func (s *Server) handleSystemStatus(w http.ResponseWriter, r *http.Request) {
 		response.OperationalAlerts = s.operationalAlerts.Snapshot()
 	} else {
 		response.OperationalAlerts = operationalAlertSnapshot{Status: "unavailable", Active: []operationalAlert{}}
+	}
+	if s.humanVerification != nil {
+		humanStatus := s.humanVerification.Status()
+		componentStatus := "disabled"
+		if humanStatus.Mode == humanverification.ModeActive && humanStatus.Available {
+			componentStatus = "ok"
+		} else if humanStatus.Mode == humanverification.ModeActive {
+			componentStatus = "degraded"
+		}
+		response.Services.HumanVerification = systemHumanVerificationStatus{
+			Status: componentStatus, Mode: humanStatus.Mode, Configured: humanStatus.Configured,
+			Available: humanStatus.Available, Provider: humanStatus.Provider,
+		}
+	} else {
+		response.Services.HumanVerification = systemHumanVerificationStatus{Status: "unavailable", Mode: humanverification.ModeDisabled}
 	}
 	writeJSON(w, http.StatusOK, response)
 }

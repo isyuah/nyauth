@@ -115,3 +115,14 @@ const (
 	AuditServiceControlExpired       = "service_control.expired"
 	AuditServiceControlCLIReset      = "service_control.cli_reset"
 )
+
+const (
+	AuditHumanVerificationSaved       = "human_verification.settings_saved"
+	AuditHumanVerificationTested      = "human_verification.settings_tested"
+	AuditHumanVerificationActivated   = "human_verification.settings_activated"
+	AuditHumanVerificationEnabled     = "human_verification.settings_enabled"
+	AuditHumanVerificationUpdated     = "human_verification.policy_updated"
+	AuditHumanVerificationDisabled    = "human_verification.settings_disabled"
+	AuditHumanVerificationRolledBack  = "human_verification.settings_rolled_back"
+	AuditHumanVerificationCLIDisabled = "human_verification.cli_disabled"
+)

@@ -18,6 +18,7 @@ import (
 	"github.com/nyasharp/nyauth/internal/audit"
 	"github.com/nyasharp/nyauth/internal/authorization"
 	"github.com/nyasharp/nyauth/internal/client"
+	"github.com/nyasharp/nyauth/internal/humanverification"
 	"github.com/nyasharp/nyauth/internal/identity"
 	"github.com/nyasharp/nyauth/internal/session"
 	"github.com/nyasharp/nyauth/internal/settings"
@@ -85,7 +86,10 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusForbidden, "invalid request origin")
 		return
 	}
-	var request models.LoginRequest
+	var request struct {
+		models.LoginRequest
+		HumanVerification *humanVerificationProof `json:"human_verification,omitempty"`
+	}
 	if err := decodeJSON(w, r, &request); err != nil {
 		writeAPIError(w, http.StatusBadRequest, "invalid request body")
 		return
@@ -108,6 +112,15 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.telemetry.RecordRateLimit(r.Context(), "login", "login", "allowed")
+	normalizedUsername := strings.ToLower(request.Username)
+	failureCount, err := s.humanLoginFailures.FailureCount(r.Context(), ip, normalizedUsername)
+	if err != nil {
+		writeAPIError(w, http.StatusServiceUnavailable, "login temporarily unavailable")
+		return
+	}
+	if !s.requireHumanVerification(w, r, humanverification.ActionLogin, failureCount, request.HumanVerification) {
+		return
+	}
 	current, err := s.userService.Authenticate(r.Context(), request.Username, request.Password)
 	if err != nil {
 		if errors.Is(err, user.ErrEmailVerificationPending) {
@@ -115,6 +128,9 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			s.enqueueAuditResult(r.Context(), models.AuditUserLoginFailed, nil, truncateAuditValue(request.Username, maxAuditActorNameLength), "failure", "low", ip, truncateAuditValue(r.UserAgent(), maxAuditUserAgentLength), map[string]any{"authentication_method": "password", "reason": "email_unverified"})
 			writeAPIError(w, http.StatusForbidden, "email verification is required before signing in")
 			return
+		}
+		if recordErr := s.humanLoginFailures.RecordFailure(r.Context(), ip, normalizedUsername); recordErr != nil {
+			slog.WarnContext(r.Context(), "recording login failure for human verification failed", "error_class", "redis_unavailable")
 		}
 		s.telemetry.RecordAuthEvent(r.Context(), "login", "invalid_credentials")
 		s.enqueueAuditResult(r.Context(), models.AuditUserLoginFailed, nil, truncateAuditValue(request.Username, maxAuditActorNameLength), "failure", "medium", ip, truncateAuditValue(r.UserAgent(), maxAuditUserAgentLength), map[string]any{"authentication_method": "password"})
@@ -135,6 +151,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	if mfaRequired {
 		_ = s.loginLimiter.ResetIdentity(r.Context(), ip, strings.ToLower(request.Username))
+		_ = s.humanLoginFailures.ResetIdentity(r.Context(), normalizedUsername)
 		s.telemetry.RecordAuthEvent(r.Context(), "login", "mfa_required")
 		writeJSON(w, http.StatusAccepted, mfaResponse)
 		return
@@ -146,6 +163,7 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_ = s.loginLimiter.ResetIdentity(r.Context(), ip, strings.ToLower(request.Username))
+	_ = s.humanLoginFailures.ResetIdentity(r.Context(), normalizedUsername)
 	s.enqueueAuditResult(r.Context(), models.AuditUserLogin, &current.ID, current.Username, "success", "low", ip, truncateAuditValue(r.UserAgent(), maxAuditUserAgentLength), map[string]any{"authentication_method": "password"})
 	_ = s.userService.RecordLogin(r.Context(), current.ID, ip)
 	s.telemetry.RecordAuthEvent(r.Context(), "login", "success")

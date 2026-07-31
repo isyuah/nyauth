@@ -1,6 +1,7 @@
 <script lang="ts">
   import Modal from './Modal.svelte';
   import Button from './Button.svelte';
+  import CopyButton from './CopyButton.svelte';
   import Input from './Input.svelte';
 
   let {
@@ -48,12 +49,19 @@
 <Modal bind:open size="sm" {title} {description}>
   <div class="space-y-4">
     {#if confirmationText}
+      <div class="space-y-1.5">
+        <p class="text-small text-nya-text-secondary">复制并输入以下文本以确认：</p>
+        <div class="flex items-center gap-2 rounded-nya-sm border border-nya-border bg-nya-surface-muted px-3 py-1.5">
+          <code class="min-w-0 flex-1 break-all font-mono text-small text-nya-text-primary">{confirmationText}</code>
+          <CopyButton value={confirmationText} label="复制确认文本" />
+        </div>
+      </div>
       <Input
         id={confirmationInputId}
         label={`输入“${confirmationText}”以确认`}
         bind:value={entered}
         autocomplete="off"
-        placeholder={confirmationText}
+        placeholder="粘贴或输入上方文本"
       />
     {/if}
     {#if error}

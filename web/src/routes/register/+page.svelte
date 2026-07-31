@@ -1,9 +1,10 @@
 <script lang="ts">
   import { onMount } from 'svelte';
-  import { ApiError, api, type RegistrationOptions } from '$lib/api';
+  import { ApiError, api, humanVerificationChallengeFromError, type HumanVerificationChallenge, type HumanVerificationProof, type RegistrationOptions } from '$lib/api';
   import AccountActionCard from '$lib/components/account/AccountActionCard.svelte';
   import Button from '$lib/components/ui/Button.svelte';
   import Input from '$lib/components/ui/Input.svelte';
+  import HumanVerificationWidget from '$lib/components/security/HumanVerificationWidget.svelte';
   import { PASSWORD_REQUIREMENT, passwordPolicyError } from '$lib/password-policy';
   import { takeQuerySecret } from '$lib/query-secret';
   import { capabilityPauseReason, isCapabilityPaused, serviceStatusStore } from '$lib/service-control';
@@ -20,6 +21,9 @@
   let error = $state('');
   let result = $state<'pending_verification' | 'registered' | ''>('');
   let verificationExpiresAt = $state('');
+  let humanChallenge = $state<HumanVerificationChallenge | null>(null);
+  let humanProof = $state<HumanVerificationProof | null>(null);
+  let humanWidgetKey = $state(0);
   let registrationPaused = $derived(isCapabilityPaused($serviceStatusStore.value, 'self_registration'));
 
   function formatDeadline(value: string): string {
@@ -30,7 +34,11 @@
   onMount(async () => {
     inviteCode = takeQuerySecret('invite') || '';
     try {
-      options = await api.getRegistrationOptions();
+      const [registrationOptions, challenge] = await Promise.all([
+        api.getRegistrationOptions(), api.getHumanVerification('register').catch(() => null),
+      ]);
+      options = registrationOptions;
+      humanChallenge = challenge;
     } catch {
       optionsError = '暂时无法加载注册信息，请稍后重试。';
     }
@@ -46,20 +54,34 @@
     const policyError = passwordPolicyError(password);
     if (policyError) { error = policyError; return; }
     if (password !== confirmation) { error = '两次输入的密码不一致。'; return; }
+    if (humanChallenge?.required && !humanProof) { error = '请先完成人机验证。'; return; }
     loading = true;
     try {
       const payload = { username: username.trim(), email: email.trim(), password } as Parameters<typeof api.register>[0];
       if (options?.mode === 'invite_only') payload.invite_code = inviteCode.trim();
+      if (humanProof) payload.human_verification = humanProof;
       const response = await api.register(payload);
       result = response.status;
       verificationExpiresAt = response.verification_expires_at || '';
     } catch (cause) {
-      if (cause instanceof ApiError && cause.status === 503) {
-        error = cause.retryAfter
-          ? `注册邮件服务正在恢复，请在 ${cause.retryAfter} 秒后重试。你填写的内容尚未提交。`
-          : '注册暂时不可用，邮件服务可能尚未配置或正在恢复，请稍后重试。';
+      const requiredChallenge = humanVerificationChallengeFromError(cause);
+      if (requiredChallenge) {
+        humanChallenge = requiredChallenge;
+        humanProof = null;
+        humanWidgetKey += 1;
+        error = '请完成人机验证后再次提交。';
       } else {
-        error = cause instanceof Error ? cause.message : '注册失败，请稍后重试';
+        if (humanChallenge?.required) {
+          humanProof = null;
+          humanWidgetKey += 1;
+        }
+        if (cause instanceof ApiError && cause.status === 503) {
+          error = cause.retryAfter
+            ? `注册邮件服务正在恢复，请在 ${cause.retryAfter} 秒后重试。你填写的内容尚未提交。`
+            : '注册暂时不可用，邮件服务可能尚未配置或正在恢复，请稍后重试。';
+        } else {
+          error = cause instanceof Error ? cause.message : '注册失败，请稍后重试';
+        }
       }
     } finally {
       loading = false;
@@ -99,6 +121,11 @@
       <Input id="register-confirm" label="确认密码" type="password" bind:value={confirmation} required autocomplete="new-password" />
       {#if options.require_email_verification}
         <p class="text-small text-nya-text-tertiary">注册后需要完成邮箱验证才能登录。</p>
+      {/if}
+      {#if humanChallenge?.required}
+        {#key humanWidgetKey}
+          <HumanVerificationWidget challenge={humanChallenge} bind:proof={humanProof} onerror={(message) => (error = message)} />
+        {/key}
       {/if}
       <Button type="submit" variant="primary" size="lg" loading={loading} requiredCapability="self_registration" fullWidth><UserPlus size={16} /> 注册</Button>
       <p class="text-center"><a href="/login" class="text-small text-nya-primary hover:underline">已有账号？返回登录</a></p>

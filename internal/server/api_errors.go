@@ -139,6 +139,22 @@ var apiErrorCodesByMessage = map[string]string{
 	"invalid service control settings":                                                   "service_control.invalid_settings",
 	"service control is temporarily unavailable":                                         "service_control.unavailable",
 	"too many service control operations":                                                "service_control.rate_limited",
+	"human verification is required":                                                     "human_verification.required",
+	"human verification failed":                                                          "human_verification.failed",
+	"human verification is temporarily unavailable":                                      "human_verification.unavailable",
+	"human verification provider is unavailable":                                         "human_verification.provider_unavailable",
+	"human verification test was rejected":                                               "human_verification.test_rejected",
+	"human verification settings are unavailable":                                        "human_verification.settings_unavailable",
+	"human verification settings revision conflict":                                      "human_verification.revision_conflict",
+	"human verification candidate changed":                                               "human_verification.candidate_changed",
+	"a human verification secret is required":                                            "human_verification.secret_required",
+	"a successful human verification candidate test is required":                         "human_verification.test_required",
+	"the successful human verification candidate test has expired":                       "human_verification.test_expired",
+	"no previous human verification configuration is available":                          "human_verification.rollback_unavailable",
+	"no active human verification configuration is available":                            "human_verification.enable_unavailable",
+	"human verification is already disabled":                                             "human_verification.already_disabled",
+	"human verification is already enabled":                                              "human_verification.already_enabled",
+	"human verification settings operation failed":                                       "human_verification.operation_failed",
 }
 
 func apiErrorCodeForMessage(message string) string {
@@ -151,6 +167,9 @@ func apiErrorCodeForMessage(message string) string {
 	}
 	if strings.HasPrefix(normalized, "invalid otlp configuration:") {
 		return "telemetry.configuration_invalid"
+	}
+	if strings.HasPrefix(normalized, "invalid human verification configuration:") {
+		return "human_verification.configuration_invalid"
 	}
 	if strings.HasPrefix(normalized, "mail_backlog_count must be between ") ||
 		strings.HasPrefix(normalized, "audit_outbox_backlog_count must be between ") ||

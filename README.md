@@ -1,15 +1,15 @@
-# nyauth 0.4.0-rc.1
+# nyauth 0.5.0-dev
 
 统一认证与用户系统，提供 OAuth 2.0 Authorization Server、OpenID Connect Provider 和第一方管理后台。
 
-## 0.3.0 基线与 0.4.0-rc.1 兼容演进
+## 0.3.0 基线与 0.5.0-dev 兼容演进
 
 `0.3.0` 是全新的破坏性开发基线，不提供旧数据库、配置、接口或 SDK 的兼容层：
 
 - 第一方后台仅使用 `HttpOnly + SameSite=Lax` 会话 Cookie，并对修改请求强制校验 CSRF。
 - OAuth 授权码客户端强制使用 PKCE S256；不支持 plain、implicit 或 hybrid 流程。
 - JWT 固定使用 RS256，refresh token 采用 family 轮换与重复使用检测。
-- 数据库以嵌入二进制的 `000001_baseline` 建立破坏性发布基线，并通过兼容的 `000002` 至 `000009_runtime_observability` 加法迁移演进；当前 `0.4.0-rc.1` 要求 schema version 9，可从正式 `0.3.0` 的 schema version 3 依次迁移。服务启动只校验 schema，不再隐式迁移。
+- 数据库以嵌入二进制的 `000001_baseline` 建立破坏性发布基线，并通过兼容的 `000002` 至 `000010_human_verification` 加法迁移演进；当前 `0.5.0-dev` 要求 schema version 10，可从正式 `0.3.0` 的 schema version 3 依次迁移。服务启动只校验 schema，不再隐式迁移。
 - 旧数据库、session、token、JWK、Provider 凭据和 OAuth 客户端注册均不兼容。
 - 旧 Go/TypeScript SDK 已删除；OAuth/OIDC 集成以标准协议和成熟语言库为准。
 
@@ -33,6 +33,7 @@
 - 运行时服务控制：六类能力独立暂停、常用维护预设、多实例排空确认、定时恢复与 CLI 紧急解锁
 - 运行时运营策略：动态限流、会话与近期认证期限、审计保留和用户客户端配额，revision CAS 与多实例同步
 - 运行时可观测性：日志基线与临时 Debug、固定运营告警阈值、版本化 OTLP 候选/真实测试/激活/回滚
+- 人机验证：适配器式运行时配置，首个 Provider 为 Cloudflare Turnstile；支持候选真实测试、激活/回滚/禁用/重新启用、自适应登录及公开账户入口保护
 - 运维：严格 readiness、JSON 日志、内部 Prometheus、可选 OTLP 与审计 outbox
 - 集成方式：标准 OAuth/OIDC Discovery、成熟语言库与 BFF 会话模式
 
@@ -293,6 +294,7 @@ OAuth 客户端支持 `post_logout_redirect_uris`。`/end_session` 仅允许跳�
 | POST | `/api/email/change/confirm` | 原子确认邮箱变更 |
 | GET | `/api/registration` | 公开注册配置（模式、是否需验证、域名限制与当前 `available`） |
 | POST | `/api/register` | 自助注册（closed/invite_only/open 由运行时设置控制） |
+| GET | `/api/human-verification?action=...` | 读取指定公开动作的验证挑战；不返回 Secret 或内部 revision |
 
 自助注册默认关闭。开启前必须存在已配置的邮件能力；邀请制模式下用户、注册生命周期、邀请码预占、验证 Token、邮件 outbox 和审计事件在同一事务内提交，失败会整体回滚。邀请码在邮箱验证后才计为已使用；删除或清理待验证用户会释放预占，删除已完成用户不会返还次数。SMTP 未配置、被禁用或熔断打开时，公开配置返回 `available=false`，注册请求在创建用户前返回 `503`；熔断状态同时返回 `Retry-After: 60`。
 
@@ -314,8 +316,9 @@ OAuth 客户端支持 `post_logout_redirect_uris`。`/end_session` 仅允许跳�
 
 | 方法 | 路径 | 描述 |
 |---|---|---|
-| GET | `/auth/{provider}/authorize` | 发起外部登录 |
+| GET | `/auth/{provider}/authorize` | 兼容性外部登录入口；开启 Provider 人机验证时会返回登录页 |
 | GET | `/auth/{provider}/callback` | 外部 Provider 回调 |
+| POST | `/api/provider-login/{provider}` | 受同源和可选人机验证保护的外部登录启动入口 |
 | POST | `/api/me/identities/{provider}/bind` | CSRF 保护的身份绑定入口 |
 
 首次使用未绑定的外部身份登录时会创建外部账号，但不会根据 email 自动合并到已有账号。通用 OIDC Provider 的 discovery URL 必须使用 HTTPS。
@@ -328,13 +331,14 @@ Provider 不再从 YAML 或环境变量静态加载，只能由管理员写入�
 
 内部管理界面继续使用 Cookie + CSRF，不是稳定的自动化 API：
 
-- `GET /api/admin/system/status`：版本、schema、PostgreSQL/Redis/JWK/Provider、SMTP、头像媒体与可观测性状态，以及当前运营告警。
+- `GET /api/admin/system/status`：版本、schema、PostgreSQL/Redis/JWK/Provider、SMTP、头像媒体、人机验证与可观测性状态，以及当前运营告警。
 - `GET/PUT /api/admin/settings/operations`：六类能力的运行时暂停、恢复、到期和多实例应用进度；修改要求近期重新认证，使用 revision CAS 并与审计同事务提交。
 - `GET /api/admin/settings/media`、候选保存/测试、迁移及 `fallback/migrate` 接口：私有 S3 运行时配置、迁回已配置本地 fallback、真实对象测试、迁移进度和失败重试；凭据只加密保存且永不回显。
 - `GET/PUT /api/admin/settings/branding`、`registration`、`security`、`protection`、`lifecycle`、`oauth`：六组运行时设置统一使用 revision CAS；写入要求近期重新认证、固定保护限流，并与 `settings.updated` 审计同事务提交。
 - `GET /api/site-banner`、`GET /api/site-banner/events`：读取全站横幅并通过 SSE 接收实时状态；公开响应不包含设置 revision 或邮件模板。
 - `GET/PUT /api/admin/settings/communications`、邮件模板 `preview/test`、横幅 Markdown `site-banner/preview`：动态管理结构化事务邮件模板和全站横幅。模板只接受受限纯文本字段与按字段授权的变量，动作链接和安全提示由服务端生成；测试邮件只能发往当前管理员已验证邮箱。
 - `GET/PUT /api/admin/settings/observability` 及其 `otlp/candidate`、`test`、`activate`、`rollback`、`disable` 接口：动态日志级别、最长 24 小时的临时 Debug、五项固定低基数告警阈值和加密的 OTLP 版本状态机；修改要求近期重新认证、CSRF、固定限流与审计。
+- `GET/PUT /api/admin/settings/human-verification` 及其 `candidate`、`candidate/test`、`activate`、`rollback`、`disable`、`enable` 接口：管理 Turnstile 不可变候选版本和注册、登录、密码恢复、验证邮件重发、Provider 登录策略；Secret 加密保存且永不回显，激活要求同一候选版本在最近十分钟内真实验证成功，禁用只关闭运行开关并保留当前配置。
 - `protection` 动态控制登录、账户操作、头像和 SMTP 管理限流，以及自助客户端全局默认配额。关闭限流组需要精确危险确认；每次 revision 都使用新的 Redis key namespace，旧计数自然过期。
 - `lifecycle` 动态控制浏览器会话绝对/空闲期限、每用户并发会话上限、近期认证期限、Access/Refresh Token、授权码和审计保留天数。缩短会话期限会在下一次请求时淘汰超龄会话；并发上限在下一次登录时原子淘汰最旧会话；延长不会恢复 Redis 中已经过期的会话。Token 与授权码策略只影响之后新签发或轮换的凭据，已签发凭据保持原到期时间。
 - `oauth` 动态控制用户自助创建、Public Client、可新增 Grant/Scope 与回调地址数量。收紧策略不修改或停用既有客户端；既有超限或已禁用项可以原样保留、等量替换或逐步减少，但不能继续扩大。
@@ -364,7 +368,7 @@ Nyauth 不要求使用专有 SDK。服务端应用应通过 Discovery 配置成�
 
 推荐库及安全约束见 [标准 OAuth/OIDC 集成指南](docs/oauth-oidc-integration.md)。近期不支持在浏览器中配置 confidential client secret，也不把 access/refresh token 持久化到 `localStorage`。
 
-单机备份、WAL/PITR、master key、local media/S3 恢复与演练见 [备份与恢复](docs/operations/backup-restore.md)；双实例拓扑、共享私有 S3 与故障语义见 [高可用部署](docs/operations/high-availability.md)；头像输入、存储、Provider 导入和清理边界见 [安全头像媒体契约](docs/avatar-storage-design.md)。仓库还提供受保护环境下手动触发的 `Isolated recovery drill` 工作流，用一次性 PostgreSQL、空 Redis、带资源计数 manifest 的备份产物和只读 `nyauth verify-recovery` 命令验证 JWK、Provider、TOTP、Passkey 与邮件 envelope 并生成恢复证据；当前该自动化不恢复或抽查头像对象，媒体恢复必须按备份手册另行留证。
+单机备份、WAL/PITR、master key、local media/S3 恢复与演练见 [备份与恢复](docs/operations/backup-restore.md)；双实例拓扑、共享私有 S3 与故障语义见 [高可用部署](docs/operations/high-availability.md)；人机验证配置、故障语义和紧急禁用见 [运行时人机验证](docs/operations/human-verification.md)；头像输入、存储、Provider 导入和清理边界见 [安全头像媒体契约](docs/avatar-storage-design.md)。仓库还提供受保护环境下手动触发的 `Isolated recovery drill` 工作流，用一次性 PostgreSQL、空 Redis、带资源计数 manifest 的备份产物和只读 `nyauth verify-recovery` 命令验证 JWK、Provider、TOTP、Passkey 与邮件 envelope 并生成恢复证据；当前该自动化不恢复或抽查头像对象，媒体恢复必须按备份手册另行留证。
 
 ## 质量检查
 

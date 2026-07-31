@@ -20,6 +20,7 @@ import (
 	"github.com/nyasharp/nyauth/internal/avatar"
 	"github.com/nyasharp/nyauth/internal/config"
 	"github.com/nyasharp/nyauth/internal/database"
+	"github.com/nyasharp/nyauth/internal/humanverification"
 	"github.com/nyasharp/nyauth/internal/mfa"
 	"github.com/nyasharp/nyauth/internal/recovery"
 	"github.com/nyasharp/nyauth/internal/registration"
@@ -30,17 +31,18 @@ import (
 )
 
 const (
-	commandServe          = "serve"
-	commandMigrate        = "migrate"
-	commandMaintenance    = "maintenance"
-	commandHealthcheck    = "healthcheck"
-	commandVerifyRecovery = "verify-recovery"
-	commandServiceControl = "service-control"
-	commandMFA            = "mfa"
+	commandServe             = "serve"
+	commandMigrate           = "migrate"
+	commandMaintenance       = "maintenance"
+	commandHealthcheck       = "healthcheck"
+	commandVerifyRecovery    = "verify-recovery"
+	commandServiceControl    = "service-control"
+	commandMFA               = "mfa"
+	commandHumanVerification = "human-verification"
 )
 
 var (
-	version = "0.4.0-rc.1"
+	version = "0.5.0-dev"
 	commit  = "unknown"
 )
 
@@ -72,6 +74,12 @@ func main() {
 	if command == commandMFA {
 		if err := runMFA(args); err != nil {
 			fatal("MFA recovery failed", err)
+		}
+		return
+	}
+	if command == commandHumanVerification {
+		if err := runHumanVerification(args); err != nil {
+			fatal("human verification recovery failed", err)
 		}
 		return
 	}
@@ -463,14 +471,55 @@ func runMFA(args []string) error {
 	return nil
 }
 
+func runHumanVerification(args []string) error {
+	if len(args) == 0 || args[0] != "disable" {
+		return fmt.Errorf("expected `human-verification disable`")
+	}
+	flags := flag.NewFlagSet("nyauth human-verification disable", flag.ContinueOnError)
+	configPath := flags.String("config", "", "path to config file (default: config.yaml)")
+	reason := flags.String("reason", "", "mandatory break-glass disable reason")
+	if err := flags.Parse(args[1:]); err != nil {
+		return fmt.Errorf("parsing human verification arguments: %w", err)
+	}
+	if flags.NArg() != 0 {
+		return fmt.Errorf("unexpected human verification arguments: %s", strings.Join(flags.Args(), " "))
+	}
+	normalizedReason, err := humanverification.NormalizeRecoveryReason(*reason)
+	if err != nil {
+		return err
+	}
+	cfg, err := config.LoadDatabaseMaintenance(*configPath)
+	if err != nil {
+		return fmt.Errorf("loading database configuration: %w", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	db, err := database.NewPostgresPool(ctx, cfg.Database)
+	if err != nil {
+		return fmt.Errorf("connecting to database: %w", err)
+	}
+	defer db.Close()
+	if err := database.ValidateSchemaVersion(ctx, db); err != nil {
+		return fmt.Errorf("validating database schema: %w", err)
+	}
+	report, err := humanverification.DisableForRecovery(ctx, db, normalizedReason, time.Now().UTC())
+	if err != nil {
+		return err
+	}
+	if err := json.NewEncoder(os.Stdout).Encode(report); err != nil {
+		return fmt.Errorf("encoding human verification recovery report: %w", err)
+	}
+	return nil
+}
+
 func parseCommand(args []string) (string, []string, error) {
 	if len(args) == 0 || strings.HasPrefix(args[0], "-") {
 		return commandServe, args, nil
 	}
 	switch args[0] {
-	case commandServe, commandMigrate, commandMaintenance, commandHealthcheck, commandVerifyRecovery, commandServiceControl, commandMFA:
+	case commandServe, commandMigrate, commandMaintenance, commandHealthcheck, commandVerifyRecovery, commandServiceControl, commandMFA, commandHumanVerification:
 		return args[0], args[1:], nil
 	default:
-		return "", nil, fmt.Errorf("unknown command %q (expected serve, migrate, maintenance, healthcheck, verify-recovery, service-control, or mfa)", args[0])
+		return "", nil, fmt.Errorf("unknown command %q (expected serve, migrate, maintenance, healthcheck, verify-recovery, service-control, mfa, or human-verification)", args[0])
 	}
 }

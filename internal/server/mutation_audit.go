@@ -266,6 +266,20 @@ func describeMutation(r *http.Request, actor *models.User) (mutationAuditDescrip
 		return mutationAuditDescriptor{event: models.AuditTelemetrySettingsRolledBack, targetType: "telemetry_config", riskLevel: "high", successAlreadyAudited: true}, true
 	case r.Method == http.MethodPost && path == "/api/admin/settings/observability/otlp/disable":
 		return mutationAuditDescriptor{event: models.AuditTelemetrySettingsDisabled, targetType: "telemetry_runtime", riskLevel: "high", successAlreadyAudited: true}, true
+	case r.Method == http.MethodPut && path == "/api/admin/settings/human-verification/candidate":
+		return mutationAuditDescriptor{event: models.AuditHumanVerificationSaved, targetType: "human_verification_config", riskLevel: "high", successAlreadyAudited: true}, true
+	case r.Method == http.MethodPost && path == "/api/admin/settings/human-verification/candidate/test":
+		return mutationAuditDescriptor{event: models.AuditHumanVerificationTested, targetType: "human_verification_config", riskLevel: "high", successAlreadyAudited: true}, true
+	case r.Method == http.MethodPost && path == "/api/admin/settings/human-verification/activate":
+		return mutationAuditDescriptor{event: models.AuditHumanVerificationActivated, targetType: "human_verification_runtime", targetID: "singleton", riskLevel: "critical", successAlreadyAudited: true}, true
+	case r.Method == http.MethodPut && path == "/api/admin/settings/human-verification/policy":
+		return mutationAuditDescriptor{event: models.AuditHumanVerificationUpdated, targetType: "human_verification_runtime", targetID: "singleton", riskLevel: "critical", successAlreadyAudited: true}, true
+	case r.Method == http.MethodPost && path == "/api/admin/settings/human-verification/rollback":
+		return mutationAuditDescriptor{event: models.AuditHumanVerificationRolledBack, targetType: "human_verification_runtime", targetID: "singleton", riskLevel: "critical", successAlreadyAudited: true}, true
+	case r.Method == http.MethodPost && path == "/api/admin/settings/human-verification/disable":
+		return mutationAuditDescriptor{event: models.AuditHumanVerificationDisabled, targetType: "human_verification_runtime", targetID: "singleton", riskLevel: "critical", successAlreadyAudited: true}, true
+	case r.Method == http.MethodPost && path == "/api/admin/settings/human-verification/enable":
+		return mutationAuditDescriptor{event: models.AuditHumanVerificationEnabled, targetType: "human_verification_runtime", targetID: "singleton", riskLevel: "critical", successAlreadyAudited: true}, true
 	case r.Method == http.MethodPut && path == "/api/admin/settings/operations":
 		return mutationAuditDescriptor{event: models.AuditServiceControlUpdated, targetType: "settings", targetID: "operations", riskLevel: "critical", successAlreadyAudited: true}, true
 	case r.Method == http.MethodPut && path == "/api/admin/settings/mail/candidate":

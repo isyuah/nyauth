@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/nyasharp/nyauth/internal/account"
+	"github.com/nyasharp/nyauth/internal/humanverification"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
 
@@ -26,7 +27,8 @@ type accountActionService interface {
 }
 
 type passwordResetRequest struct {
-	Email string `json:"email"`
+	Email             string                  `json:"email"`
+	HumanVerification *humanVerificationProof `json:"human_verification,omitempty"`
 }
 
 type passwordResetConfirmation struct {
@@ -43,7 +45,8 @@ type emailChangeRequest struct {
 }
 
 type emailVerificationResendRequest struct {
-	Email string `json:"email"`
+	Email             string                  `json:"email"`
+	HumanVerification *humanVerificationProof `json:"human_verification,omitempty"`
 }
 
 func (s *Server) handleRequestPasswordReset(w http.ResponseWriter, r *http.Request) {
@@ -77,6 +80,9 @@ func (s *Server) handleRequestPasswordReset(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	s.telemetry.RecordRateLimit(r.Context(), "account_action", "password_reset", "allowed")
+	if !s.requireHumanVerification(w, r, humanverification.ActionPasswordReset, 0, request.HumanVerification) {
+		return
+	}
 	if err := s.accountService.RequestPasswordReset(r.Context(), request.Email, accountRequestMetadata(r)); err != nil {
 		// The public response deliberately remains indistinguishable from an
 		// unknown account. Operators still receive a structured error signal.
@@ -171,6 +177,9 @@ func (s *Server) handleResendPendingEmailVerification(w http.ResponseWriter, r *
 		return
 	}
 	s.telemetry.RecordRateLimit(r.Context(), "account_action", "pending_email_verification", "allowed")
+	if !s.requireHumanVerification(w, r, humanverification.ActionEmailVerificationResend, 0, request.HumanVerification) {
+		return
+	}
 	if err := s.accountService.RequestPendingEmailVerification(r.Context(), request.Email, accountRequestMetadata(r)); err != nil {
 		// Queue and lookup failures remain indistinguishable from an unknown
 		// address. Operators still receive a durable log/metric signal.

@@ -3,6 +3,7 @@ import {
   api,
   ApiError,
   buildAuditLogExportURL,
+  humanVerificationChallengeFromError,
   isMFARequiredResponse,
   isAPIErrorCode,
   localizeAPIErrorMessage,
@@ -89,6 +90,87 @@ describe('localizeAPIErrorMessage', () => {
   it('matches control-flow errors by code instead of server wording', () => {
     const error = new ApiError('本地化消息', 400, undefined, 'wording changed', { code: 'mfa.challenge_expired' }, 'mfa.challenge_expired');
     expect(isAPIErrorCode(error, 'mfa.challenge_expired')).toBe(true);
+  });
+});
+
+describe('human verification API contract', () => {
+  afterEach(() => {
+    setCsrfToken('');
+    vi.unstubAllGlobals();
+  });
+
+  it('extracts only a complete Turnstile challenge from the required response', () => {
+    const complete = {
+      enabled: true, required: true, available: true, provider: 'turnstile',
+      site_key: 'site-key', widget_mode: 'managed', action: 'login',
+    };
+    expect(humanVerificationChallengeFromError(new ApiError(
+      'required', 428, undefined, 'required', { code: 'human_verification.required', challenge: complete }, 'human_verification.required',
+    ))).toEqual(complete);
+    expect(humanVerificationChallengeFromError(new ApiError(
+      'required', 428, undefined, 'required', {
+        code: 'human_verification.required', challenge: { ...complete, site_key: undefined },
+      }, 'human_verification.required',
+    ))).toBeNull();
+    expect(humanVerificationChallengeFromError(new ApiError(
+      'required', 428, undefined, 'required', {
+        code: 'human_verification.required', challenge: { ...complete, action: 'private_action' },
+      }, 'human_verification.required',
+    ))).toBeNull();
+  });
+
+  it('sends public proofs and all administrator lifecycle requests with the expected contract', async () => {
+    const responses = Array.from({ length: 11 }, () => new Response('{}', {
+      status: 200, headers: { 'Content-Type': 'application/json' },
+    }));
+    const fetchMock = vi.fn(async () => responses.shift()!);
+    vi.stubGlobal('fetch', fetchMock);
+    setCsrfToken('human-csrf');
+    const proof = { token: 'one-time-token', idempotency_key: '11111111-1111-4111-8111-111111111111' };
+    const policy = {
+      registration: true, login_mode: 'adaptive' as const, login_trigger_after: 3,
+      password_reset: true, email_verification_resend: true, provider_login: true,
+    };
+
+    await api.getHumanVerification('register');
+    await api.login('alice', 'password', '/dashboard', proof);
+    await api.startProviderLogin('github', '/dashboard', proof);
+    await api.admin.getHumanVerificationSettings();
+    await api.admin.saveHumanVerificationCandidate({
+      expected_revision: 1, provider: 'turnstile', site_key: 'site-key', widget_mode: 'managed',
+    });
+    await api.admin.testHumanVerificationCandidate(2, '22222222-2222-4222-8222-222222222222', proof);
+    await api.admin.activateHumanVerification(3, '22222222-2222-4222-8222-222222222222', policy);
+    await api.admin.updateHumanVerificationPolicy(4, policy);
+    await api.admin.rollbackHumanVerification(5);
+    await api.admin.disableHumanVerification(6);
+    await api.admin.enableHumanVerification(7);
+
+    const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit]>;
+    expect(calls.map(([url]) => url)).toEqual([
+      '/api/human-verification?action=register',
+      '/api/login',
+      '/api/provider-login/github',
+      '/api/admin/settings/human-verification',
+      '/api/admin/settings/human-verification/candidate',
+      '/api/admin/settings/human-verification/candidate/test',
+      '/api/admin/settings/human-verification/activate',
+      '/api/admin/settings/human-verification/policy',
+      '/api/admin/settings/human-verification/rollback',
+      '/api/admin/settings/human-verification/disable',
+      '/api/admin/settings/human-verification/enable',
+    ]);
+    expect(calls[0][1].cache).toBe('no-store');
+    expect(calls[3][1].cache).toBe('no-store');
+    expect(JSON.parse(String(calls[1][1].body)).human_verification).toEqual(proof);
+    expect(JSON.parse(String(calls[2][1].body)).human_verification).toEqual(proof);
+    expect(JSON.parse(String(calls[4][1].body))).not.toHaveProperty('secret');
+    expect(JSON.parse(String(calls[5][1].body))).toMatchObject({
+      expected_revision: 2, version_id: '22222222-2222-4222-8222-222222222222', ...proof,
+    });
+    for (const index of [4, 5, 6, 7, 8, 9, 10]) {
+      expect(new Headers(calls[index][1].headers).get('X-CSRF-Token')).toBe('human-csrf');
+    }
   });
 });
 

@@ -167,4 +167,4 @@ Manifest 不得包含用户名、邮箱、Client Secret、Provider Secret、Toke
 
 ## 破坏性基线提示
 
-`0.3.0-rc.1` 的 schema version 1 是破坏性 release baseline，不提供早期开发数据库迁移；正式 `0.3.0` 在该 baseline 上追加兼容迁移到 schema version 3，当前 `0.4.0-rc.1` 再通过 `000004` 至 `000009_runtime_observability` 演进到 schema version 9。恢复时数据库 schema 必须与目标镜像要求一致，不能把旧恢复点直接交给要求更高 schema version 的应用而跳过迁移。需要重建时，运维人员必须先确认准确的 Compose project、PostgreSQL volume、media volume 或 S3 prefix，并完成必要备份。应用及迁移命令不会自动执行 `docker compose down -v`、删除任何 volume 或清空 S3；`down -v` 会同时删除本地 PostgreSQL 与 media volume，不得用于普通停止或回滚。
+`0.3.0-rc.1` 的 schema version 1 是破坏性 release baseline，不提供早期开发数据库迁移；正式 `0.3.0` 在该 baseline 上追加兼容迁移到 schema version 3，`0.4.0-rc.1` 通过 `000004` 至 `000009_runtime_observability` 演进到 schema version 9，当前 `0.5.0-dev` 再通过 `000010_human_verification` 演进到 schema version 10。恢复时数据库 schema 必须与目标镜像要求一致，不能把旧恢复点直接交给要求更高 schema version 的应用而跳过迁移。需要重建时，运维人员必须先确认准确的 Compose project、PostgreSQL volume、media volume 或 S3 prefix，并完成必要备份。应用及迁移命令不会自动执行 `docker compose down -v`、删除任何 volume 或清空 S3；`down -v` 会同时删除本地 PostgreSQL 与 media volume，不得用于普通停止或回滚。
