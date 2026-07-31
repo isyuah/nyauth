@@ -116,6 +116,23 @@ var apiErrorCodesByMessage = map[string]string{
 	"audit retention confirmation is required":                                           "settings.retention_confirmation_required",
 	"settings are temporarily unavailable":                                               "settings.unavailable",
 	"too many settings operations":                                                       "settings.rate_limited",
+	"observability settings are temporarily unavailable":                                 "observability.settings_unavailable",
+	"failed to store observability settings":                                             "observability.store_failed",
+	"log_level must be info, warn, or error":                                             "observability.log_level_invalid",
+	"debug_until must be between 1 minute and 24h0m0s from now":                          "observability.debug_until_invalid",
+	"otlp settings revision conflict":                                                    "telemetry.revision_conflict",
+	"otlp candidate changed; reload settings":                                            "telemetry.candidate_changed",
+	"a recent successful otlp candidate test is required":                                "telemetry.test_required",
+	"the successful otlp candidate test has expired":                                     "telemetry.test_expired",
+	"no previous otlp configuration is available":                                        "telemetry.rollback_unavailable",
+	"otlp export is already disabled":                                                    "telemetry.already_disabled",
+	"otlp authorization cannot be inherited":                                             "telemetry.authorization_inheritance",
+	"otlp settings are temporarily unavailable":                                          "telemetry.settings_unavailable",
+	"export_interval must be a valid duration":                                           "telemetry.export_interval_invalid",
+	"timeout must be a valid duration":                                                   "telemetry.timeout_invalid",
+	"otlp configuration was activated but could not be applied on this instance":         "telemetry.activation_apply_failed",
+	"otlp rollback was stored but could not be applied on this instance":                 "telemetry.rollback_apply_failed",
+	"otlp disable was stored but could not be applied on this instance":                  "telemetry.disable_apply_failed",
 	"service control revision conflict":                                                  "service_control.revision_conflict",
 	"registration settings conflict with service control":                                "service_control.registration_conflict",
 	"service control dependency violation":                                               "service_control.dependency_violation",
@@ -131,6 +148,16 @@ func apiErrorCodeForMessage(message string) string {
 	}
 	if code := apiErrorCodesByMessage[normalized]; code != "" {
 		return code
+	}
+	if strings.HasPrefix(normalized, "invalid otlp configuration:") {
+		return "telemetry.configuration_invalid"
+	}
+	if strings.HasPrefix(normalized, "mail_backlog_count must be between ") ||
+		strings.HasPrefix(normalized, "audit_outbox_backlog_count must be between ") ||
+		strings.HasPrefix(normalized, "avatar_cleanup_pending_count must be between ") ||
+		strings.HasPrefix(normalized, "mail_oldest_pending_age must be a duration between ") ||
+		strings.HasPrefix(normalized, "audit_oldest_pending_age must be a duration between ") {
+		return "observability.configuration_invalid"
 	}
 	return apiErrorCodeRequestFailed
 }

@@ -38,6 +38,18 @@ type systemMediaStatus struct {
 	LastErrorAt *time.Time `json:"last_error_at,omitempty"`
 }
 
+type systemObservabilityStatus struct {
+	Status         string     `json:"status"`
+	LogLevel       string     `json:"log_level"`
+	DebugUntil     *time.Time `json:"debug_until,omitempty"`
+	OTLPMode       string     `json:"otlp_mode"`
+	OTLPConfigured bool       `json:"otlp_configured"`
+	OTLPAvailable  bool       `json:"otlp_available"`
+	LastExportAt   *time.Time `json:"last_export_at,omitempty"`
+	LastErrorAt    *time.Time `json:"last_error_at,omitempty"`
+	LastErrorCode  string     `json:"last_error_code,omitempty"`
+}
+
 type systemSchemaStatus struct {
 	Status          string `json:"status"`
 	Version         int64  `json:"version"`
@@ -57,15 +69,17 @@ type systemStatusResponse struct {
 	Version        string             `json:"version"`
 	Schema         systemSchemaStatus `json:"schema"`
 	Services       struct {
-		PostgreSQL systemDependencyStatus `json:"postgresql"`
-		Redis      systemDependencyStatus `json:"redis"`
-		Providers  systemProviderStatus   `json:"providers"`
-		JWK        systemDependencyStatus `json:"jwk"`
-		Mail       systemMailStatus       `json:"mail"`
-		Media      systemMediaStatus      `json:"media"`
+		PostgreSQL    systemDependencyStatus    `json:"postgresql"`
+		Redis         systemDependencyStatus    `json:"redis"`
+		Providers     systemProviderStatus      `json:"providers"`
+		JWK           systemDependencyStatus    `json:"jwk"`
+		Mail          systemMailStatus          `json:"mail"`
+		Media         systemMediaStatus         `json:"media"`
+		Observability systemObservabilityStatus `json:"observability"`
 	} `json:"services"`
-	ActiveSigningKey        *systemSigningKeyStatus `json:"active_signing_key,omitempty"`
-	DisabledRateLimitGroups []string                `json:"disabled_rate_limit_groups"`
+	ActiveSigningKey        *systemSigningKeyStatus  `json:"active_signing_key,omitempty"`
+	DisabledRateLimitGroups []string                 `json:"disabled_rate_limit_groups"`
+	OperationalAlerts       operationalAlertSnapshot `json:"operational_alerts"`
 }
 
 type systemSchemaSnapshot struct {
@@ -131,6 +145,36 @@ func (s *Server) handleSystemStatus(w http.ResponseWriter, r *http.Request) {
 		if !group.enabled {
 			response.DisabledRateLimitGroups = append(response.DisabledRateLimitGroups, group.name)
 		}
+	}
+	observability := s.settingsMgr.Observability()
+	effectiveLogLevel := observability.LogLevel
+	if observability.DebugUntil != nil && observability.DebugUntil.After(time.Now()) {
+		effectiveLogLevel = "debug"
+	}
+	otlpMode := "fallback"
+	if s.observabilityManager != nil {
+		otlpMode = s.observabilityManager.Effective().Mode
+	}
+	otlpRuntime := s.telemetry.OTLPStatus()
+	componentStatus := "not_configured"
+	if otlpMode == "disabled" {
+		componentStatus = "disabled"
+	} else if otlpRuntime.Configured && otlpRuntime.Available {
+		componentStatus = "ok"
+	} else if otlpRuntime.Configured {
+		componentStatus = "degraded"
+	} else if otlpMode == "active" {
+		componentStatus = "degraded"
+	}
+	response.Services.Observability = systemObservabilityStatus{
+		Status: componentStatus, LogLevel: effectiveLogLevel, DebugUntil: observability.DebugUntil,
+		OTLPMode: otlpMode, OTLPConfigured: otlpRuntime.Configured, OTLPAvailable: otlpRuntime.Available,
+		LastExportAt: otlpRuntime.LastSuccessAt, LastErrorAt: otlpRuntime.LastErrorAt, LastErrorCode: otlpRuntime.LastErrorCode,
+	}
+	if s.operationalAlerts != nil {
+		response.OperationalAlerts = s.operationalAlerts.Snapshot()
+	} else {
+		response.OperationalAlerts = operationalAlertSnapshot{Status: "unavailable", Active: []operationalAlert{}}
 	}
 	writeJSON(w, http.StatusOK, response)
 }

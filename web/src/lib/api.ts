@@ -625,6 +625,113 @@ export interface PublicSiteBannerResponse {
   next_change_at?: string;
 }
 
+export type LogLevel = 'info' | 'warn' | 'error';
+export type EffectiveLogLevel = LogLevel | 'debug';
+export type OTLPRuntimeMode = 'fallback' | 'active' | 'disabled';
+export type OperationalAlertStatus = 'pending' | 'ok' | 'unavailable' | string;
+
+export interface OperationalAlertThresholds {
+  mail_backlog_count: number;
+  mail_oldest_pending_age: string;
+  audit_outbox_backlog_count: number;
+  audit_oldest_pending_age: string;
+  avatar_cleanup_pending_count: number;
+}
+
+export interface ObservabilityPolicy {
+  log_level: LogLevel;
+  debug_until?: string | null;
+  alerts: OperationalAlertThresholds;
+}
+
+export interface OperationalAlert {
+  code: 'mail_backlog' | 'mail_oldest_pending' | 'audit_outbox_backlog' | 'audit_oldest_pending' | 'avatar_cleanup_pending' | string;
+  current: number;
+  threshold: number;
+  unit: 'count' | 'seconds' | string;
+}
+
+export interface OperationalAlertSnapshot {
+  status: OperationalAlertStatus;
+  checked_at?: string;
+  active: OperationalAlert[];
+}
+
+export interface OTLPConfigSummary {
+  id?: string;
+  revision?: number;
+  endpoint: string;
+  export_interval: string;
+  timeout: string;
+  authorization_configured: boolean;
+  created_at?: string;
+}
+
+export interface OTLPRuntimeStatus {
+  configured: boolean;
+  available: boolean;
+  last_success_at?: string;
+  last_error_at?: string;
+  last_error_code?: string;
+}
+
+export interface OTLPCandidateTestEvidence {
+  result: 'success' | 'failure';
+  error_code?: string;
+  tested_at: string;
+  valid_until?: string;
+  activation_eligible: boolean;
+}
+
+export interface OTLPSettings {
+  mode: OTLPRuntimeMode;
+  state_revision: number;
+  active?: OTLPConfigSummary;
+  candidate?: OTLPConfigSummary;
+  candidate_test?: OTLPCandidateTestEvidence;
+  previous?: OTLPConfigSummary;
+  effective?: OTLPConfigSummary;
+  runtime: OTLPRuntimeStatus;
+}
+
+export interface ObservabilitySettings {
+  revision: number;
+  observability: ObservabilityPolicy;
+  effective_log_level: EffectiveLogLevel;
+  otlp: OTLPSettings;
+  alerts: OperationalAlertSnapshot;
+}
+
+export interface UpdateObservabilitySettingsInput {
+  expected_revision: number;
+  observability: ObservabilityPolicy;
+}
+
+export interface SaveOTLPCandidateInput {
+  expected_revision: number;
+  endpoint: string;
+  authorization?: string;
+  export_interval: string;
+  timeout: string;
+}
+
+export interface SaveOTLPCandidateResult {
+  candidate: OTLPConfigSummary;
+  state_revision: number;
+}
+
+export interface TestOTLPCandidateResult {
+  result: 'success' | 'failure';
+  error_code?: string;
+  state_revision: number;
+  tested_at: string;
+}
+
+export interface OTLPMutationResult {
+  state_revision: number;
+  mode: OTLPRuntimeMode;
+}
+
 export type RegistrationMode = 'closed' | 'invite_only' | 'open';
 
 export interface RegistrationOptions {
@@ -973,7 +1080,19 @@ export interface SystemStatus {
       configured: boolean;
       last_error_at?: string;
     };
+    observability: {
+      status: ComponentStatus;
+      log_level: EffectiveLogLevel;
+      debug_until?: string;
+      otlp_mode: OTLPRuntimeMode;
+      otlp_configured: boolean;
+      otlp_available: boolean;
+      last_export_at?: string;
+      last_error_at?: string;
+      last_error_code?: string;
+    };
   };
+  operational_alerts: OperationalAlertSnapshot;
   active_signing_key?: {
     kid: string;
     status: ComponentStatus;
@@ -1145,6 +1264,25 @@ const API_ERROR_TRANSLATIONS: Record<string, string> = {
   'service control is temporarily unavailable': '运行控制暂时不可用，请稍后重试',
   'too many service control operations': '运行控制操作过于频繁，请稍后重试',
   'settings revision conflict': '设置已被其他管理员修改，请加载最新设置后重试',
+  'observability settings are temporarily unavailable': '可观测性设置暂时不可用，请稍后重试',
+  'failed to store observability settings': '可观测性设置保存失败，请稍后重试',
+	'invalid observability settings': '可观测性设置无效，请检查日志级别与运营告警阈值',
+  'log_level must be info, warn, or error': '日志基线级别只能是 info、warn 或 error',
+  'debug_until must be between 1 minute and 24h0m0s from now': '临时 Debug 的结束时间须在 1 分钟至 24 小时内',
+  'export_interval must be a valid duration': 'OTLP 导出间隔格式无效',
+  'timeout must be a valid duration': 'OTLP 超时时间格式无效',
+  'otlp settings revision conflict': 'OTLP 设置已被其他管理员修改，请加载最新设置后重试',
+  'otlp candidate changed; reload settings': 'OTLP 候选配置已发生变化，请加载最新设置后重试',
+  'a recent successful otlp candidate test is required': '激活前必须先完成一次近期成功的真实 OTLP 测试',
+  'the successful otlp candidate test has expired': 'OTLP 候选配置的成功测试已过期，请重新测试',
+  'no previous otlp configuration is available': '没有可回滚的上一版 OTLP 配置',
+  'otlp export is already disabled': 'OTLP 导出已经处于禁用状态',
+  'otlp authorization cannot be inherited': '当前没有可继承的 Authorization，请输入凭据或明确清空',
+  'invalid otlp configuration': 'OTLP 配置无效，请检查地址、导出间隔和超时时间',
+  'otlp settings are temporarily unavailable': 'OTLP 设置暂时不可用，请稍后重试',
+  'otlp configuration was activated but could not be applied on this instance': 'OTLP 配置已激活，但当前实例暂时无法应用，请检查运行状态',
+  'otlp rollback was stored but could not be applied on this instance': 'OTLP 回滚已保存，但当前实例暂时无法应用，请检查运行状态',
+  'otlp disable was stored but could not be applied on this instance': 'OTLP 禁用状态已保存，但当前实例暂时无法应用，请检查运行状态',
 };
 
 const API_ERROR_MESSAGES_BY_CODE: Record<string, string> = {
@@ -1250,6 +1388,25 @@ const API_ERROR_MESSAGES_BY_CODE: Record<string, string> = {
   'service_control.unavailable': 'service control is temporarily unavailable',
   'service_control.rate_limited': 'too many service control operations',
   'settings.revision_conflict': 'settings revision conflict',
+  'observability.settings_unavailable': 'observability settings are temporarily unavailable',
+  'observability.store_failed': 'failed to store observability settings',
+  'observability.log_level_invalid': 'log_level must be info, warn, or error',
+  'observability.debug_until_invalid': 'debug_until must be between 1 minute and 24h0m0s from now',
+	'observability.configuration_invalid': 'invalid observability settings',
+  'telemetry.revision_conflict': 'otlp settings revision conflict',
+  'telemetry.candidate_changed': 'otlp candidate changed; reload settings',
+  'telemetry.test_required': 'a recent successful otlp candidate test is required',
+  'telemetry.test_expired': 'the successful otlp candidate test has expired',
+  'telemetry.rollback_unavailable': 'no previous otlp configuration is available',
+  'telemetry.already_disabled': 'otlp export is already disabled',
+  'telemetry.authorization_inheritance': 'otlp authorization cannot be inherited',
+  'telemetry.configuration_invalid': 'invalid otlp configuration',
+  'telemetry.settings_unavailable': 'otlp settings are temporarily unavailable',
+	'telemetry.export_interval_invalid': 'export_interval must be a valid duration',
+	'telemetry.timeout_invalid': 'timeout must be a valid duration',
+	'telemetry.activation_apply_failed': 'otlp configuration was activated but could not be applied on this instance',
+	'telemetry.rollback_apply_failed': 'otlp rollback was stored but could not be applied on this instance',
+	'telemetry.disable_apply_failed': 'otlp disable was stored but could not be applied on this instance',
   'client.quota_exceeded': 'application limit reached',
   'client.self_service_disabled': 'self-service client creation is disabled',
   'client.policy_changed': 'oauth client policy changed; reload and retry',
@@ -1262,6 +1419,13 @@ export function localizeAPIErrorMessage(message: string, code = ''): string {
   const normalized = message.trim().toLowerCase();
   if (normalized.includes(PASSWORD_POLICY_ERROR)) return PASSWORD_REQUIREMENT;
   if (API_ERROR_TRANSLATIONS[normalized]) return API_ERROR_TRANSLATIONS[normalized];
+  if (normalized.startsWith('invalid otlp configuration:')) return API_ERROR_TRANSLATIONS['invalid otlp configuration'];
+  if (/^(mail_backlog_count|audit_outbox_backlog_count|avatar_cleanup_pending_count) must be between /.test(normalized)) {
+    return '运营告警数量阈值须为 1 至 1,000,000 的整数';
+  }
+  if (/^(mail_oldest_pending_age|audit_oldest_pending_age) must be a duration between /.test(normalized)) {
+    return '运营告警时长阈值须在 1 分钟至 7 天之间';
+  }
   if (code === 'request_failed' && /^[\x00-\x7F]*$/.test(message)) return '请求失败，请稍后重试';
   return message;
 }
@@ -1525,6 +1689,28 @@ export const api = {
     getCommunicationsSettings: () => req<CommunicationsSettings>('/api/admin/settings/communications', { cache: 'no-store' }),
     updateCommunicationsSettings: (settings: UpdateCommunicationsSettingsInput) =>
       req<CommunicationsSettings>('/api/admin/settings/communications', { method: 'PUT', body: JSON.stringify(settings) }),
+    getObservabilitySettings: () =>
+      req<ObservabilitySettings>('/api/admin/settings/observability', { cache: 'no-store' }),
+    updateObservabilitySettings: (settings: UpdateObservabilitySettingsInput) =>
+      req<ObservabilitySettings>('/api/admin/settings/observability', { method: 'PUT', body: JSON.stringify(settings) }),
+    saveOTLPCandidate: (settings: SaveOTLPCandidateInput) =>
+      req<SaveOTLPCandidateResult>('/api/admin/settings/observability/otlp/candidate', { method: 'PUT', body: JSON.stringify(settings) }),
+    testOTLPCandidate: (expectedRevision: number, versionID: string) =>
+      req<TestOTLPCandidateResult>('/api/admin/settings/observability/otlp/candidate/test', {
+        method: 'POST', body: JSON.stringify({ expected_revision: expectedRevision, version_id: versionID }),
+      }),
+    activateOTLPCandidate: (expectedRevision: number, versionID: string) =>
+      req<OTLPMutationResult>('/api/admin/settings/observability/otlp/activate', {
+        method: 'POST', body: JSON.stringify({ expected_revision: expectedRevision, version_id: versionID }),
+      }),
+    rollbackOTLP: (expectedRevision: number) =>
+      req<OTLPMutationResult>('/api/admin/settings/observability/otlp/rollback', {
+        method: 'POST', body: JSON.stringify({ expected_revision: expectedRevision }),
+      }),
+    disableOTLP: (expectedRevision: number) =>
+      req<OTLPMutationResult>('/api/admin/settings/observability/otlp/disable', {
+        method: 'POST', body: JSON.stringify({ expected_revision: expectedRevision }),
+      }),
     previewSiteBannerMarkdown: (message: string) =>
       req<SiteBannerMarkdownPreview>('/api/admin/settings/communications/site-banner/preview', {
         method: 'POST', body: JSON.stringify({ message }),

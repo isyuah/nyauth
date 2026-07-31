@@ -9,7 +9,7 @@
 - 第一方后台仅使用 `HttpOnly + SameSite=Lax` 会话 Cookie，并对修改请求强制校验 CSRF。
 - OAuth 授权码客户端强制使用 PKCE S256；不支持 plain、implicit 或 hybrid 流程。
 - JWT 固定使用 RS256，refresh token 采用 family 轮换与重复使用检测。
-- 数据库以嵌入二进制的 `000001_baseline` 建立破坏性发布基线，并通过兼容的 `000002` 至 `000008_oauth_client_redirects` 加法迁移演进；当前 `0.4.0-dev` 要求 schema version 8，可从正式 `0.3.0` 的 schema version 3 依次迁移。服务启动只校验 schema，不再隐式迁移。
+- 数据库以嵌入二进制的 `000001_baseline` 建立破坏性发布基线，并通过兼容的 `000002` 至 `000009_runtime_observability` 加法迁移演进；当前 `0.4.0-dev` 要求 schema version 9，可从正式 `0.3.0` 的 schema version 3 依次迁移。服务启动只校验 schema，不再隐式迁移。
 - 旧数据库、session、token、JWK、Provider 凭据和 OAuth 客户端注册均不兼容。
 - 旧 Go/TypeScript SDK 已删除；OAuth/OIDC 集成以标准协议和成熟语言库为准。
 
@@ -32,6 +32,7 @@
 - 安全头像：浏览器 1:1 裁剪、服务端重编码、本地持久化或私有 S3、Provider 首次异步导入，以及版本化运行时 S3 配置与可续跑迁移
 - 运行时服务控制：六类能力独立暂停、常用维护预设、多实例排空确认、定时恢复与 CLI 紧急解锁
 - 运行时运营策略：动态限流、会话与近期认证期限、审计保留和用户客户端配额，revision CAS 与多实例同步
+- 运行时可观测性：日志基线与临时 Debug、固定运营告警阈值、版本化 OTLP 候选/真实测试/激活/回滚
 - 运维：严格 readiness、JSON 日志、内部 Prometheus、可选 OTLP 与审计 outbox
 - 集成方式：标准 OAuth/OIDC Discovery、成熟语言库与 BFF 会话模式
 
@@ -186,7 +187,7 @@ S3 override 要求 `NYAUTH_MEDIA_S3_REGION`、`NYAUTH_MEDIA_S3_BUCKET`、access 
 
 生产切换到此基线时必须使用全新的 PostgreSQL/Redis 空 volume；本地头像模式还必须建立并纳入备份新的 `media` volume。删除旧 volume 是人工运维动作，应用不会自动执行。运行账号只拥有业务表 DML 权限；迁移账号由一次性 `migrate` service 和受控的 `maintenance` 调度使用。生产 Compose 可按月运行 `docker compose -f docker-compose.prod.yml run --rm migrate maintenance`，不得把迁移 DSN 提供给常驻应用容器；使用 S3 override 时该命令也必须追加相同 override。`NYAUTH_AUDIT_RETENTION` 仅是数据库尚无生命周期设置时的静态 fallback；保存运行时 `audit_retention_days` 后，`maintenance` 使用数据库中的权威值。缩短保留期只保存策略，真正删除仍由后续 maintenance 执行。
 
-Prometheus 指标默认由仅限内部网络访问的 `/metrics` 提供。除 HTTP、OAuth、依赖和连接池指标外，还包含注册结果、邮箱验证耗时、SMTP 错误类别、共享熔断状态、outbox backlog、最老待发邮件年龄、头像处理，以及固定组名的限流启用状态和运行时设置 revision；标签不会包含邮箱、用户名、用户 ID、邀请码、SMTP 主机、头像 object key 或原始错误。可选 OTLP HTTP 导出使用 `NYAUTH_TELEMETRY_OTLP_ENABLED`、`NYAUTH_TELEMETRY_OTLP_ENDPOINT`、`NYAUTH_TELEMETRY_OTLP_EXPORT_INTERVAL` 和 `NYAUTH_TELEMETRY_OTLP_TIMEOUT`；collector Authorization 建议通过 `NYAUTH_TELEMETRY_OTLP_AUTHORIZATION_FILE` 注入，生产 endpoint 必须使用 HTTPS。
+Prometheus 指标默认由仅限内部网络访问的 `/metrics` 提供。除 HTTP、OAuth、依赖和连接池指标外，还包含注册结果、邮箱验证耗时、SMTP 错误类别、共享熔断状态、outbox backlog、最老待发邮件年龄、头像处理、固定运营告警状态、限流启用状态和运行时设置 revision；标签不会包含邮箱、用户名、用户 ID、邀请码、SMTP 主机、头像 object key 或原始错误。OTLP HTTP 可在后台按“不可变候选 → 真实 collector 测试 → 十分钟内激活”免重启切换、回滚或禁用；Authorization 使用 master key 加密且不回显。`NYAUTH_TELEMETRY_OTLP_*` 仅在数据库仍为 `fallback` 时生效，生产 endpoint 必须使用 HTTPS。完整流程见 [运行时可观测性](docs/operations/runtime-observability.md)。
 
 Nyauth 只通过 SMTP 发送邮件，不读取邮箱，也不需要 IMAP。生产 SMTP 应在服务启动后写入数据库：管理员先保存不可变候选，向指定地址实际发送测试邮件，再在测试成功后的十分钟内激活；后续可免重启切换候选、回滚上一数据库版本或在关闭注册后禁用。所有配置操作要求管理员最近十分钟内重新认证，密码使用 master key envelope encryption，API 只返回 `password_configured`。`NYAUTH_MAIL_*`、单机 `docker/compose.prod.smtp-password-file.yml` 和 HA `docker/compose.ha.smtp-password-file.yml` 仅保留为首次 fallback/bootstrap。详见 [动态 SMTP 配置与故障处理](docs/operations/runtime-mail.md)。
 
@@ -327,12 +328,13 @@ Provider 不再从 YAML 或环境变量静态加载，只能由管理员写入�
 
 内部管理界面继续使用 Cookie + CSRF，不是稳定的自动化 API：
 
-- `GET /api/admin/system/status`：版本、schema、PostgreSQL/Redis/JWK/Provider、SMTP 与头像媒体状态。
+- `GET /api/admin/system/status`：版本、schema、PostgreSQL/Redis/JWK/Provider、SMTP、头像媒体与可观测性状态，以及当前运营告警。
 - `GET/PUT /api/admin/settings/operations`：六类能力的运行时暂停、恢复、到期和多实例应用进度；修改要求近期重新认证，使用 revision CAS 并与审计同事务提交。
 - `GET /api/admin/settings/media`、候选保存/测试、迁移及 `fallback/migrate` 接口：私有 S3 运行时配置、迁回已配置本地 fallback、真实对象测试、迁移进度和失败重试；凭据只加密保存且永不回显。
 - `GET/PUT /api/admin/settings/branding`、`registration`、`security`、`protection`、`lifecycle`、`oauth`：六组运行时设置统一使用 revision CAS；写入要求近期重新认证、固定保护限流，并与 `settings.updated` 审计同事务提交。
 - `GET /api/site-banner`、`GET /api/site-banner/events`：读取全站横幅并通过 SSE 接收实时状态；公开响应不包含设置 revision 或邮件模板。
 - `GET/PUT /api/admin/settings/communications`、邮件模板 `preview/test`、横幅 Markdown `site-banner/preview`：动态管理结构化事务邮件模板和全站横幅。模板只接受受限纯文本字段与按字段授权的变量，动作链接和安全提示由服务端生成；测试邮件只能发往当前管理员已验证邮箱。
+- `GET/PUT /api/admin/settings/observability` 及其 `otlp/candidate`、`test`、`activate`、`rollback`、`disable` 接口：动态日志级别、最长 24 小时的临时 Debug、五项固定低基数告警阈值和加密的 OTLP 版本状态机；修改要求近期重新认证、CSRF、固定限流与审计。
 - `protection` 动态控制登录、账户操作、头像和 SMTP 管理限流，以及自助客户端全局默认配额。关闭限流组需要精确危险确认；每次 revision 都使用新的 Redis key namespace，旧计数自然过期。
 - `lifecycle` 动态控制浏览器会话绝对/空闲期限、每用户并发会话上限、近期认证期限、Access/Refresh Token、授权码和审计保留天数。缩短会话期限会在下一次请求时淘汰超龄会话；并发上限在下一次登录时原子淘汰最旧会话；延长不会恢复 Redis 中已经过期的会话。Token 与授权码策略只影响之后新签发或轮换的凭据，已签发凭据保持原到期时间。
 - `oauth` 动态控制用户自助创建、Public Client、可新增 Grant/Scope 与回调地址数量。收紧策略不修改或停用既有客户端；既有超限或已禁用项可以原样保留、等量替换或逐步减少，但不能继续扩大。

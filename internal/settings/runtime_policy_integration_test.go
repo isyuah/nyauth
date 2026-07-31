@@ -155,6 +155,31 @@ func TestRuntimePolicySettingsCASAuditRollbackAndRetention(t *testing.T) {
 		t.Fatalf("communication audit rows = %d, want 3", communicationAudits)
 	}
 
+	observability := DefaultObservability()
+	observability.LogLevel = LogLevelWarn
+	observability.Alerts.MailBacklogCount = 25
+	var appliedObservability Versioned[Observability]
+	managerA.SetObservabilityApply(func(snapshot Versioned[Observability]) { appliedObservability = snapshot })
+	if revision, err := managerA.SetObservability(ctx, observability, 0, "policy-a", mutation("policy-a")); err != nil || revision != 1 {
+		t.Fatalf("store observability revision=%d err=%v", revision, err)
+	}
+	if appliedObservability.Revision != 1 || appliedObservability.Value.LogLevel != LogLevelWarn {
+		t.Fatalf("applied observability = %#v", appliedObservability)
+	}
+	if _, err := managerB.SetObservability(ctx, DefaultObservability(), 0, "policy-b", mutation("policy-b")); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("stale observability update error = %v", err)
+	}
+	if err := managerB.Load(ctx); err != nil {
+		t.Fatalf("reload observability: %v", err)
+	}
+	if snapshot := managerB.ObservabilitySnapshot(); snapshot.Revision != 1 || snapshot.Value.Alerts.MailBacklogCount != 25 {
+		t.Fatalf("loaded observability = %#v", snapshot)
+	}
+	var observabilityAudits int
+	if err := schema.pool.QueryRow(ctx, `SELECT COUNT(*) FROM audit_event_outbox WHERE event=$1 AND aggregate_type='settings' AND aggregate_id='observability'`, models.AuditSettingsUpdated).Scan(&observabilityAudits); err != nil || observabilityAudits != 1 {
+		t.Fatalf("observability audit rows=%d err=%v", observabilityAudits, err)
+	}
+
 	lifecycle := DefaultLifecycle(365)
 	lifecycle.AuditRetentionDays = 90
 	if _, err := managerA.SetLifecycle(ctx, lifecycle, 0, "policy-a", "", mutation("policy-a")); !errors.Is(err, ErrRetentionConfirmation) {

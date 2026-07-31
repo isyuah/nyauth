@@ -112,6 +112,7 @@ docker compose -f docker-compose.ha.yml ps
 - Provider 变更通过 PostgreSQL `LISTEN/NOTIFY` 通知，并使用周期 reconciliation 修复丢失通知。
 - 头像元数据和当前引用存于 PostgreSQL，四种 WebP 变体存于共享 S3。两个实例可跨节点上传和读取；Provider 导入任务使用行锁/lease 分工，孤儿清理使用 PostgreSQL advisory lock 保证每轮单执行者。
 - 动态 SMTP 的活动版本、上一版本和熔断状态由 PostgreSQL 共享；变更通过 `LISTEN/NOTIFY` 同步，并每分钟 reconciliation。每 30 秒最多一个实例取得熔断探测权。
+- 日志基线、临时 Debug 和运营告警阈值由通用运行时设置共享；OTLP 使用独立的不可变候选、测试证据与活动版本。变更通过 `LISTEN/NOTIFY` 同步并每分钟 reconciliation，实例只替换 exporter，不重建 Prometheus MeterProvider。collector 故障和阈值告警不改变 `/readyz`。
 - 运行时服务控制状态和 revision 存于 PostgreSQL；`LISTEN/NOTIFY` 提供即时同步，5 秒 reconciliation 修复丢失通知。实例先关闭对应 gate，再等待旧 in-flight 排空并确认 applied revision。15 秒未能刷新数据库状态的实例对六类受控能力 fail-closed，但健康检查、撤销、登出、审计与清理仍可用。
 - 运行时运营设置存于 PostgreSQL 并按设置组使用 revision CAS；实例通过原子快照、`LISTEN/NOTIFY` 和每分钟 reconciliation 同步。限流 revision 隔离 Redis 计数；全局客户端配额变更与客户端创建/转入使用共享/独占 advisory lock 建立明确提交边界。
 - 运行时媒体 profile 和迁移状态存于 PostgreSQL；实例预加载候选私有 S3 profile 后才允许迁移。迁移使用持久化逐头像 item、对象回读哈希校验和 `media_writes` 排空，失败不会切断旧 profile 读取，也不会自动覆盖管理员后续维护状态。
@@ -120,7 +121,7 @@ docker compose -f docker-compose.ha.yml ps
 
 ## 发布顺序
 
-`0.3.0-rc.1` 是 schema version 1 的破坏性 release baseline，不支持从早期开发数据库滚动升级。正式 `0.3.0` 通过兼容迁移演进到 schema version 3；`0.4.0-dev` 再通过 `000004` 至 `000008_oauth_client_redirects` 兼容升级到 schema version 8。必须先由迁移任务完成加法迁移，再逐个替换应用实例。首次部署仍必须使用全新 PostgreSQL/Redis；启动单个新实例完成 smoke test 后再扩容第二实例。后续版本只有在发布说明明确承诺兼容时才可滚动升级，不得让要求不同数据库契约的应用版本同时处理流量。
+`0.3.0-rc.1` 是 schema version 1 的破坏性 release baseline，不支持从早期开发数据库滚动升级。正式 `0.3.0` 通过兼容迁移演进到 schema version 3；`0.4.0-dev` 再通过 `000004` 至 `000009_runtime_observability` 兼容升级到 schema version 9。必须先由迁移任务完成加法迁移，再逐个替换应用实例。首次部署仍必须使用全新 PostgreSQL/Redis；启动单个新实例完成 smoke test 后再扩容第二实例。后续版本只有在发布说明明确承诺兼容时才可滚动升级，不得让要求不同数据库契约的应用版本同时处理流量。
 
 运行时暂停变更后，管理 API 最多等待 5 秒收集所有活动实例的排空确认；返回 `202 applying` 时设置已经生效且不会自动回滚，应轮询管理状态直至所有活动实例 applied。无限期暂停的 HA 紧急解锁可从任一相同版本服务定义执行：
 

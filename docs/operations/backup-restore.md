@@ -5,7 +5,7 @@
 ## 恢复目标
 
 - PostgreSQL：使用全量备份与 WAL 归档实现时间点恢复（PITR）。
-- Master key：独立于数据库备份并加密保存；丢失后无法解密 Provider secret、TOTP secret、Passkey credential、动态 SMTP 密码、邮件 outbox 或 JWK 私钥。
+- Master key：独立于数据库备份并加密保存；丢失后无法解密 Provider secret、TOTP secret、Passkey credential、动态 SMTP 密码、OTLP Authorization、邮件 outbox 或 JWK 私钥。
 - Redis：不恢复旧快照。Redis 丢失后启动空实例，使全部会话和 Token 失效。
 - 本地头像：备份 Compose `media` volume 或 `media.local.directory`，并与 PostgreSQL 恢复点配对。
 - S3 头像：使用私有 bucket、versioning 和受控 lifecycle 保留足以覆盖数据库 PITR 窗口的对象历史。
@@ -26,14 +26,15 @@ Nyauth 不负责拉取 WAL、操作托管数据库快照或选择生产恢复点
 
 1. 恢复到隔离 PostgreSQL。
 2. 使用一次性迁移账号运行 schema 检查，不运行应用流量。
-3. 将恢复后的用户、客户端、Provider、JWK、审计和邮件 outbox 数量与备份 manifest 比较；另外记录 `mail_config_versions`、`mail_runtime_state`、`user_avatars`、active 头像、待清理头像和 Provider 头像导入任务数量。当前自动化 manifest 尚未包含动态邮件和头像媒体证据。
+3. 将恢复后的用户、客户端、Provider、JWK、审计和邮件 outbox 数量与备份 manifest 比较；另外记录 `mail_config_versions`、`mail_runtime_state`、`otlp_config_versions`、`otlp_runtime_state`、`user_avatars`、active 头像、待清理头像和 Provider 头像导入任务数量。当前自动化 manifest 尚未包含动态邮件、OTLP 和头像媒体证据。
 4. 运行只读的 `nyauth verify-recovery`，验证活动 JWK、全部 Provider Secret、全部 TOTP secret、全部 Passkey credential，以及最多 100 条仍保留密文的邮件 outbox envelope。
 5. 在 `serve` 和 maintenance 都停止的状态下，恢复与该数据库恢复点匹配的本地 media 备份或 S3 prefix/version。
 6. 使用正确 master key 和匹配的媒体后端启动单个隔离应用实例并检查 `/readyz` 与 `/api/admin/system/status`。媒体故障不进入 `/readyz`，因此必须单独确认 `services.media`。
 7. 读取 `/api/admin/settings/mail`，确认活动版本、mode 和 `password_configured` 符合恢复点。当前 `verify-recovery` 不验证动态 SMTP 密码 envelope；应在隔离环境创建继承密码的候选并向受控测试地址实际测试，或使用等价的受控 SMTP 验证流程。
-8. 从恢复数据库抽取 active avatar ID，逐个抽查 64、128、256、512 四种 `/media/avatars/{id}/{size}.webp`，确认返回静态 WebP；当前 `verify-recovery` 不读取媒体对象。
-9. 验证新的登录和 OAuth code 流程；不得使用备份中的旧 Redis。
-10. 验证完成后才允许切换流量。
+8. 读取 `/api/admin/settings/observability`，确认 OTLP mode、活动版本和 `authorization_configured`；在隔离 collector 上保存继承 Authorization 的候选并执行真实测试，避免向生产 collector 发送恢复演练指标。
+9. 从恢复数据库抽取 active avatar ID，逐个抽查 64、128、256、512 四种 `/media/avatars/{id}/{size}.webp`，确认返回静态 WebP；当前 `verify-recovery` 不读取媒体对象。
+10. 验证新的登录和 OAuth code 流程；不得使用备份中的旧 Redis。
+11. 验证完成后才允许切换流量。
 
 ## 头像媒体
 
@@ -166,4 +167,4 @@ Manifest 不得包含用户名、邮箱、Client Secret、Provider Secret、Toke
 
 ## 破坏性基线提示
 
-`0.3.0-rc.1` 的 schema version 1 是破坏性 release baseline，不提供早期开发数据库迁移；正式 `0.3.0` 在该 baseline 上追加兼容迁移到 schema version 3，当前 `0.4.0-dev` 再通过 `000004` 至 `000008_oauth_client_redirects` 演进到 schema version 8。恢复时数据库 schema 必须与目标镜像要求一致，不能把旧恢复点直接交给要求更高 schema version 的应用而跳过迁移。需要重建时，运维人员必须先确认准确的 Compose project、PostgreSQL volume、media volume 或 S3 prefix，并完成必要备份。应用及迁移命令不会自动执行 `docker compose down -v`、删除任何 volume 或清空 S3；`down -v` 会同时删除本地 PostgreSQL 与 media volume，不得用于普通停止或回滚。
+`0.3.0-rc.1` 的 schema version 1 是破坏性 release baseline，不提供早期开发数据库迁移；正式 `0.3.0` 在该 baseline 上追加兼容迁移到 schema version 3，当前 `0.4.0-dev` 再通过 `000004` 至 `000009_runtime_observability` 演进到 schema version 9。恢复时数据库 schema 必须与目标镜像要求一致，不能把旧恢复点直接交给要求更高 schema version 的应用而跳过迁移。需要重建时，运维人员必须先确认准确的 Compose project、PostgreSQL volume、media volume 或 S3 prefix，并完成必要备份。应用及迁移命令不会自动执行 `docker compose down -v`、删除任何 volume 或清空 S3；`down -v` 会同时删除本地 PostgreSQL 与 media volume，不得用于普通停止或回滚。

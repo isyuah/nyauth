@@ -46,6 +46,9 @@ describe('localizeAPIErrorMessage', () => {
     ['Passkey removed; please sign in again', 'Passkey 已删除，但当前会话无法继续使用，请重新登录'],
     ['self-service client creation is disabled', '管理员已关闭用户自助创建客户端'],
     ['OAuth client policy changed; reload and retry', 'OAuth 客户端策略已更新，请重新加载后再试'],
+    ['OTLP settings revision conflict', 'OTLP 设置已被其他管理员修改，请加载最新设置后重试'],
+    ['a recent successful OTLP candidate test is required', '激活前必须先完成一次近期成功的真实 OTLP 测试'],
+    ['OTLP authorization cannot be inherited', '当前没有可继承的 Authorization，请输入凭据或明确清空'],
   ])('maps stable authentication error %s', (message, expected) => {
     expect(localizeAPIErrorMessage(message)).toBe(expected);
   });
@@ -61,10 +64,26 @@ describe('localizeAPIErrorMessage', () => {
     expect(localizeAPIErrorMessage('wording changed', 'settings.revision_conflict')).toBe('设置已被其他管理员修改，请加载最新设置后重试');
     expect(localizeAPIErrorMessage('wording changed', 'media.instances_not_ready')).toBe('仍有运行实例尚未加载候选配置，请稍后重试');
     expect(localizeAPIErrorMessage('wording changed', 'client.policy_changed')).toBe('OAuth 客户端策略已更新，请重新加载后再试');
+    expect(localizeAPIErrorMessage('wording changed', 'telemetry.revision_conflict')).toBe('OTLP 设置已被其他管理员修改，请加载最新设置后重试');
   });
 
   it('uses a Chinese fallback for an unknown coded backend error', () => {
     expect(localizeAPIErrorMessage('new backend wording', 'request_failed')).toBe('请求失败，请稍后重试');
+  });
+
+  it('localizes detailed observability validation errors even while the backend uses request_failed', () => {
+    expect(localizeAPIErrorMessage(
+      'invalid OTLP configuration: endpoint must use HTTPS in production',
+      'request_failed',
+    )).toBe('OTLP 配置无效，请检查地址、导出间隔和超时时间');
+    expect(localizeAPIErrorMessage(
+      'mail_backlog_count must be between 1 and 1000000',
+      'request_failed',
+    )).toBe('运营告警数量阈值须为 1 至 1,000,000 的整数');
+    expect(localizeAPIErrorMessage(
+      'audit_oldest_pending_age must be a duration between 1m0s and 168h0m0s',
+      'request_failed',
+    )).toBe('运营告警时长阈值须在 1 分钟至 7 天之间');
   });
 
   it('matches control-flow errors by code instead of server wording', () => {
@@ -815,5 +834,114 @@ describe('runtime communications API contract', () => {
     for (const index of [2, 3, 4, 5]) {
       expect(new Headers(calls[index][1].headers).get('X-CSRF-Token')).toBe('communications-csrf');
     }
+  });
+});
+
+describe('runtime observability API contract', () => {
+  afterEach(() => {
+    setCsrfToken('');
+    vi.unstubAllGlobals();
+  });
+
+  it('uses revisioned policy and OTLP candidate lifecycle endpoints without inventing secrets', async () => {
+    const observability = {
+      log_level: 'info' as const,
+      debug_until: null,
+      alerts: {
+        mail_backlog_count: 100,
+        mail_oldest_pending_age: '15m',
+        audit_outbox_backlog_count: 1000,
+        audit_oldest_pending_age: '10m',
+        avatar_cleanup_pending_count: 100,
+      },
+    };
+    const config = {
+      id: '11111111-1111-4111-8111-111111111111',
+      revision: 2,
+      endpoint: 'https://collector.example/v1/metrics',
+      export_interval: '30s',
+      timeout: '5s',
+      authorization_configured: true,
+    };
+    const settings = {
+      revision: 4,
+      observability,
+      effective_log_level: 'info' as const,
+      otlp: {
+        mode: 'active' as const,
+        state_revision: 7,
+        active: config,
+        effective: config,
+        runtime: { configured: true, available: true },
+      },
+      alerts: { status: 'ok', checked_at: '2026-07-30T10:00:00Z', active: [] },
+    };
+    const responses = [
+      settings,
+      { ...settings, revision: 5 },
+      { candidate: { ...config, id: '22222222-2222-4222-8222-222222222222' }, state_revision: 8 },
+      { result: 'success', state_revision: 9, tested_at: '2026-07-30T10:01:00Z' },
+      { state_revision: 10, mode: 'active' },
+      { state_revision: 11, mode: 'active' },
+      { state_revision: 12, mode: 'disabled' },
+    ];
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    setCsrfToken('observability-csrf');
+
+    await api.admin.getObservabilitySettings();
+    await api.admin.updateObservabilitySettings({ expected_revision: 4, observability });
+    await api.admin.saveOTLPCandidate({
+      expected_revision: 7,
+      endpoint: config.endpoint,
+      export_interval: '30s',
+      timeout: '5s',
+    });
+    await api.admin.testOTLPCandidate(8, '22222222-2222-4222-8222-222222222222');
+    await api.admin.activateOTLPCandidate(9, '22222222-2222-4222-8222-222222222222');
+    await api.admin.rollbackOTLP(10);
+    await api.admin.disableOTLP(11);
+
+    const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit]>;
+    expect(calls.map(([url]) => url)).toEqual([
+      '/api/admin/settings/observability',
+      '/api/admin/settings/observability',
+      '/api/admin/settings/observability/otlp/candidate',
+      '/api/admin/settings/observability/otlp/candidate/test',
+      '/api/admin/settings/observability/otlp/activate',
+      '/api/admin/settings/observability/otlp/rollback',
+      '/api/admin/settings/observability/otlp/disable',
+    ]);
+    expect(calls[0][1].cache).toBe('no-store');
+    expect(JSON.parse(String(calls[2][1].body))).toEqual({
+      expected_revision: 7,
+      endpoint: config.endpoint,
+      export_interval: '30s',
+      timeout: '5s',
+    });
+    expect(String(calls[2][1].body)).not.toContain('authorization');
+    for (const index of [1, 2, 3, 4, 5, 6]) {
+      expect(new Headers(calls[index][1].headers).get('X-CSRF-Token')).toBe('observability-csrf');
+    }
+  });
+
+  it('sends an explicit empty Authorization only for a requested clear', async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({ candidate: {}, state_revision: 2 }), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    await api.admin.saveOTLPCandidate({
+      expected_revision: 1,
+      endpoint: 'https://collector.example/v1/metrics',
+      authorization: '',
+      export_interval: '30s',
+      timeout: '5s',
+    });
+    const body = JSON.parse(String((fetchMock.mock.calls[0] as unknown as [string, RequestInit])[1].body));
+    expect(body).toHaveProperty('authorization', '');
   });
 });

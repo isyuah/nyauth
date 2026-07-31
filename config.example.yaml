@@ -96,6 +96,7 @@ audit:
   retention: 8760h
 telemetry:
   # Prometheus remains enabled on the internal /metrics route.
+  # OTLP is only the bootstrap fallback until the database state is activated or disabled.
   otlp:
     enabled: false
     endpoint: ""

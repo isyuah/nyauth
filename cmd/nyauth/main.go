@@ -45,7 +45,9 @@ var (
 )
 
 func main() {
-	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo})).With(
+	logLevel := new(slog.LevelVar)
+	logLevel.Set(slog.LevelInfo)
+	logger := slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: logLevel})).With(
 		"service", "nyauth",
 		"version", version,
 		"commit", commit,
@@ -140,6 +142,7 @@ func main() {
 		OTLPAuthorization:  cfg.Telemetry.OTLP.Authorization,
 		OTLPExportInterval: cfg.Telemetry.OTLP.ExportInterval,
 		OTLPTimeout:        cfg.Telemetry.OTLP.Timeout,
+		LogLevel:           logLevel,
 	})
 	if err != nil {
 		fatal("initializing telemetry", err)

@@ -170,7 +170,7 @@ func TestPolicyObserversExposeOnlyBoundedGroups(t *testing.T) {
 			t.Fatalf("missing enabled state for %s:\n%s", group, body)
 		}
 	}
-	for _, group := range []string{"branding", "registration", "security", "protection", "lifecycle"} {
+	for _, group := range []string{"branding", "registration", "security", "protection", "lifecycle", "oauth", "communications", "observability"} {
 		if !metricHasLabelAndValue(body, "nyauth_settings_revision", `group="`+group+`"`, "0") {
 			t.Fatalf("missing revision for %s:\n%s", group, body)
 		}

@@ -105,6 +105,44 @@ func TestReleaseBaselineUpgradesSchema3To4(t *testing.T) {
 	}
 }
 
+func TestRuntimeObservabilityUpgradesSchema8To9(t *testing.T) {
+	schema := newPostgresTestSchema(t)
+	source, err := iofs.New(migrationfiles.Files, ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner, err := migrate.NewWithSourceInstance("iofs", source, schema.migrationDSN)
+	if err != nil {
+		_ = source.Close()
+		t.Fatal(err)
+	}
+	if err := runner.Migrate(8); err != nil {
+		_, _ = runner.Close()
+		t.Fatalf("migrate to schema 8: %v", err)
+	}
+	var before *string
+	if err := schema.pool.QueryRow(t.Context(), `SELECT to_regclass('otlp_runtime_state')::text`).Scan(&before); err != nil {
+		t.Fatal(err)
+	}
+	if before != nil {
+		t.Fatalf("OTLP runtime table exists at schema 8: %q", *before)
+	}
+	if sourceErr, databaseErr := runner.Close(); sourceErr != nil || databaseErr != nil {
+		t.Fatalf("close schema 8 runner: source=%v database=%v", sourceErr, databaseErr)
+	}
+	if err := database.RunMigrations(schema.migrationDSN); err != nil {
+		t.Fatalf("upgrade schema 8 to 9: %v", err)
+	}
+	var mode string
+	var revision int64
+	if err := schema.pool.QueryRow(t.Context(), `SELECT mode,revision FROM otlp_runtime_state WHERE singleton=TRUE`).Scan(&mode, &revision); err != nil {
+		t.Fatal(err)
+	}
+	if mode != "fallback" || revision != 0 {
+		t.Fatalf("initial OTLP state mode=%q revision=%d", mode, revision)
+	}
+}
+
 func assertReleaseBaseline(t *testing.T, schema *postgresTestSchema) {
 	t.Helper()
 	ctx := context.Background()
@@ -124,6 +162,7 @@ func assertReleaseBaseline(t *testing.T, schema *postgresTestSchema) {
 		"service_control_state", "service_control_pauses", "service_control_instances",
 		"media_storage_profiles", "media_storage_state", "media_storage_migrations",
 		"media_storage_migration_items", "media_storage_instances",
+		"otlp_config_versions", "otlp_config_tests", "otlp_runtime_state",
 	} {
 		var resolved *string
 		if err := schema.pool.QueryRow(ctx, `SELECT to_regclass($1)::text`, object).Scan(&resolved); err != nil {

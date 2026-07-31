@@ -30,6 +30,7 @@ const (
 	lifecycleKey           = "lifecycle"
 	oauthKey               = "oauth"
 	communicationsKey      = "communications"
+	observabilityKey       = "observability"
 	notificationChannel    = "nyauth_settings_changed"
 	reconciliationInterval = 60 * time.Second
 )
@@ -126,6 +127,8 @@ type Manager struct {
 	lifecycle          atomic.Pointer[Versioned[Lifecycle]]
 	oauth              atomic.Pointer[Versioned[OAuthPolicy]]
 	communications     atomic.Pointer[Versioned[Communications]]
+	observability      atomic.Pointer[Versioned[Observability]]
+	observabilityApply func(Versioned[Observability])
 	loadMu             sync.Mutex
 }
 
@@ -255,6 +258,25 @@ func (m *Manager) CommunicationsSnapshot() Versioned[Communications] {
 	return Versioned[Communications]{Value: DefaultCommunications()}
 }
 
+// Observability returns runtime logging and operational alert settings.
+func (m *Manager) Observability() Observability {
+	return m.ObservabilitySnapshot().Value
+}
+
+func (m *Manager) ObservabilitySnapshot() Versioned[Observability] {
+	if snapshot := m.observability.Load(); snapshot != nil {
+		return *snapshot
+	}
+	return Versioned[Observability]{Value: DefaultObservability()}
+}
+
+// SetObservabilityApply installs the process-local consumer used to update
+// logging and telemetry behavior whenever a validated snapshot is published.
+// It must be configured during process construction before Load is called.
+func (m *Manager) SetObservabilityApply(apply func(Versioned[Observability])) {
+	m.observabilityApply = apply
+}
+
 func decodeLifecycle(raw []byte, defaults Lifecycle) (Lifecycle, error) {
 	value := defaults
 	var fields map[string]json.RawMessage
@@ -299,7 +321,7 @@ func (m *Manager) Load(ctx context.Context) error {
 		return nil
 	}
 	rows, err := m.db.Query(ctx, `SELECT key, value, revision FROM runtime_settings WHERE key = ANY($1)`,
-		[]string{brandingKey, registrationKey, securityKey, protectionKey, lifecycleKey, oauthKey, communicationsKey})
+		[]string{brandingKey, registrationKey, securityKey, protectionKey, lifecycleKey, oauthKey, communicationsKey, observabilityKey})
 	if err != nil {
 		return fmt.Errorf("loading runtime settings: %w", err)
 	}
@@ -402,6 +424,18 @@ func (m *Manager) Load(ctx context.Context) error {
 		communications = &Versioned[Communications]{Revision: storedValue.revision, Value: value}
 	}
 
+	var observability *Versioned[Observability]
+	if storedValue, ok := stored[observabilityKey]; ok {
+		value := DefaultObservability()
+		if err := json.Unmarshal(storedValue.value, &value); err != nil {
+			return fmt.Errorf("decoding stored observability settings: %w", err)
+		}
+		if err := ValidateObservability(value); err != nil {
+			return fmt.Errorf("decoding stored observability settings: %w", err)
+		}
+		observability = &Versioned[Observability]{Revision: storedValue.revision, Value: value}
+	}
+
 	// Publish only after every stored group decodes and validates, so a corrupt
 	// row cannot partially replace the last known-good process snapshot.
 	m.branding.Store(branding)
@@ -411,6 +445,10 @@ func (m *Manager) Load(ctx context.Context) error {
 	m.lifecycle.Store(lifecycle)
 	m.oauth.Store(oauthPolicy)
 	m.communications.Store(communications)
+	m.observability.Store(observability)
+	if m.observabilityApply != nil {
+		m.observabilityApply(m.ObservabilitySnapshot())
+	}
 	return nil
 }
 

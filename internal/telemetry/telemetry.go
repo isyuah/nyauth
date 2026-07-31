@@ -2,11 +2,14 @@ package telemetry
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log/slog"
 	"net/http"
 	"strconv"
+	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -22,45 +25,56 @@ import (
 	"go.opentelemetry.io/otel/exporters/prometheus"
 	"go.opentelemetry.io/otel/metric"
 	sdkmetric "go.opentelemetry.io/otel/sdk/metric"
+	"go.opentelemetry.io/otel/sdk/metric/metricdata"
 )
 
-const instrumentationName = "github.com/nyasharp/nyauth/internal/telemetry"
+const (
+	instrumentationName      = "github.com/nyasharp/nyauth/internal/telemetry"
+	dynamicOTLPReaderTick    = 5 * time.Second
+	dynamicOTLPReaderTimeout = 35 * time.Second
+)
 
 // Runtime owns the process metric provider and low-cardinality application
 // instruments. It intentionally does not attach user, client, token, IP, or
 // other unbounded identifiers to metrics.
 type Runtime struct {
-	provider             *sdkmetric.MeterProvider
-	meter                metric.Meter
-	httpRequests         metric.Int64Counter
-	httpDuration         metric.Float64Histogram
-	authEvents           metric.Int64Counter
-	dependencyDuration   metric.Float64Histogram
-	auditFailures        metric.Int64Counter
-	csrfRejections       metric.Int64Counter
-	oauthGrants          metric.Int64Counter
-	refreshReuse         metric.Int64Counter
-	providerEvents       metric.Int64Counter
-	jwkRotations         metric.Int64Counter
-	rateLimitEvents      metric.Int64Counter
-	registrationEvents   metric.Int64Counter
-	verificationTime     metric.Float64Histogram
-	smtpDeliveries       metric.Int64Counter
-	smtpRetries          metric.Int64Counter
-	smtpFailures         metric.Int64Counter
-	smtpBacklog          metric.Int64Gauge
-	smtpOldestAge        metric.Float64Gauge
-	smtpCircuitOpen      metric.Int64Gauge
-	avatarOperations     metric.Int64Counter
-	avatarDuration       metric.Float64Histogram
-	avatarStorageErrors  metric.Int64Counter
-	avatarCleanupPending metric.Int64Gauge
-	rateLimitEnabled     metric.Int64ObservableGauge
-	settingsRevision     metric.Int64ObservableGauge
-	postgresPool         metric.Int64ObservableGauge
-	redisPool            metric.Int64ObservableGauge
-	registrationMu       sync.Mutex
-	registrations        []metric.Registration
+	provider               *sdkmetric.MeterProvider
+	otlp                   *dynamicOTLPExporter
+	logLevel               *slog.LevelVar
+	logMu                  sync.Mutex
+	debugTimer             *time.Timer
+	logGeneration          uint64
+	meter                  metric.Meter
+	httpRequests           metric.Int64Counter
+	httpDuration           metric.Float64Histogram
+	authEvents             metric.Int64Counter
+	dependencyDuration     metric.Float64Histogram
+	auditFailures          metric.Int64Counter
+	csrfRejections         metric.Int64Counter
+	oauthGrants            metric.Int64Counter
+	refreshReuse           metric.Int64Counter
+	providerEvents         metric.Int64Counter
+	jwkRotations           metric.Int64Counter
+	rateLimitEvents        metric.Int64Counter
+	registrationEvents     metric.Int64Counter
+	verificationTime       metric.Float64Histogram
+	smtpDeliveries         metric.Int64Counter
+	smtpRetries            metric.Int64Counter
+	smtpFailures           metric.Int64Counter
+	smtpBacklog            metric.Int64Gauge
+	smtpOldestAge          metric.Float64Gauge
+	smtpCircuitOpen        metric.Int64Gauge
+	avatarOperations       metric.Int64Counter
+	avatarDuration         metric.Float64Histogram
+	avatarStorageErrors    metric.Int64Counter
+	avatarCleanupPending   metric.Int64Gauge
+	operationalAlertActive metric.Int64Gauge
+	rateLimitEnabled       metric.Int64ObservableGauge
+	settingsRevision       metric.Int64ObservableGauge
+	postgresPool           metric.Int64ObservableGauge
+	redisPool              metric.Int64ObservableGauge
+	registrationMu         sync.Mutex
+	registrations          []metric.Registration
 }
 
 type Options struct {
@@ -69,6 +83,156 @@ type Options struct {
 	OTLPAuthorization  string
 	OTLPExportInterval time.Duration
 	OTLPTimeout        time.Duration
+	LogLevel           *slog.LevelVar
+}
+
+// OTLPConfig is an internal effective exporter snapshot. Authorization is
+// never serialized by this package and must not be logged by callers.
+type OTLPConfig struct {
+	Endpoint       string
+	Authorization  string
+	ExportInterval time.Duration
+	Timeout        time.Duration
+}
+
+type OTLPStatus struct {
+	Configured    bool       `json:"configured"`
+	Available     bool       `json:"available"`
+	LastSuccessAt *time.Time `json:"last_success_at,omitempty"`
+	LastErrorAt   *time.Time `json:"last_error_at,omitempty"`
+	LastErrorCode string     `json:"last_error_code,omitempty"`
+}
+
+type dynamicOTLPState struct {
+	exporter      sdkmetric.Exporter
+	config        OTLPConfig
+	lastAttempt   time.Time
+	lastSuccessAt *time.Time
+	lastErrorAt   *time.Time
+	lastError     string
+}
+
+// dynamicOTLPExporter is registered once with the MeterProvider. Swapping the
+// delegate never invalidates existing metric instruments or the Prometheus
+// reader. Export and replacement are serialized so an old exporter is never
+// shut down while it is in use.
+type dynamicOTLPExporter struct {
+	mu       sync.Mutex
+	state    dynamicOTLPState
+	shutdown atomic.Bool
+}
+
+func (e *dynamicOTLPExporter) Temporality(kind sdkmetric.InstrumentKind) metricdata.Temporality {
+	return sdkmetric.DefaultTemporalitySelector(kind)
+}
+
+func (e *dynamicOTLPExporter) Aggregation(kind sdkmetric.InstrumentKind) sdkmetric.Aggregation {
+	return sdkmetric.DefaultAggregationSelector(kind)
+}
+
+func (e *dynamicOTLPExporter) Export(ctx context.Context, data *metricdata.ResourceMetrics) error {
+	if e == nil || e.shutdown.Load() {
+		return nil
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	state := &e.state
+	if state.exporter == nil {
+		return nil
+	}
+	now := time.Now().UTC()
+	if !state.lastAttempt.IsZero() && now.Sub(state.lastAttempt) < state.config.ExportInterval {
+		return nil
+	}
+	state.lastAttempt = now
+	err := state.exporter.Export(ctx, data)
+	if err != nil {
+		failedAt := time.Now().UTC()
+		state.lastErrorAt = &failedAt
+		state.lastError = boundedExporterError(err)
+		return err
+	}
+	succeededAt := time.Now().UTC()
+	state.lastSuccessAt = &succeededAt
+	state.lastError = ""
+	return nil
+}
+
+func (e *dynamicOTLPExporter) ForceFlush(ctx context.Context) error {
+	if e == nil || e.shutdown.Load() {
+		return nil
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.state.exporter == nil {
+		return nil
+	}
+	return e.state.exporter.ForceFlush(ctx)
+}
+
+func (e *dynamicOTLPExporter) Shutdown(ctx context.Context) error {
+	if e == nil || !e.shutdown.CompareAndSwap(false, true) {
+		return nil
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.state.exporter == nil {
+		return nil
+	}
+	err := e.state.exporter.Shutdown(ctx)
+	e.state.exporter = nil
+	return err
+}
+
+func (e *dynamicOTLPExporter) replace(ctx context.Context, exporter sdkmetric.Exporter, config OTLPConfig) error {
+	if e == nil || e.shutdown.Load() {
+		if exporter != nil {
+			_ = exporter.Shutdown(ctx)
+		}
+		return errors.New("telemetry runtime is shut down")
+	}
+	e.mu.Lock()
+	old := e.state.exporter
+	e.state = dynamicOTLPState{exporter: exporter, config: config}
+	if old != nil {
+		if err := old.Shutdown(ctx); err != nil {
+			slog.Warn("previous OTLP exporter shutdown failed", "error_class", boundedExporterError(err))
+		}
+	}
+	e.mu.Unlock()
+	return nil
+}
+
+func (e *dynamicOTLPExporter) status() OTLPStatus {
+	if e == nil {
+		return OTLPStatus{}
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return OTLPStatus{
+		Configured:    e.state.exporter != nil,
+		Available:     e.state.exporter != nil && e.state.lastError == "",
+		LastSuccessAt: cloneTime(e.state.lastSuccessAt), LastErrorAt: cloneTime(e.state.lastErrorAt),
+		LastErrorCode: e.state.lastError,
+	}
+}
+
+func cloneTime(value *time.Time) *time.Time {
+	if value == nil {
+		return nil
+	}
+	copyValue := *value
+	return &copyValue
+}
+
+func boundedExporterError(err error) string {
+	if err == nil {
+		return ""
+	}
+	if errors.Is(err, context.DeadlineExceeded) {
+		return "timeout"
+	}
+	return "export_failed"
 }
 
 func New(ctx context.Context, options Options) (*Runtime, error) {
@@ -76,7 +240,14 @@ func New(ctx context.Context, options Options) (*Runtime, error) {
 	if err != nil {
 		return nil, fmt.Errorf("creating Prometheus exporter: %w", err)
 	}
-	providerOptions := []sdkmetric.Option{sdkmetric.WithReader(exporter)}
+	dynamicOTLP := &dynamicOTLPExporter{}
+	providerOptions := []sdkmetric.Option{
+		sdkmetric.WithReader(exporter),
+		sdkmetric.WithReader(sdkmetric.NewPeriodicReader(dynamicOTLP,
+			sdkmetric.WithInterval(dynamicOTLPReaderTick),
+			sdkmetric.WithTimeout(dynamicOTLPReaderTimeout),
+		)),
+	}
 	if options.OTLPEnabled {
 		if options.OTLPEndpoint == "" {
 			return nil, fmt.Errorf("OTLP endpoint is required when the exporter is enabled")
@@ -84,28 +255,18 @@ func New(ctx context.Context, options Options) (*Runtime, error) {
 		if options.OTLPExportInterval <= 0 || options.OTLPTimeout <= 0 {
 			return nil, fmt.Errorf("OTLP export interval and timeout must be positive")
 		}
-		exporterOptions := []otlpmetrichttp.Option{
-			otlpmetrichttp.WithEndpointURL(options.OTLPEndpoint),
-			otlpmetrichttp.WithTimeout(options.OTLPTimeout),
-		}
-		if options.OTLPAuthorization != "" {
-			exporterOptions = append(exporterOptions, otlpmetrichttp.WithHeaders(map[string]string{
-				"Authorization": options.OTLPAuthorization,
-			}))
-		}
-		otlpExporter, err := otlpmetrichttp.New(ctx, exporterOptions...)
+		config := OTLPConfig{Endpoint: options.OTLPEndpoint, Authorization: options.OTLPAuthorization, ExportInterval: options.OTLPExportInterval, Timeout: options.OTLPTimeout}
+		otlpExporter, err := newOTLPExporter(ctx, config)
 		if err != nil {
 			return nil, fmt.Errorf("creating OTLP metrics exporter: %w", err)
 		}
-		providerOptions = append(providerOptions, sdkmetric.WithReader(sdkmetric.NewPeriodicReader(
-			otlpExporter,
-			sdkmetric.WithInterval(options.OTLPExportInterval),
-			sdkmetric.WithTimeout(options.OTLPTimeout),
-		)))
-		otel.SetErrorHandler(otel.ErrorHandlerFunc(func(err error) {
-			slog.Error("OTLP metric export failed", "error", err)
-		}))
+		dynamicOTLP.state = dynamicOTLPState{exporter: otlpExporter, config: config}
 	}
+	otel.SetErrorHandler(otel.ErrorHandlerFunc(func(err error) {
+		// Collector responses are untrusted and may echo request headers. Keep
+		// raw exporter errors out of logs so Authorization can never be reflected.
+		slog.Error("metric export failed", "error_class", boundedExporterError(err))
+	}))
 	provider := sdkmetric.NewMeterProvider(providerOptions...)
 	otel.SetMeterProvider(provider)
 	meter := provider.Meter(instrumentationName)
@@ -202,6 +363,10 @@ func New(ctx context.Context, options Options) (*Runtime, error) {
 	if err != nil {
 		return nil, err
 	}
+	operationalAlertActive, err := meter.Int64Gauge("nyauth.operational.alert.active", metric.WithDescription("Operational threshold state by bounded alert code"))
+	if err != nil {
+		return nil, err
+	}
 	rateLimitEnabled, err := meter.Int64ObservableGauge("nyauth.rate_limit.enabled", metric.WithDescription("Runtime rate-limit group state, where disabled is 0 and enabled is 1"))
 	if err != nil {
 		return nil, err
@@ -220,7 +385,8 @@ func New(ctx context.Context, options Options) (*Runtime, error) {
 	}
 
 	return &Runtime{
-		provider: provider, meter: meter, httpRequests: httpRequests, httpDuration: httpDuration,
+		provider: provider, otlp: dynamicOTLP, logLevel: options.LogLevel,
+		meter: meter, httpRequests: httpRequests, httpDuration: httpDuration,
 		authEvents: authEvents, dependencyDuration: dependencyDuration, auditFailures: auditFailures,
 		csrfRejections: csrfRejections, oauthGrants: oauthGrants, refreshReuse: refreshReuse,
 		providerEvents: providerEvents, jwkRotations: jwkRotations, rateLimitEvents: rateLimitEvents,
@@ -228,11 +394,106 @@ func New(ctx context.Context, options Options) (*Runtime, error) {
 		smtpDeliveries: smtpDeliveries, smtpRetries: smtpRetries, smtpFailures: smtpFailures,
 		smtpBacklog: smtpBacklog, smtpOldestAge: smtpOldestAge, smtpCircuitOpen: smtpCircuitOpen,
 		avatarOperations: avatarOperations, avatarDuration: avatarDuration, avatarStorageErrors: avatarStorageErrors,
-		avatarCleanupPending: avatarCleanupPending,
-		rateLimitEnabled:     rateLimitEnabled,
-		settingsRevision:     settingsRevision,
-		postgresPool:         postgresPool, redisPool: redisPool,
+		avatarCleanupPending:   avatarCleanupPending,
+		operationalAlertActive: operationalAlertActive,
+		rateLimitEnabled:       rateLimitEnabled,
+		settingsRevision:       settingsRevision,
+		postgresPool:           postgresPool, redisPool: redisPool,
 	}, nil
+}
+
+func newOTLPExporter(ctx context.Context, config OTLPConfig) (sdkmetric.Exporter, error) {
+	if strings.TrimSpace(config.Endpoint) == "" || config.ExportInterval <= 0 || config.Timeout <= 0 {
+		return nil, errors.New("OTLP endpoint, export interval, and timeout are required")
+	}
+	options := []otlpmetrichttp.Option{
+		otlpmetrichttp.WithEndpointURL(config.Endpoint),
+		otlpmetrichttp.WithTimeout(config.Timeout),
+	}
+	if config.Authorization != "" {
+		options = append(options, otlpmetrichttp.WithHeaders(map[string]string{"Authorization": config.Authorization}))
+	}
+	return otlpmetrichttp.New(ctx, options...)
+}
+
+// TestOTLP sends one real metric through a throwaway provider. A successful
+// result proves URL parsing, transport, TLS, authorization, and collector
+// acceptance without changing the active exporter.
+func TestOTLP(ctx context.Context, config OTLPConfig) error {
+	exporter, err := newOTLPExporter(ctx, config)
+	if err != nil {
+		return err
+	}
+	reader := sdkmetric.NewPeriodicReader(exporter, sdkmetric.WithInterval(time.Hour), sdkmetric.WithTimeout(config.Timeout))
+	provider := sdkmetric.NewMeterProvider(sdkmetric.WithReader(reader))
+	counter, err := provider.Meter(instrumentationName + "/test").Int64Counter("nyauth.otlp.configuration.test")
+	if err == nil {
+		counter.Add(ctx, 1)
+		err = provider.ForceFlush(ctx)
+	}
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), config.Timeout)
+	defer cancel()
+	shutdownErr := provider.Shutdown(shutdownCtx)
+	return errors.Join(err, shutdownErr)
+}
+
+func (r *Runtime) ConfigureOTLP(ctx context.Context, config OTLPConfig) error {
+	exporter, err := newOTLPExporter(ctx, config)
+	if err != nil {
+		return err
+	}
+	if err := r.otlp.replace(ctx, exporter, config); err != nil {
+		return fmt.Errorf("replacing OTLP exporter: %w", err)
+	}
+	return nil
+}
+
+func (r *Runtime) DisableOTLP(ctx context.Context) error {
+	return r.otlp.replace(ctx, nil, OTLPConfig{})
+}
+
+func (r *Runtime) OTLPStatus() OTLPStatus {
+	if r == nil {
+		return OTLPStatus{}
+	}
+	return r.otlp.status()
+}
+
+func (r *Runtime) ApplyObservability(snapshot settings.Versioned[settings.Observability]) {
+	if r == nil || r.logLevel == nil {
+		return
+	}
+	r.logMu.Lock()
+	defer r.logMu.Unlock()
+	r.logGeneration++
+	generation := r.logGeneration
+	if r.debugTimer != nil {
+		r.debugTimer.Stop()
+		r.debugTimer = nil
+	}
+	base := slog.LevelInfo
+	switch snapshot.Value.LogLevel {
+	case settings.LogLevelWarn:
+		base = slog.LevelWarn
+	case settings.LogLevelError:
+		base = slog.LevelError
+	}
+	until := snapshot.Value.DebugUntil
+	if until == nil || !until.After(time.Now()) {
+		r.logLevel.Set(base)
+		return
+	}
+	r.logLevel.Set(slog.LevelDebug)
+	expiresAt := *until
+	r.debugTimer = time.AfterFunc(time.Until(expiresAt), func() {
+		r.logMu.Lock()
+		defer r.logMu.Unlock()
+		if r.logLevel == nil || r.logGeneration != generation {
+			return
+		}
+		r.logLevel.Set(base)
+		r.debugTimer = nil
+	})
 }
 
 // BindPolicySettingsObservers exports only fixed setting-group labels and
@@ -256,11 +517,14 @@ func (r *Runtime) BindPolicySettingsObservers(manager *settings.Manager) error {
 			observer.ObserveInt64(r.rateLimitEnabled, value, metric.WithAttributes(attribute.String("group", group)))
 		}
 		for group, revision := range map[string]int64{
-			"branding":     manager.BrandingSnapshot().Revision,
-			"registration": manager.RegistrationSnapshot().Revision,
-			"security":     manager.SecuritySnapshot().Revision,
-			"protection":   protection.Revision,
-			"lifecycle":    manager.LifecycleSnapshot().Revision,
+			"branding":      manager.BrandingSnapshot().Revision,
+			"registration":  manager.RegistrationSnapshot().Revision,
+			"security":      manager.SecuritySnapshot().Revision,
+			"protection":    protection.Revision,
+			"lifecycle":     manager.LifecycleSnapshot().Revision,
+			"oauth":         manager.OAuthPolicySnapshot().Revision,
+			"communications": manager.CommunicationsSnapshot().Revision,
+			"observability": manager.ObservabilitySnapshot().Revision,
 		} {
 			observer.ObserveInt64(r.settingsRevision, revision, metric.WithAttributes(attribute.String("group", group)))
 		}
@@ -285,6 +549,12 @@ func (r *Runtime) Shutdown(ctx context.Context) error {
 	}
 	r.registrations = nil
 	r.registrationMu.Unlock()
+	r.logMu.Lock()
+	if r.debugTimer != nil {
+		r.debugTimer.Stop()
+		r.debugTimer = nil
+	}
+	r.logMu.Unlock()
 	return r.provider.Shutdown(ctx)
 }
 
@@ -600,6 +870,21 @@ func (r *Runtime) RecordAvatarCleanupPending(ctx context.Context, pending int64)
 		pending = 0
 	}
 	r.avatarCleanupPending.Record(ctx, pending)
+}
+
+func (r *Runtime) RecordOperationalAlert(ctx context.Context, code string, active bool) {
+	if r == nil {
+		return
+	}
+	code = boundedValue(code, "other",
+		"mail_backlog", "mail_oldest_pending", "audit_outbox_backlog",
+		"audit_oldest_pending", "avatar_cleanup_pending",
+	)
+	value := int64(0)
+	if active {
+		value = 1
+	}
+	r.operationalAlertActive.Record(ctx, value, metric.WithAttributes(attribute.String("alert.code", code)))
 }
 
 func boundedValue(value, fallback string, allowed ...string) string {

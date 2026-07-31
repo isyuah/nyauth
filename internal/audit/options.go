@@ -49,6 +49,11 @@ func KnownFilterOptions() FilterOptions {
 		models.AuditMailSettingsSaved,
 		models.AuditMailSettingsTested,
 		models.AuditMailTemplateTested,
+		models.AuditTelemetrySettingsSaved,
+		models.AuditTelemetrySettingsTested,
+		models.AuditTelemetrySettingsActivated,
+		models.AuditTelemetrySettingsDisabled,
+		models.AuditTelemetrySettingsRolledBack,
 		models.AuditMediaSettingsSaved,
 		models.AuditMediaSettingsTested,
 		models.AuditMediaMigrationStarted,
@@ -108,7 +113,7 @@ func KnownFilterOptions() FilterOptions {
 		TargetTypes: []string{
 			"client", "identity", "invite", "mail_config", "mail_runtime", "media_config", "media_migration", "oauth_consent",
 			"oauth_endpoint", "oauth_grant", "passkey", "provider", "registration",
-			"session", "settings", "user",
+			"session", "settings", "telemetry_config", "telemetry_runtime", "user",
 		},
 	}
 }

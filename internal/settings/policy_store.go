@@ -278,6 +278,35 @@ func (m *Manager) SetCommunications(
 	return revision, value, nil
 }
 
+func (m *Manager) SetObservability(
+	ctx context.Context,
+	value Observability,
+	expectedRevision int64,
+	updatedBy string,
+	mutation audit.MutationAudit,
+) (int64, error) {
+	if err := ValidateObservability(value); err != nil {
+		return 0, err
+	}
+	m.loadMu.Lock()
+	defer m.loadMu.Unlock()
+	revision, err := m.storeAudited(ctx, observabilityKey, value, expectedRevision, updatedBy, mutation, map[string]any{
+		"log_level": value.LogLevel, "temporary_debug": value.DebugUntil != nil,
+		"mail_backlog_count":           value.Alerts.MailBacklogCount,
+		"audit_outbox_backlog_count":   value.Alerts.AuditOutboxBacklogCount,
+		"avatar_cleanup_pending_count": value.Alerts.AvatarCleanupPendingCount,
+	})
+	if err != nil {
+		return 0, err
+	}
+	snapshot := Versioned[Observability]{Revision: revision, Value: value}
+	m.observability.Store(&snapshot)
+	if m.observabilityApply != nil {
+		m.observabilityApply(snapshot)
+	}
+	return revision, nil
+}
+
 // RequireOAuthPolicyTx verifies that a client write still uses the exact
 // policy snapshot validated by its caller. The shared advisory lock prevents
 // the policy update from committing across the client transaction.

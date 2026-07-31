@@ -80,6 +80,23 @@ func TestMailTemplateErrorsHaveSpecificStableCodes(t *testing.T) {
 	}
 }
 
+func TestObservabilityErrorsHaveSpecificStableCodes(t *testing.T) {
+	tests := map[string]string{
+		"observability settings are temporarily unavailable":                    "observability.settings_unavailable",
+		"OTLP settings revision conflict":                                       "telemetry.revision_conflict",
+		"OTLP candidate changed; reload settings":                               "telemetry.candidate_changed",
+		"a recent successful OTLP candidate test is required":                   "telemetry.test_required",
+		"invalid OTLP configuration: endpoint must be an absolute HTTP(S) URL":  "telemetry.configuration_invalid",
+		"mail_backlog_count must be between 1 and 1000000":                      "observability.configuration_invalid",
+		"audit_oldest_pending_age must be a duration between 1m0s and 168h0m0s": "observability.configuration_invalid",
+	}
+	for message, expected := range tests {
+		if got := apiErrorCodeForMessage(message); got != expected {
+			t.Fatalf("error code for %q = %q, want %q", message, got, expected)
+		}
+	}
+}
+
 func TestAPIErrorMappingKeysAreNormalized(t *testing.T) {
 	for message := range apiErrorCodesByMessage {
 		if normalized := strings.ToLower(strings.TrimSpace(message)); message != normalized {

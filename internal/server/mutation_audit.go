@@ -254,6 +254,18 @@ func describeMutation(r *http.Request, actor *models.User) (mutationAuditDescrip
 		return mutationAuditDescriptor{event: models.AuditSettingsUpdated, targetType: "settings", targetID: "communications", riskLevel: "high", successAlreadyAudited: true}, true
 	case r.Method == http.MethodPost && path == "/api/admin/settings/communications/email/test":
 		return mutationAuditDescriptor{event: models.AuditMailTemplateTested, targetType: "email_template", riskLevel: "high", successAlreadyAudited: true}, true
+	case r.Method == http.MethodPut && path == "/api/admin/settings/observability":
+		return mutationAuditDescriptor{event: models.AuditSettingsUpdated, targetType: "settings", targetID: "observability", riskLevel: "high", successAlreadyAudited: true}, true
+	case r.Method == http.MethodPut && path == "/api/admin/settings/observability/otlp/candidate":
+		return mutationAuditDescriptor{event: models.AuditTelemetrySettingsSaved, targetType: "telemetry_config", riskLevel: "high", successAlreadyAudited: true}, true
+	case r.Method == http.MethodPost && path == "/api/admin/settings/observability/otlp/candidate/test":
+		return mutationAuditDescriptor{event: models.AuditTelemetrySettingsTested, targetType: "telemetry_config", riskLevel: "high", successAlreadyAudited: true}, true
+	case r.Method == http.MethodPost && path == "/api/admin/settings/observability/otlp/activate":
+		return mutationAuditDescriptor{event: models.AuditTelemetrySettingsActivated, targetType: "telemetry_config", riskLevel: "high", successAlreadyAudited: true}, true
+	case r.Method == http.MethodPost && path == "/api/admin/settings/observability/otlp/rollback":
+		return mutationAuditDescriptor{event: models.AuditTelemetrySettingsRolledBack, targetType: "telemetry_config", riskLevel: "high", successAlreadyAudited: true}, true
+	case r.Method == http.MethodPost && path == "/api/admin/settings/observability/otlp/disable":
+		return mutationAuditDescriptor{event: models.AuditTelemetrySettingsDisabled, targetType: "telemetry_runtime", riskLevel: "high", successAlreadyAudited: true}, true
 	case r.Method == http.MethodPut && path == "/api/admin/settings/operations":
 		return mutationAuditDescriptor{event: models.AuditServiceControlUpdated, targetType: "settings", targetID: "operations", riskLevel: "critical", successAlreadyAudited: true}, true
 	case r.Method == http.MethodPut && path == "/api/admin/settings/mail/candidate":

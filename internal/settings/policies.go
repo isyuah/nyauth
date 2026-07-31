@@ -43,6 +43,15 @@ const (
 	MaxRedirectURILimit           = 100
 	MinPostLogoutRedirectURILimit = 0
 	MaxPostLogoutRedirectURILimit = 100
+	MinOperationalAlertCount      = 1
+	MaxOperationalAlertCount      = 1_000_000
+	MaxTemporaryDebugDuration     = 24 * time.Hour
+)
+
+const (
+	LogLevelInfo  = "info"
+	LogLevelWarn  = "warn"
+	LogLevelError = "error"
 )
 
 const (
@@ -58,6 +67,82 @@ var (
 	ErrProtectionDisableConfirmation = errors.New("rate limit disable confirmation is required")
 	ErrRetentionConfirmation         = errors.New("audit retention confirmation is required")
 )
+
+// OperationalAlertThresholds contains only bounded, low-cardinality signals.
+// Crossing a threshold surfaces a warning and metric; it never changes
+// readiness or pauses application capabilities.
+type OperationalAlertThresholds struct {
+	MailBacklogCount          int64  `json:"mail_backlog_count"`
+	MailOldestPendingAge      string `json:"mail_oldest_pending_age"`
+	AuditOutboxBacklogCount   int64  `json:"audit_outbox_backlog_count"`
+	AuditOldestPendingAge     string `json:"audit_oldest_pending_age"`
+	AvatarCleanupPendingCount int64  `json:"avatar_cleanup_pending_count"`
+}
+
+// Observability controls process-local verbosity and operational warning
+// thresholds. Debug is intentionally temporary; the persisted base level is
+// restored automatically when DebugUntil is reached.
+type Observability struct {
+	LogLevel   string                     `json:"log_level"`
+	DebugUntil *time.Time                 `json:"debug_until,omitempty"`
+	Alerts     OperationalAlertThresholds `json:"alerts"`
+}
+
+func DefaultObservability() Observability {
+	return Observability{
+		LogLevel: LogLevelInfo,
+		Alerts: OperationalAlertThresholds{
+			MailBacklogCount: 100, MailOldestPendingAge: "15m",
+			AuditOutboxBacklogCount: 1000, AuditOldestPendingAge: "10m",
+			AvatarCleanupPendingCount: 100,
+		},
+	}
+}
+
+func ValidateObservability(value Observability) error {
+	switch value.LogLevel {
+	case LogLevelInfo, LogLevelWarn, LogLevelError:
+	default:
+		return errors.New("log_level must be info, warn, or error")
+	}
+	for name, count := range map[string]int64{
+		"mail_backlog_count":           value.Alerts.MailBacklogCount,
+		"audit_outbox_backlog_count":   value.Alerts.AuditOutboxBacklogCount,
+		"avatar_cleanup_pending_count": value.Alerts.AvatarCleanupPendingCount,
+	} {
+		if count < MinOperationalAlertCount || count > MaxOperationalAlertCount {
+			return fmt.Errorf("%s must be between %d and %d", name, MinOperationalAlertCount, MaxOperationalAlertCount)
+		}
+	}
+	for name, encoded := range map[string]string{
+		"mail_oldest_pending_age":  value.Alerts.MailOldestPendingAge,
+		"audit_oldest_pending_age": value.Alerts.AuditOldestPendingAge,
+	} {
+		if _, err := parseBoundedDuration(name, encoded, time.Minute, 7*24*time.Hour); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func ValidateTemporaryDebug(value Observability, now time.Time) error {
+	if value.DebugUntil == nil {
+		return nil
+	}
+	until := value.DebugUntil.UTC()
+	if until.Before(now.UTC().Add(time.Minute)) || until.After(now.UTC().Add(MaxTemporaryDebugDuration)) {
+		return fmt.Errorf("debug_until must be between 1 minute and %s from now", MaxTemporaryDebugDuration)
+	}
+	return nil
+}
+
+func (o Observability) MailOldestPendingDuration() time.Duration {
+	return mustDuration(o.Alerts.MailOldestPendingAge)
+}
+
+func (o Observability) AuditOldestPendingDuration() time.Duration {
+	return mustDuration(o.Alerts.AuditOldestPendingAge)
+}
 
 // Versioned keeps a setting value and the database revision that produced it
 // in one atomic publication unit.

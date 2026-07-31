@@ -36,6 +36,7 @@ import (
 	"github.com/nyasharp/nyauth/internal/mailruntime"
 	"github.com/nyasharp/nyauth/internal/mediaruntime"
 	"github.com/nyasharp/nyauth/internal/mfa"
+	"github.com/nyasharp/nyauth/internal/observabilityruntime"
 	"github.com/nyasharp/nyauth/internal/provider"
 	"github.com/nyasharp/nyauth/internal/registration"
 	"github.com/nyasharp/nyauth/internal/securityrevocation"
@@ -82,6 +83,8 @@ type Server struct {
 	policySettingsLimiter     *PolicySettingsLimiter
 	avatarLimiter             *AvatarLimiter
 	mailManager               *mailruntime.Manager
+	observabilityManager      *observabilityruntime.Manager
+	operationalAlerts         *operationalAlertMonitor
 	mfaService                *mfa.Service
 	avatarService             *avatar.Service
 	avatarRepository          *avatar.Repository
@@ -117,6 +120,7 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 	settingsMgr.SetAuthenticationFallbacks(
 		cfg.Auth.AccessTokenTTL, cfg.Auth.RefreshTokenTTL, cfg.Auth.AuthorizationCodeTTL,
 	)
+	settingsMgr.SetObservabilityApply(telemetryRuntime.ApplyObservability)
 	userStore := user.NewStoreForRP(db, passkeyRPID)
 	clientStore := client.NewStore(db)
 	authorizationStore := authorization.NewStore(db)
@@ -203,6 +207,47 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 		mfaService: mfaService, avatarService: avatarService, avatarRepository: avatarRepository,
 		avatarStore: avatarStore, mediaManager: mediaManager, avatarProcessing: make(chan struct{}, 1),
 	}
+	var otlpFallback *observabilityruntime.Config
+	if cfg.Telemetry.OTLP.Enabled {
+		otlpFallback = &observabilityruntime.Config{
+			Settings: observabilityruntime.Settings{
+				Endpoint:       cfg.Telemetry.OTLP.Endpoint,
+				ExportInterval: cfg.Telemetry.OTLP.ExportInterval,
+				Timeout:        cfg.Telemetry.OTLP.Timeout,
+			},
+			Authorization: cfg.Telemetry.OTLP.Authorization,
+		}
+	}
+	otlpStore, err := observabilityruntime.NewStore(db, observabilityruntime.StoreOptions{
+		ActiveKeyID: "primary", MasterKeys: map[string][]byte{"primary": cfg.Auth.MasterKey},
+	})
+	if err != nil {
+		return nil, fmt.Errorf("configuring runtime OTLP storage: %w", err)
+	}
+	otlpManager, err := observabilityruntime.NewManager(otlpStore, observabilityruntime.ManagerOptions{
+		Fallback: otlpFallback, Production: cfg.IsProduction(),
+		Apply: func(ctx context.Context, value *observabilityruntime.Config) error {
+			if value == nil {
+				return telemetryRuntime.DisableOTLP(ctx)
+			}
+			return telemetryRuntime.ConfigureOTLP(ctx, telemetry.OTLPConfig{
+				Endpoint: value.Endpoint, Authorization: value.Authorization,
+				ExportInterval: value.ExportInterval, Timeout: value.Timeout,
+			})
+		},
+		OnError: func(err error) { slog.Error("runtime OTLP synchronization failed", "error", err) },
+	})
+	if err != nil {
+		return nil, fmt.Errorf("configuring runtime OTLP manager: %w", err)
+	}
+	loadOTLPCtx, cancelOTLPLoad := context.WithTimeout(context.Background(), 10*time.Second)
+	if err := otlpManager.Load(loadOTLPCtx); err != nil {
+		cancelOTLPLoad()
+		return nil, fmt.Errorf("loading runtime OTLP configuration: %w", err)
+	}
+	cancelOTLPLoad()
+	s.observabilityManager = otlpManager
+	s.operationalAlerts = newOperationalAlertMonitor(db, settingsMgr, telemetryRuntime)
 	browserSessionResolver := func(w http.ResponseWriter, r *http.Request) (*session.SessionData, error) {
 		authenticated, err := s.sessionMiddleware.GetSession(w, r)
 		if err != nil {
@@ -519,6 +564,13 @@ func (s *Server) buildRouter() *chi.Mux {
 			r.Post("/admin/settings/communications/email/preview", s.handlePreviewEmailTemplate)
 			r.With(adminMutations).Post("/admin/settings/communications/email/test", s.handleTestEmailTemplate)
 			r.With(adminMutations).Put("/admin/settings/communications", s.handleUpdateCommunicationsSettings)
+			r.Get("/admin/settings/observability", s.handleGetObservabilitySettings)
+			r.With(adminMutations).Put("/admin/settings/observability", s.handleUpdateObservabilitySettings)
+			r.With(adminMutations).Put("/admin/settings/observability/otlp/candidate", s.handleSaveOTLPCandidate)
+			r.With(adminMutations).Post("/admin/settings/observability/otlp/candidate/test", s.handleTestOTLPCandidate)
+			r.With(adminMutations).Post("/admin/settings/observability/otlp/activate", s.handleActivateOTLPCandidate)
+			r.With(adminMutations).Post("/admin/settings/observability/otlp/rollback", s.handleRollbackOTLP)
+			r.With(adminMutations).Post("/admin/settings/observability/otlp/disable", s.handleDisableOTLP)
 			r.Get("/admin/settings/mail", s.handleGetMailSettings)
 			r.With(adminMutations).Put("/admin/settings/mail/candidate", s.handleSaveMailCandidate)
 			r.With(adminMutations).Post("/admin/settings/mail/candidate/test", s.handleTestMailCandidate)
@@ -657,6 +709,9 @@ func (s *Server) Run(ctx context.Context) error {
 	if s.mediaManager != nil {
 		s.mediaManager.StartSynchronization(runCtx)
 	}
+	if s.observabilityManager != nil {
+		s.observabilityManager.StartSynchronization(runCtx)
+	}
 	if s.auditDispatcher != nil {
 		go func() {
 			if dispatchErr := s.auditDispatcher.Run(runCtx); dispatchErr != nil && !errors.Is(dispatchErr, context.Canceled) {
@@ -689,6 +744,9 @@ func (s *Server) Run(ctx context.Context) error {
 	go s.statsHandler.Run(runCtx, time.Minute)
 	go s.runRegistrationCleanup(runCtx)
 	go s.runAvatarCleanup(runCtx)
+	if s.operationalAlerts != nil {
+		go s.operationalAlerts.Run(runCtx)
+	}
 	s.readiness.accepting.Store(true)
 	go func() {
 		<-runCtx.Done()
