@@ -2391,7 +2391,9 @@ test('administrators can edit OAuth clients without mutating immutable ownership
     'https://backup.example/callback',
   ].join('\n'));
   await dialog.locator('#edit-client-logouts').fill('https://new.example/signed-out');
-  await dialog.getByLabel('Scopes（空格、逗号或换行分隔）').fill('openid email\nprofile');
+  await expect(dialog.getByLabel('Scopes（空格、逗号或换行分隔）')).toHaveCount(0);
+  await dialog.locator('#edit-client-scope-email').check();
+  await dialog.locator('#edit-client-scope-offline_access').uncheck();
   await dialog.getByLabel('profile 允许用户拒绝').check();
   await dialog.getByLabel('Metadata（JSON 字符串键值）').fill(JSON.stringify({
     environment: 'production',
@@ -2406,9 +2408,9 @@ test('administrators can edit OAuth clients without mutating immutable ownership
     redirect_uris: ['https://new.example/callback', 'https://backup.example/callback'],
     post_logout_redirect_uris: ['https://new.example/signed-out'],
     grants: ['authorization_code', 'refresh_token'],
-    scopes: ['openid', 'email', 'profile'],
+    scopes: ['openid', 'profile', 'email'],
     optional_scopes: ['profile'],
-    allowed_claims: ['sub', 'preferred_username', 'name', 'picture', 'role'],
+    allowed_claims: ['sub', 'preferred_username', 'name', 'picture', 'email', 'email_verified', 'role'],
     metadata: { environment: 'production', team: 'identity' },
     access_policy: 'open',
   });
