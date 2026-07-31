@@ -1,6 +1,6 @@
 # 安全头像媒体契约
 
-> 状态：已实现；`0.4.0-dev` 的 `000006_runtime_media_storage` 增加版本化运行时 S3 配置与可续跑迁移，`000007_runtime_media_fallback` 补充迁回已配置本地 fallback。
+> 状态：已实现；`0.4.0-rc.1` 的 `000006_runtime_media_storage` 增加版本化运行时 S3 配置与可续跑迁移，`000007_runtime_media_fallback` 补充迁回已配置本地 fallback。
 
 ## 1. 结论与边界
 

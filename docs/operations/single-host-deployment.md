@@ -339,7 +339,7 @@ docker compose --env-file .env.production -f docker-compose.prod.yml down
 
 ## 升级
 
-`0.3.0-rc.1` 建立了 schema version 1 的破坏性 release baseline，不能从更早的开发数据库升级。正式 `0.3.0` 通过兼容迁移演进到 schema version 3；`0.4.0-dev` 再通过兼容的 `000004` 至 `000009_runtime_observability` 演进到 schema version 9。升级前保存旧 digest，备份 PostgreSQL、头像媒体和 master key，并阅读目标版本的迁移说明：
+`0.3.0-rc.1` 建立了 schema version 1 的破坏性 release baseline，不能从更早的开发数据库升级。正式 `0.3.0` 通过兼容迁移演进到 schema version 3；`0.4.0-rc.1` 再通过兼容的 `000004` 至 `000009_runtime_observability` 演进到 schema version 9。升级前保存旧 digest，备份 PostgreSQL、头像媒体和 master key，并阅读目标版本的迁移说明：
 
 1. 把匹配目标版本的 Compose 和初始化脚本放入部署目录。
 2. 在临时副本中把 `.env.production` 的 `NYAUTH_IMAGE` 更新为已验证的新 digest，执行 `config --quiet`，确认后再原子替换正式文件。

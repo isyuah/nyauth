@@ -45,7 +45,7 @@ func TestReleaseBaselineMigratesFreshDatabaseDownAndUp(t *testing.T) {
 	assertReleaseBaseline(t, schema)
 }
 
-func TestReleaseBaselineUpgradesSchema3To4(t *testing.T) {
+func TestReleaseBaselineUpgradesSchema3ToCurrent(t *testing.T) {
 	schema := newPostgresTestSchema(t)
 	source, err := iofs.New(migrationfiles.Files, ".")
 	if err != nil {
@@ -85,7 +85,7 @@ func TestReleaseBaselineUpgradesSchema3To4(t *testing.T) {
 	}
 
 	if err := database.RunMigrations(schema.migrationDSN); err != nil {
-		t.Fatalf("upgrade schema 3 to 4: %v", err)
+		t.Fatalf("upgrade schema 3 to current schema: %v", err)
 	}
 	assertReleaseBaseline(t, schema)
 

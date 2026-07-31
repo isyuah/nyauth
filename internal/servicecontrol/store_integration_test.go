@@ -240,7 +240,7 @@ func TestServiceControlStoreLifecycleConcurrencyAndCoordination(t *testing.T) {
 
 	instanceID := uuid.New()
 	if _, err := store.RegisterInstance(ctx, RegisterInstanceInput{
-		ID: instanceID, Version: "0.4.0-dev", StartedAt: time.Now().UTC(),
+		ID: instanceID, Version: "0.4.0-rc.1", StartedAt: time.Now().UTC(),
 		LoadedRevision: 5, AppliedRevision: 4,
 	}); err != nil {
 		t.Fatalf("register instance: %v", err)
@@ -371,7 +371,7 @@ func TestServiceControlManagersSynchronizeAcrossInstances(t *testing.T) {
 	_, store, actorID := newServiceControlStore(t)
 	options := func() ManagerOptions {
 		return ManagerOptions{
-			InstanceID: uuid.New(), Version: "0.4.0-dev", StartedAt: time.Now().UTC(),
+			InstanceID: uuid.New(), Version: "0.4.0-rc.1", StartedAt: time.Now().UTC(),
 			HeartbeatInterval: 50 * time.Millisecond, ReconciliationInterval: 50 * time.Millisecond,
 			ApplyTimeout: 2 * time.Second, StaleAfter: 3 * time.Second,
 			CleanupInterval: time.Second, InstanceRetention: 4 * time.Second,

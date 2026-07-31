@@ -4,16 +4,35 @@
 
 ## [Unreleased]
 
+## [0.4.0-rc.1] — 2026-07-31
+
 ### 新增
 
 - Phase C1 运行时服务控制：六类固定 capability、四种维护预设、实时公开维护横幅、可选到期恢复、revision 冲突保护和独立 `operating_state`
 - 多实例安全排空：进程内 gate 与 in-flight 计数、PostgreSQL 心跳和应用进度、`LISTEN/NOTIFY`、5 秒 reconciliation、15 秒失联 fail-closed 以及单 leader 到期审计
 - `GET /api/service-status`、`GET /api/service-status/events` SSE、`GET/PUT /api/admin/settings/operations` 与 `nyauth service-control reset -reason <text>` 紧急解锁命令
+- Phase C2 运行时运营策略：动态限流、浏览器会话和 Token 生命周期、近期认证期限、审计保留策略，以及全局和每用户 OAuth 客户端配额
+- Phase C3 运行时媒体存储：私有 S3 候选测试、可续跑迁移、失败重试和迁回部署时本地存储；凭据使用 envelope encryption 且永不回显
+- Phase C4 认证生命周期：动态会话空闲期限、并发会话淘汰、Access/Refresh Token 与授权码期限，并提供审计化 MFA 恢复 CLI
+- Phase C5 OAuth 客户端策略：动态控制自助创建、Public Client、Grant、标准/自定义 Scope 和 Redirect URI 数量，同时保留既有客户端的收紧兼容语义
+- Phase C6 沟通设置：结构化事务邮件模板、真实测试邮件，以及支持 Markdown、独立起止时间和 SSE 实时更新的全站横幅
+- Phase C7 运行时可观测性：日志基线、临时 Debug、固定低基数运营告警，以及带不可变候选、真实测试、激活、回滚和禁用状态机的动态 OTLP
+- 管理员可在近期重新认证后修改用户账号名；新增审计化 MFA 恢复和管理员账号恢复路径
 
 ### 变更
 
-- 开发版本进入 `0.4.0-dev`；新增兼容迁移 `000004_runtime_service_control`，schema version 从 3 提升到 4，正式 `v0.3.0` Tag 保持不变
+- 版本进入 `0.4.0-rc.1`；新增兼容迁移 `000004_runtime_service_control` 至 `000009_runtime_observability`，schema version 从 3 提升到 9，可从正式 `v0.3.0` 依次迁移
 - 受控请求在能力暂停时返回稳定错误码 `service.capability_paused`、HTTP 503 和 `Retry-After`；主动维护不改变 `/readyz`
+
+### 修复
+
+- 系统状态和可观测性响应在没有活动告警时稳定返回空数组，避免管理页面读取 `null.length` 而崩溃
+- 管理筛选输入避免密码管理器自动填充，Provider 登录入口统一显示内置或配置的品牌图标
+
+### 已知限制
+
+- `/api/v1`、Service Account、OpenAPI、事件 Webhook、自动更新和用户组不包含在本候选版本中
+- issuer、签名密钥、数据库/Redis 连接、可信代理和本地媒体目录仍属于部署拓扑配置，修改后需要受控重启
 
 ## [0.3.0] — 2026-07-28
 
