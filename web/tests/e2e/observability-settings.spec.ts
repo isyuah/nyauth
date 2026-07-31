@@ -155,7 +155,7 @@ async function installMocks(page: Page, options: MockOptions = {}) {
       return json(route, 200, currentSession);
     }
     if (path === '/api/admin/system/status') return json(route, 200, {
-      status: 'ok', operating_state: 'normal', version: '0.5.0-rc.1', disabled_rate_limit_groups: [],
+      status: 'ok', operating_state: 'normal', version: '0.5.0', disabled_rate_limit_groups: [],
       schema: { status: 'ok', version: 9, required_version: 9 },
       services: {
         postgresql: { status: 'ok', latency_ms: 2 }, redis: { status: 'ok', latency_ms: 1 },
@@ -256,5 +256,5 @@ test('system status shows observability and operational alerts without degrading
   await expect(page.getByText('邮件队列积压')).toBeVisible();
   await expect(page.getByRole('heading', { name: '可观测性' })).toBeVisible();
   await expect(page.getByText('这些告警用于提示队列或清理任务积压，不代表依赖故障，也不会改变 readiness。')).toBeVisible();
-  await expect(page.getByText('0.5.0-rc.1').locator('..').getByText('正常')).toBeVisible();
+  await expect(page.getByText('0.5.0').locator('..').getByText('正常')).toBeVisible();
 });

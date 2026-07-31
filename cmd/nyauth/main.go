@@ -42,7 +42,7 @@ const (
 )
 
 var (
-	version = "0.5.0-rc.1"
+	version = "0.5.0"
 	commit  = "unknown"
 )
 
