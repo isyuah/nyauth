@@ -64,10 +64,13 @@ func (s *Server) beginMFAPending(
 	r *http.Request,
 	current *models.User,
 	primaryMethod, provider, returnTo string,
-) (*models.MFARequiredResponse, bool, error) {
+) (*models.MFARequiredResponse, bool, bool, error) {
 	methods, required, err := s.loginMFARequirement(r, current)
 	if err != nil || !required {
-		return nil, required, err
+		return nil, required, false, err
+	}
+	if s.useTrustedDevice(w, r, current) {
+		return nil, false, true, nil
 	}
 	pending, err := s.sessionMiddleware.CreateMFAPending(w, r, &session.MFAPendingData{
 		UserID: current.ID.String(), Username: current.Username,
@@ -76,12 +79,15 @@ func (s *Server) beginMFAPending(
 		ReturnTo: safeReturnPath(returnTo, "/dashboard"), CreatedAt: time.Now().UTC(),
 	})
 	if err != nil {
-		return nil, true, err
+		return nil, true, false, err
 	}
+	security := s.settingsMgr.Security()
 	return &models.MFARequiredResponse{
 		Status: "mfa_required", Purpose: mfaPurposeLogin, Username: current.Username, Methods: methods,
 		CSRFToken: pending.Data.CSRFToken, ExpiresAt: pending.Data.ExpiresAt,
-	}, true, nil
+		TrustedDeviceAvailable:  security.TrustedDevicesEnabled,
+		TrustedDeviceTTLSeconds: int64(security.TrustedDeviceDuration() / time.Second),
+	}, true, false, nil
 }
 
 func (s *Server) beginReauthenticationMFAPending(
@@ -181,11 +187,17 @@ func (s *Server) handleGetMFAChallenge(w http.ResponseWriter, r *http.Request) {
 		s.writeMFAChallengeUnavailable(w, r, err)
 		return
 	}
-	writeJSON(w, http.StatusOK, models.MFARequiredResponse{
+	response := models.MFARequiredResponse{
 		Status: "mfa_required", Purpose: pending.Data.Purpose,
 		Username: pending.Data.Username, Methods: methods,
 		CSRFToken: pending.Data.CSRFToken, ExpiresAt: pending.Data.ExpiresAt,
-	})
+	}
+	security := s.settingsMgr.Security()
+	if pending.Data.Purpose == mfaPurposeLogin && security.TrustedDevicesEnabled {
+		response.TrustedDeviceAvailable = true
+		response.TrustedDeviceTTLSeconds = int64(security.TrustedDeviceDuration() / time.Second)
+	}
+	writeJSON(w, http.StatusOK, response)
 }
 
 func validPendingCSRF(pending *MFAPendingSession, r *http.Request) bool {
@@ -233,8 +245,9 @@ func (s *Server) handleVerifyMFAChallenge(w http.ResponseWriter, r *http.Request
 		return
 	}
 	var request struct {
-		Method string `json:"method"`
-		Code   string `json:"code"`
+		Method      string `json:"method"`
+		Code        string `json:"code"`
+		TrustDevice bool   `json:"trust_device"`
 	}
 	if err := decodeJSON(w, r, &request); err != nil {
 		writeAPIError(w, http.StatusBadRequest, "invalid request body")
@@ -287,7 +300,7 @@ func (s *Server) handleVerifyMFAChallenge(w http.ResponseWriter, r *http.Request
 				reason = "replayed_code"
 			}
 			s.enqueueAuditTargetResult(r.Context(), models.AuditMFAChallengeFailed, &current.ID, current.Username, "user", current.ID.String(), "failure", "medium", ip, truncateAuditValue(r.UserAgent(), maxAuditUserAgentLength), map[string]any{
-				"primary_method": pending.Data.PrimaryMethod, "mfa_method": request.Method, "reason": reason,
+				"purpose": pending.Data.Purpose, "primary_method": pending.Data.PrimaryMethod, "mfa_method": request.Method, "reason": reason,
 			})
 			writeAPIError(w, http.StatusUnauthorized, "invalid MFA code")
 			return
@@ -301,7 +314,7 @@ func (s *Server) handleVerifyMFAChallenge(w http.ResponseWriter, r *http.Request
 		writeAPIError(w, http.StatusServiceUnavailable, "MFA verification temporarily unavailable")
 		return
 	}
-	s.completeMFAChallenge(w, r, pending, current, authenticated, request.Method, limitIdentity)
+	s.completeMFAChallenge(w, r, pending, current, authenticated, request.Method, limitIdentity, request.TrustDevice)
 }
 
 func (s *Server) completeMFAChallenge(
@@ -312,6 +325,7 @@ func (s *Server) completeMFAChallenge(
 	authenticated *AuthenticatedSession,
 	secondFactor string,
 	limitIdentity string,
+	trustDevice bool,
 ) {
 	ip := requestIP(r)
 	var err error
@@ -369,6 +383,9 @@ func (s *Server) completeMFAChallenge(
 	if pending.Data.Provider != "" {
 		details["provider"] = pending.Data.Provider
 		s.telemetry.RecordProviderEvent(r.Context(), "mfa", "login", "success", "none", -1)
+	}
+	if trustDevice {
+		s.issueTrustedDevice(w, r, current)
 	}
 	s.enqueueAuditResult(r.Context(), models.AuditUserLogin, &current.ID, current.Username, "success", "low", ip, truncateAuditValue(r.UserAgent(), maxAuditUserAgentLength), details)
 	_ = s.userService.RecordLogin(r.Context(), current.ID, ip)
@@ -575,6 +592,7 @@ func (s *Server) handleUpdateSecuritySettings(w http.ResponseWriter, r *http.Req
 		ExpectedRevision int64 `json:"expected_revision"`
 		settings.Security
 	}
+	request.Security = settings.DefaultSecurity()
 	if err := decodeJSON(w, r, &request); err != nil {
 		writeAPIError(w, http.StatusBadRequest, "invalid request body")
 		return
@@ -587,6 +605,8 @@ func (s *Server) handleUpdateSecuritySettings(w http.ResponseWriter, r *http.Req
 		switch {
 		case errors.Is(err, settings.ErrRevisionConflict):
 			writeAPIError(w, http.StatusConflict, "settings revision conflict")
+		case errors.Is(err, settings.ErrInvalidSecurity):
+			writeAPIError(w, http.StatusBadRequest, err.Error())
 		case errors.As(err, &missing):
 			writeJSON(w, http.StatusConflict, map[string]any{
 				"error":          "all active administrators must enroll MFA before it can be required",

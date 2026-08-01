@@ -11,6 +11,7 @@
   import { consumeProviderAuthError } from '$lib/stores';
   import ReauthenticationDialog from '$lib/components/account/ReauthenticationDialog.svelte';
   import Button from '$lib/components/ui/Button.svelte';
+  import Input from '$lib/components/ui/Input.svelte';
   import Switch from '$lib/components/ui/Switch.svelte';
   import { toast } from '$lib/toast';
   import { ShieldCheck } from 'lucide-svelte';
@@ -22,6 +23,8 @@
   let totpEnabled = $state(true);
   let passkeysEnabled = $state(true);
   let requireMFAForAdmins = $state(false);
+  let trustedDevicesEnabled = $state(true);
+  let trustedDeviceTTLDays = $state('30');
   let revision = $state(0);
   let loaded = $state(false);
   let loading = $state(true);
@@ -46,6 +49,8 @@
       totpEnabled = current.totp_enabled;
       passkeysEnabled = current.passkeys_enabled;
       requireMFAForAdmins = current.require_mfa_for_admins;
+      trustedDevicesEnabled = current.trusted_devices_enabled;
+      trustedDeviceTTLDays = trustedDeviceDays(current.trusted_device_ttl);
       loaded = true;
     } catch (cause) {
       loaded = false;
@@ -57,11 +62,18 @@
 
   async function saveSettings(event: SubmitEvent) {
     event.preventDefault();
+    const trustedDays = Number(trustedDeviceTTLDays);
+    if (!Number.isInteger(trustedDays) || trustedDays < 1 || trustedDays > 90) {
+      toast.error('可信浏览器有效期须为 1 至 90 天的整数。');
+      return;
+    }
     const payload: UpdateSecuritySettingsInput = {
       expected_revision: revision,
       totp_enabled: totpEnabled,
       passkeys_enabled: passkeysEnabled,
       require_mfa_for_admins: requireMFAForAdmins,
+      trusted_devices_enabled: trustedDevicesEnabled,
+      trusted_device_ttl: `${trustedDays * 24}h`,
     };
     pendingSettings = payload;
     await executeSave(payload, true);
@@ -79,6 +91,8 @@
       totpEnabled = updated.totp_enabled;
       passkeysEnabled = updated.passkeys_enabled;
       requireMFAForAdmins = updated.require_mfa_for_admins;
+      trustedDevicesEnabled = updated.trusted_devices_enabled;
+      trustedDeviceTTLDays = trustedDeviceDays(updated.trusted_device_ttl);
       toast.success('登录安全策略已保存，立即对所有实例生效。');
     } catch (cause) {
       if (allowReauthentication && isRecentAuthenticationError(cause)) {
@@ -124,12 +138,16 @@
         totp_enabled: restored.totp_enabled,
         passkeys_enabled: restored.passkeys_enabled,
         require_mfa_for_admins: restored.require_mfa_for_admins,
+        trusted_devices_enabled: restored.trusted_devices_enabled !== false,
+        trusted_device_ttl: typeof restored.trusted_device_ttl === 'string' && restored.trusted_device_ttl ? restored.trusted_device_ttl : '720h',
       };
       pendingSettings = validated;
       revision = validated.expected_revision;
       totpEnabled = validated.totp_enabled;
       passkeysEnabled = validated.passkeys_enabled;
       requireMFAForAdmins = validated.require_mfa_for_admins;
+      trustedDevicesEnabled = validated.trusted_devices_enabled !== false;
+      trustedDeviceTTLDays = trustedDeviceDays(validated.trusted_device_ttl || '720h');
       const providerError = consumeProviderAuthError();
       if (providerError) {
         toast.error(providerError.message);
@@ -139,6 +157,12 @@
     } catch {
       toast.error('无法恢复待保存的登录安全策略，请重新检查设置。');
     }
+  }
+
+  function trustedDeviceDays(duration: string): string {
+    const hours = Number.parseFloat(duration.replace(/h.*$/, ''));
+    if (!Number.isFinite(hours)) return '30';
+    return String(Math.min(90, Math.max(1, Math.round(hours / 24))));
   }
 </script>
 
@@ -199,6 +223,34 @@
             <Switch bind:checked={requireMFAForAdmins} label="管理员强制 MFA" />
           </div>
           <p class="mt-2 text-small text-nya-text-tertiary">该策略接受已注册的动态验证码或 Passkey；保存时后端会验证所有活动管理员是否至少拥有一种因素。</p>
+        </div>
+
+        <div class="border-t border-nya-divider pt-4">
+          <div class="flex flex-col justify-between gap-3 sm:flex-row sm:items-start">
+            <div class="max-w-2xl">
+              <p class="text-body-medium font-semibold text-nya-text-primary">允许信任浏览器</p>
+              <p class="mt-1 text-small text-nya-text-secondary">用户完成 MFA 后可信任当前浏览器。信任只跳过后续登录的第二项验证，不会跳过密码、Provider、Passkey 主验证或近期重新认证。</p>
+            </div>
+            <Switch bind:checked={trustedDevicesEnabled} label="允许信任浏览器" />
+          </div>
+          <div class="mt-4 max-w-xs">
+            <Input
+              id="trusted-device-ttl-days"
+              label="信任有效期（天）"
+              bind:value={trustedDeviceTTLDays}
+              type="number"
+              inputmode="numeric"
+              min={1}
+              max={90}
+              step={1}
+              disabled={!trustedDevicesEnabled}
+              help="范围 1 至 90 天。缩短后会立即按设备最初创建时间重新计算截止日期，延长不会续期已有设备。"
+              required
+            />
+          </div>
+          {#if !trustedDevicesEnabled}
+            <p class="mt-3 rounded-nya-sm bg-nya-warning-soft px-3 py-2 text-small text-nya-warning">保存为关闭状态会立即撤销全部用户的可信浏览器记录；之后重新开启不会恢复。</p>
+          {/if}
         </div>
       </div>
 

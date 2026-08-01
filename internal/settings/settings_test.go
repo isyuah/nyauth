@@ -2,6 +2,7 @@ package settings
 
 import (
 	"encoding/json"
+	"errors"
 	"slices"
 	"testing"
 	"time"
@@ -10,6 +11,27 @@ import (
 	"github.com/nyasharp/nyauth/internal/audit"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
+
+func TestSecurityTrustedDeviceDefaultsAndBounds(t *testing.T) {
+	defaults := DefaultSecurity()
+	if !defaults.TrustedDevicesEnabled || defaults.TrustedDeviceDuration() != 30*24*time.Hour {
+		t.Fatalf("trusted device defaults = %#v", defaults)
+	}
+	for _, ttl := range []string{"24h", "2160h"} {
+		value := defaults
+		value.TrustedDeviceTTL = ttl
+		if err := ValidateSecurity(value); err != nil {
+			t.Errorf("ValidateSecurity(%q) = %v", ttl, err)
+		}
+	}
+	for _, ttl := range []string{"", "23h59m", "2160h1m", "not-a-duration"} {
+		value := defaults
+		value.TrustedDeviceTTL = ttl
+		if err := ValidateSecurity(value); !errors.Is(err, ErrInvalidSecurity) {
+			t.Errorf("ValidateSecurity(%q) = %v, want ErrInvalidSecurity", ttl, err)
+		}
+	}
+}
 
 func TestLifecycleDefaultsUseDeploymentAuthenticationFallbacks(t *testing.T) {
 	manager := NewManager(nil, Branding{Title: "Nya"})
@@ -248,7 +270,9 @@ func TestSecurityFallsBackToEnrollmentEnabledAndOptionalAdminMFA(t *testing.T) {
 	if !security.TOTPEnabled || !security.PasskeysEnabled || security.RequireMFAForAdmins {
 		t.Fatalf("security defaults = %#v", security)
 	}
-	stored := Security{TOTPEnabled: false, PasskeysEnabled: false, RequireMFAForAdmins: false}
+	stored := DefaultSecurity()
+	stored.TOTPEnabled = false
+	stored.PasskeysEnabled = false
 	manager.security.Store(&Versioned[Security]{Revision: 4, Value: stored})
 	if got := manager.Security(); got.TOTPEnabled || got.PasskeysEnabled || got.RequireMFAForAdmins {
 		t.Fatalf("security snapshot = %#v", got)

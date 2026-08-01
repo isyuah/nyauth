@@ -18,6 +18,9 @@
     ignorePasswordManagers = false,
     inputmode,
     maxlength,
+    min,
+    max,
+    step,
     oninput,
   }: {
     label?: string;
@@ -36,6 +39,9 @@
     ignorePasswordManagers?: boolean;
     inputmode?: 'text' | 'numeric' | 'email' | 'url' | 'search' | 'tel' | 'decimal' | 'none';
     maxlength?: number;
+    min?: number | string;
+    max?: number | string;
+    step?: number | string;
     oninput?: (e: Event) => void;
   } = $props();
 
@@ -59,6 +65,9 @@
     data-lpignore={ignorePasswordManagers ? 'true' : undefined}
     {inputmode}
     {maxlength}
+    {min}
+    {max}
+    {step}
     aria-invalid={error ? 'true' : undefined}
     aria-describedby={describedBy}
     bind:value

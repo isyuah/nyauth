@@ -115,6 +115,12 @@ var apiErrorCodesByMessage = map[string]string{
 	"rate limit disable confirmation is required":                                        "settings.disable_confirmation_required",
 	"audit retention confirmation is required":                                           "settings.retention_confirmation_required",
 	"settings are temporarily unavailable":                                               "settings.unavailable",
+	"failed to list login history":                                                       "login_history.unavailable",
+	"failed to list trusted devices":                                                     "trusted_device.list_unavailable",
+	"invalid trusted device id":                                                          "trusted_device.id_invalid",
+	"trusted device not found":                                                           "trusted_device.not_found",
+	"failed to revoke trusted device":                                                    "trusted_device.revoke_unavailable",
+	"failed to revoke trusted devices":                                                   "trusted_device.revoke_unavailable",
 	"too many settings operations":                                                       "settings.rate_limited",
 	"observability settings are temporarily unavailable":                                 "observability.settings_unavailable",
 	"failed to store observability settings":                                             "observability.store_failed",
@@ -173,6 +179,9 @@ func apiErrorCodeForMessage(message string) string {
 	}
 	if strings.HasPrefix(normalized, "invalid oauth client:") {
 		return "client.configuration_invalid"
+	}
+	if strings.HasPrefix(normalized, "invalid security settings:") {
+		return "settings.configuration_invalid"
 	}
 	if strings.HasPrefix(normalized, "mail_backlog_count must be between ") ||
 		strings.HasPrefix(normalized, "audit_outbox_backlog_count must be between ") ||

@@ -46,6 +46,7 @@ import (
 	"github.com/nyasharp/nyauth/internal/settings"
 	"github.com/nyasharp/nyauth/internal/stats"
 	"github.com/nyasharp/nyauth/internal/telemetry"
+	"github.com/nyasharp/nyauth/internal/trusteddevice"
 	"github.com/nyasharp/nyauth/internal/user"
 	"github.com/nyasharp/nyauth/pkg/models"
 	"github.com/redis/go-redis/v9"
@@ -89,6 +90,7 @@ type Server struct {
 	observabilityManager      *observabilityruntime.Manager
 	operationalAlerts         *operationalAlertMonitor
 	mfaService                *mfa.Service
+	trustedDeviceStore        *trusteddevice.Store
 	avatarService             *avatar.Service
 	avatarRepository          *avatar.Repository
 	avatarStore               avatar.BlobStore
@@ -234,7 +236,8 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 		authorizationStore: authorizationStore, statsHandler: stats.NewHandler(db, rdb),
 		settingsMgr: settingsMgr, inviteStore: invite.NewStore(db),
 		registrationStore: registration.NewStore(db), telemetry: telemetryRuntime,
-		mfaService: mfaService, avatarService: avatarService, avatarRepository: avatarRepository,
+		mfaService: mfaService, trustedDeviceStore: trusteddevice.NewStore(db),
+		avatarService: avatarService, avatarRepository: avatarRepository,
 		humanVerification:  humanVerificationManager,
 		humanLoginFailures: NewHumanVerificationLoginLimiter(rdb, humanVerificationManager, settingsMgr),
 		avatarStore:        avatarStore, mediaManager: mediaManager, avatarProcessing: make(chan struct{}, 1),
@@ -561,6 +564,10 @@ func (s *Server) buildRouter() *chi.Mux {
 			r.Get("/me/sessions", s.handleListMySessions)
 			r.Delete("/me/sessions/{id}", s.handleDeleteMySession)
 			r.Post("/me/sessions/revoke-others", s.handleRevokeOtherSessions)
+			r.Get("/me/login-history", s.handleListMyLoginHistory)
+			r.Get("/me/trusted-devices", s.handleListMyTrustedDevices)
+			r.Delete("/me/trusted-devices/{id}", s.handleDeleteMyTrustedDevice)
+			r.Post("/me/trusted-devices/revoke-others", s.handleRevokeOtherTrustedDevices)
 			r.Get("/me/authorizations", s.handleListMyAuthorizations)
 			r.Delete("/me/authorizations/{client_id}", s.handleRevokeMyAuthorization)
 			r.Get("/me/identities", s.handleMyIdentities)

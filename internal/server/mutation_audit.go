@@ -173,6 +173,12 @@ func describeMutation(r *http.Request, actor *models.User) (mutationAuditDescrip
 		descriptor := userMutation(models.AuditSessionOthersRevoked, actor, true)
 		descriptor.riskLevel = "medium"
 		return descriptor, true
+	case r.Method == http.MethodDelete && strings.HasPrefix(path, "/api/me/trusted-devices/"):
+		return mutationAuditDescriptor{event: models.AuditTrustedDeviceRevoked, targetType: "trusted_device", targetID: param("id"), riskLevel: "medium", successAlreadyAudited: true}, true
+	case r.Method == http.MethodPost && path == "/api/me/trusted-devices/revoke-others":
+		descriptor := userMutation(models.AuditTrustedDeviceOthersRevoked, actor, true)
+		descriptor.riskLevel = "medium"
+		return descriptor, true
 	case r.Method == http.MethodPost && strings.HasPrefix(path, "/api/me/reauth/"):
 		descriptor := userMutation(models.AuditUserReauthenticated, actor, true)
 		descriptor.riskLevel = "medium"

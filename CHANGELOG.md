@@ -10,15 +10,18 @@
 - 授权记录保存同意时的应用身份与客户端 revision，个人中心可辨认应用改名、政策链接变化和需要重新授权的高风险变更
 - 授权记录的最近使用时间只在客户端实际换取 Access Token 或轮换 Refresh Token 后更新，不再把仅同意授权误报为已使用
 - Consent 标出此前已授权与本次新增的 Scope/Claim；再次授权时历史可选权限保持勾选，新增可选权限默认不勾选
+- 个人中心新增受限登录历史，只展示本人登录成功、登录失败和登录 MFA 失败的固定字段投影
+- 新增可信浏览器：用户完成登录 MFA 后可选择在受控期限内跳过后续登录的第二因素，并可在设备页逐个或批量撤销
 
 ### 安全
 
 - Redirect URI 变化、Grant/Scope/Claim 移除和访问策略变化推进客户端授权 revision；授权码兑换、Access Token 本机校验和 Refresh Token 轮换都会拒绝旧 revision
 - Consent 提交与客户端修改通过 PostgreSQL 行锁建立顺序，避免并发修改被错误记录为用户已经同意
+- 可信浏览器 Token 仅以 SHA-256 哈希存储，并绑定用户认证/会话版本；不会跳过主验证、近期重新认证或延长会话
 
 ### 变更
 
-- 开发版本进入 `0.6.0-dev`；新增兼容迁移 `000014_oauth_application_identity`，schema version 从 13 提升到 14
+- 开发版本进入 `0.6.0-dev`；新增兼容迁移 `000014_oauth_application_identity` 与 `000015_trusted_devices`，schema version 从 13 提升到 15
 
 ## [0.5.0] — 2026-07-31
 

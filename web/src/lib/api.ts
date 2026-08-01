@@ -110,6 +110,8 @@ export interface MFARequiredResponse {
   methods: MFAMethod[];
   csrf_token: string;
   expires_at: string;
+  trusted_device_available?: boolean;
+  trusted_device_ttl_seconds?: number;
 }
 
 export type LoginResponse = SessionInfo | MFARequiredResponse;
@@ -140,17 +142,21 @@ export interface RecoveryCodesResult {
 }
 
 export interface SecuritySettings {
-	revision: number;
+  revision: number;
   totp_enabled: boolean;
   passkeys_enabled: boolean;
   require_mfa_for_admins: boolean;
+  trusted_devices_enabled: boolean;
+  trusted_device_ttl: string;
 }
 
 export interface UpdateSecuritySettingsInput {
-	expected_revision: number;
-	totp_enabled: boolean;
-	passkeys_enabled: boolean;
-	require_mfa_for_admins: boolean;
+  expected_revision: number;
+  totp_enabled: boolean;
+  passkeys_enabled: boolean;
+  require_mfa_for_admins: boolean;
+  trusted_devices_enabled?: boolean;
+  trusted_device_ttl?: string;
 }
 
 export interface WebAuthnOptionsResponse<TPublicKey> {
@@ -616,6 +622,32 @@ export interface BrowserSession {
   session_expires_at: string;
   session_idle_expires_at: string;
   recent_authentication_expires_at: string;
+}
+
+export interface TrustedDevice {
+  id: string;
+  ip_address?: string;
+  user_agent?: string;
+  created_at: string;
+  last_used_at: string;
+  expires_at: string;
+  current: boolean;
+}
+
+export interface TrustedDevicesResponse {
+  enabled: boolean;
+  items: TrustedDevice[];
+}
+
+export interface LoginHistoryEntry {
+  id: string;
+  result: 'success' | 'failure' | string;
+  authentication_method: string;
+  second_factor?: string;
+  provider?: string;
+  ip_address?: string;
+  user_agent?: string;
+  created_at: string;
 }
 
 export interface Branding {
@@ -1473,6 +1505,13 @@ const API_ERROR_TRANSLATIONS: Record<string, string> = {
   'service control is temporarily unavailable': '运行控制暂时不可用，请稍后重试',
   'too many service control operations': '运行控制操作过于频繁，请稍后重试',
   'settings revision conflict': '设置已被其他管理员修改，请加载最新设置后重试',
+  'invalid security settings': '登录安全策略无效，请检查可信浏览器有效期',
+  'failed to list login history': '登录历史暂时无法加载，请稍后重试',
+  'failed to list trusted devices': '可信浏览器暂时无法加载，请稍后重试',
+  'invalid trusted device id': '可信浏览器标识无效，请刷新页面后重试',
+  'trusted device not found': '该可信浏览器已被撤销或不存在',
+  'failed to revoke trusted device': '暂时无法撤销可信浏览器，请稍后重试',
+  'failed to revoke trusted devices': '暂时无法撤销可信浏览器，请稍后重试',
   'observability settings are temporarily unavailable': '可观测性设置暂时不可用，请稍后重试',
   'failed to store observability settings': '可观测性设置保存失败，请稍后重试',
 	'invalid observability settings': '可观测性设置无效，请检查日志级别与运营告警阈值',
@@ -1597,6 +1636,12 @@ const API_ERROR_MESSAGES_BY_CODE: Record<string, string> = {
   'service_control.unavailable': 'service control is temporarily unavailable',
   'service_control.rate_limited': 'too many service control operations',
   'settings.revision_conflict': 'settings revision conflict',
+  'settings.configuration_invalid': 'invalid security settings',
+  'login_history.unavailable': 'failed to list login history',
+  'trusted_device.list_unavailable': 'failed to list trusted devices',
+  'trusted_device.id_invalid': 'invalid trusted device id',
+  'trusted_device.not_found': 'trusted device not found',
+  'trusted_device.revoke_unavailable': 'failed to revoke trusted device',
   'observability.settings_unavailable': 'observability settings are temporarily unavailable',
   'observability.store_failed': 'failed to store observability settings',
   'observability.log_level_invalid': 'log_level must be info, warn, or error',
@@ -1791,16 +1836,24 @@ export function normalizeConsentRequest(consent: ConsentRequest): ConsentRequest
   };
 }
 
+export function normalizeSecuritySettings(settings: SecuritySettings): SecuritySettings {
+  return {
+    ...settings,
+    trusted_devices_enabled: settings.trusted_devices_enabled !== false,
+    trusted_device_ttl: settings.trusted_device_ttl || '720h0m0s',
+  };
+}
+
 export const api = {
   login: (username: string, password: string, returnTo: string, humanVerification?: HumanVerificationProof) =>
     req<LoginResponse>('/api/login', {
       method: 'POST', body: JSON.stringify({ username, password, return_to: returnTo, human_verification: humanVerification }),
     }, false),
   getLoginMFA: () => req<MFARequiredResponse>('/api/login/mfa', { cache: 'no-store' }, false),
-  verifyLoginMFA: (method: CodeMFAMethod, code: string, pendingCsrf: string) => req<SessionInfo>('/api/login/mfa', {
+  verifyLoginMFA: (method: CodeMFAMethod, code: string, pendingCsrf: string, trustDevice = false) => req<SessionInfo>('/api/login/mfa', {
     method: 'POST',
     headers: { 'X-CSRF-Token': pendingCsrf },
-    body: JSON.stringify({ method, code }),
+    body: JSON.stringify({ method, code, trust_device: trustDevice }),
   }, false),
   cancelLoginMFA: (pendingCsrf: string) => req<void>('/api/login/mfa', {
     method: 'DELETE',
@@ -1848,6 +1901,11 @@ export const api = {
   getMySessions: () => req<BrowserSession[]>('/api/me/sessions'),
   revokeMySession: (id: string) => req<void>(`/api/me/sessions/${encodeURIComponent(id)}`, { method: 'DELETE' }),
   revokeOtherSessions: () => req<{ revoked: number }>('/api/me/sessions/revoke-others', { method: 'POST' }),
+  getMyTrustedDevices: () => req<TrustedDevicesResponse>('/api/me/trusted-devices', { cache: 'no-store' }),
+  revokeMyTrustedDevice: (id: string) => req<void>(`/api/me/trusted-devices/${encodeURIComponent(id)}`, { method: 'DELETE' }),
+  revokeOtherTrustedDevices: () => req<{ revoked: number }>('/api/me/trusted-devices/revoke-others', { method: 'POST' }),
+  getMyLoginHistory: (page = 1, pageSize = 20) =>
+    req<PaginatedResponse<LoginHistoryEntry>>(`/api/me/login-history?page=${page}&page_size=${pageSize}`, { cache: 'no-store' }),
   reauthenticateWithPassword: (password: string) => req<ReauthenticationResponse>('/api/me/reauth/password', {
     method: 'POST',
     body: JSON.stringify({ password }),
@@ -1872,9 +1930,13 @@ export const api = {
     headers: { 'X-CSRF-Token': pendingCsrf },
     signal,
   }, false),
-  finishMFAPasskey: (ceremonyID: string, credential: unknown, pendingCsrf: string, signal?: AbortSignal) => req<SessionInfo>('/api/login/mfa/passkey/verify', {
+  finishMFAPasskey: (ceremonyID: string, credential: unknown, pendingCsrf: string, signal?: AbortSignal, trustDevice = false) => req<SessionInfo>('/api/login/mfa/passkey/verify', {
     method: 'POST',
-    headers: { 'X-CSRF-Token': pendingCsrf, 'X-WebAuthn-Ceremony': ceremonyID },
+    headers: {
+      'X-CSRF-Token': pendingCsrf,
+      'X-WebAuthn-Ceremony': ceremonyID,
+      ...(trustDevice ? { 'X-Trust-Device': 'true' } : {}),
+    },
     body: JSON.stringify(credential),
     signal,
   }, false),
@@ -2059,9 +2121,9 @@ export const api = {
     getRegistrationSettings: () => req<RegistrationSettings>('/api/admin/settings/registration', { cache: 'no-store' }),
     updateRegistrationSettings: (settings: UpdateRegistrationSettingsInput) =>
       req<RegistrationSettings>('/api/admin/settings/registration', { method: 'PUT', body: JSON.stringify(settings) }),
-    getSecuritySettings: () => req<SecuritySettings>('/api/admin/settings/security', { cache: 'no-store' }),
+    getSecuritySettings: () => req<SecuritySettings>('/api/admin/settings/security', { cache: 'no-store' }).then(normalizeSecuritySettings),
     updateSecuritySettings: (settings: UpdateSecuritySettingsInput) =>
-      req<SecuritySettings>('/api/admin/settings/security', { method: 'PUT', body: JSON.stringify(settings) }),
+      req<SecuritySettings>('/api/admin/settings/security', { method: 'PUT', body: JSON.stringify(settings) }).then(normalizeSecuritySettings),
     getMailSettings: () => req<MailSettings>('/api/admin/settings/mail'),
     saveMailCandidate: (settings: SaveMailCandidateInput) =>
       req<SaveMailCandidateResult>('/api/admin/settings/mail/candidate', { method: 'PUT', body: JSON.stringify(settings) }),

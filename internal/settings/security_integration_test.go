@@ -38,7 +38,9 @@ func TestSetSecurityAuditFailureRollsBackSetting(t *testing.T) {
 		Details:   map[string]any{"method": "PUT", "path": "/api/admin/settings/security"},
 	}
 
-	stored := Security{TOTPEnabled: false, RequireMFAForAdmins: false}
+	stored := DefaultSecurity()
+	stored.TOTPEnabled = false
+	stored.PasskeysEnabled = false
 	if _, err := manager.SetSecurity(ctx, stored, 0, mutation.ActorName, mutation); err != nil {
 		t.Fatalf("store audited security settings: %v", err)
 	}
@@ -75,6 +77,58 @@ func TestSetSecurityAuditFailureRollsBackSetting(t *testing.T) {
 	}
 	if snapshot := manager.Security(); snapshot != stored {
 		t.Fatalf("published security settings after audit failure = %#v, want %#v", snapshot, stored)
+	}
+}
+
+func TestSetSecurityDisablingTrustedDevicesRevokesExistingTrust(t *testing.T) {
+	schema := newSecuritySettingsTestSchema(t)
+	if err := database.RunMigrations(schema.migrationDSN); err != nil {
+		t.Fatalf("run settings migrations: %v", err)
+	}
+
+	ctx := t.Context()
+	userID := uuid.New()
+	deviceID := uuid.New()
+	if _, err := schema.pool.Exec(ctx, `
+		INSERT INTO users (id,username,status,role,creation_source)
+		VALUES ($1,'trusted-policy-user','active','user','legacy')
+	`, userID); err != nil {
+		t.Fatalf("insert trusted device owner: %v", err)
+	}
+	if _, err := schema.pool.Exec(ctx, `
+		INSERT INTO user_trusted_devices (
+			id,user_id,token_hash,auth_version,session_version,expires_at
+		) VALUES ($1,$2,$3,1,1,NOW()+INTERVAL '30 days')
+	`, deviceID, userID, make([]byte, 32)); err != nil {
+		t.Fatalf("insert trusted device: %v", err)
+	}
+
+	manager := NewManager(schema.pool, Branding{Title: "Nyauth Test"})
+	disabled := DefaultSecurity()
+	disabled.TrustedDevicesEnabled = false
+	mutation := audit.MutationAudit{
+		Event: models.AuditSettingsUpdated, ActorID: uuid.New(), ActorName: "security-admin",
+		Result: "success", RiskLevel: "high", IPAddress: "192.0.2.81",
+		UserAgent: "settings-integration-test",
+	}
+	revision, err := manager.SetSecurity(ctx, disabled, 0, mutation.ActorName, mutation)
+	if err != nil {
+		t.Fatalf("disable trusted devices: %v", err)
+	}
+	if revision != 1 {
+		t.Fatalf("security revision = %d, want 1", revision)
+	}
+	var revokedAt *time.Time
+	if err := schema.pool.QueryRow(ctx, `
+		SELECT revoked_at FROM user_trusted_devices WHERE id=$1
+	`, deviceID).Scan(&revokedAt); err != nil {
+		t.Fatalf("load trusted device after policy change: %v", err)
+	}
+	if revokedAt == nil {
+		t.Fatal("trusted device remained active after the policy was disabled")
+	}
+	if snapshot := manager.Security(); snapshot.TrustedDevicesEnabled {
+		t.Fatalf("published security settings = %#v, want trusted devices disabled", snapshot)
 	}
 }
 

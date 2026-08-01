@@ -158,6 +158,7 @@ func assertReleaseBaseline(t *testing.T, schema *postgresTestSchema) {
 	for _, object := range []string{
 		"runtime_settings", "client_access_users", "self_registrations", "mail_config_versions",
 		"registration_stats_daily", "user_totp_credentials", "user_passkey_credentials",
+		"user_trusted_devices",
 		"user_avatars", "provider_avatar_import_jobs", "idx_audit_logs_target_created",
 		"service_control_state", "service_control_pauses", "service_control_instances",
 		"media_storage_profiles", "media_storage_state", "media_storage_migrations",

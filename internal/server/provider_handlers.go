@@ -478,7 +478,7 @@ func (s *Server) finishExternalLogin(w http.ResponseWriter, r *http.Request, pro
 		s.providerCallbackFailure(w, r, "login", returnTo, "account_unavailable", http.StatusForbidden)
 		return
 	}
-	_, mfaRequired, mfaErr := s.beginMFAPending(w, r, current, "provider", providerName, returnTo)
+	_, mfaRequired, trustedDevice, mfaErr := s.beginMFAPending(w, r, current, "provider", providerName, returnTo)
 	if mfaErr != nil {
 		code := "mfa_unavailable"
 		status := http.StatusServiceUnavailable
@@ -499,7 +499,11 @@ func (s *Server) finishExternalLogin(w http.ResponseWriter, r *http.Request, pro
 		s.providerCallbackFailure(w, r, "login", returnTo, "session_failed", http.StatusInternalServerError)
 		return
 	}
-	s.enqueueAuditResult(r.Context(), models.AuditUserLogin, &current.ID, current.Username, "success", "low", requestIP(r), truncateAuditValue(r.UserAgent(), maxAuditUserAgentLength), map[string]any{"authentication_method": "provider", "provider": providerName})
+	details := map[string]any{"authentication_method": "provider", "provider": providerName}
+	if trustedDevice {
+		details["second_factor"] = "trusted_device"
+	}
+	s.enqueueAuditResult(r.Context(), models.AuditUserLogin, &current.ID, current.Username, "success", "low", requestIP(r), truncateAuditValue(r.UserAgent(), maxAuditUserAgentLength), details)
 	_ = s.userService.RecordLogin(r.Context(), current.ID, requestIP(r))
 	s.telemetry.RecordProviderEvent(r.Context(), "callback", "login", "success", "none", -1)
 	http.Redirect(w, r, safeReturnPath(returnTo, "/dashboard"), http.StatusFound)

@@ -22,6 +22,7 @@
   let cancelling = $state(false);
   let error = $state('');
   let challengeExpired = $state(false);
+  let trustDevice = $state(false);
   let now = $state(Date.now());
   let passkeyController: AbortController | null = null;
   let passkeyGeneration = 0;
@@ -31,12 +32,14 @@
   let activePurpose = $derived(challenge?.purpose ?? requestedPurpose);
   let expiryTime = $derived(challenge ? Date.parse(challenge.expires_at) : Number.NaN);
   let remainingSeconds = $derived(Number.isFinite(expiryTime) ? Math.max(0, Math.ceil((expiryTime - now) / 1000)) : 0);
+  let trustedDeviceDays = $derived(Math.max(1, Math.round((challenge?.trusted_device_ttl_seconds ?? 0) / 86_400)));
 
   $effect(() => {
     if (challenge && !challenge.methods.includes(selectedMethod)) {
       selectedMethod = challenge.methods[0] ?? 'totp';
       code = '';
     }
+    if (!challenge?.trusted_device_available || challenge.purpose !== 'login') trustDevice = false;
   });
 
   onMount(() => {
@@ -114,7 +117,7 @@
     submitting = true;
     try {
       const purpose = pending.purpose;
-      const session = await api.verifyLoginMFA(selectedMethod, submittedCode, pending.csrf_token);
+      const session = await api.verifyLoginMFA(selectedMethod, submittedCode, pending.csrf_token, trustDevice);
       if (generation !== passkeyGeneration) return;
       code = '';
       await finishMFA(session, purpose);
@@ -169,6 +172,7 @@
         authenticationCredentialToJSON(credential),
         pending.csrf_token,
         controller.signal,
+        trustDevice,
       );
       if (controller.signal.aborted || generation !== passkeyGeneration) return;
       passkeyController = null;
@@ -294,6 +298,15 @@
               mono
             />
             <p class="text-small text-nya-text-tertiary">每枚恢复码只能使用一次，使用后请从安全中心查看剩余数量。</p>
+          {/if}
+          {#if challenge.purpose === 'login' && challenge.trusted_device_available}
+            <label class="flex cursor-pointer items-start gap-3 rounded-nya-sm border border-nya-border bg-nya-surface-muted px-4 py-3">
+              <input type="checkbox" bind:checked={trustDevice} disabled={submitting || cancelling} class="mt-0.5 h-4 w-4 shrink-0 accent-[var(--nya-primary)]" />
+              <span>
+                <span class="block text-body-medium font-semibold text-nya-text-primary">信任此浏览器</span>
+                <span class="mt-0.5 block text-small text-nya-text-secondary">未来 {trustedDeviceDays} 天内，在此浏览器完成密码或 Provider 登录后不再要求第二项验证。敏感操作仍需重新认证。</span>
+              </span>
+            </label>
           {/if}
           <Button type="submit" variant="primary" size="lg" loading={submitting} disabled={remainingSeconds <= 0 || cancelling} fullWidth>
             {#if selectedMethod === 'passkey'}<Fingerprint size={17} />{/if}

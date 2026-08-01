@@ -113,6 +113,9 @@ func KnownFilterOptions() FilterOptions {
 		models.AuditUserSuspended,
 		models.AuditUserUpdated,
 		models.AuditSessionOthersRevoked,
+		models.AuditTrustedDeviceCreated,
+		models.AuditTrustedDeviceRevoked,
+		models.AuditTrustedDeviceOthersRevoked,
 		models.AuditSessionRevoked,
 	}
 	sort.Strings(events)

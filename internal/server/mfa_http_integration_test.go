@@ -51,7 +51,8 @@ func TestPasswordLoginRequiresMFAAndCreatesSessionOnlyAfterVerification(t *testi
 	if err := json.Unmarshal(login.Body.Bytes(), &challenge); err != nil {
 		t.Fatal(err)
 	}
-	if challenge.Status != "mfa_required" || challenge.CSRFToken == "" || len(challenge.Methods) != 2 {
+	if challenge.Status != "mfa_required" || challenge.CSRFToken == "" || len(challenge.Methods) != 2 ||
+		!challenge.TrustedDeviceAvailable || challenge.TrustedDeviceTTLSeconds != int64(30*24*time.Hour/time.Second) {
 		t.Fatalf("challenge=%#v", challenge)
 	}
 	pendingCookie := responseCookie(t, login, mfaPendingCookieName)
@@ -81,11 +82,12 @@ func TestPasswordLoginRequiresMFAAndCreatesSessionOnlyAfterVerification(t *testi
 	}
 
 	verified := mfaHTTPRequest(testApp.app, http.MethodPost, "/api/login/mfa",
-		fmt.Sprintf(`{"method":"totp","code":%q}`, validCode), pendingCookieHeader, challenge.CSRFToken)
+		fmt.Sprintf(`{"method":"totp","code":%q,"trust_device":true}`, validCode), pendingCookieHeader, challenge.CSRFToken)
 	if verified.Code != http.StatusOK {
 		t.Fatalf("verified MFA status=%d body=%s", verified.Code, verified.Body.String())
 	}
 	sessionCookie := responseCookie(t, verified, sessionCookieName)
+	trustedDeviceCookie := responseCookie(t, verified, trustedDeviceCookieName)
 	var sessionResponse models.SessionResponse
 	if err := json.Unmarshal(verified.Body.Bytes(), &sessionResponse); err != nil {
 		t.Fatal(err)
@@ -95,6 +97,14 @@ func TestPasswordLoginRequiresMFAAndCreatesSessionOnlyAfterVerification(t *testi
 	}
 	if count, err := testApp.app.sessionStore.CountActiveSessions(context.Background()); err != nil || count != 1 {
 		t.Fatalf("active sessions after MFA=%d err=%v", count, err)
+	}
+	trustedLogin := mfaHTTPRequest(testApp.app, http.MethodPost, "/api/login", `{
+		"username":"mfa-http-admin",
+		"password":"correct horse battery staple",
+		"return_to":"/dashboard"
+	}`, trustedDeviceCookie.Name+"="+trustedDeviceCookie.Value, "")
+	if trustedLogin.Code != http.StatusOK {
+		t.Fatalf("trusted device login status=%d body=%s", trustedLogin.Code, trustedLogin.Body.String())
 	}
 	sessionCookieHeader := sessionCookie.Name + "=" + sessionCookie.Value
 	currentSession := mfaHTTPRequest(testApp.app, http.MethodGet, "/api/session", "", sessionCookieHeader, "")
@@ -119,7 +129,7 @@ func TestPasswordLoginRequiresMFAAndCreatesSessionOnlyAfterVerification(t *testi
 	if err := json.Unmarshal(passwordReauth.Body.Bytes(), &reauthChallenge); err != nil {
 		t.Fatal(err)
 	}
-	if reauthChallenge.Purpose != mfaPurposeReauthentication {
+	if reauthChallenge.Purpose != mfaPurposeReauthentication || reauthChallenge.TrustedDeviceAvailable || reauthChallenge.TrustedDeviceTTLSeconds != 0 {
 		t.Fatalf("reauth challenge=%#v", reauthChallenge)
 	}
 	stillStale, err := testApp.app.sessionStore.GetSession(context.Background(), sessionCookie.Value)

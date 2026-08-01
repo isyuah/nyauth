@@ -89,6 +89,9 @@ interface MockState {
   mfaStatusRequests?: number;
   passkeyListRequests?: number;
   sessionListRequests?: number;
+  trustedDeviceListRequests?: number;
+  loginHistoryRequests?: number;
+  trustedDeviceDeleteCSRF?: string | null;
   authorizationListRequests?: number;
   adminUserOverviewRequests?: Record<string, number>;
   adminUserSecurityRequests?: Record<string, number>;
@@ -144,6 +147,9 @@ const browserSessions = [
     created_at: '2026-01-01T00:00:00Z',
     last_seen_at: '2026-01-02T00:00:00Z',
     authenticated_at: '2026-01-01T00:00:00Z',
+    session_idle_expires_at: '2026-01-03T00:00:00Z',
+    session_expires_at: '2026-01-04T00:00:00Z',
+    recent_authentication_expires_at: '2026-01-01T00:10:00Z',
   },
   {
     id: 'session-other',
@@ -153,6 +159,33 @@ const browserSessions = [
     created_at: '2026-01-01T01:00:00Z',
     last_seen_at: '2026-01-02T01:00:00Z',
     authenticated_at: '2026-01-01T01:00:00Z',
+    session_idle_expires_at: '2026-01-03T01:00:00Z',
+    session_expires_at: '2026-01-04T01:00:00Z',
+    recent_authentication_expires_at: '2026-01-01T01:10:00Z',
+  },
+];
+
+const trustedDevices = [
+  {
+    id: 'trusted-current', current: true, ip_address: '192.0.2.10',
+    user_agent: 'Mozilla/5.0 (Windows NT 10.0) Chrome/126.0',
+    created_at: '2026-01-01T00:00:00Z', last_used_at: '2026-01-02T00:00:00Z', expires_at: '2026-02-01T00:00:00Z',
+  },
+  {
+    id: 'trusted-other', current: false, ip_address: '198.51.100.24',
+    user_agent: 'Mozilla/5.0 (Android 15) Firefox/128.0',
+    created_at: '2026-01-01T01:00:00Z', last_used_at: '2026-01-02T01:00:00Z', expires_at: '2026-02-01T01:00:00Z',
+  },
+];
+
+const loginHistory = [
+  {
+    id: 'history-success', result: 'success', authentication_method: 'password', second_factor: 'trusted_device',
+    ip_address: '192.0.2.10', user_agent: 'Mozilla/5.0 (Windows NT 10.0) Chrome/126.0', created_at: '2026-01-02T00:00:00Z',
+  },
+  {
+    id: 'history-failure', result: 'failure', authentication_method: 'password', second_factor: 'totp',
+    ip_address: '198.51.100.24', user_agent: 'Mozilla/5.0 (Android 15) Firefox/128.0', created_at: '2026-01-01T23:00:00Z',
   },
 ];
 
@@ -673,6 +706,24 @@ async function installAPIMocks(page: Page, state: MockState) {
     if (path === '/api/me/sessions/revoke-others' && request.method() === 'POST') {
       state.revokeOthersCSRF = await request.headerValue('x-csrf-token');
       await fulfillJSON(route, 200, { revoked: 1 });
+      return;
+    }
+
+    if (path === '/api/me/trusted-devices' && request.method() === 'GET') {
+      state.trustedDeviceListRequests = (state.trustedDeviceListRequests || 0) + 1;
+      await fulfillJSON(route, 200, { enabled: true, items: trustedDevices });
+      return;
+    }
+
+    if (path === '/api/me/login-history' && request.method() === 'GET') {
+      state.loginHistoryRequests = (state.loginHistoryRequests || 0) + 1;
+      await fulfillJSON(route, 200, { items: loginHistory, total: 2, page: 1, page_size: 20, total_pages: 1 });
+      return;
+    }
+
+    if (path === `/api/me/trusted-devices/${trustedDevices[1].id}` && request.method() === 'DELETE') {
+      state.trustedDeviceDeleteCSRF = await request.headerValue('x-csrf-token');
+      await route.fulfill({ status: 204 });
       return;
     }
 
@@ -1345,6 +1396,8 @@ test('all profile deep links load only their own account data', async ({ page })
     state.mfaStatusRequests = 0;
     state.passkeyListRequests = 0;
     state.sessionListRequests = 0;
+    state.trustedDeviceListRequests = 0;
+    state.loginHistoryRequests = 0;
     state.authorizationListRequests = 0;
     state.identityLoadRequests = 0;
     state.providerListRequests = 0;
@@ -1374,6 +1427,8 @@ test('all profile deep links load only their own account data', async ({ page })
   await expect(page.getByRole('heading', { name: '设备会话', exact: true }).first()).toBeVisible();
   await expect(page.getByRole('link', { name: '设备会话', exact: true })).toHaveAttribute('aria-current', 'page');
   await expect.poll(() => state.sessionListRequests || 0).toBeGreaterThan(0);
+  await expect.poll(() => state.trustedDeviceListRequests || 0).toBeGreaterThan(0);
+  await expect.poll(() => state.loginHistoryRequests || 0).toBeGreaterThan(0);
   expect(state.meRequests || 0).toBe(0);
   expect(state.mfaStatusRequests || 0).toBe(0);
   expect(state.authorizationListRequests || 0).toBe(0);
@@ -1547,8 +1602,32 @@ test('revoking other device sessions sends CSRF and preserves the current sessio
 
   await expect(dialog).toBeHidden();
   await expect(page.getByText('当前设备')).toBeVisible();
-  await expect(page.getByText('Firefox · Android')).toBeHidden();
+  const sessionsSection = page.locator('section').filter({ has: page.getByRole('heading', { name: '设备会话', exact: true }) });
+  await expect(sessionsSection.getByText('Firefox · Android')).toBeHidden();
   expect(state.revokeOthersCSRF).toBe('csrf-user');
+});
+
+test('trusted browsers and restricted login history are visible and revocable', async ({ page }) => {
+  const state: MockState = {
+    authenticated: true,
+    mustChangePassword: false,
+    role: 'user',
+    csrfToken: 'csrf-user',
+  };
+  await installAPIMocks(page, state);
+
+  await page.goto('/profile/sessions');
+  await expect(page.getByRole('heading', { name: '可信浏览器' })).toBeVisible();
+  await expect(page.getByText('密码 + 可信浏览器')).toBeVisible();
+  await expect(page.getByText('密码 + 动态验证码')).toBeVisible();
+  const trustedSection = page.locator('section').filter({ has: page.getByRole('heading', { name: '可信浏览器' }) });
+  await trustedSection.getByRole('button', { name: '撤销信任' }).last().click();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog.getByText(/当前已登录会话不会退出/)).toBeVisible();
+  await dialog.getByRole('button', { name: '撤销可信浏览器' }).click();
+
+  await expect(dialog).toBeHidden();
+  expect(state.trustedDeviceDeleteCSRF).toBe('csrf-user');
 });
 
 test('revoking an OAuth authorization sends CSRF and removes the grant', async ({ page }) => {
@@ -1678,7 +1757,7 @@ test('password reauthentication completes MFA inline and promotes the formal CSR
 
   expect(primaryCSRF).toBe('csrf-formal-before-mfa');
   expect(verificationCSRF).toBe('csrf-mfa-pending');
-  expect(verificationBody).toEqual({ method: 'totp', code: '123456' });
+  expect(verificationBody).toEqual({ method: 'totp', code: '123456', trust_device: false });
   expect(state.revokeOthersCSRF).toBe('csrf-formal-after-mfa');
 });
 

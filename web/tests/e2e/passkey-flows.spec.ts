@@ -26,6 +26,7 @@ interface PasskeyMockState {
   mfaMethods: MFAMethod[];
   mfaOptionsCSRF: string | null;
   mfaVerifyCSRF: string | null;
+  mfaTrustDeviceHeader: string | null;
   mfaCredentialRawID: string;
   deleteRequiresReauthentication: boolean;
   reauthenticated: boolean;
@@ -86,12 +87,16 @@ function newState(overrides: Partial<PasskeyMockState> = {}): PasskeyMockState {
     mfaMethods: ['passkey'],
     mfaOptionsCSRF: null,
     mfaVerifyCSRF: null,
+    mfaTrustDeviceHeader: null,
     mfaCredentialRawID: '',
     deleteRequiresReauthentication: false,
     reauthenticated: false,
     deleteAttempts: 0,
     reauthCredentialRawID: '',
-    security: { revision: 1, totp_enabled: true, passkeys_enabled: true, require_mfa_for_admins: false },
+    security: {
+      revision: 1, totp_enabled: true, passkeys_enabled: true, require_mfa_for_admins: false,
+      trusted_devices_enabled: true, trusted_device_ttl: '720h0m0s',
+    },
     securitySaveAttempts: 0,
     securitySaveBodies: [],
     securitySaveCSRF: [],
@@ -180,6 +185,8 @@ function mfaChallenge(state: PasskeyMockState) {
     methods: state.mfaMethods,
     csrf_token: 'csrf-mfa-pending',
     expires_at: futureTimestamp(),
+    trusted_device_available: true,
+    trusted_device_ttl_seconds: 30 * 24 * 60 * 60,
   };
 }
 
@@ -395,6 +402,7 @@ async function installPasskeyMocks(page: Page, state: PasskeyMockState) {
     }
     if (path === '/api/login/mfa/passkey/verify' && method === 'POST') {
       state.mfaVerifyCSRF = await request.headerValue('x-csrf-token');
+      state.mfaTrustDeviceHeader = await request.headerValue('x-trust-device');
       const body = request.postDataJSON() as { rawId: string };
       state.mfaCredentialRawID = body.rawId;
       state.mfaPending = false;
@@ -465,6 +473,8 @@ async function installPasskeyMocks(page: Page, state: PasskeyMockState) {
         totp_enabled: body.totp_enabled,
         passkeys_enabled: body.passkeys_enabled,
         require_mfa_for_admins: body.require_mfa_for_admins,
+        trusted_devices_enabled: body.trusted_devices_enabled !== false,
+        trusted_device_ttl: body.trusted_device_ttl || '720h0m0s',
       };
       await fulfillJSON(route, 200, state.security);
       return;
@@ -603,11 +613,13 @@ test('a registered Passkey completes the password login MFA challenge', async ({
     await page.getByLabel('密码').fill('password-for-e2e');
     await page.getByRole('button', { name: '登录', exact: true }).click();
     await expect(page).toHaveURL(/\/login\/mfa/);
+    await page.getByRole('checkbox', { name: /信任此浏览器/ }).check();
     await page.getByRole('button', { name: '使用 Passkey 验证' }).click();
 
     await expect(page).toHaveURL(/\/profile\/security$/);
     expect(state.mfaOptionsCSRF).toBe('csrf-mfa-pending');
     expect(state.mfaVerifyCSRF).toBe('csrf-mfa-pending');
+    expect(state.mfaTrustDeviceHeader).toBe('true');
     expect(state.mfaCredentialRawID).toBe(state.credentialRawID);
   } finally {
     await removeVirtualAuthenticator(authenticator);
@@ -742,8 +754,8 @@ test('administrators can hot-update the Passkey enrollment switch after reauthen
   await expect(page.getByText('登录安全策略已保存，立即对所有实例生效。')).toBeVisible();
   expect(state.securitySaveAttempts).toBe(2);
   expect(state.securitySaveBodies).toEqual([
-    { expected_revision: 1, totp_enabled: true, passkeys_enabled: false, require_mfa_for_admins: false },
-    { expected_revision: 1, totp_enabled: true, passkeys_enabled: false, require_mfa_for_admins: false },
+    { expected_revision: 1, totp_enabled: true, passkeys_enabled: false, require_mfa_for_admins: false, trusted_devices_enabled: true, trusted_device_ttl: '720h' },
+    { expected_revision: 1, totp_enabled: true, passkeys_enabled: false, require_mfa_for_admins: false, trusted_devices_enabled: true, trusted_device_ttl: '720h' },
   ]);
   expect(state.securitySaveCSRF).toEqual(['csrf-session', 'csrf-password-reauthenticated']);
 });

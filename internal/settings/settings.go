@@ -100,13 +100,41 @@ func DefaultRegistration() Registration {
 // Security controls runtime enrollment and administrator MFA policy. Turning
 // off enrollment does not deactivate factors users already enrolled.
 type Security struct {
-	TOTPEnabled         bool `json:"totp_enabled"`
-	PasskeysEnabled     bool `json:"passkeys_enabled"`
-	RequireMFAForAdmins bool `json:"require_mfa_for_admins"`
+	TOTPEnabled           bool   `json:"totp_enabled"`
+	PasskeysEnabled       bool   `json:"passkeys_enabled"`
+	RequireMFAForAdmins   bool   `json:"require_mfa_for_admins"`
+	TrustedDevicesEnabled bool   `json:"trusted_devices_enabled"`
+	TrustedDeviceTTL      string `json:"trusted_device_ttl"`
 }
 
 func DefaultSecurity() Security {
-	return Security{TOTPEnabled: true, PasskeysEnabled: true, RequireMFAForAdmins: false}
+	return Security{
+		TOTPEnabled: true, PasskeysEnabled: true, RequireMFAForAdmins: false,
+		TrustedDevicesEnabled: true, TrustedDeviceTTL: (30 * 24 * time.Hour).String(),
+	}
+}
+
+const (
+	MinTrustedDeviceTTL = 24 * time.Hour
+	MaxTrustedDeviceTTL = 90 * 24 * time.Hour
+)
+
+var ErrInvalidSecurity = errors.New("invalid security settings")
+
+func (s Security) TrustedDeviceDuration() time.Duration {
+	duration, err := time.ParseDuration(s.TrustedDeviceTTL)
+	if err != nil {
+		return 0
+	}
+	return duration
+}
+
+func ValidateSecurity(value Security) error {
+	duration := value.TrustedDeviceDuration()
+	if duration < MinTrustedDeviceTTL || duration > MaxTrustedDeviceTTL {
+		return fmt.Errorf("%w: trusted device TTL must be between %s and %s", ErrInvalidSecurity, MinTrustedDeviceTTL, MaxTrustedDeviceTTL)
+	}
+	return nil
 }
 
 // Manager caches the current settings snapshot and keeps it consistent across
@@ -374,6 +402,9 @@ func (m *Manager) Load(ctx context.Context) error {
 		if err := json.Unmarshal(storedValue.value, &value); err != nil {
 			return fmt.Errorf("decoding stored security settings: %w", err)
 		}
+		if err := ValidateSecurity(value); err != nil {
+			return fmt.Errorf("decoding stored security settings: %w", err)
+		}
 		security = &Versioned[Security]{Revision: storedValue.revision, Value: value}
 	}
 
@@ -586,13 +617,18 @@ func (m *Manager) SetSecurity(
 	if m.db == nil {
 		return 0, errors.New("runtime settings storage is unavailable")
 	}
+	if err := ValidateSecurity(security); err != nil {
+		return 0, err
+	}
 	if err := mutation.ValidateEvent(models.AuditSettingsUpdated); err != nil {
 		return 0, fmt.Errorf("validating security settings audit: %w", err)
 	}
 	mutation = mutation.WithTarget("settings", securityKey).WithDetails(map[string]any{
-		"totp_enabled":           security.TOTPEnabled,
-		"passkeys_enabled":       security.PasskeysEnabled,
-		"require_mfa_for_admins": security.RequireMFAForAdmins,
+		"totp_enabled":            security.TOTPEnabled,
+		"passkeys_enabled":        security.PasskeysEnabled,
+		"require_mfa_for_admins":  security.RequireMFAForAdmins,
+		"trusted_devices_enabled": security.TrustedDevicesEnabled,
+		"trusted_device_ttl":      security.TrustedDeviceTTL,
 	})
 	encoded, err := json.Marshal(security)
 	if err != nil {
@@ -604,6 +640,10 @@ func (m *Manager) SetSecurity(
 	}
 	defer tx.Rollback(ctx)
 	if err := runtimecoord.LockSecurityExclusive(ctx, tx); err != nil {
+		return 0, err
+	}
+	previous, err := LoadSecurityTx(ctx, tx)
+	if err != nil {
 		return 0, err
 	}
 	if security.RequireMFAForAdmins {
@@ -645,10 +685,24 @@ func (m *Manager) SetSecurity(
 	if err != nil {
 		return 0, err
 	}
+	var revokedTrustedDevices int64
+	if previous.TrustedDevicesEnabled && !security.TrustedDevicesEnabled {
+		tag, err := tx.Exec(ctx, `
+			UPDATE user_trusted_devices SET revoked_at=NOW()
+			WHERE revoked_at IS NULL
+		`)
+		if err != nil {
+			return 0, fmt.Errorf("revoking trusted devices while disabling policy: %w", err)
+		}
+		revokedTrustedDevices = tag.RowsAffected()
+	}
 	mutation = mutation.WithDetails(map[string]any{
 		"revision": revision, "totp_enabled": security.TOTPEnabled,
-		"passkeys_enabled":       security.PasskeysEnabled,
-		"require_mfa_for_admins": security.RequireMFAForAdmins,
+		"passkeys_enabled":        security.PasskeysEnabled,
+		"require_mfa_for_admins":  security.RequireMFAForAdmins,
+		"trusted_devices_enabled": security.TrustedDevicesEnabled,
+		"trusted_device_ttl":      security.TrustedDeviceTTL,
+		"trusted_devices_revoked": revokedTrustedDevices,
 	})
 	if err := audit.EnqueueMutationTx(ctx, tx, mutation); err != nil {
 		return 0, fmt.Errorf("auditing security settings: %w", err)
@@ -676,6 +730,9 @@ func LoadSecurityTx(ctx context.Context, tx pgx.Tx) (Security, error) {
 		return Security{}, fmt.Errorf("locking security settings: %w", err)
 	}
 	if err := json.Unmarshal(raw, &security); err != nil {
+		return Security{}, fmt.Errorf("decoding stored security settings: %w", err)
+	}
+	if err := ValidateSecurity(security); err != nil {
 		return Security{}, fmt.Errorf("decoding stored security settings: %w", err)
 	}
 	return security, nil

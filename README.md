@@ -9,7 +9,7 @@
 - 第一方后台仅使用 `HttpOnly + SameSite=Lax` 会话 Cookie，并对修改请求强制校验 CSRF。
 - OAuth 授权码客户端强制使用 PKCE S256；不支持 plain、implicit 或 hybrid 流程。
 - JWT 固定使用 RS256，refresh token 采用 family 轮换与重复使用检测。
-- 数据库以嵌入二进制的 `000001_baseline` 建立破坏性发布基线，并通过兼容的 `000002` 至 `000014_oauth_application_identity` 加法迁移演进；当前 `0.6.0-dev` 要求 schema version 14，可从正式 `0.5.0` 的 schema version 13 继续迁移。服务启动只校验 schema，不再隐式迁移。
+- 数据库以嵌入二进制的 `000001_baseline` 建立破坏性发布基线，并通过兼容的 `000002` 至 `000015_trusted_devices` 加法迁移演进；当前 `0.6.0-dev` 要求 schema version 15，可从正式 `0.5.0` 的 schema version 13 依次迁移。服务启动只校验 schema，不再隐式迁移。
 - 旧数据库、session、token、JWK、Provider 凭据和 OAuth 客户端注册均不兼容。
 - 旧 Go/TypeScript SDK 已删除；OAuth/OIDC 集成以标准协议和成熟语言库为准。
 
@@ -29,7 +29,7 @@
 - 控制面认证：HttpOnly 会话、CSRF、强制首次改密、会话与令牌即时失效
 - 外部身份：GitHub、Google、通用 HTTPS OIDC Provider；不按邮箱自动合并账户
 - 管理后台：用户、客户端、Provider、审计与统计
-- 账户安全中心：设备会话、OAuth 授权、近期重新认证、TOTP、Passkey/WebAuthn、一次性恢复码、邮箱验证与密码恢复
+- 账户安全中心：设备会话、可信浏览器、受限登录历史、OAuth 授权、近期重新认证、TOTP、Passkey/WebAuthn、一次性恢复码、邮箱验证与密码恢复
 - 自助注册：关闭 / 邀请制 / 开放三种模式，域名白名单与邀请码均为运行时设置
 - 动态邮件：数据库版本化 SMTP 配置、结构化事务邮件模板、真实预览/测试、免重启激活/回滚与共享熔断
 - 全站横幅：信息/警告/严重三级横幅，开始与结束时间可独立省略，浏览器按版本关闭，以及 SSE 实时同步
@@ -238,6 +238,10 @@ Nyauth 只通过 SMTP 发送邮件，不读取邮箱，也不需要 IMAP。生�
 | GET | `/api/me/sessions` | 查看设备会话 |
 | DELETE | `/api/me/sessions/{id}` | 撤销指定设备会话 |
 | POST | `/api/me/sessions/revoke-others` | 撤销当前会话以外的所有设备会话 |
+| GET | `/api/me/trusted-devices` | 列出当前安全版本下仍有效的可信浏览器，不返回 Token 或哈希 |
+| DELETE | `/api/me/trusted-devices/{id}` | 撤销指定可信浏览器，不退出既有会话 |
+| POST | `/api/me/trusted-devices/revoke-others` | 撤销当前浏览器以外的全部可信浏览器 |
+| GET | `/api/me/login-history` | 分页查看本人登录成功、登录失败和登录 MFA 失败的受限投影 |
 | GET | `/api/me/authorizations` | 查看 OAuth 客户端授权 |
 | DELETE | `/api/me/authorizations/{client_id}` | 撤销授权并立即失效既有 access/refresh token |
 | GET | `/api/me/identities` | 当前用户的外部身份 |
@@ -254,6 +258,8 @@ Nyauth 只通过 SMTP 发送邮件，不读取邮箱，也不需要 IMAP。生�
 TOTP 使用 RFC 6238 的 SHA-1、30 秒、6 位参数和 `±1` time-step 窗口，成功 step 会在 PostgreSQL 行锁事务中记录并拒绝重放。TOTP secret 使用 master key envelope encryption，恢复码只保存 selector 摘要与 Argon2id 哈希。Passkey 注册强制 discoverable credential 与 user verification，attestation 为 `none`；完整 WebAuthn credential 使用 master key envelope encryption，credential ID 仅用于索引，每次 assertion 都在行锁事务中同步 sign count、clone warning、backup state 与完整密文。clone warning 会保留并写高风险审计，但不会仅凭该信号立即锁死账户。
 
 启用或停用因素会推进 `auth_version`，撤销既有浏览器会话与 OAuth refresh family，再为当前设备轮换新会话。密码和 Provider 重新认证均会在主因素后执行同一第二因素 challenge，不能只凭密码刷新近期认证时间。Passkey 可作为独立登录、MFA 第二因素和近期重新认证方式；TOTP 恢复码仍只属于 TOTP，不会被无依据地扩成账户级恢复凭据。
+
+用户完成登录 MFA 后可选择信任当前浏览器，默认有效 30 天、管理员可在 1 至 90 天内热更新。浏览器只持有 `HttpOnly + SameSite=Lax` 随机 Token，PostgreSQL 只保存 SHA-256 哈希，并绑定用户的 `auth_version` 与 `session_version`。可信状态仅在密码或 Provider 主验证成功后跳过登录 MFA；不会跳过主验证、Passkey 登录、近期重新认证，也不会延长会话。改密码、MFA 变化、会话安全版本变化、用户撤销或管理员关闭策略都会使信任失效。登录历史复用持久化审计日志，但 API 只投影认证方式、第二因素、结果、IP、User-Agent 和时间，不返回任意审计 details。
 
 ```typescript
 const session = await fetch('/api/session', {
@@ -368,7 +374,7 @@ Provider 不再从 YAML 或环境变量静态加载，只能由管理员写入�
 - `GET /api/admin/users/{id}/clients`、`PUT /api/admin/users/{id}/client-quota`：查看权威客户端配额，或设置 0–1000 的用户覆盖值；`null` 恢复继承全局默认，降低配额不删除已有客户端。
 - `POST /api/admin/users/{id}/avatar`、`DELETE /api/admin/users/{id}/avatar`：管理员上传或删除用户头像，受 CSRF、限流与审计保护。
 - `GET/PUT /api/admin/settings/registration`：注册模式、邮箱验证要求、域名白名单、待验证期限与邀请默认值（运行时设置，免重启生效；修改要求近期重新认证）。
-- `GET/PUT /api/admin/settings/security`：TOTP/Passkey 注册开关与管理员强制 MFA（运行时设置，免重启生效；修改要求近期重新认证）。开关只阻止新注册，不停用已有因素。开启强制策略前所有活动管理员必须在当前 RP 下至少配置 TOTP 或 Passkey；策略生效后，无因素用户不能被激活/晋升为管理员，活动管理员也不能删除其最后一个因素。
+- `GET/PUT /api/admin/settings/security`：TOTP/Passkey 注册开关、可信浏览器开关与有效期、管理员强制 MFA（运行时设置，免重启生效；修改要求近期重新认证）。关闭可信浏览器会在同一设置事务中撤销全部记录；TOTP/Passkey 开关只阻止新注册，不停用已有因素。开启强制策略前所有活动管理员必须在当前 RP 下至少配置 TOTP 或 Passkey；策略生效后，无因素用户不能被激活/晋升为管理员，活动管理员也不能删除其最后一个因素。
 - `GET/POST /api/admin/invites`、`DELETE /api/admin/invites/{id}`：邀请码管理；明文 code 仅创建响应返回一次，库中只存哈希；列表分别返回已使用与待验证预占数。创建要求近期重新认证，紧急吊销不要求。
 - `GET /api/admin/settings/mail`、`PUT /api/admin/settings/mail/candidate`，以及邮件设置下的 `candidate/test`、`activate`、`rollback`、`disable` POST：数据库动态 SMTP；候选必须实际测试成功并在十分钟内激活，所有读取和变更均要求近期重新认证，写操作还受 CSRF、限流和审计保护。
 

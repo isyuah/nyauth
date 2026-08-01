@@ -31,6 +31,33 @@ var (
 	ErrEmailVerificationPending = errors.New("email verification is required before signing in")
 )
 
+// AuthenticationFailure carries a known account identity only inside the
+// trusted server boundary. Its Error and Unwrap behavior preserves the public
+// generic credential error and it must never be serialized directly.
+type AuthenticationFailure struct {
+	UserID   uuid.UUID
+	Username string
+	cause    error
+}
+
+func (e *AuthenticationFailure) Error() string { return e.cause.Error() }
+func (e *AuthenticationFailure) Unwrap() error { return e.cause }
+
+func AuthenticationFailureActor(err error) (uuid.UUID, string, bool) {
+	var failure *AuthenticationFailure
+	if !errors.As(err, &failure) || failure.UserID == uuid.Nil {
+		return uuid.Nil, "", false
+	}
+	return failure.UserID, failure.Username, true
+}
+
+func authenticationFailure(cause error, current *models.User) error {
+	if current == nil || current.ID == uuid.Nil {
+		return cause
+	}
+	return &AuthenticationFailure{UserID: current.ID, Username: current.Username, cause: cause}
+}
+
 type serviceStore interface {
 	Create(ctx context.Context, u *models.User) error
 	CreateRegistration(ctx context.Context, u *models.User, options RegistrationCommitOptions) (*uuid.UUID, error)
@@ -455,13 +482,13 @@ func (s *Service) Authenticate(ctx context.Context, username, password string) (
 	}
 	ok, verifyErr := crypto.VerifyPassword(candidate, hash)
 	if !validUsername || !validPassword || lookupErr != nil || verifyErr != nil || !ok || u == nil || u.PasswordHash == nil {
-		return nil, ErrInvalidCredentials
+		return nil, authenticationFailure(ErrInvalidCredentials, u)
 	}
 	if u.Status == models.UserStatusPending {
-		return nil, ErrEmailVerificationPending
+		return nil, authenticationFailure(ErrEmailVerificationPending, u)
 	}
 	if u.Status != models.UserStatusActive {
-		return nil, ErrInvalidCredentials
+		return nil, authenticationFailure(ErrInvalidCredentials, u)
 	}
 	return u, nil
 }

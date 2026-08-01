@@ -251,11 +251,11 @@ func (s *Server) handleFinishMFAPasskey(w http.ResponseWriter, r *http.Request) 
 		"mfa_"+pending.Data.Purpose, s.mfaAuditContext(r, current), time.Now().UTC(),
 	)
 	if err != nil {
-		s.handlePasskeyAuthenticationError(w, r, err, "mfa", current, pending.Data.PrimaryMethod)
+		s.handlePasskeyAuthenticationError(w, r, err, "mfa_"+pending.Data.Purpose, current, pending.Data.PrimaryMethod)
 		return
 	}
 	s.sessionMiddleware.clearNamedCookie(w, mfaPendingCookieName)
-	s.completeMFAChallenge(w, r, pending, current, authenticated, "passkey", limitIdentity)
+	s.completeMFAChallenge(w, r, pending, current, authenticated, "passkey", limitIdentity, r.Header.Get("X-Trust-Device") == "true")
 }
 
 func (s *Server) handleBeginPasskeyReauthentication(w http.ResponseWriter, r *http.Request) {

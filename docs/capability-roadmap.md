@@ -1,6 +1,6 @@
 # 能力路线图（0.4+ 展望）
 
-> 状态：更新于 2026-07-31。本文档记录"网站自身能力"的增强方向与取舍结论，按优先级排序。
+> 状态：更新于 2026-08-01。本文档记录"网站自身能力"的增强方向与取舍结论，按优先级排序。
 
 ## 结论摘要
 
@@ -14,6 +14,7 @@
 | 每客户端访问策略 | 已完成——支持 open、admins_only 和 allowlist，并在授权与用户 Token 使用时持续执行 | 已完成 |
 | TOTP + 恢复码 | Phase T 已完成：登录、reauth、管理员强制策略、恢复验证 | 已完成 |
 | Passkey/WebAuthn | Phase P 已完成：独立登录、Conditional UI、MFA、step-up 与安全中心管理 | 已完成 |
+| 登录历史与可信浏览器 | Phase B 已完成：受限审计投影、MFA 后信任、版本绑定和用户自助撤销 | 已完成 |
 | 自助注册 / 邀请制 | Phase R 已完成：关闭 / 邀请制 / 开放注册、验证与邀请预占生命周期 | 已完成 |
 | 人机验证 | Phase H 已完成：适配器、Turnstile 候选/测试/激活/回滚、公开入口策略与 CLI 紧急禁用 | 已完成 |
 | 事件 Webhook | 做——作为插件系统的替代品，复用审计 outbox | P2 |
@@ -65,6 +66,7 @@ OAuth 客户端已支持 `open`、`admins_only` 和 `allowlist`。策略在用�
 - Passkey 已支持 discoverable 独立登录、Conditional UI、MFA 第二因素、近期重新认证与安全中心管理；RP ID 和 origin 从公开 `auth.issuer` 固定派生。
 - 完整 WebAuthn credential 加密存储，每次认证在事务中持久化 sign count、clone warning 与 backup state；Redis ceremony 使用不透明 ID，并与 MFA pending 原子消费。
 - 管理员强制 MFA 接受 TOTP 或当前 RP Passkey；两个注册开关都是运行时 enrollment 开关，不会停用已有因素。
+- Phase B 的可信浏览器只在密码或 Provider 主验证之后跳过登录 MFA，不参与 Passkey 独立登录、近期重新认证或会话续期。Token 只在浏览器 Cookie 中出现，数据库保存哈希并绑定认证/会话版本；个人中心同时提供自助撤销和来自审计日志的受限登录历史。
 
 ## 6. 自助注册 / 邀请（已完成）
 
@@ -87,7 +89,7 @@ OAuth 客户端已支持 `open`、`admins_only` 和 `allowlist`。策略在用�
 ## 实施顺序建议
 
 ```
-当前 0.6.0-dev: OAuth 应用身份资料、受控 Logo、授权快照、Scope/Claim 变化提示和高风险变更重新授权正在实现，schema 演进到 14
-下一步: 完成并验收应用身份与授权详情后，进入登录历史与可信设备；Passkey Conditional UI 已在 0.5.0 完成，不重复实现
+当前 0.6.0-dev: OAuth 应用身份与授权变化（Phase A）、登录历史与可信浏览器（Phase B）均已实现，schema 演进到 15
+下一步: 完成 0.6.0-dev 集中门禁与本地验收，再决定是否进入 OAuth Device Authorization Grant
 后续: 自动化管理 API、Webhook、自动更新和用户组继续推迟
 ```

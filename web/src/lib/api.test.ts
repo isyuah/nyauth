@@ -194,6 +194,8 @@ describe('MFA API contract', () => {
     methods: ['totp', 'recovery_code', 'passkey'],
     csrf_token: 'mfa-csrf',
     expires_at: '2026-07-27T12:05:00Z',
+    trusted_device_available: true,
+    trusted_device_ttl_seconds: 2592000,
   };
 
   const session: SessionInfo = {
@@ -238,12 +240,13 @@ describe('MFA API contract', () => {
       return_to: '/authorize?client_id=demo',
     });
 
-    await api.verifyLoginMFA('recovery_code', 'ABCDEFGH-234567ABCDEFGH', mfaRequired.csrf_token);
+    await api.verifyLoginMFA('recovery_code', 'ABCDEFGH-234567ABCDEFGH', mfaRequired.csrf_token, true);
     const [, verifyInit] = fetchMock.mock.calls[1] as unknown as [string, RequestInit];
     expect(new Headers(verifyInit.headers).get('X-CSRF-Token')).toBe('mfa-csrf');
     expect(JSON.parse(String(verifyInit.body))).toEqual({
       method: 'recovery_code',
       code: 'ABCDEFGH-234567ABCDEFGH',
+      trust_device: true,
     });
   });
 
@@ -335,7 +338,7 @@ describe('MFA API contract', () => {
     setCsrfToken('formal-session-csrf');
 
     await api.beginMFAPasskey('pending-mfa-csrf');
-    await api.finishMFAPasskey(options.ceremony_id, credential, 'pending-mfa-csrf');
+    await api.finishMFAPasskey(options.ceremony_id, credential, 'pending-mfa-csrf', undefined, true);
 
     const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit]>;
     for (const [, init] of calls) {
@@ -344,6 +347,7 @@ describe('MFA API contract', () => {
     }
     const finishHeaders = new Headers(calls[1][1].headers);
     expect(finishHeaders.get('X-WebAuthn-Ceremony')).toBe('mfa-ceremony');
+    expect(finishHeaders.get('X-Trust-Device')).toBe('true');
   });
 
   it('matches Passkey management and reauthentication routes exactly', async () => {

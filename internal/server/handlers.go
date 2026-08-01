@@ -123,9 +123,15 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	current, err := s.userService.Authenticate(r.Context(), request.Username, request.Password)
 	if err != nil {
+		var failureActorID *uuid.UUID
+		failureActorName := truncateAuditValue(request.Username, maxAuditActorNameLength)
+		if actorID, actorName, known := user.AuthenticationFailureActor(err); known {
+			failureActorID = &actorID
+			failureActorName = actorName
+		}
 		if errors.Is(err, user.ErrEmailVerificationPending) {
 			s.telemetry.RecordAuthEvent(r.Context(), "login", "email_unverified")
-			s.enqueueAuditResult(r.Context(), models.AuditUserLoginFailed, nil, truncateAuditValue(request.Username, maxAuditActorNameLength), "failure", "low", ip, truncateAuditValue(r.UserAgent(), maxAuditUserAgentLength), map[string]any{"authentication_method": "password", "reason": "email_unverified"})
+			s.enqueueAuditResult(r.Context(), models.AuditUserLoginFailed, failureActorID, failureActorName, "failure", "low", ip, truncateAuditValue(r.UserAgent(), maxAuditUserAgentLength), map[string]any{"authentication_method": "password", "reason": "email_unverified"})
 			writeAPIError(w, http.StatusForbidden, "email verification is required before signing in")
 			return
 		}
@@ -133,12 +139,12 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 			slog.WarnContext(r.Context(), "recording login failure for human verification failed", "error_class", "redis_unavailable")
 		}
 		s.telemetry.RecordAuthEvent(r.Context(), "login", "invalid_credentials")
-		s.enqueueAuditResult(r.Context(), models.AuditUserLoginFailed, nil, truncateAuditValue(request.Username, maxAuditActorNameLength), "failure", "medium", ip, truncateAuditValue(r.UserAgent(), maxAuditUserAgentLength), map[string]any{"authentication_method": "password"})
+		s.enqueueAuditResult(r.Context(), models.AuditUserLoginFailed, failureActorID, failureActorName, "failure", "medium", ip, truncateAuditValue(r.UserAgent(), maxAuditUserAgentLength), map[string]any{"authentication_method": "password"})
 		writeAPIError(w, http.StatusUnauthorized, "invalid credentials")
 		return
 	}
 	returnTo := safeReturnPath(request.ReturnTo, "/dashboard")
-	mfaResponse, mfaRequired, err := s.beginMFAPending(w, r, current, "password", "", returnTo)
+	mfaResponse, mfaRequired, trustedDevice, err := s.beginMFAPending(w, r, current, "password", "", returnTo)
 	if err != nil {
 		if errors.Is(err, errMFAEnrollmentRequired) {
 			s.telemetry.RecordAuthEvent(r.Context(), "login", "mfa_enrollment_required")
@@ -164,7 +170,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	}
 	_ = s.loginLimiter.ResetIdentity(r.Context(), ip, strings.ToLower(request.Username))
 	_ = s.humanLoginFailures.ResetIdentity(r.Context(), normalizedUsername)
-	s.enqueueAuditResult(r.Context(), models.AuditUserLogin, &current.ID, current.Username, "success", "low", ip, truncateAuditValue(r.UserAgent(), maxAuditUserAgentLength), map[string]any{"authentication_method": "password"})
+	details := map[string]any{"authentication_method": "password"}
+	if trustedDevice {
+		details["second_factor"] = "trusted_device"
+	}
+	s.enqueueAuditResult(r.Context(), models.AuditUserLogin, &current.ID, current.Username, "success", "low", ip, truncateAuditValue(r.UserAgent(), maxAuditUserAgentLength), details)
 	_ = s.userService.RecordLogin(r.Context(), current.ID, ip)
 	s.telemetry.RecordAuthEvent(r.Context(), "login", "success")
 	writeJSON(w, http.StatusOK, sessionResponse(current, authenticated.Data))

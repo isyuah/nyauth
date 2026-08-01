@@ -71,12 +71,14 @@ type LoginRequest struct {
 }
 
 type MFARequiredResponse struct {
-	Status    string    `json:"status"`
-	Purpose   string    `json:"purpose"`
-	Username  string    `json:"username"`
-	Methods   []string  `json:"methods"`
-	CSRFToken string    `json:"csrf_token"`
-	ExpiresAt time.Time `json:"expires_at"`
+	Status                  string    `json:"status"`
+	Purpose                 string    `json:"purpose"`
+	Username                string    `json:"username"`
+	Methods                 []string  `json:"methods"`
+	CSRFToken               string    `json:"csrf_token"`
+	ExpiresAt               time.Time `json:"expires_at"`
+	TrustedDeviceAvailable  bool      `json:"trusted_device_available"`
+	TrustedDeviceTTLSeconds int64     `json:"trusted_device_ttl_seconds,omitempty"`
 }
 
 // ChangePasswordRequest changes the password for the current user.
