@@ -29,12 +29,14 @@ type ConsentHandler struct {
 }
 
 type consentPermission struct {
-	Scope       string   `json:"scope"`
-	DisplayName string   `json:"display_name"`
-	Description string   `json:"description"`
-	RiskLevel   string   `json:"risk_level"`
-	Required    bool     `json:"required"`
-	Claims      []string `json:"claims"`
+	Scope             string   `json:"scope"`
+	DisplayName       string   `json:"display_name"`
+	Description       string   `json:"description"`
+	RiskLevel         string   `json:"risk_level"`
+	Required          bool     `json:"required"`
+	Claims            []string `json:"claims"`
+	PreviouslyGranted bool     `json:"previously_granted"`
+	NewlyRequested    bool     `json:"newly_requested"`
 }
 
 type consentDecisionRequest struct {
@@ -70,6 +72,28 @@ func (h *ConsentHandler) GetConsent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_or_expired_challenge")
 		return
 	}
+	if normalizedClientRevision(data.ClientAuthorizationRevision) != cl.AuthorizationRevision || normalizedClientRevision(data.ClientIdentityRevision) != cl.IdentityRevision {
+		writeError(w, http.StatusConflict, "client_changed_restart_authorization")
+		return
+	}
+	previousScopes := []string(nil)
+	previousClaims := []string(nil)
+	previouslyAuthorized := false
+	applicationChanged := false
+	reauthorizationRequired := false
+	newScopes := []string{}
+	newClaims := []string{}
+	if userID, parseErr := uuid.Parse(data.UserID); parseErr == nil {
+		if existing, getErr := h.authorizationStore.GetActive(r.Context(), userID, data.ClientID); getErr == nil {
+			previousScopes = existing.Scopes
+			previousClaims = existing.AllowedClaims
+			previouslyAuthorized = true
+			applicationChanged = existing.ClientIdentityRevision != cl.IdentityRevision
+			reauthorizationRequired = existing.ClientAuthorizationRevision != cl.AuthorizationRevision
+			newScopes = difference(data.Scopes, previousScopes)
+			newClaims = difference(claimsForGrantedScopes(data.Scopes, data.ScopeClaims), previousClaims)
+		}
+	}
 	redirectOrigin := ""
 	if parsed, parseErr := url.Parse(data.RedirectURI); parseErr == nil && parsed.Scheme != "" && parsed.Host != "" {
 		redirectOrigin = parsed.Scheme + "://" + parsed.Host
@@ -77,9 +101,14 @@ func (h *ConsentHandler) GetConsent(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"challenge": challenge, "client_name": cl.Name, "client_id": cl.ID,
 		"scopes": data.Scopes, "redirect_uri": data.RedirectURI,
-		"permissions":     consentPermissions(data.Scopes, data.OptionalScopes, data.ScopeClaims, data.ScopeDetails),
+		"permissions":     consentPermissionsWithHistory(data.Scopes, data.OptionalScopes, data.ScopeClaims, data.ScopeDetails, previousScopes),
 		"redirect_origin": redirectOrigin, "publisher_type": cl.PublisherType,
 		"verification_status": cl.PublisherVerification,
+		"logo_url":            cl.LogoURL, "homepage_uri": cl.HomepageURI,
+		"privacy_policy_uri": cl.PrivacyPolicyURI, "terms_of_service_uri": cl.TermsOfServiceURI,
+		"previously_authorized": previouslyAuthorized, "application_changed": applicationChanged,
+		"reauthorization_required": reauthorizationRequired,
+		"new_scopes":               newScopes, "new_claims": newClaims,
 	})
 }
 
@@ -98,6 +127,11 @@ func (h *ConsentHandler) AcceptConsent(w http.ResponseWriter, r *http.Request) {
 	data, err := h.sessionStore.ConsumeConsentForUser(r.Context(), decision.Challenge, sess.UserID)
 	if err != nil || data.AuthVersion != sess.AuthVersion {
 		writeError(w, http.StatusBadRequest, "invalid_or_expired_challenge")
+		return
+	}
+	cl, err := h.clientStore.GetByID(r.Context(), data.ClientID)
+	if err != nil || normalizedClientRevision(data.ClientAuthorizationRevision) != cl.AuthorizationRevision || normalizedClientRevision(data.ClientIdentityRevision) != cl.IdentityRevision {
+		writeError(w, http.StatusConflict, "client_changed_restart_authorization")
 		return
 	}
 	grantedOptionalScopes := data.OptionalScopes
@@ -120,8 +154,12 @@ func (h *ConsentHandler) AcceptConsent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusInternalServerError, "server_error")
 		return
 	}
-	if err := h.authorizationStore.Upsert(r.Context(), userID, data.ClientID, grantedScopes, grantedClaims, time.UnixMicro(authorizationIssuedAt).UTC()); err != nil {
-		writeError(w, http.StatusInternalServerError, "server_error")
+	if err := h.authorizationStore.UpsertExpected(r.Context(), userID, data.ClientID, grantedScopes, grantedClaims, time.UnixMicro(authorizationIssuedAt).UTC(), cl.IdentityRevision, cl.AuthorizationRevision); err != nil {
+		if errors.Is(err, authorization.ErrClientChanged) {
+			writeError(w, http.StatusConflict, "client_changed_restart_authorization")
+		} else {
+			writeError(w, http.StatusInternalServerError, "server_error")
+		}
 		return
 	}
 	code, err := internalcrypto.GenerateRandomString(32)
@@ -133,7 +171,8 @@ func (h *ConsentHandler) AcceptConsent(w http.ResponseWriter, r *http.Request) {
 		ClientID: data.ClientID, UserID: data.UserID, RedirectURI: data.RedirectURI, Scopes: grantedScopes,
 		AllowedClaims: grantedClaims, ClaimNamesSet: true,
 		CodeChallenge: data.CodeChallenge, ChallengeMethod: "S256", Nonce: data.Nonce, AuthVersion: data.AuthVersion,
-		AuthorizationIssuedAt: authorizationIssuedAt,
+		AuthorizationIssuedAt:       authorizationIssuedAt,
+		ClientAuthorizationRevision: cl.AuthorizationRevision,
 	}
 	if err := h.sessionStore.SaveAuthorizationCode(r.Context(), code, authorization, h.authorizationCodeTTL()); err != nil {
 		writeError(w, http.StatusInternalServerError, "server_error")
@@ -149,6 +188,25 @@ func (h *ConsentHandler) AcceptConsent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"redirect_url": target})
+}
+
+func consentPermissionsWithHistory(scopes, optionalScopes []string, scopeClaims map[string][]string, details map[string]session.ConsentScopeDetails, previousScopes []string) []consentPermission {
+	permissions := consentPermissions(scopes, optionalScopes, scopeClaims, details)
+	for index := range permissions {
+		permissions[index].PreviouslyGranted = slices.Contains(previousScopes, permissions[index].Scope)
+		permissions[index].NewlyRequested = len(previousScopes) > 0 && !permissions[index].PreviouslyGranted
+	}
+	return permissions
+}
+
+func difference(values, previous []string) []string {
+	result := make([]string, 0)
+	for _, value := range values {
+		if !slices.Contains(previous, value) {
+			result = append(result, value)
+		}
+	}
+	return result
 }
 
 func (h *ConsentHandler) authorizationStateTTL() time.Duration {

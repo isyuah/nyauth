@@ -110,6 +110,13 @@ const oauthSettings: OAuthSettings = {
 const ownedClient: OAuthClient = {
   id: 'quota-client',
   name: 'Quota Client',
+  homepage_uri: '',
+  privacy_policy_uri: '',
+  terms_of_service_uri: '',
+  current_logo_id: null,
+  logo_url: null,
+  identity_revision: 1,
+  authorization_revision: 1,
   redirect_uris: ['https://client.example.test/callback'],
   post_logout_redirect_uris: [],
   grants: ['authorization_code', 'refresh_token'],
@@ -641,10 +648,10 @@ test('my applications build new clients only from the current OAuth policy', asy
   await expect(tooltip).toBeVisible();
   expect(await tooltip.evaluate((element) => element.closest('[role="dialog"]') === null)).toBe(true);
   expect(await dialog.evaluate((element) => element.scrollWidth)).toBe(scrollWidthBefore);
-  await expect(page.getByLabel('client_credentials')).toBeChecked();
-  await expect(page.getByRole('checkbox', { name: 'email', exact: true })).toBeChecked();
-  await expect(page.getByRole('checkbox', { name: 'authorization_code', exact: true })).toHaveCount(0);
-  await expect(page.getByRole('checkbox', { name: 'offline_access', exact: true })).toHaveCount(0);
+  await expect(dialog.getByRole('checkbox', { name: /Client Credentials/ })).toBeChecked();
+  await expect(dialog.locator('#my-client-create-scope-email')).toBeChecked();
+  await expect(dialog.getByRole('checkbox', { name: /Authorization Code/ })).toHaveCount(0);
+  await expect(dialog.locator('#my-client-create-scope-offline_access')).toHaveCount(0);
   await expect(page.getByLabel('公共客户端')).toBeDisabled();
   await expect(page.getByLabel(/Post-logout Redirect URI/)).toBeDisabled();
   await page.getByLabel('应用名称').fill('Machine Client');
@@ -652,6 +659,9 @@ test('my applications build new clients only from the current OAuth policy', asy
   await expect.poll(() => bodies.length).toBe(1);
   expect(bodies[0]).toEqual({
     name: 'Machine Client',
+    homepage_uri: '',
+    privacy_policy_uri: '',
+    terms_of_service_uri: '',
     redirect_uris: [],
     post_logout_redirect_uris: [],
     grants: ['client_credentials'],

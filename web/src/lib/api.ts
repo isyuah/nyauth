@@ -208,6 +208,13 @@ export interface ProviderSummary {
 export interface OAuthClient {
   id: string;
   name: string;
+  homepage_uri: string;
+  privacy_policy_uri: string;
+  terms_of_service_uri: string;
+  current_logo_id?: string | null;
+  logo_url?: string | null;
+  identity_revision: number;
+  authorization_revision: number;
   redirect_uris: string[];
   post_logout_redirect_uris: string[];
   grants: string[];
@@ -244,6 +251,9 @@ export interface ClientAccessUser {
 
 export interface CreateClientInput {
   name: string;
+  homepage_uri?: string;
+  privacy_policy_uri?: string;
+  terms_of_service_uri?: string;
   redirect_uris: string[];
   post_logout_redirect_uris?: string[];
   grants: string[];
@@ -258,6 +268,9 @@ export interface CreateClientInput {
 
 export interface UpdateClientInput {
   name?: string;
+  homepage_uri?: string;
+  privacy_policy_uri?: string;
+  terms_of_service_uri?: string;
   redirect_uris?: string[];
   post_logout_redirect_uris?: string[];
   grants?: string[];
@@ -284,6 +297,20 @@ export interface OAuthAuthorization {
   id: string;
   client_id: string;
   client_name: string;
+  client_name_at_grant: string;
+  logo_url?: string | null;
+  homepage_uri?: string;
+  privacy_policy_uri?: string;
+  terms_of_service_uri?: string;
+  homepage_uri_at_grant?: string;
+  privacy_policy_uri_at_grant?: string;
+  terms_of_service_uri_at_grant?: string;
+  client_identity_revision: number;
+  current_identity_revision: number;
+  client_authorization_revision: number;
+  current_authorization_revision: number;
+  application_changed: boolean;
+  reauthorization_required: boolean;
   scopes: string[];
   allowed_claims: string[];
   granted_at: string;
@@ -478,6 +505,15 @@ export interface ConsentRequest {
   redirect_origin: string;
   publisher_type: OAuthPublisherType;
   verification_status: OAuthPublisherVerificationStatus;
+  logo_url?: string | null;
+  homepage_uri?: string;
+  privacy_policy_uri?: string;
+  terms_of_service_uri?: string;
+  previously_authorized: boolean;
+  application_changed: boolean;
+  reauthorization_required: boolean;
+  new_scopes: string[];
+  new_claims: string[];
 }
 
 export interface ConsentPermission {
@@ -487,6 +523,8 @@ export interface ConsentPermission {
   risk_level: OAuthRiskLevel;
   required: boolean;
   claims: string[];
+  previously_granted: boolean;
+  newly_requested: boolean;
 }
 
 export interface AuditLog {
@@ -1419,6 +1457,11 @@ const API_ERROR_TRANSLATIONS: Record<string, string> = {
   'oauth client policy changed; reload and retry': 'OAuth 客户端策略已更新，请重新加载后再试',
   'publisher verification is not applicable to system-managed clients': '系统管理客户端不需要发布者审核',
   'publisher verification status is unchanged': '发布者可信状态已经是目标状态',
+  'application not found': '应用不存在，或您没有管理权限',
+  'failed to update application': '应用保存失败，请重新加载后重试',
+  'logo was updated but the application could not be reloaded': 'Logo 已上传，但应用信息刷新失败，请重新加载页面',
+  'logo was removed but the application could not be reloaded': 'Logo 已删除，但应用信息刷新失败，请重新加载页面',
+  'client_changed_restart_authorization': '应用配置在授权期间已变更，请返回应用重新发起授权',
   'failed to update publisher verification': '发布者可信状态更新失败，请稍后重试',
   'invalid_scope_selection': '可选权限选择无效，请重新发起授权',
   'invalid_or_expired_challenge': '授权请求无效或已过期，请重新发起登录',
@@ -1688,6 +1731,66 @@ async function req<T>(path: string, opts: RequestInit = {}, redirectOnUnauthoriz
   return data;
 }
 
+function normalizedStringArray(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === 'string') : [];
+}
+
+export function normalizeOAuthClient<T extends OAuthClient>(client: T): T {
+  return {
+    ...client,
+    homepage_uri: client.homepage_uri || '',
+    privacy_policy_uri: client.privacy_policy_uri || '',
+    terms_of_service_uri: client.terms_of_service_uri || '',
+    identity_revision: Number.isSafeInteger(client.identity_revision) ? client.identity_revision : 1,
+    authorization_revision: Number.isSafeInteger(client.authorization_revision) ? client.authorization_revision : 1,
+    redirect_uris: normalizedStringArray(client.redirect_uris),
+    post_logout_redirect_uris: normalizedStringArray(client.post_logout_redirect_uris),
+    grants: normalizedStringArray(client.grants),
+    scopes: normalizedStringArray(client.scopes),
+    optional_scopes: normalizedStringArray(client.optional_scopes),
+    allowed_claims: normalizedStringArray(client.allowed_claims),
+  };
+}
+
+export function normalizeOAuthAuthorization(authorization: OAuthAuthorization): OAuthAuthorization {
+  return {
+    ...authorization,
+    client_name_at_grant: authorization.client_name_at_grant || authorization.client_name,
+    homepage_uri: authorization.homepage_uri || '',
+    privacy_policy_uri: authorization.privacy_policy_uri || '',
+    terms_of_service_uri: authorization.terms_of_service_uri || '',
+    homepage_uri_at_grant: authorization.homepage_uri_at_grant || '',
+    privacy_policy_uri_at_grant: authorization.privacy_policy_uri_at_grant || '',
+    terms_of_service_uri_at_grant: authorization.terms_of_service_uri_at_grant || '',
+    client_identity_revision: Number.isSafeInteger(authorization.client_identity_revision) ? authorization.client_identity_revision : 1,
+    current_identity_revision: Number.isSafeInteger(authorization.current_identity_revision) ? authorization.current_identity_revision : 1,
+    client_authorization_revision: Number.isSafeInteger(authorization.client_authorization_revision) ? authorization.client_authorization_revision : 1,
+    current_authorization_revision: Number.isSafeInteger(authorization.current_authorization_revision) ? authorization.current_authorization_revision : 1,
+    application_changed: authorization.application_changed === true,
+    reauthorization_required: authorization.reauthorization_required === true,
+    scopes: normalizedStringArray(authorization.scopes),
+    allowed_claims: normalizedStringArray(authorization.allowed_claims),
+  };
+}
+
+export function normalizeConsentRequest(consent: ConsentRequest): ConsentRequest {
+  return {
+    ...consent,
+    scopes: normalizedStringArray(consent.scopes),
+    permissions: Array.isArray(consent.permissions) ? consent.permissions.map((permission) => ({
+      ...permission,
+      claims: normalizedStringArray(permission.claims),
+      previously_granted: permission.previously_granted === true,
+      newly_requested: permission.newly_requested === true,
+    })) : [],
+    new_scopes: normalizedStringArray(consent.new_scopes),
+    new_claims: normalizedStringArray(consent.new_claims),
+    previously_authorized: consent.previously_authorized === true,
+    application_changed: consent.application_changed === true,
+    reauthorization_required: consent.reauthorization_required === true,
+  };
+}
+
 export const api = {
   login: (username: string, password: string, returnTo: string, humanVerification?: HumanVerificationProof) =>
     req<LoginResponse>('/api/login', {
@@ -1811,7 +1914,10 @@ export const api = {
     body: JSON.stringify({ new_password: newPassword }),
   }),
   deleteMyIdentity: (identityID: string) => req<SessionInfo>(`/api/me/identities/${encodeURIComponent(identityID)}`, { method: 'DELETE' }),
-  getMyAuthorizations: () => req<OAuthAuthorization[]>('/api/me/authorizations'),
+  getMyAuthorizations: async () => {
+    const authorizations = await req<OAuthAuthorization[]>('/api/me/authorizations');
+    return (Array.isArray(authorizations) ? authorizations : []).map(normalizeOAuthAuthorization);
+  },
   revokeMyAuthorization: (clientID: string) => req<void>(`/api/me/authorizations/${encodeURIComponent(clientID)}`, { method: 'DELETE' }),
   discovery: () => req<OIDCDiscoveryDocument>('/.well-known/openid-configuration', {}, false),
 
@@ -1840,14 +1946,24 @@ export const api = {
   },
 
   consent: {
-    get: (challenge: string) => req<ConsentRequest>(`/api/consent?challenge=${encodeURIComponent(challenge)}`),
+    get: async (challenge: string) => normalizeConsentRequest(await req<ConsentRequest>(`/api/consent?challenge=${encodeURIComponent(challenge)}`)),
     accept: (challenge: string, grantedOptionalScopes: string[]) => req<{ redirect_url: string }>('/api/consent/accept', { method: 'POST', body: JSON.stringify({ challenge, granted_optional_scopes: grantedOptionalScopes }) }),
     deny: (challenge: string) => req<{ redirect_url: string }>('/api/consent/deny', { method: 'POST', body: JSON.stringify({ challenge }) }),
   },
 
   my: {
-    getClients: () => req<MyClientPage>('/api/my/clients', { cache: 'no-store' }),
-    createClient: (data: CreateClientInput) => req<CreateClientResult>('/api/my/clients', { method: 'POST', body: JSON.stringify(data) }),
+    getClients: async () => {
+      const result = await req<MyClientPage>('/api/my/clients', { cache: 'no-store' });
+      return { ...result, items: (Array.isArray(result.items) ? result.items : []).map(normalizeOAuthClient) };
+    },
+    createClient: async (data: CreateClientInput) => normalizeOAuthClient(await req<CreateClientResult>('/api/my/clients', { method: 'POST', body: JSON.stringify(data) })),
+    updateClient: async (id: string, data: UpdateClientInput) => normalizeOAuthClient(await req<OAuthClient>(`/api/my/clients/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(data) })),
+    uploadClientLogo: async (id: string, blob: Blob) => {
+      const body = new FormData();
+      body.append('logo', blob, blob.type === 'image/png' ? 'logo.png' : 'logo.webp');
+      return normalizeOAuthClient(await req<OAuthClient>(`/api/my/clients/${encodeURIComponent(id)}/logo`, { method: 'POST', body }));
+    },
+    removeClientLogo: async (id: string) => normalizeOAuthClient(await req<OAuthClient>(`/api/my/clients/${encodeURIComponent(id)}/logo`, { method: 'DELETE' })),
     deleteClient: (id: string) => req<void>(`/api/my/clients/${encodeURIComponent(id)}`, { method: 'DELETE' }),
     rotateClientSecret: (id: string) => req<RotateClientSecretResult>(`/api/my/clients/${encodeURIComponent(id)}/rotate-secret`, { method: 'POST' }),
   },
@@ -2020,9 +2136,19 @@ export const api = {
     revokeUserSession: (id: string, sessionID: string) =>
       req<void>(`/api/admin/users/${encodeURIComponent(id)}/sessions/${encodeURIComponent(sessionID)}`, { method: 'DELETE' }),
     revokeUserSessions: (id: string) => req<{ revoked: number }>(`/api/admin/users/${encodeURIComponent(id)}/sessions`, { method: 'DELETE' }),
-    getClients: (page = 1, pageSize = 20) => req<PaginatedResponse<OAuthClient>>(`/api/admin/clients?page=${page}&page_size=${pageSize}`),
-    createClient: (data: CreateClientInput) => req<CreateClientResult>('/api/admin/clients', { method: 'POST', body: JSON.stringify(data) }),
-    updateClient: (id: string, data: UpdateClientInput) => req<OAuthClient>(`/api/admin/clients/${id}`, { method: 'PUT', body: JSON.stringify(data) }),
+    getClients: async (page = 1, pageSize = 20) => {
+      const result = await req<PaginatedResponse<OAuthClient>>(`/api/admin/clients?page=${page}&page_size=${pageSize}`);
+      return { ...result, items: (Array.isArray(result.items) ? result.items : []).map(normalizeOAuthClient) };
+    },
+    getClient: async (id: string) => normalizeOAuthClient(await req<OAuthClient>(`/api/admin/clients/${encodeURIComponent(id)}`, { cache: 'no-store' })),
+    createClient: async (data: CreateClientInput) => normalizeOAuthClient(await req<CreateClientResult>('/api/admin/clients', { method: 'POST', body: JSON.stringify(data) })),
+    updateClient: async (id: string, data: UpdateClientInput) => normalizeOAuthClient(await req<OAuthClient>(`/api/admin/clients/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(data) })),
+    uploadClientLogo: async (id: string, blob: Blob) => {
+      const body = new FormData();
+      body.append('logo', blob, blob.type === 'image/png' ? 'logo.png' : 'logo.webp');
+      return normalizeOAuthClient(await req<OAuthClient>(`/api/admin/clients/${encodeURIComponent(id)}/logo`, { method: 'POST', body }));
+    },
+    removeClientLogo: async (id: string) => normalizeOAuthClient(await req<OAuthClient>(`/api/admin/clients/${encodeURIComponent(id)}/logo`, { method: 'DELETE' })),
     updateClientOwner: (id: string, data: { owner_id: string | null }) =>
       req<OAuthClient>(`/api/admin/clients/${encodeURIComponent(id)}/owner`, { method: 'PUT', body: JSON.stringify(data) }),
     verifyClientPublisher: (id: string) =>

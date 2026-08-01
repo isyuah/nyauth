@@ -66,9 +66,44 @@ func validateRedirectURI(value string) error {
 	}
 	return fmt.Errorf("%w: redirect URI must use HTTPS except for loopback development clients", ErrInvalidClient)
 }
+
+func validateApplicationURI(label, value string) error {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return nil
+	}
+	if len(value) > 2048 {
+		return fmt.Errorf("%w: %s URI is too long", ErrInvalidClient, label)
+	}
+	u, err := url.Parse(value)
+	if err != nil || u.Scheme == "" || u.Host == "" || u.User != nil {
+		return fmt.Errorf("%w: invalid %s URI", ErrInvalidClient, label)
+	}
+	if u.Scheme == "https" {
+		return nil
+	}
+	if u.Scheme == "http" {
+		host := u.Hostname()
+		ip := net.ParseIP(host)
+		if strings.EqualFold(host, "localhost") || (ip != nil && ip.IsLoopback()) {
+			return nil
+		}
+	}
+	return fmt.Errorf("%w: %s URI must use HTTPS except for loopback development clients", ErrInvalidClient, label)
+}
+
 func validateRequest(req models.CreateClientRequest) error {
 	if strings.TrimSpace(req.Name) == "" || len(req.Name) > 128 {
 		return fmt.Errorf("%w: client name is required", ErrInvalidClient)
+	}
+	for label, value := range map[string]string{
+		"homepage":         req.HomepageURI,
+		"privacy policy":   req.PrivacyPolicyURI,
+		"terms of service": req.TermsOfServiceURI,
+	} {
+		if err := validateApplicationURI(label, value); err != nil {
+			return err
+		}
 	}
 	if len(req.Grants) == 0 {
 		return fmt.Errorf("%w: at least one grant is required", ErrInvalidClient)
@@ -215,6 +250,10 @@ func validateNewClientPolicyForActor(req models.CreateClientRequest, policy sett
 }
 
 func validateUpdatedClientPolicy(previous, next *models.OAuthClient, request models.UpdateClientRequest, policy settings.OAuthPolicy) error {
+	return validateUpdatedClientPolicyForActor(previous, next, request, policy, true)
+}
+
+func validateUpdatedClientPolicyForActor(previous, next *models.OAuthClient, request models.UpdateClientRequest, policy settings.OAuthPolicy, administrator bool) error {
 	previousHasInvalidOfflineAccess := slices.Contains(previous.Scopes, "offline_access") && !slices.Contains(previous.Grants, models.GrantRefreshToken)
 	nextHasInvalidOfflineAccess := slices.Contains(next.Scopes, "offline_access") && !slices.Contains(next.Grants, models.GrantRefreshToken)
 	if nextHasInvalidOfflineAccess && !previousHasInvalidOfflineAccess {
@@ -238,10 +277,13 @@ func validateUpdatedClientPolicy(previous, next *models.OAuthClient, request mod
 			if !slices.Contains(previous.Scopes, scope) && !policy.AllowsScope(scope) {
 				return fmt.Errorf("%w: scope %q is disabled by OAuth policy", ErrInvalidClient, scope)
 			}
+			if !slices.Contains(previous.Scopes, scope) && !policy.ScopeAssignable(scope, administrator) {
+				return fmt.Errorf("%w: scope %q requires administrator assignment", ErrInvalidClient, scope)
+			}
 		}
 	}
 	if request.AllowedClaims != nil {
-		availableClaims := policy.ClaimsForScopes(next.Scopes, true)
+		availableClaims := policy.ClaimsForScopes(next.Scopes, administrator)
 		for _, claim := range next.AllowedClaims {
 			if !slices.Contains(previous.AllowedClaims, claim) && !slices.Contains(availableClaims, claim) {
 				return fmt.Errorf("%w: claim %q is not assignable for the selected scopes", ErrInvalidClient, claim)
@@ -292,6 +334,8 @@ func (s *Service) buildClientForActor(req models.CreateClientRequest, administra
 	}
 	c := &models.OAuthClient{
 		ID: id, SecretHash: secretHash, Name: strings.TrimSpace(req.Name),
+		HomepageURI: strings.TrimSpace(req.HomepageURI), PrivacyPolicyURI: strings.TrimSpace(req.PrivacyPolicyURI),
+		TermsOfServiceURI: strings.TrimSpace(req.TermsOfServiceURI), IdentityRevision: 1, AuthorizationRevision: 1,
 		RedirectURIs: req.RedirectURIs, PostLogoutRedirectURIs: req.PostLogoutRedirectURIs,
 		Grants: req.Grants, Scopes: req.Scopes, OptionalScopes: req.OptionalScopes, AllowedClaims: req.AllowedClaims,
 		IsPublic: req.IsPublic, AccessPolicy: req.AccessPolicy, Metadata: req.Metadata,
@@ -376,12 +420,29 @@ func (s *Service) Update(ctx context.Context, id string, req models.UpdateClient
 	return s.store.UpdateRequestWithOAuthPolicy(ctx, id, req, mutation, policy)
 }
 
+func (s *Service) UpdateOwned(ctx context.Context, id, ownerID string, req models.UpdateClientRequest, mutation audit.MutationAudit) (*models.OAuthClient, error) {
+	if err := mutation.ValidateEvent(models.AuditClientUpdated); err != nil {
+		return nil, fmt.Errorf("invalid client update audit context: %w", err)
+	}
+	policy := s.oauthPolicySnapshot()
+	return s.store.UpdateOwnedRequestWithOAuthPolicy(ctx, id, ownerID, req, mutation, policy)
+}
+
 func applyClientUpdate(c *models.OAuthClient, req models.UpdateClientRequest) error {
 	if req.IsPublic != nil && *req.IsPublic != c.IsPublic {
 		return fmt.Errorf("%w: client type cannot be changed", ErrInvalidClient)
 	}
 	if req.Name != nil {
 		c.Name = strings.TrimSpace(*req.Name)
+	}
+	if req.HomepageURI != nil {
+		c.HomepageURI = strings.TrimSpace(*req.HomepageURI)
+	}
+	if req.PrivacyPolicyURI != nil {
+		c.PrivacyPolicyURI = strings.TrimSpace(*req.PrivacyPolicyURI)
+	}
+	if req.TermsOfServiceURI != nil {
+		c.TermsOfServiceURI = strings.TrimSpace(*req.TermsOfServiceURI)
 	}
 	if req.RedirectURIs != nil {
 		c.RedirectURIs = req.RedirectURIs
@@ -410,7 +471,7 @@ func applyClientUpdate(c *models.OAuthClient, req models.UpdateClientRequest) er
 	if c.AccessPolicy == "" {
 		c.AccessPolicy = models.ClientAccessOpen
 	}
-	check := models.CreateClientRequest{Name: c.Name, RedirectURIs: c.RedirectURIs, PostLogoutRedirectURIs: c.PostLogoutRedirectURIs, Grants: c.Grants, Scopes: c.Scopes, OptionalScopes: c.OptionalScopes, AllowedClaims: c.AllowedClaims, IsPublic: c.IsPublic, AccessPolicy: c.AccessPolicy, Metadata: c.Metadata}
+	check := models.CreateClientRequest{Name: c.Name, HomepageURI: c.HomepageURI, PrivacyPolicyURI: c.PrivacyPolicyURI, TermsOfServiceURI: c.TermsOfServiceURI, RedirectURIs: c.RedirectURIs, PostLogoutRedirectURIs: c.PostLogoutRedirectURIs, Grants: c.Grants, Scopes: c.Scopes, OptionalScopes: c.OptionalScopes, AllowedClaims: c.AllowedClaims, IsPublic: c.IsPublic, AccessPolicy: c.AccessPolicy, Metadata: c.Metadata}
 	if err := validateRequest(check); err != nil {
 		return err
 	}

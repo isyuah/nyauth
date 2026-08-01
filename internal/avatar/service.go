@@ -78,7 +78,15 @@ func (s *Service) UploadProviderAvatar(ctx context.Context, userID uuid.UUID, in
 }
 
 func (s *Service) OpenActiveVariant(ctx context.Context, avatarID uuid.UUID, size int) (BlobObject, error) {
-	variant, err := s.repo.GetActiveVariant(ctx, avatarID, size)
+	return s.openActiveVariant(ctx, avatarID, size, "user_avatar")
+}
+
+func (s *Service) OpenActiveClientLogoVariant(ctx context.Context, logoID uuid.UUID, size int) (BlobObject, error) {
+	return s.openActiveVariant(ctx, logoID, size, "client_logo")
+}
+
+func (s *Service) openActiveVariant(ctx context.Context, avatarID uuid.UUID, size int, mediaPurpose string) (BlobObject, error) {
+	variant, err := s.repo.GetActiveVariant(ctx, avatarID, size, mediaPurpose)
 	if err != nil {
 		return BlobObject{}, err
 	}
@@ -133,7 +141,8 @@ func (s *Service) upload(ctx context.Context, userID uuid.UUID, source Source, i
 	}
 	params := CreateAvatarParams{
 		ID:                avatarID,
-		UserID:            userID,
+		UserID:            &userID,
+		MediaPurpose:      "user_avatar",
 		Source:            source,
 		StorageBackend:    storage.Store.Backend(),
 		StorageProfileID:  storage.ProfileID,
@@ -200,6 +209,88 @@ func (s *Service) upload(ctx context.Context, userID uuid.UUID, source Source, i
 		UpdatedAt:         now.UTC(),
 		ActivatedAt:       ptrTime(now.UTC()),
 	}, nil
+}
+
+func (s *Service) UploadClientLogo(ctx context.Context, clientID string, input io.Reader, now time.Time) (uuid.UUID, error) {
+	if clientID == "" {
+		return uuid.Nil, fmt.Errorf("client id is required")
+	}
+	processed, err := s.processor.ProcessUserUpload(input)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	storage, err := s.resolver.Current(ctx)
+	if err != nil || storage.Store == nil {
+		return uuid.Nil, ErrStorageUnavailable
+	}
+	logoID := uuid.New()
+	prefix := "client-logos/" + clientID + "/" + logoID.String()
+	variants := make([]models.AvatarVariant, 0, len(VariantSizes))
+	for _, size := range VariantSizes {
+		body := processed.Variants[size]
+		variants = append(variants, models.AvatarVariant{Size: size, ObjectKey: objectKey(prefix, size), ContentType: ContentType, Bytes: int64(len(body))})
+	}
+	tx, err := s.repo.Begin(ctx)
+	if err != nil {
+		return uuid.Nil, err
+	}
+	params := CreateAvatarParams{
+		ID: logoID, ClientID: &clientID, MediaPurpose: "client_logo", Source: SourceClientUpload,
+		StorageBackend: storage.Store.Backend(), StorageProfileID: storage.ProfileID, ObjectPrefix: prefix,
+		Variants: variants, ContentSHA256: processed.SHA256, OriginalMediaType: processed.SourceMediaType,
+		OriginalWidth: processed.OriginalWidth, OriginalHeight: processed.OriginalHeight,
+	}
+	if err := s.repo.CreateStagingTx(ctx, tx, params, now); err != nil {
+		_ = tx.Rollback(ctx)
+		return uuid.Nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return uuid.Nil, fmt.Errorf("committing client logo staging record: %w", err)
+	}
+	storedKeys := make([]string, 0, len(VariantSizes))
+	for _, size := range VariantSizes {
+		key := objectKey(prefix, size)
+		if err := storage.Store.Put(ctx, key, processed.Variants[size], ContentType); err != nil {
+			s.recordStorageResult(err, time.Now().UTC())
+			s.compensateFailedUpload(logoID, storedKeys, err, now)
+			return uuid.Nil, err
+		}
+		storedKeys = append(storedKeys, key)
+	}
+	s.recordStorageResult(nil, time.Now().UTC())
+	tx, err = s.repo.Begin(ctx)
+	if err != nil {
+		s.compensateFailedUpload(logoID, storedKeys, err, now)
+		return uuid.Nil, err
+	}
+	if err := s.repo.ActivateClientLogoTx(ctx, tx, clientID, logoID, now); err != nil {
+		_ = tx.Rollback(ctx)
+		s.compensateFailedUpload(logoID, storedKeys, err, now)
+		return uuid.Nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		s.compensateFailedUpload(logoID, storedKeys, err, now)
+		return uuid.Nil, fmt.Errorf("committing client logo upload: %w", err)
+	}
+	return logoID, nil
+}
+
+func (s *Service) DeleteClientLogo(ctx context.Context, clientID string, now time.Time) (cleanupDeferred bool, err error) {
+	tx, err := s.repo.Begin(ctx)
+	if err != nil {
+		return false, err
+	}
+	defer tx.Rollback(ctx)
+	items, err := s.repo.DeleteActiveClientLogoTx(ctx, tx, clientID, now)
+	if err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("committing client logo deletion: %w", err)
+	}
+	err = s.deleteItemsBestEffort(ctx, items)
+	s.recordStorageResult(err, time.Now().UTC())
+	return err != nil, nil
 }
 
 func (s *Service) DeleteUserAvatar(ctx context.Context, userID uuid.UUID, now time.Time) (cleanupDeferred bool, err error) {

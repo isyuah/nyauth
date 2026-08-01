@@ -6,7 +6,9 @@
   import { sessionStore } from '$lib/stores';
   import Button from '$lib/components/ui/Button.svelte';
   import Card from '$lib/components/ui/Card.svelte';
-  import { Shield, CheckCircle, XCircle, TriangleAlert, Info } from 'lucide-svelte';
+  import Badge from '$lib/components/ui/Badge.svelte';
+  import OAuthClientLogo from '$lib/components/oauth/OAuthClientLogo.svelte';
+  import { Shield, CheckCircle, ExternalLink, XCircle, TriangleAlert, Info } from 'lucide-svelte';
   import { CLAIM_HELP, RISK_LABELS } from '$lib/oauth-catalog';
 
   let challenge = $derived($page.url.searchParams.get('challenge') || '');
@@ -46,7 +48,9 @@
         return;
       }
       consentData = await api.consent.get(challenge);
-      grantedOptionalScopes = consentData.permissions.filter((permission) => !permission.required).map((permission) => permission.scope);
+      grantedOptionalScopes = consentData.permissions
+        .filter((permission) => !permission.required && (!consentData?.previously_authorized || permission.previously_granted))
+        .map((permission) => permission.scope);
     } catch (cause) {
       error = cause instanceof Error ? cause.message : '授权请求无效或已过期';
     }
@@ -92,10 +96,10 @@
     {:else}
       <Card>
         <div class="space-y-5">
-          <div class="text-center">
-            <p class="text-body text-nya-text-secondary">
-              <strong class="text-nya-text-primary">{consentData.client_name}</strong> 请求访问您的账户
-            </p>
+          <div class="flex flex-col items-center text-center">
+            <OAuthClientLogo name={consentData.client_name} url={consentData.logo_url} size="lg" />
+            <p class="mt-3 text-body text-nya-text-secondary"><strong class="text-nya-text-primary">{consentData.client_name}</strong> 请求访问您的账户</p>
+            {#if consentData.previously_authorized}<p class="mt-1 text-micro text-nya-text-tertiary">您之前已授权过此应用，请检查本次变化。</p>{/if}
           </div>
 
           <div class="border-y border-nya-border py-3">
@@ -105,6 +109,18 @@
               <div class="grid grid-cols-[88px_1fr] gap-3"><dt class="text-nya-text-tertiary">发布者状态</dt><dd class="text-nya-text-primary">{consentData.verification_status === 'verified' ? '已由管理员审核' : consentData.verification_status === 'not_applicable' ? '系统管理' : '尚未验证'}</dd></div>
               <div class="grid grid-cols-[88px_1fr] gap-3"><dt class="text-nya-text-tertiary">回调来源</dt><dd class="break-all font-mono text-nya-text-primary">{consentData.redirect_origin || '不可用'}</dd></div>
             </dl>
+            {#if consentData.homepage_uri || consentData.privacy_policy_uri || consentData.terms_of_service_uri}
+              <nav aria-label="应用信息链接" class="mt-3 flex flex-wrap gap-x-4 gap-y-2 text-small">
+                {#if consentData.homepage_uri}<a href={consentData.homepage_uri} target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1 text-nya-primary hover:underline"><ExternalLink size={13} /> 应用主页</a>{/if}
+                {#if consentData.privacy_policy_uri}<a href={consentData.privacy_policy_uri} target="_blank" rel="noopener noreferrer" class="text-nya-primary hover:underline">隐私政策</a>{/if}
+                {#if consentData.terms_of_service_uri}<a href={consentData.terms_of_service_uri} target="_blank" rel="noopener noreferrer" class="text-nya-primary hover:underline">服务条款</a>{/if}
+              </nav>
+            {/if}
+            {#if consentData.reauthorization_required}
+              <div class="mt-3 flex items-start gap-2 rounded-nya-sm border border-nya-danger/25 bg-nya-danger-soft px-3 py-2 text-small text-nya-danger" role="alert"><TriangleAlert size={15} class="mt-0.5 shrink-0" /><span>应用的回调地址或授权能力已发生高风险变更。旧授权不再适用，请重新核对后授权。</span></div>
+            {:else if consentData.application_changed}
+              <div class="mt-3 flex items-start gap-2 rounded-nya-sm bg-nya-warning-soft px-3 py-2 text-small text-nya-warning" role="status"><Info size={15} class="mt-0.5 shrink-0" /><span>此应用的名称、Logo、公开链接或发布者状态在上次授权后已变更。</span></div>
+            {/if}
             {#if consentData.verification_status === 'unverified'}
               <div class="mt-3 flex items-start gap-2 rounded-nya-sm bg-nya-warning-soft px-3 py-2 text-small text-nya-warning" role="status">
                 <TriangleAlert size={15} class="mt-0.5 shrink-0" />
@@ -134,9 +150,9 @@
                   <div class="flex items-start gap-2.5 rounded-nya-sm bg-nya-surface-soft px-3 py-2 {permission.scope === 'offline_access' ? 'border border-nya-warning/30 bg-nya-warning-soft' : ''}">
                     <CheckCircle size={15} class="mt-0.5 shrink-0 text-nya-success" />
                     <div class="min-w-0">
-                      <div class="flex flex-wrap items-center gap-x-2"><span class="text-body-medium font-semibold text-nya-text-primary">{permissionTitle(permission)}</span><code class="text-micro text-nya-text-tertiary">{permission.scope}</code><span class="text-micro text-nya-text-tertiary">{RISK_LABELS[permission.risk_level] || permission.risk_level}</span></div>
+                      <div class="flex flex-wrap items-center gap-x-2"><span class="text-body-medium font-semibold text-nya-text-primary">{permissionTitle(permission)}</span><code class="text-micro text-nya-text-tertiary">{permission.scope}</code><span class="text-micro text-nya-text-tertiary">{RISK_LABELS[permission.risk_level] || permission.risk_level}</span>{#if permission.newly_requested}<Badge variant="warning">新增请求</Badge>{:else if permission.previously_granted}<Badge variant="success">之前已授权</Badge>{/if}</div>
                       <p class="text-small text-nya-text-secondary">{permissionDescription(permission)}</p>
-                      {#if permission.claims.length > 0}<p class="mt-1 text-micro text-nya-text-tertiary">包含：{permission.claims.map((claim) => CLAIM_HELP[claim]?.title || claim).join('、')}</p>{/if}
+                      {#if permission.claims.length > 0}<div class="mt-1 flex flex-wrap gap-1 text-micro text-nya-text-tertiary"><span>包含：</span>{#each permission.claims as claim}<span class={consentData.new_claims.includes(claim) ? 'font-semibold text-nya-warning' : ''}>{CLAIM_HELP[claim]?.title || claim}{consentData.new_claims.includes(claim) ? '（新增）' : ''}</span>{/each}</div>{/if}
                     </div>
                   </div>
                 {/each}
@@ -155,9 +171,9 @@
                   <label class="flex cursor-pointer items-start gap-2.5 rounded-nya-sm border border-nya-border px-3 py-2 transition-colors hover:border-nya-primary/50 {permission.scope === 'offline_access' ? 'border-nya-warning/30 bg-nya-warning-soft' : 'bg-nya-surface'}">
                     <input type="checkbox" class="mt-1 shrink-0 rounded" checked={grantedOptionalScopes.includes(permission.scope)} onchange={(event) => toggleOptionalScope(permission.scope, event.currentTarget.checked)} />
                     <span class="min-w-0">
-                      <span class="flex flex-wrap items-center gap-x-2"><span class="text-body-medium font-semibold text-nya-text-primary">{permissionTitle(permission)}</span><code class="text-micro text-nya-text-tertiary">{permission.scope}</code><span class="text-micro text-nya-text-tertiary">{RISK_LABELS[permission.risk_level] || permission.risk_level}</span></span>
+                      <span class="flex flex-wrap items-center gap-x-2"><span class="text-body-medium font-semibold text-nya-text-primary">{permissionTitle(permission)}</span><code class="text-micro text-nya-text-tertiary">{permission.scope}</code><span class="text-micro text-nya-text-tertiary">{RISK_LABELS[permission.risk_level] || permission.risk_level}</span>{#if permission.newly_requested}<Badge variant="warning">新增请求</Badge>{:else if permission.previously_granted}<Badge variant="success">之前已授权</Badge>{/if}</span>
                       <span class="block text-small text-nya-text-secondary">{permissionDescription(permission)}</span>
-                      {#if permission.claims.length > 0}<span class="mt-1 block text-micro text-nya-text-tertiary">包含：{permission.claims.map((claim) => CLAIM_HELP[claim]?.title || claim).join('、')}</span>{/if}
+                      {#if permission.claims.length > 0}<span class="mt-1 block text-micro text-nya-text-tertiary">包含：{permission.claims.map((claim) => `${CLAIM_HELP[claim]?.title || claim}${consentData?.new_claims.includes(claim) ? '（新增）' : ''}`).join('、')}</span>{/if}
                     </span>
                   </label>
                 {/each}

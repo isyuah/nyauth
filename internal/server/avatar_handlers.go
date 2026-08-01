@@ -98,6 +98,10 @@ func (s *Server) reserveAvatarProcessing(w http.ResponseWriter, r *http.Request)
 }
 
 func readSingleAvatarPart(w http.ResponseWriter, r *http.Request) ([]byte, error) {
+	return readSingleImagePart(w, r, "avatar")
+}
+
+func readSingleImagePart(w http.ResponseWriter, r *http.Request, fieldName string) ([]byte, error) {
 	r.Body = http.MaxBytesReader(w, r.Body, avatar.MaxUploadBytes+avatarMultipartOverhead)
 	reader, err := r.MultipartReader()
 	if err != nil {
@@ -113,7 +117,7 @@ func readSingleAvatarPart(w http.ResponseWriter, r *http.Request) ([]byte, error
 		if nextErr != nil {
 			return nil, nextErr
 		}
-		if found || part.FormName() != "avatar" || strings.TrimSpace(part.FileName()) == "" {
+		if found || part.FormName() != fieldName || strings.TrimSpace(part.FileName()) == "" {
 			_ = part.Close()
 			return nil, errors.New("unexpected multipart part")
 		}
@@ -131,6 +135,37 @@ func readSingleAvatarPart(w http.ResponseWriter, r *http.Request) ([]byte, error
 		return nil, errors.New("avatar file is required")
 	}
 	return contents, nil
+}
+
+func (s *Server) handleClientLogoMedia(w http.ResponseWriter, r *http.Request) {
+	logoID, err := uuid.Parse(chi.URLParam(r, "logo_id"))
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	size, err := strconv.Atoi(chi.URLParam(r, "size"))
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	object, err := s.avatarService.OpenActiveClientLogoVariant(r.Context(), logoID, size)
+	if err != nil {
+		if errors.Is(err, avatar.ErrNotFound) {
+			http.NotFound(w, r)
+			return
+		}
+		writeAPIError(w, http.StatusServiceUnavailable, "application logo is temporarily unavailable")
+		return
+	}
+	defer object.Body.Close()
+	w.Header().Set("Content-Type", avatar.ContentType)
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	w.Header().Set("Cache-Control", "public, max-age=86400, immutable")
+	if object.Size >= 0 {
+		w.Header().Set("Content-Length", strconv.FormatInt(object.Size, 10))
+	}
+	w.WriteHeader(http.StatusOK)
+	_, _ = io.Copy(w, object.Body)
 }
 
 func writeAvatarOperationError(w http.ResponseWriter, err error) {

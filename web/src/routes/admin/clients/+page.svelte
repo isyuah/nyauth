@@ -15,15 +15,21 @@
   import Input from '$lib/components/ui/Input.svelte';
   import Modal from '$lib/components/ui/Modal.svelte';
   import ResourceState from '$lib/components/ui/ResourceState.svelte';
+  import AvatarCropper from '$lib/components/account/AvatarCropper.svelte';
   import OAuthClientAuthorizationEditor from '$lib/components/oauth/OAuthClientAuthorizationEditor.svelte';
+  import OAuthClientIdentityFields from '$lib/components/oauth/OAuthClientIdentityFields.svelte';
+  import OAuthClientLogo from '$lib/components/oauth/OAuthClientLogo.svelte';
   import ReauthenticationDialog from '$lib/components/account/ReauthenticationDialog.svelte';
   import SecretReveal from '$lib/components/ui/SecretReveal.svelte';
   import { toast } from '$lib/toast';
-  import { AppWindow, ChevronLeft, ChevronRight, Pencil, Plus, RefreshCw, ShieldCheck, Users } from 'lucide-svelte';
+  import { ChevronLeft, ChevronRight, ExternalLink, Pencil, Plus, RefreshCw, ShieldCheck, Users } from 'lucide-svelte';
   import { ASSIGNMENT_LABELS, claimsForScopes, cloneScopeDefinitions } from '$lib/oauth-catalog';
 
   type ClientForm = {
     name: string;
+    homepage_uri: string;
+    privacy_policy_uri: string;
+    terms_of_service_uri: string;
     redirect_uris: string;
     post_logout_redirect_uris: string;
     is_public: boolean;
@@ -36,6 +42,9 @@
 
   type ClientEditForm = {
     name: string;
+    homepage_uri: string;
+    privacy_policy_uri: string;
+    terms_of_service_uri: string;
     redirect_uris: string;
     post_logout_redirect_uris: string;
     metadata: string;
@@ -98,7 +107,7 @@
   let editScopes = $state<OAuthScope[]>([]);
   let editOptionalScopes = $state<OAuthScope[]>([]);
   let editAllowedClaims = $state<string[]>([]);
-  let editForm = $state<ClientEditForm>({ name: '', redirect_uris: '', post_logout_redirect_uris: '', metadata: '{}', access_policy: 'open' });
+  let editForm = $state<ClientEditForm>({ name: '', homepage_uri: '', privacy_policy_uri: '', terms_of_service_uri: '', redirect_uris: '', post_logout_redirect_uris: '', metadata: '{}', access_policy: 'open' });
   let accessTarget = $state<OAuthClient | null>(null);
   let accessModalOpen = $state(false);
   let accessUsers = $state<ClientAccessUser[]>([]);
@@ -144,7 +153,7 @@
     if (grants.length === 0 && policy.allowed_grant_types[0]) grants.push(policy.allowed_grant_types[0]);
     const scopes = policy.allowed_scopes.filter((scope) => OAUTH_SCOPES.some((standard) => standard === scope)
       && (scope !== 'offline_access' || grants.includes('refresh_token')));
-    return { name: '', redirect_uris: '', post_logout_redirect_uris: '', is_public: false, owner_id: null, grants, scopes, optional_scopes: [], allowed_claims: claimsForScopes(policy, scopes, true) };
+    return { name: '', homepage_uri: '', privacy_policy_uri: '', terms_of_service_uri: '', redirect_uris: '', post_logout_redirect_uris: '', is_public: false, owner_id: null, grants, scopes, optional_scopes: [], allowed_claims: claimsForScopes(policy, scopes, true) };
   }
 
   function applyClientPolicy(policy: OAuthClientPolicy) {
@@ -415,6 +424,9 @@
       if (postLogoutRedirectURIs.length > clientPolicy.max_post_logout_redirect_uris) throw new Error(`Post-logout Redirect URI 不能超过 ${clientPolicy.max_post_logout_redirect_uris} 个。`);
       const payload: CreateClientInput = {
         name: newClient.name,
+        homepage_uri: newClient.homepage_uri.trim(),
+        privacy_policy_uri: newClient.privacy_policy_uri.trim(),
+        terms_of_service_uri: newClient.terms_of_service_uri.trim(),
         redirect_uris: redirectURIs,
         post_logout_redirect_uris: postLogoutRedirectURIs,
         grants: [...newClient.grants],
@@ -492,19 +504,25 @@
     openingEditID = client.id;
     editError = '';
     try {
-      const policy = await api.admin.getOAuthSettings();
+      const [policy, latest] = await Promise.all([
+        api.admin.getOAuthSettings(),
+        api.admin.getClient(client.id),
+      ]);
       applyClientPolicy(policy);
-      editTarget = client;
-      editGrants = client.grants.filter(knownGrant);
-      editScopes = [...client.scopes];
-      editOptionalScopes = [...(client.optional_scopes || [])];
-      editAllowedClaims = [...(client.allowed_claims || [])];
+      editTarget = latest;
+      editGrants = latest.grants.filter(knownGrant);
+      editScopes = [...latest.scopes];
+      editOptionalScopes = [...latest.optional_scopes];
+      editAllowedClaims = [...latest.allowed_claims];
       editForm = {
-        name: client.name,
-        redirect_uris: client.redirect_uris.join('\n'),
-        post_logout_redirect_uris: client.post_logout_redirect_uris.join('\n'),
-        metadata: formatStringMetadata(client.metadata),
-        access_policy: (client.access_policy as ClientAccessPolicy) || 'open',
+        name: latest.name,
+        homepage_uri: latest.homepage_uri,
+        privacy_policy_uri: latest.privacy_policy_uri,
+        terms_of_service_uri: latest.terms_of_service_uri,
+        redirect_uris: latest.redirect_uris.join('\n'),
+        post_logout_redirect_uris: latest.post_logout_redirect_uris.join('\n'),
+        metadata: formatStringMetadata(latest.metadata),
+        access_policy: (latest.access_policy as ClientAccessPolicy) || 'open',
       };
       showEdit = true;
     } catch (cause) {
@@ -563,6 +581,9 @@
 
     const payload: UpdateClientInput = {
       name,
+      homepage_uri: editForm.homepage_uri.trim(),
+      privacy_policy_uri: editForm.privacy_policy_uri.trim(),
+      terms_of_service_uri: editForm.terms_of_service_uri.trim(),
       redirect_uris: redirectURIs,
       post_logout_redirect_uris: postLogoutRedirectURIs,
       grants,
@@ -582,6 +603,23 @@
     } finally {
       editing = false;
     }
+  }
+
+  function replaceEditedClient(updated: OAuthClient) {
+    clients = clients.map((client) => client.id === updated.id ? updated : client);
+    editTarget = updated;
+  }
+
+  async function uploadClientLogo(blob: Blob) {
+    if (!editTarget) return;
+    replaceEditedClient(await api.admin.uploadClientLogo(editTarget.id, blob));
+    toast.success('应用 Logo 已更新');
+  }
+
+  async function removeClientLogo() {
+    if (!editTarget) return;
+    replaceEditedClient(await api.admin.removeClientLogo(editTarget.id));
+    toast.success('应用 Logo 已删除');
   }
 
   async function openAccessUsers(client: OAuthClient) {
@@ -732,9 +770,16 @@
       {#each clients as client}
         <Card>
           <div class="flex flex-col justify-between gap-4 md:flex-row md:items-start">
-            <div class="flex min-w-0 items-center gap-3"><span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-nya-md bg-nya-blue-soft"><AppWindow size={20} class="text-nya-blue" /></span><div class="min-w-0"><h2 class="truncate text-card-title text-nya-text-primary">{client.name}</h2><CopyField value={client.id} /></div></div>
+            <div class="flex min-w-0 items-center gap-3"><OAuthClientLogo name={client.name} url={client.logo_url} size="sm" /><div class="min-w-0"><h2 class="truncate text-card-title text-nya-text-primary">{client.name}</h2><CopyField value={client.id} /></div></div>
             <div class="flex flex-wrap items-center gap-2">{#if client.is_public}<Badge variant="warning">Public</Badge>{:else}<Badge variant="default">Confidential</Badge><Button variant="secondary" size="sm" requiredCapability="admin_mutations" onclick={() => requestRotation(client)}><RefreshCw size={14} /> 轮换 Secret</Button>{/if}{#if client.access_policy && client.access_policy !== 'open'}<Badge variant="warning">访问：{accessPolicyLabel(client.access_policy)}</Badge>{/if}<Badge variant="primary">{client.grants.join(', ')}</Badge>{#if client.access_policy === 'allowlist'}<Button variant="secondary" size="sm" requiredCapability="admin_mutations" ariaLabel={`管理 ${client.name} 访问名单`} onclick={() => openAccessUsers(client)}><Users size={14} /> 访问名单</Button>{/if}<Button variant="ghost" size="sm" requiredCapability="admin_mutations" loading={openingEditID === client.id} disabled={openingEditID !== null && openingEditID !== client.id} onclick={() => openEdit(client)}><Pencil size={14} /> 编辑</Button><Button variant="ghost" size="sm" requiredCapability="admin_mutations" onclick={() => requestDelete(client)}>删除</Button></div>
           </div>
+          {#if client.homepage_uri || client.privacy_policy_uri || client.terms_of_service_uri}
+            <div class="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-small">
+              {#if client.homepage_uri}<a href={client.homepage_uri} target="_blank" rel="noopener noreferrer" class="inline-flex items-center gap-1 text-nya-primary hover:underline"><ExternalLink size={13} /> 应用主页</a>{/if}
+              {#if client.privacy_policy_uri}<a href={client.privacy_policy_uri} target="_blank" rel="noopener noreferrer" class="text-nya-primary hover:underline">隐私政策</a>{/if}
+              {#if client.terms_of_service_uri}<a href={client.terms_of_service_uri} target="_blank" rel="noopener noreferrer" class="text-nya-primary hover:underline">服务条款</a>{/if}
+            </div>
+          {/if}
           <div class="mt-3 flex flex-wrap items-center justify-between gap-2"><p class="min-w-0 text-small text-nya-text-tertiary">Owner：<code class="break-all font-mono">{client.owner_id || '未分配'}</code> · Client 类型为只读，创建后不可更改。</p><Button variant="secondary" size="sm" requiredCapability="admin_mutations" ariaLabel={`管理 ${client.name} Owner`} onclick={() => openOwnerManager(client)}><Users size={14} /> 管理 Owner</Button></div>
           <div class="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-nya-sm bg-nya-surface-soft px-3 py-2">
             <div class="min-w-0">
@@ -781,10 +826,10 @@
   {/snippet}
 </ResourceState>
 
-<Modal bind:open={showCreate} title="创建应用" description="授权码客户端始终强制使用 S256 PKCE" size="md">
+<Modal bind:open={showCreate} title="创建应用" description="授权码客户端始终强制使用 S256 PKCE" size="lg">
   <form onsubmit={handleCreate} class="space-y-4">
     {#if createError}<p class="rounded-nya-sm bg-nya-danger-soft px-3 py-2 text-small text-nya-danger" role="alert">{createError}</p>{/if}
-    <Input id="client-name" label="应用名称" bind:value={newClient.name} required placeholder="我的应用" />
+    <OAuthClientIdentityFields idPrefix="admin-client-create" bind:name={newClient.name} bind:homepageURI={newClient.homepage_uri} bind:privacyPolicyURI={newClient.privacy_policy_uri} bind:termsOfServiceURI={newClient.terms_of_service_uri} />
     <OAuthClientAuthorizationEditor
       policy={clientPolicy}
       idPrefix="create-client"
@@ -806,7 +851,9 @@
 <Modal bind:open={showEdit} title={`编辑 OAuth Client · ${editTarget?.name || ''}`} description="Client 类型不可变；Owner 请通过应用卡片上的独立操作管理" size="lg">
   <form onsubmit={handleEdit} class="space-y-4">
     {#if editError}<p class="rounded-nya-sm bg-nya-danger-soft px-3 py-2 text-small text-nya-danger" role="alert">{editError}</p>{/if}
-    <div class="grid gap-4 sm:grid-cols-2"><Input id="edit-client-name" label="应用名称" bind:value={editForm.name} required /><div><span class="mb-1.5 block text-body-medium text-nya-text-primary">Client 类型 / Owner</span><p class="rounded-nya-sm bg-nya-surface-muted px-3 py-2 text-small text-nya-text-secondary">{editTarget?.is_public ? 'Public' : 'Confidential'} · <code>{editTarget?.owner_id || '未分配'}</code></p></div></div>
+    {#if editTarget}<div class="flex items-start gap-4 rounded-nya-sm bg-nya-surface-soft p-4"><OAuthClientLogo name={editTarget.name} url={editTarget.logo_url} size="lg" /><div class="min-w-0 flex-1"><p class="mb-2 text-body-medium font-semibold text-nya-text-primary">应用 Logo</p><AvatarCropper currentUrl={editTarget.logo_url} subject="应用 Logo" previewShape="rounded" onupload={uploadClientLogo} onremove={removeClientLogo} /></div></div>{/if}
+    <OAuthClientIdentityFields idPrefix="admin-client-edit" bind:name={editForm.name} bind:homepageURI={editForm.homepage_uri} bind:privacyPolicyURI={editForm.privacy_policy_uri} bind:termsOfServiceURI={editForm.terms_of_service_uri} />
+    <div><span class="mb-1.5 block text-body-medium text-nya-text-primary">Client 类型 / Owner</span><p class="rounded-nya-sm bg-nya-surface-muted px-3 py-2 text-small text-nya-text-secondary">{editTarget?.is_public ? 'Public' : 'Confidential'} · <code>{editTarget?.owner_id || '未分配'}</code></p></div>
     <div><label for="edit-client-redirects" class="mb-1.5 block text-body-medium text-nya-text-primary">Redirect URI（每行一个；新策略上限 {clientPolicy.max_redirect_uris}）</label><textarea id="edit-client-redirects" bind:value={editForm.redirect_uris} required={editGrants.includes('authorization_code')} rows="3" class="w-full rounded-nya-sm border border-nya-border bg-nya-surface px-3 py-2 font-mono text-small focus:border-nya-primary focus:outline-none focus:ring-2 focus:ring-nya-primary/24"></textarea></div>
     <div><label for="edit-client-logouts" class="mb-1.5 block text-body-medium text-nya-text-primary">Post-logout Redirect URI（每行一个；新策略上限 {clientPolicy.max_post_logout_redirect_uris}）</label><textarea id="edit-client-logouts" bind:value={editForm.post_logout_redirect_uris} rows="2" class="w-full rounded-nya-sm border border-nya-border bg-nya-surface px-3 py-2 font-mono text-small focus:border-nya-primary focus:outline-none focus:ring-2 focus:ring-nya-primary/24"></textarea></div>
     <fieldset><legend class="mb-2 text-body-medium text-nya-text-primary">访问策略</legend><div class="grid gap-2 sm:grid-cols-3">{#each accessPolicyOptions as option}<label class="flex cursor-pointer items-start gap-2 rounded-nya-sm border border-nya-border px-3 py-2 {editForm.access_policy === option.value ? 'border-nya-primary bg-nya-primary-soft' : ''}"><input type="radio" name="edit-access-policy" value={option.value} bind:group={editForm.access_policy} class="mt-0.5" /><span><span class="block text-small font-semibold text-nya-text-primary">{option.label}</span><span class="block text-micro text-nya-text-tertiary">{option.description}</span></span></label>{/each}</div><p class="mt-1.5 text-micro text-nya-text-tertiary">策略只作用于用户授权流程；client_credentials 机器流程不受限制。切换为白名单后请在应用卡片上维护访问名单。</p></fieldset>

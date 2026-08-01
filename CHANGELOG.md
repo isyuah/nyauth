@@ -4,6 +4,22 @@
 
 ## [Unreleased]
 
+### 新增
+
+- OAuth 应用身份资料：客户端可配置主页、隐私政策、服务条款与受控 Logo；Logo 复用现有图片重编码、本地/S3 存储迁移和 HA 安全清理管线
+- 授权记录保存同意时的应用身份与客户端 revision，个人中心可辨认应用改名、政策链接变化和需要重新授权的高风险变更
+- 授权记录的最近使用时间只在客户端实际换取 Access Token 或轮换 Refresh Token 后更新，不再把仅同意授权误报为已使用
+- Consent 标出此前已授权与本次新增的 Scope/Claim；再次授权时历史可选权限保持勾选，新增可选权限默认不勾选
+
+### 安全
+
+- Redirect URI 变化、Grant/Scope/Claim 移除和访问策略变化推进客户端授权 revision；授权码兑换、Access Token 本机校验和 Refresh Token 轮换都会拒绝旧 revision
+- Consent 提交与客户端修改通过 PostgreSQL 行锁建立顺序，避免并发修改被错误记录为用户已经同意
+
+### 变更
+
+- 开发版本进入 `0.6.0-dev`；新增兼容迁移 `000014_oauth_application_identity`，schema version 从 13 提升到 14
+
 ## [0.5.0] — 2026-07-31
 
 ### 新增

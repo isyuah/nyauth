@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -37,7 +38,7 @@ type OwnerQuota struct {
 	Override *int  `json:"quota_override"`
 }
 
-const clientSelectCols = `id, secret_hash, secret_hint, secret_version, secret_rotated_at, secret_last_used_at, name, redirect_uris, post_logout_redirect_uris, grants, scopes, optional_scopes, allowed_claims, is_public, access_policy, owner_id, publisher_type, publisher_verification_status, publisher_verified_at, publisher_verified_by, metadata, created_at, updated_at`
+const clientSelectCols = `id, secret_hash, secret_hint, secret_version, secret_rotated_at, secret_last_used_at, name, homepage_uri, privacy_policy_uri, terms_of_service_uri, current_logo_id, identity_revision, authorization_revision, redirect_uris, post_logout_redirect_uris, grants, scopes, optional_scopes, allowed_claims, is_public, access_policy, owner_id, publisher_type, publisher_verification_status, publisher_verified_at, publisher_verified_by, metadata, created_at, updated_at`
 
 type rowScanner interface{ Scan(dest ...any) error }
 
@@ -49,12 +50,16 @@ func scanClient(row rowScanner) (*models.OAuthClient, error) {
 	c := &models.OAuthClient{}
 	if err := row.Scan(
 		&c.ID, &c.SecretHash, &c.SecretHint, &c.SecretVersion, &c.SecretRotatedAt,
-		&c.SecretLastUsedAt, &c.Name, &c.RedirectURIs, &c.PostLogoutRedirectURIs,
+		&c.SecretLastUsedAt, &c.Name, &c.HomepageURI, &c.PrivacyPolicyURI, &c.TermsOfServiceURI,
+		&c.CurrentLogoID, &c.IdentityRevision, &c.AuthorizationRevision, &c.RedirectURIs, &c.PostLogoutRedirectURIs,
 		&c.Grants, &c.Scopes, &c.OptionalScopes, &c.AllowedClaims, &c.IsPublic, &c.AccessPolicy, &c.OwnerID,
 		&c.PublisherType, &c.PublisherVerification, &c.PublisherVerifiedAt, &c.PublisherVerifiedBy,
 		&c.Metadata, &c.CreatedAt, &c.UpdatedAt,
 	); err != nil {
 		return nil, err
+	}
+	if c.CurrentLogoID != nil {
+		c.LogoURL = "/media/client-logos/" + *c.CurrentLogoID + "/128.webp"
 	}
 	return c, nil
 }
@@ -81,6 +86,12 @@ func (s *Store) CreateWithOAuthPolicy(ctx context.Context, c *models.OAuthClient
 }
 
 func insertClient(ctx context.Context, execer clientExecer, c *models.OAuthClient) error {
+	if c.IdentityRevision < 1 {
+		c.IdentityRevision = 1
+	}
+	if c.AuthorizationRevision < 1 {
+		c.AuthorizationRevision = 1
+	}
 	if c.AccessPolicy == "" {
 		c.AccessPolicy = models.ClientAccessOpen
 	}
@@ -102,12 +113,12 @@ func insertClient(ctx context.Context, execer clientExecer, c *models.OAuthClien
 	}
 	_, err := execer.Exec(ctx, `
 		INSERT INTO oauth_clients (
-			id,secret_hash,secret_hint,secret_version,secret_rotated_at,name,redirect_uris,
+			id,secret_hash,secret_hint,secret_version,secret_rotated_at,name,homepage_uri,privacy_policy_uri,terms_of_service_uri,redirect_uris,
 			post_logout_redirect_uris,grants,scopes,optional_scopes,allowed_claims,is_public,access_policy,owner_id,
 			publisher_type,publisher_verification_status,publisher_verified_at,publisher_verified_by,metadata
-		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20)
+		) VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23)
 	`, c.ID, c.SecretHash, c.SecretHint, c.SecretVersion, c.SecretRotatedAt, c.Name,
-		c.RedirectURIs, c.PostLogoutRedirectURIs, c.Grants, c.Scopes, c.OptionalScopes, c.AllowedClaims, c.IsPublic, c.AccessPolicy, c.OwnerID,
+		c.HomepageURI, c.PrivacyPolicyURI, c.TermsOfServiceURI, c.RedirectURIs, c.PostLogoutRedirectURIs, c.Grants, c.Scopes, c.OptionalScopes, c.AllowedClaims, c.IsPublic, c.AccessPolicy, c.OwnerID,
 		c.PublisherType, c.PublisherVerification, c.PublisherVerifiedAt, c.PublisherVerifiedBy, c.Metadata)
 	if err != nil {
 		return fmt.Errorf("creating OAuth client: %w", err)
@@ -196,16 +207,33 @@ func (s *Store) GetByID(ctx context.Context, id string) (*models.OAuthClient, er
 	return c, nil
 }
 
+func (s *Store) ClientAuthorizationRevision(ctx context.Context, clientID string) (int64, error) {
+	var revision int64
+	if err := s.db.QueryRow(ctx, `SELECT authorization_revision FROM oauth_clients WHERE id=$1`, clientID).Scan(&revision); err != nil {
+		return 0, fmt.Errorf("getting client authorization revision: %w", err)
+	}
+	return revision, nil
+}
+
 func (s *Store) Update(ctx context.Context, c *models.OAuthClient, mutation audit.MutationAudit) error {
 	name, isPublic, accessPolicy := c.Name, c.IsPublic, c.AccessPolicy
 	_, err := s.UpdateRequestWithOAuthPolicy(ctx, c.ID, models.UpdateClientRequest{
-		Name: &name, RedirectURIs: c.RedirectURIs, PostLogoutRedirectURIs: c.PostLogoutRedirectURIs,
+		Name: &name, HomepageURI: &c.HomepageURI, PrivacyPolicyURI: &c.PrivacyPolicyURI, TermsOfServiceURI: &c.TermsOfServiceURI,
+		RedirectURIs: c.RedirectURIs, PostLogoutRedirectURIs: c.PostLogoutRedirectURIs,
 		Grants: c.Grants, Scopes: c.Scopes, OptionalScopes: c.OptionalScopes, AllowedClaims: c.AllowedClaims, IsPublic: &isPublic, AccessPolicy: &accessPolicy, Metadata: c.Metadata,
 	}, mutation, settings.Versioned[settings.OAuthPolicy]{Value: settings.DefaultOAuthPolicy()})
 	return err
 }
 
 func (s *Store) UpdateRequestWithOAuthPolicy(ctx context.Context, id string, request models.UpdateClientRequest, mutation audit.MutationAudit, policy settings.Versioned[settings.OAuthPolicy]) (*models.OAuthClient, error) {
+	return s.updateRequestWithOAuthPolicy(ctx, id, "", true, request, mutation, policy)
+}
+
+func (s *Store) UpdateOwnedRequestWithOAuthPolicy(ctx context.Context, id, ownerID string, request models.UpdateClientRequest, mutation audit.MutationAudit, policy settings.Versioned[settings.OAuthPolicy]) (*models.OAuthClient, error) {
+	return s.updateRequestWithOAuthPolicy(ctx, id, ownerID, false, request, mutation, policy)
+}
+
+func (s *Store) updateRequestWithOAuthPolicy(ctx context.Context, id, ownerID string, administrator bool, request models.UpdateClientRequest, mutation audit.MutationAudit, policy settings.Versioned[settings.OAuthPolicy]) (*models.OAuthClient, error) {
 	tx, err := s.db.Begin(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("starting client update: %w", err)
@@ -218,27 +246,59 @@ func (s *Store) UpdateRequestWithOAuthPolicy(ctx context.Context, id string, req
 	if err != nil {
 		return nil, err
 	}
+	if !administrator && (current.OwnerID == nil || *current.OwnerID != ownerID) {
+		return nil, ErrClientOwnerUnavailable
+	}
 	updated := *current
 	if err := applyClientUpdate(&updated, request); err != nil {
 		return nil, err
 	}
-	if err := validateUpdatedClientPolicy(current, &updated, request, policy.Value); err != nil {
+	if err := validateUpdatedClientPolicyForActor(current, &updated, request, policy.Value, administrator); err != nil {
 		return nil, err
 	}
-	result, err := tx.Exec(ctx, `UPDATE oauth_clients SET name=$2,redirect_uris=$3,post_logout_redirect_uris=$4,grants=$5,scopes=$6,optional_scopes=$7,allowed_claims=$8,metadata=$9,access_policy=$10,updated_at=NOW() WHERE id=$1`, updated.ID, updated.Name, updated.RedirectURIs, updated.PostLogoutRedirectURIs, updated.Grants, updated.Scopes, updated.OptionalScopes, updated.AllowedClaims, updated.Metadata, updated.AccessPolicy)
+	identityChanged := current.Name != updated.Name || current.HomepageURI != updated.HomepageURI || current.PrivacyPolicyURI != updated.PrivacyPolicyURI || current.TermsOfServiceURI != updated.TermsOfServiceURI
+	authorizationChanged := !sameStringSet(current.RedirectURIs, updated.RedirectURIs) || !isSubset(current.Grants, updated.Grants) || current.AccessPolicy != updated.AccessPolicy || !isSubset(current.Scopes, updated.Scopes) || !isSubset(current.AllowedClaims, updated.AllowedClaims)
+	updated.IdentityRevision = current.IdentityRevision
+	if identityChanged {
+		updated.IdentityRevision++
+	}
+	updated.AuthorizationRevision = current.AuthorizationRevision
+	if authorizationChanged {
+		updated.AuthorizationRevision++
+	}
+	result, err := tx.Exec(ctx, `UPDATE oauth_clients SET name=$2,homepage_uri=$3,privacy_policy_uri=$4,terms_of_service_uri=$5,redirect_uris=$6,post_logout_redirect_uris=$7,grants=$8,scopes=$9,optional_scopes=$10,allowed_claims=$11,metadata=$12,access_policy=$13,identity_revision=$14,authorization_revision=$15,updated_at=NOW() WHERE id=$1`, updated.ID, updated.Name, updated.HomepageURI, updated.PrivacyPolicyURI, updated.TermsOfServiceURI, updated.RedirectURIs, updated.PostLogoutRedirectURIs, updated.Grants, updated.Scopes, updated.OptionalScopes, updated.AllowedClaims, updated.Metadata, updated.AccessPolicy, updated.IdentityRevision, updated.AuthorizationRevision)
 	if err != nil {
 		return nil, fmt.Errorf("updating client: %w", err)
 	}
 	if result.RowsAffected() == 0 {
 		return nil, pgx.ErrNoRows
 	}
-	if err := audit.EnqueueMutationTx(ctx, tx, mutation.WithTarget("client", updated.ID)); err != nil {
+	audited := mutation.WithTarget("client", updated.ID).WithDetails(map[string]any{
+		"identity_changed":         identityChanged,
+		"reauthorization_required": authorizationChanged,
+		"identity_revision":        updated.IdentityRevision,
+		"authorization_revision":   updated.AuthorizationRevision,
+	})
+	if err := audit.EnqueueMutationTx(ctx, tx, audited); err != nil {
 		return nil, fmt.Errorf("auditing client update: %w", err)
 	}
 	if err := tx.Commit(ctx); err != nil {
 		return nil, fmt.Errorf("committing client update: %w", err)
 	}
 	return &updated, nil
+}
+
+func isSubset(candidate, allowed []string) bool {
+	for _, value := range candidate {
+		if !slices.Contains(allowed, value) {
+			return false
+		}
+	}
+	return true
+}
+
+func sameStringSet(left, right []string) bool {
+	return len(left) == len(right) && isSubset(left, right) && isSubset(right, left)
 }
 
 func requireOAuthPolicy(ctx context.Context, tx pgx.Tx, expected settings.Versioned[settings.OAuthPolicy]) error {
@@ -331,7 +391,8 @@ func (s *Store) UpdatePublisherVerification(ctx context.Context, clientID, statu
 	}
 	updated, err := scanClient(tx.QueryRow(ctx, `
 		UPDATE oauth_clients
-		SET publisher_verification_status=$2,publisher_verified_at=$3,publisher_verified_by=$4,updated_at=$5
+		SET publisher_verification_status=$2,publisher_verified_at=$3,publisher_verified_by=$4,
+		    identity_revision=identity_revision+1,updated_at=$5
 		WHERE id=$1
 		RETURNING `+clientSelectCols,
 		clientID, status, verifiedAt, verifiedBy, reviewedAt,

@@ -54,7 +54,7 @@ func TestOAuthPublisherTrustMigrationAndTransactionalReview(t *testing.T) {
 		t.Fatalf("insert schema-12 client: %v", err)
 	}
 	if err := runner.Up(); err != nil {
-		t.Fatalf("upgrade isolated schema from 12 to 13: %v", err)
+		t.Fatalf("upgrade isolated schema from 12 to latest: %v", err)
 	}
 	if err := database.ValidateSchemaVersion(ctx, schema.pool); err != nil {
 		t.Fatalf("validate upgraded schema: %v", err)

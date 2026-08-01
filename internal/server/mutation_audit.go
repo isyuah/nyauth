@@ -193,6 +193,10 @@ func describeMutation(r *http.Request, actor *models.User) (mutationAuditDescrip
 		return mutationAuditDescriptor{event: models.AuditClientCreated, targetType: "client", successAlreadyAudited: true}, true
 	case r.Method == http.MethodPost && strings.HasSuffix(path, "/rotate-secret") && strings.HasPrefix(path, "/api/my/clients/"):
 		return mutationAuditDescriptor{event: models.AuditClientSecretRotated, targetType: "client", targetID: param("id"), successAlreadyAudited: true}, true
+	case (r.Method == http.MethodPost || r.Method == http.MethodDelete) && strings.HasSuffix(path, "/logo") && strings.HasPrefix(path, "/api/my/clients/"):
+		return mutationAuditDescriptor{event: models.AuditClientUpdated, targetType: "client", targetID: param("id"), riskLevel: "medium"}, true
+	case r.Method == http.MethodPut && strings.HasPrefix(path, "/api/my/clients/"):
+		return mutationAuditDescriptor{event: models.AuditClientUpdated, targetType: "client", targetID: param("id"), riskLevel: "medium", successAlreadyAudited: true}, true
 	case r.Method == http.MethodDelete && strings.HasPrefix(path, "/api/my/clients/"):
 		return mutationAuditDescriptor{event: models.AuditClientDeleted, targetType: "client", targetID: param("id"), successAlreadyAudited: true}, true
 	case r.Method == http.MethodDelete && strings.HasPrefix(path, "/api/me/authorizations/"):
@@ -229,6 +233,8 @@ func describeMutation(r *http.Request, actor *models.User) (mutationAuditDescrip
 		return mutationAuditDescriptor{event: models.AuditClientCreated, targetType: "client", successAlreadyAudited: true}, true
 	case r.Method == http.MethodPost && strings.HasSuffix(path, "/rotate-secret") && strings.HasPrefix(path, "/api/admin/clients/"):
 		return mutationAuditDescriptor{event: models.AuditClientSecretRotated, targetType: "client", targetID: param("id"), riskLevel: "high", successAlreadyAudited: true}, true
+	case (r.Method == http.MethodPost || r.Method == http.MethodDelete) && strings.HasSuffix(path, "/logo") && strings.HasPrefix(path, "/api/admin/clients/"):
+		return mutationAuditDescriptor{event: models.AuditClientUpdated, targetType: "client", targetID: param("id"), riskLevel: "medium"}, true
 	case r.Method == http.MethodPut && strings.HasSuffix(path, "/owner") && strings.HasPrefix(path, "/api/admin/clients/"):
 		return mutationAuditDescriptor{event: models.AuditClientOwnerChanged, targetType: "client", targetID: param("id"), riskLevel: "high", successAlreadyAudited: true}, true
 	case r.Method == http.MethodPost && strings.HasSuffix(path, "/publisher-verification") && strings.HasPrefix(path, "/api/admin/clients/"):

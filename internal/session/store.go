@@ -51,31 +51,33 @@ type Store struct{ rdb *redis.Client }
 func NewStore(rdb *redis.Client) *Store { return &Store{rdb: rdb} }
 
 type AuthorizationData struct {
-	RecordVersion         string   `json:"record_version"`
-	ClientID              string   `json:"client_id"`
-	UserID                string   `json:"user_id"`
-	RedirectURI           string   `json:"redirect_uri"`
-	Scopes                []string `json:"scopes"`
-	AllowedClaims         []string `json:"allowed_claims,omitempty"`
-	ClaimNamesSet         bool     `json:"claim_names_set,omitempty"`
-	CodeChallenge         string   `json:"code_challenge"`
-	ChallengeMethod       string   `json:"code_challenge_method"`
-	Nonce                 string   `json:"nonce,omitempty"`
-	AuthVersion           int64    `json:"auth_version,omitempty"`
-	AuthorizationIssuedAt int64    `json:"authorization_issued_at,omitempty"`
+	RecordVersion               string   `json:"record_version"`
+	ClientID                    string   `json:"client_id"`
+	UserID                      string   `json:"user_id"`
+	RedirectURI                 string   `json:"redirect_uri"`
+	Scopes                      []string `json:"scopes"`
+	AllowedClaims               []string `json:"allowed_claims,omitempty"`
+	ClaimNamesSet               bool     `json:"claim_names_set,omitempty"`
+	CodeChallenge               string   `json:"code_challenge"`
+	ChallengeMethod             string   `json:"code_challenge_method"`
+	Nonce                       string   `json:"nonce,omitempty"`
+	AuthVersion                 int64    `json:"auth_version,omitempty"`
+	AuthorizationIssuedAt       int64    `json:"authorization_issued_at,omitempty"`
+	ClientAuthorizationRevision int64    `json:"client_authorization_revision,omitempty"`
 }
 type TokenData struct {
-	ClientID              string   `json:"client_id"`
-	UserID                string   `json:"user_id"`
-	Scopes                []string `json:"scopes"`
-	AllowedClaims         []string `json:"allowed_claims,omitempty"`
-	ClaimNamesSet         bool     `json:"claim_names_set,omitempty"`
-	TokenUse              string   `json:"token_use"`
-	AuthVersion           int64    `json:"auth_version,omitempty"`
-	FamilyID              string   `json:"family_id,omitempty"`
-	FamilyKey             string   `json:"family_key,omitempty"`
-	UserKey               string   `json:"user_key,omitempty"`
-	AuthorizationIssuedAt int64    `json:"authorization_issued_at,omitempty"`
+	ClientID                    string   `json:"client_id"`
+	UserID                      string   `json:"user_id"`
+	Scopes                      []string `json:"scopes"`
+	AllowedClaims               []string `json:"allowed_claims,omitempty"`
+	ClaimNamesSet               bool     `json:"claim_names_set,omitempty"`
+	TokenUse                    string   `json:"token_use"`
+	AuthVersion                 int64    `json:"auth_version,omitempty"`
+	FamilyID                    string   `json:"family_id,omitempty"`
+	FamilyKey                   string   `json:"family_key,omitempty"`
+	UserKey                     string   `json:"user_key,omitempty"`
+	AuthorizationIssuedAt       int64    `json:"authorization_issued_at,omitempty"`
+	ClientAuthorizationRevision int64    `json:"client_authorization_revision,omitempty"`
 }
 type SessionData struct {
 	PublicID                      string    `json:"public_id"`
@@ -102,18 +104,20 @@ type ConsentScopeDetails struct {
 	RiskLevel   string `json:"risk_level"`
 }
 type ConsentData struct {
-	ClientID        string                         `json:"client_id"`
-	UserID          string                         `json:"user_id"`
-	RedirectURI     string                         `json:"redirect_uri"`
-	Scopes          []string                       `json:"scopes"`
-	OptionalScopes  []string                       `json:"optional_scopes,omitempty"`
-	ScopeClaims     map[string][]string            `json:"scope_claims"`
-	ScopeDetails    map[string]ConsentScopeDetails `json:"scope_details,omitempty"`
-	State           string                         `json:"state"`
-	CodeChallenge   string                         `json:"code_challenge"`
-	ChallengeMethod string                         `json:"code_challenge_method"`
-	Nonce           string                         `json:"nonce,omitempty"`
-	AuthVersion     int64                          `json:"auth_version,omitempty"`
+	ClientID                    string                         `json:"client_id"`
+	UserID                      string                         `json:"user_id"`
+	RedirectURI                 string                         `json:"redirect_uri"`
+	Scopes                      []string                       `json:"scopes"`
+	OptionalScopes              []string                       `json:"optional_scopes,omitempty"`
+	ScopeClaims                 map[string][]string            `json:"scope_claims"`
+	ScopeDetails                map[string]ConsentScopeDetails `json:"scope_details,omitempty"`
+	State                       string                         `json:"state"`
+	CodeChallenge               string                         `json:"code_challenge"`
+	ChallengeMethod             string                         `json:"code_challenge_method"`
+	Nonce                       string                         `json:"nonce,omitempty"`
+	AuthVersion                 int64                          `json:"auth_version,omitempty"`
+	ClientIdentityRevision      int64                          `json:"client_identity_revision,omitempty"`
+	ClientAuthorizationRevision int64                          `json:"client_authorization_revision,omitempty"`
 }
 
 var consumeMatchingScript = redis.NewScript(`

@@ -7,6 +7,7 @@ import (
 	"encoding/pem"
 	"errors"
 	"fmt"
+	"log/slog"
 	"slices"
 	"strings"
 	"time"
@@ -30,16 +31,17 @@ var (
 
 // TokenService handles JWT generation, validation, and opaque refresh rotation.
 type TokenService struct {
-	jwkManager      *JWKManager
-	session         *session.Store
-	users           *user.Service
-	accessPolicy    AccessPolicyChecker
-	issuer          string
-	fallback        TokenLifetimes
-	lifetimeSource  func() TokenLifetimes
-	revocationTTL   time.Duration
-	codeRetention   time.Duration
-	publicKeyLoader func(context.Context, string) (*rsa.PublicKey, error)
+	jwkManager         *JWKManager
+	session            *session.Store
+	users              *user.Service
+	accessPolicy       AccessPolicyChecker
+	issuer             string
+	fallback           TokenLifetimes
+	lifetimeSource     func() TokenLifetimes
+	revocationTTL      time.Duration
+	codeRetention      time.Duration
+	publicKeyLoader    func(context.Context, string) (*rsa.PublicKey, error)
+	authorizationUsage func(context.Context, string, string, time.Time) error
 }
 
 // TokenLifetimes is an immutable snapshot used for one issuance operation.
@@ -54,6 +56,7 @@ type TokenLifetimes struct {
 // access policy. Implemented by the client store.
 type AccessPolicyChecker interface {
 	UserMayAccess(ctx context.Context, clientID string, userID string) (bool, error)
+	ClientAuthorizationRevision(ctx context.Context, clientID string) (int64, error)
 }
 
 func NewTokenService(jwkManager *JWKManager, sessionStore *session.Store, issuer string, accessTTL, refreshTTL time.Duration) *TokenService {
@@ -126,6 +129,13 @@ func (ts *TokenService) SetAccessPolicyChecker(checker AccessPolicyChecker) {
 	ts.accessPolicy = checker
 }
 
+// SetAuthorizationUsageSink records actual user-grant use after token state is
+// durably stored. Failure is observational and must not turn an already issued
+// token into an ambiguous client error.
+func (ts *TokenService) SetAuthorizationUsageSink(sink func(context.Context, string, string, time.Time) error) {
+	ts.authorizationUsage = sink
+}
+
 type TokenPair struct {
 	AccessToken  string `json:"access_token"`
 	TokenType    string `json:"token_type"`
@@ -150,22 +160,34 @@ func (ts *TokenService) GenerateAuthorizationCodeTokenPair(ctx context.Context, 
 }
 
 func (ts *TokenService) GenerateAuthorizationCodeTokenPairWithClaims(ctx context.Context, clientID, userID string, scopes, allowedClaims []string, authVersion, authorizationIssuedAt int64, issueRefresh bool) (*TokenPair, error) {
+	return ts.GenerateAuthorizationCodeTokenPairAtRevisionWithClaims(ctx, clientID, userID, scopes, allowedClaims, authVersion, authorizationIssuedAt, 0, issueRefresh)
+}
+
+func (ts *TokenService) GenerateAuthorizationCodeTokenPairAtRevisionWithClaims(ctx context.Context, clientID, userID string, scopes, allowedClaims []string, authVersion, authorizationIssuedAt, expectedClientRevision int64, issueRefresh bool) (*TokenPair, error) {
 	if authVersion <= 0 || authorizationIssuedAt <= 0 {
 		return nil, fmt.Errorf("invalid user auth version")
 	}
+	clientRevision, err := ts.currentClientAuthorizationRevision(ctx, clientID)
+	if err != nil {
+		return nil, err
+	}
+	if expectedClientRevision > 0 && clientRevision != normalizedClientRevision(expectedClientRevision) {
+		return nil, ErrInvalidToken
+	}
 	if err := ts.validateAuthorization(ctx, &session.TokenData{
 		ClientID: clientID, UserID: userID, AuthVersion: authVersion, AuthorizationIssuedAt: authorizationIssuedAt,
+		ClientAuthorizationRevision: clientRevision,
 	}); err != nil {
 		return nil, err
 	}
-	return ts.generateTokenPair(ctx, clientID, userID, scopes, allowedClaims, authVersion, issueRefresh, "", authorizationIssuedAt)
+	return ts.generateTokenPair(ctx, clientID, userID, scopes, allowedClaims, authVersion, issueRefresh, "", authorizationIssuedAt, clientRevision)
 }
 
 func (ts *TokenService) GenerateClientTokenPair(ctx context.Context, clientID string, scopes []string) (*TokenPair, error) {
-	return ts.generateTokenPair(ctx, clientID, clientID, scopes, nil, 0, false, "", 0)
+	return ts.generateTokenPair(ctx, clientID, clientID, scopes, nil, 0, false, "", 0, 0)
 }
 
-func (ts *TokenService) generateTokenPair(ctx context.Context, clientID, subject string, scopes, allowedClaims []string, authVersion int64, issueRefresh bool, familyKey string, authorizationIssuedAt int64) (*TokenPair, error) {
+func (ts *TokenService) generateTokenPair(ctx context.Context, clientID, subject string, scopes, allowedClaims []string, authVersion int64, issueRefresh bool, familyKey string, authorizationIssuedAt, clientAuthorizationRevision int64) (*TokenPair, error) {
 	lifetimes := ts.Lifetimes()
 	access, jti, err := ts.signAccessToken(ctx, clientID, subject, scopes, allowedClaims, authVersion, lifetimes.AccessToken)
 	if err != nil {
@@ -177,13 +199,13 @@ func (ts *TokenService) generateTokenPair(ctx context.Context, clientID, subject
 		if err != nil {
 			return nil, fmt.Errorf("generating refresh token: %w", err)
 		}
-		refreshData := &session.TokenData{ClientID: clientID, UserID: subject, Scopes: scopes, AllowedClaims: allowedClaims, ClaimNamesSet: allowedClaims != nil, TokenUse: "refresh", AuthVersion: authVersion, AuthorizationIssuedAt: authorizationIssuedAt}
+		refreshData := &session.TokenData{ClientID: clientID, UserID: subject, Scopes: scopes, AllowedClaims: allowedClaims, ClaimNamesSet: allowedClaims != nil, TokenUse: "refresh", AuthVersion: authVersion, AuthorizationIssuedAt: authorizationIssuedAt, ClientAuthorizationRevision: clientAuthorizationRevision}
 		if err := ts.session.SaveRefreshToken(ctx, refresh, refreshData, lifetimes.RefreshToken); err != nil {
 			return nil, fmt.Errorf("storing refresh token: %w", err)
 		}
 		familyKey = refreshData.FamilyKey
 	}
-	data := &session.TokenData{ClientID: clientID, UserID: subject, Scopes: scopes, AllowedClaims: allowedClaims, ClaimNamesSet: allowedClaims != nil, TokenUse: "access", AuthVersion: authVersion, FamilyKey: familyKey, AuthorizationIssuedAt: authorizationIssuedAt}
+	data := &session.TokenData{ClientID: clientID, UserID: subject, Scopes: scopes, AllowedClaims: allowedClaims, ClaimNamesSet: allowedClaims != nil, TokenUse: "access", AuthVersion: authVersion, FamilyKey: familyKey, AuthorizationIssuedAt: authorizationIssuedAt, ClientAuthorizationRevision: clientAuthorizationRevision}
 	var saveErr error
 	if familyKey == "" {
 		saveErr = ts.session.SaveToken(ctx, jti, data, lifetimes.AccessToken)
@@ -195,6 +217,11 @@ func (ts *TokenService) generateTokenPair(ctx context.Context, clientID, subject
 			_ = ts.session.RevokeRefreshTokenForClient(ctx, refresh, clientID, ts.revocationTTL)
 		}
 		return nil, fmt.Errorf("storing access token metadata: %w", saveErr)
+	}
+	if authVersion > 0 && ts.authorizationUsage != nil {
+		if err := ts.authorizationUsage(ctx, subject, clientID, time.Now().UTC()); err != nil {
+			slog.WarnContext(ctx, "OAuth authorization usage update failed", "client_id", clientID, "error", err)
+		}
 	}
 	result := &TokenPair{AccessToken: access, TokenType: "Bearer", ExpiresIn: int(lifetimes.AccessToken.Seconds()), Scope: joinScopes(scopes)}
 	if !issueRefresh {
@@ -386,6 +413,7 @@ func (ts *TokenService) RefreshTokenWithClaimPolicy(ctx context.Context, refresh
 	accessData := &session.TokenData{
 		ClientID: data.ClientID, UserID: data.UserID, Scopes: data.Scopes, AllowedClaims: effectiveClaims, ClaimNamesSet: true, TokenUse: "access",
 		AuthVersion: data.AuthVersion, FamilyKey: data.FamilyKey, AuthorizationIssuedAt: data.AuthorizationIssuedAt,
+		ClientAuthorizationRevision: data.ClientAuthorizationRevision,
 	}
 	_, err = ts.session.RotateRefreshTokenAndStoreAccess(
 		ctx, refreshToken, newRefresh, jti, data, accessData, lifetimes.RefreshToken, lifetimes.AccessToken,
@@ -519,7 +547,32 @@ func (ts *TokenService) validateAuthorization(ctx context.Context, data *session
 	if revoked {
 		return ErrInvalidToken
 	}
+	currentRevision, err := ts.currentClientAuthorizationRevision(ctx, data.ClientID)
+	if err != nil {
+		return err
+	}
+	issuedRevision := data.ClientAuthorizationRevision
+	if issuedRevision == 0 {
+		issuedRevision = 1
+	}
+	if issuedRevision != currentRevision {
+		return ErrInvalidToken
+	}
 	return nil
+}
+
+func (ts *TokenService) currentClientAuthorizationRevision(ctx context.Context, clientID string) (int64, error) {
+	if ts.accessPolicy == nil {
+		return 0, ErrInvalidToken
+	}
+	revision, err := ts.accessPolicy.ClientAuthorizationRevision(ctx, clientID)
+	if err != nil {
+		return 0, fmt.Errorf("%w: loading client authorization revision: %v", ErrTokenValidationUnavailable, err)
+	}
+	if revision < 1 {
+		return 0, ErrInvalidToken
+	}
+	return revision, nil
 }
 
 func (ts *TokenService) getPublicKey(ctx context.Context, kid string) (*rsa.PublicKey, error) {

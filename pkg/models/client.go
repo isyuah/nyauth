@@ -17,6 +17,13 @@ type OAuthClient struct {
 	SecretRotatedAt        *time.Time        `json:"secret_rotated_at,omitempty" db:"secret_rotated_at"`
 	SecretLastUsedAt       *time.Time        `json:"secret_last_used_at,omitempty" db:"secret_last_used_at"`
 	Name                   string            `json:"name" db:"name"`
+	HomepageURI            string            `json:"homepage_uri" db:"homepage_uri"`
+	PrivacyPolicyURI       string            `json:"privacy_policy_uri" db:"privacy_policy_uri"`
+	TermsOfServiceURI      string            `json:"terms_of_service_uri" db:"terms_of_service_uri"`
+	CurrentLogoID          *string           `json:"current_logo_id,omitempty" db:"current_logo_id"`
+	LogoURL                string            `json:"logo_url,omitempty" db:"-"`
+	IdentityRevision       int64             `json:"identity_revision" db:"identity_revision"`
+	AuthorizationRevision  int64             `json:"authorization_revision" db:"authorization_revision"`
 	RedirectURIs           []string          `json:"redirect_uris" db:"redirect_uris"`
 	PostLogoutRedirectURIs []string          `json:"post_logout_redirect_uris" db:"post_logout_redirect_uris"`
 	Grants                 []string          `json:"grants" db:"grants"`
@@ -65,6 +72,9 @@ func ValidClientAccessPolicy(policy string) bool {
 // CreateClientRequest is the payload to create a client.
 type CreateClientRequest struct {
 	Name                   string            `json:"name" validate:"required"`
+	HomepageURI            string            `json:"homepage_uri,omitempty"`
+	PrivacyPolicyURI       string            `json:"privacy_policy_uri,omitempty"`
+	TermsOfServiceURI      string            `json:"terms_of_service_uri,omitempty"`
 	RedirectURIs           []string          `json:"redirect_uris" validate:"required,min=1"`
 	PostLogoutRedirectURIs []string          `json:"post_logout_redirect_uris,omitempty"`
 	Grants                 []string          `json:"grants" validate:"required,min=1"`
@@ -80,6 +90,9 @@ type CreateClientRequest struct {
 // UpdateClientRequest is the payload to update a client.
 type UpdateClientRequest struct {
 	Name                   *string           `json:"name,omitempty"`
+	HomepageURI            *string           `json:"homepage_uri,omitempty"`
+	PrivacyPolicyURI       *string           `json:"privacy_policy_uri,omitempty"`
+	TermsOfServiceURI      *string           `json:"terms_of_service_uri,omitempty"`
 	RedirectURIs           []string          `json:"redirect_uris,omitempty"`
 	PostLogoutRedirectURIs []string          `json:"post_logout_redirect_uris,omitempty"`
 	Grants                 []string          `json:"grants,omitempty"`

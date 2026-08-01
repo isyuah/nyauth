@@ -41,6 +41,11 @@ interface MockState {
   revokeOthersCSRF?: string | null;
   authorizationRevokeCSRF?: string | null;
   clientRotateCSRF?: string | null;
+  myClientUpdateBody?: unknown;
+  myClientUpdateCSRF?: string | null;
+  myClientLogoMethod?: string;
+  myClientLogoCSRF?: string | null;
+  myClientLogoContentType?: string | null;
   reauthCSRF?: string | null;
   reauthBody?: unknown;
   providerReauthCSRF?: string | null;
@@ -155,6 +160,20 @@ const oauthAuthorization = {
   id: '22222222-2222-2222-2222-222222222222',
   client_id: 'example-client',
   client_name: 'Example App',
+  client_name_at_grant: 'Example App',
+  logo_url: '/media/client-logos/99999999-9999-4999-8999-999999999999/128.webp',
+  homepage_uri: 'https://app.example',
+  privacy_policy_uri: 'https://app.example/privacy',
+  terms_of_service_uri: 'https://app.example/terms',
+  homepage_uri_at_grant: 'https://app.example',
+  privacy_policy_uri_at_grant: 'https://app.example/privacy',
+  terms_of_service_uri_at_grant: 'https://app.example/terms',
+  client_identity_revision: 1,
+  current_identity_revision: 1,
+  client_authorization_revision: 1,
+  current_authorization_revision: 1,
+  application_changed: false,
+  reauthorization_required: false,
   scopes: ['openid', 'profile', 'offline_access'],
   optional_scopes: [],
   allowed_claims: ['sub', 'preferred_username', 'name', 'picture'],
@@ -167,6 +186,13 @@ const oauthAuthorization = {
 const oauthClient: OAuthClient = {
   id: 'example-client',
   name: 'Example App',
+  homepage_uri: 'https://app.example',
+  privacy_policy_uri: 'https://app.example/privacy',
+  terms_of_service_uri: 'https://app.example/terms',
+  current_logo_id: null,
+  logo_url: null,
+  identity_revision: 1,
+  authorization_revision: 1,
   redirect_uris: ['https://app.example/callback'],
   post_logout_redirect_uris: ['https://app.example/signed-out'],
   grants: ['authorization_code', 'refresh_token'],
@@ -702,6 +728,25 @@ async function installAPIMocks(page: Page, state: MockState) {
       return;
     }
 
+    if (path === `/api/my/clients/${oauthClient.id}` && request.method() === 'PUT') {
+      state.myClientUpdateCSRF = await request.headerValue('x-csrf-token');
+      state.myClientUpdateBody = request.postDataJSON();
+      await fulfillJSON(route, 200, { ...oauthClient, ...(state.myClientUpdateBody as object), updated_at: '2026-01-03T00:00:00Z' });
+      return;
+    }
+
+    if (path === `/api/my/clients/${oauthClient.id}/logo` && (request.method() === 'POST' || request.method() === 'DELETE')) {
+      state.myClientLogoMethod = request.method();
+      state.myClientLogoCSRF = await request.headerValue('x-csrf-token');
+      state.myClientLogoContentType = await request.headerValue('content-type');
+      await fulfillJSON(route, 200, {
+        ...oauthClient,
+        logo_url: request.method() === 'POST' ? '/media/client-logos/99999999-9999-4999-8999-999999999999/256.webp' : null,
+        current_logo_id: request.method() === 'POST' ? '99999999-9999-4999-8999-999999999999' : null,
+      });
+      return;
+    }
+
     if (path === '/api/my/clients') {
       await fulfillJSON(route, 200, {
         items: [oauthClient],
@@ -1007,6 +1052,12 @@ async function installAPIMocks(page: Page, state: MockState) {
         await fulfillJSON(route, 200, updated);
         return;
       }
+    }
+
+    if (path === `/api/admin/clients/${oauthClient.id}` && request.method() === 'GET' && state.adminClients) {
+      const current = state.adminClients.find((client) => client.id === oauthClient.id);
+      await fulfillJSON(route, current ? 200 : 404, current || { error: 'client not found' });
+      return;
     }
 
     if (path === `/api/admin/clients/${oauthClient.id}` && request.method() === 'PUT' && state.adminClients) {
@@ -1332,7 +1383,8 @@ test('all profile deep links load only their own account data', async ({ page })
   await page.goto('/profile/authorizations');
   await expect(page.getByRole('heading', { name: 'OAuth 应用授权', exact: true, level: 1 })).toBeVisible();
   await expect(page.getByRole('link', { name: '应用授权', exact: true })).toHaveAttribute('aria-current', 'page');
-  await expect(page.getByText('可返回字段：稳定用户 ID、用户名、显示名称、头像')).toBeVisible();
+  await expect(page.getByText('允许返回的 Claim', { exact: true })).toBeVisible();
+  await expect(page.getByText('稳定用户 ID', { exact: false })).toBeVisible();
   await expect.poll(() => state.authorizationListRequests || 0).toBeGreaterThan(0);
   expect(state.meRequests || 0).toBe(0);
   expect(state.mfaStatusRequests || 0).toBe(0);
@@ -1395,6 +1447,46 @@ test('owned applications show the used quota as a compact fraction', async ({ pa
 
   await expect(page.getByText('1/10', { exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: '创建应用' }).first()).toBeEnabled();
+});
+
+test('owners can edit application identity and upload a cropped logo', async ({ page }) => {
+  const state: MockState = {
+    authenticated: true,
+    mustChangePassword: false,
+    role: 'user',
+    csrfToken: 'csrf-owned-client',
+  };
+  await installAPIMocks(page, state);
+  await page.goto('/dashboard/apps');
+
+  await page.getByRole('button', { name: '编辑', exact: true }).click();
+  const editor = page.getByRole('dialog', { name: /编辑应用/ });
+  await editor.getByRole('textbox', { name: '应用主页' }).fill('https://new-app.example');
+  await editor.getByRole('textbox', { name: '隐私政策' }).fill('https://new-app.example/privacy');
+  await editor.getByRole('textbox', { name: '服务条款' }).fill('https://new-app.example/terms');
+
+  const logoFixture = await readFile(new URL('../../static/logo.png', import.meta.url));
+  await editor.locator('input[type="file"][accept*="image/webp"]').setInputFiles({
+    name: 'application-logo.png',
+    mimeType: 'image/png',
+    buffer: logoFixture,
+  });
+  const cropDialog = page.getByRole('dialog', { name: '裁剪应用 Logo' });
+  await cropDialog.getByRole('button', { name: '上传应用 Logo' }).click();
+  await expect(cropDialog).toBeHidden();
+  await expect(editor.getByAltText('Example App Logo')).toBeVisible();
+
+  await editor.getByRole('button', { name: '保存更改' }).click();
+  await expect(editor).toBeHidden();
+  expect(state.myClientUpdateCSRF).toBe('csrf-owned-client');
+  expect(state.myClientUpdateBody).toMatchObject({
+    homepage_uri: 'https://new-app.example',
+    privacy_policy_uri: 'https://new-app.example/privacy',
+    terms_of_service_uri: 'https://new-app.example/terms',
+  });
+  expect(state.myClientLogoMethod).toBe('POST');
+  expect(state.myClientLogoCSRF).toBe('csrf-owned-client');
+  expect(state.myClientLogoContentType).toMatch(/^multipart\/form-data; boundary=/);
 });
 
 test('mobile navigation traps focus, closes with Escape, and restores the menu trigger', async ({ page }) => {
@@ -1469,6 +1561,9 @@ test('revoking an OAuth authorization sends CSRF and removes the grant', async (
   await installAPIMocks(page, state);
 
   await page.goto('/profile/authorizations');
+  await expect(page.getByText('授权有效', { exact: true })).toBeVisible();
+  await expect(page.getByRole('link', { name: '应用主页' })).toHaveAttribute('href', 'https://app.example');
+  await expect(page.getByText('尚无使用记录')).toHaveCount(0);
   await page.getByRole('button', { name: '撤销授权' }).click();
   const dialog = page.getByRole('dialog');
   await dialog.getByRole('button', { name: '撤销授权' }).click();
@@ -2436,6 +2531,9 @@ test('administrators can edit OAuth clients without mutating immutable ownership
   expect(state.adminClientUpdateCSRF).toBe('csrf-admin');
   expect(state.adminClientUpdateBody).toEqual({
     name: 'Renamed App',
+    homepage_uri: 'https://app.example',
+    privacy_policy_uri: 'https://app.example/privacy',
+    terms_of_service_uri: 'https://app.example/terms',
     redirect_uris: ['https://new.example/callback', 'https://backup.example/callback'],
     post_logout_redirect_uris: ['https://new.example/signed-out'],
     grants: ['authorization_code', 'refresh_token'],
@@ -2579,6 +2677,9 @@ test('administrators can select an active owner while creating a client', async 
   expect(state.adminClientCreateCSRF).toBe('csrf-admin');
   expect(state.adminClientCreateBody).toEqual({
     name: 'Owner App',
+    homepage_uri: '',
+    privacy_policy_uri: '',
+    terms_of_service_uri: '',
     redirect_uris: ['https://owner.example/callback'],
     post_logout_redirect_uris: [],
     grants: ['authorization_code', 'refresh_token'],

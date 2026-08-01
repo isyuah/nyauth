@@ -181,6 +181,29 @@ func TestClientCredentialsDoesNotRequireRedirectURI(t *testing.T) {
 	}
 }
 
+func TestApplicationURIsRequireHTTPSExceptLoopback(t *testing.T) {
+	for _, test := range []struct {
+		name    string
+		value   string
+		wantErr bool
+	}{
+		{name: "empty", value: ""},
+		{name: "https", value: "https://app.example/privacy"},
+		{name: "loopback", value: "http://127.0.0.1:3000/terms"},
+		{name: "localhost", value: "http://localhost:5173"},
+		{name: "remote http", value: "http://app.example/privacy", wantErr: true},
+		{name: "credentials", value: "https://user:pass@app.example", wantErr: true},
+		{name: "relative", value: "/privacy", wantErr: true},
+	} {
+		t.Run(test.name, func(t *testing.T) {
+			err := validateApplicationURI("privacy policy", test.value)
+			if (err != nil) != test.wantErr {
+				t.Fatalf("error = %v, wantErr=%v", err, test.wantErr)
+			}
+		})
+	}
+}
+
 func TestOfflineAccessRequiresRefreshTokenForNewClientsButLegacyStateCanBeRepaired(t *testing.T) {
 	service := NewService(nil)
 	request := models.CreateClientRequest{

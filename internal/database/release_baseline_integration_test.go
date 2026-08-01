@@ -175,9 +175,12 @@ func assertReleaseBaseline(t *testing.T, schema *postgresTestSchema) {
 
 	for _, column := range []struct{ table, name string }{
 		{"users", "current_avatar_id"}, {"users", "creation_source"}, {"users", "created_by"},
-		{"oauth_clients", "access_policy"}, {"oauth_clients", "optional_scopes"}, {"oauth_clients", "allowed_claims"}, {"oauth_authorizations", "allowed_claims"}, {"oauth_providers", "import_avatar"},
+		{"oauth_clients", "access_policy"}, {"oauth_clients", "optional_scopes"}, {"oauth_clients", "allowed_claims"},
+		{"oauth_clients", "homepage_uri"}, {"oauth_clients", "current_logo_id"}, {"oauth_clients", "identity_revision"}, {"oauth_clients", "authorization_revision"},
+		{"oauth_authorizations", "allowed_claims"}, {"oauth_authorizations", "client_name_snapshot"}, {"oauth_authorizations", "client_authorization_revision"},
+		{"oauth_providers", "import_avatar"},
 		{"oauth_providers", "avatar_allowed_hosts"},
-		{"user_avatars", "storage_profile_id"},
+		{"user_avatars", "storage_profile_id"}, {"user_avatars", "media_purpose"}, {"user_avatars", "client_id"},
 		{"media_storage_migrations", "target_backend"},
 		{"media_storage_migration_items", "target_backend"},
 	} {

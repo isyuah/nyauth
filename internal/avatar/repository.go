@@ -65,10 +65,10 @@ func (r *Repository) CreateStagingTx(ctx context.Context, tx pgx.Tx, params Crea
 	}
 	_, err = tx.Exec(ctx, `
 		INSERT INTO user_avatars (
-			id,user_id,source,status,storage_backend,storage_profile_id,object_prefix,variants,content_sha256,
+			id,user_id,client_id,media_purpose,source,status,storage_backend,storage_profile_id,object_prefix,variants,content_sha256,
 			original_media_type,original_width,original_height,created_at,updated_at
-		) VALUES ($1,$2,$3,'staging',$4,$5,$6,$7,$8,$9,$10,$11,$12,$12)
-	`, params.ID, params.UserID, params.Source, params.StorageBackend, params.StorageProfileID, params.ObjectPrefix, variants,
+		) VALUES ($1,$2,$3,$4,$5,'staging',$6,$7,$8,$9,$10,$11,$12,$13,$14,$14)
+	`, params.ID, params.UserID, params.ClientID, params.MediaPurpose, params.Source, params.StorageBackend, params.StorageProfileID, params.ObjectPrefix, variants,
 		params.ContentSHA256, params.OriginalMediaType, params.OriginalWidth, params.OriginalHeight, now.UTC())
 	if err != nil {
 		return fmt.Errorf("creating staging avatar record: %w", err)
@@ -124,20 +124,20 @@ func (r *Repository) activateTx(ctx context.Context, tx pgx.Tx, userID, avatarID
 	return nil
 }
 
-func (r *Repository) GetActiveVariant(ctx context.Context, avatarID uuid.UUID, size int) (ActiveVariant, error) {
+func (r *Repository) GetActiveVariant(ctx context.Context, avatarID uuid.UUID, size int, mediaPurpose string) (ActiveVariant, error) {
 	var result ActiveVariant
 	if r == nil || r.db == nil {
 		return result, fmt.Errorf("avatar repository is unavailable")
 	}
-	if avatarID == uuid.Nil || !validVariantSize(size) {
+	if avatarID == uuid.Nil || !validVariantSize(size) || (mediaPurpose != "user_avatar" && mediaPurpose != "client_logo") {
 		return result, ErrNotFound
 	}
 	var raw []byte
 	if err := r.db.QueryRow(ctx, `
 		SELECT storage_backend,storage_profile_id,variants
 		FROM user_avatars
-		WHERE id=$1 AND status='active' AND storage_deleted_at IS NULL
-	`, avatarID).Scan(&result.StorageBackend, &result.StorageProfileID, &raw); err != nil {
+		WHERE id=$1 AND media_purpose=$2 AND status='active' AND storage_deleted_at IS NULL
+	`, avatarID, mediaPurpose).Scan(&result.StorageBackend, &result.StorageProfileID, &raw); err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			return result, ErrNotFound
 		}
@@ -210,6 +210,74 @@ func (r *Repository) DeleteActiveTx(ctx context.Context, tx pgx.Tx, userID uuid.
 	return items, nil
 }
 
+func (r *Repository) ActivateClientLogoTx(ctx context.Context, tx pgx.Tx, clientID string, logoID uuid.UUID, now time.Time) error {
+	if tx == nil || strings.TrimSpace(clientID) == "" {
+		return fmt.Errorf("client logo transaction and owner are required")
+	}
+	now = now.UTC()
+	if _, err := tx.Exec(ctx, `SELECT id FROM oauth_clients WHERE id=$1 FOR UPDATE`, clientID); err != nil {
+		return fmt.Errorf("locking client logo owner: %w", err)
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE user_avatars SET status='replaced',replaced_at=$3,updated_at=$3
+		WHERE client_id=$1 AND id<>$2 AND media_purpose='client_logo' AND status='active'
+	`, clientID, logoID, now); err != nil {
+		return fmt.Errorf("replacing previous active client logo: %w", err)
+	}
+	tag, err := tx.Exec(ctx, `
+		UPDATE user_avatars SET status='active',activated_at=$3,updated_at=$3,last_error=NULL,failed_at=NULL
+		WHERE id=$1 AND client_id=$2 AND media_purpose='client_logo' AND status='staging'
+	`, logoID, clientID, now)
+	if err != nil {
+		return fmt.Errorf("activating client logo: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrNotFound
+	}
+	tag, err = tx.Exec(ctx, `
+		UPDATE oauth_clients
+		SET current_logo_id=$2,identity_revision=identity_revision+1,updated_at=$3
+		WHERE id=$1
+	`, clientID, logoID, now)
+	if err != nil {
+		return fmt.Errorf("updating client current logo: %w", err)
+	}
+	if tag.RowsAffected() != 1 {
+		return ErrNotFound
+	}
+	return nil
+}
+
+func (r *Repository) DeleteActiveClientLogoTx(ctx context.Context, tx pgx.Tx, clientID string, now time.Time) ([]CleanupItem, error) {
+	if tx == nil || strings.TrimSpace(clientID) == "" {
+		return nil, fmt.Errorf("client logo transaction and owner are required")
+	}
+	now = now.UTC()
+	if _, err := tx.Exec(ctx, `SELECT id FROM oauth_clients WHERE id=$1 FOR UPDATE`, clientID); err != nil {
+		return nil, fmt.Errorf("locking client logo owner: %w", err)
+	}
+	rows, err := tx.Query(ctx, `
+		UPDATE user_avatars SET status='deleted',deleted_at=$2,updated_at=$2
+		WHERE client_id=$1 AND media_purpose='client_logo' AND status='active'
+		RETURNING id,storage_backend,storage_profile_id,variants
+	`, clientID, now)
+	if err != nil {
+		return nil, fmt.Errorf("deleting active client logo: %w", err)
+	}
+	items, _, err := collectCleanupItems(rows)
+	if err != nil {
+		return nil, err
+	}
+	if _, err := tx.Exec(ctx, `
+		UPDATE oauth_clients
+		SET current_logo_id=NULL,identity_revision=identity_revision+1,updated_at=$2
+		WHERE id=$1 AND current_logo_id IS NOT NULL
+	`, clientID, now); err != nil {
+		return nil, fmt.Errorf("clearing client current logo: %w", err)
+	}
+	return items, nil
+}
+
 type CleanupResult struct {
 	LockAcquired bool
 	Rows         int64
@@ -277,7 +345,9 @@ func (r *Repository) CountCleanupPending(ctx context.Context, backend StorageBac
 	if err := r.db.QueryRow(ctx, `
 		SELECT COUNT(*) FROM user_avatars
 		WHERE storage_backend=$1 AND storage_deleted_at IS NULL
-		  AND (status IN ('staging','replaced','failed','deleted') OR user_id IS NULL)
+		  AND (status IN ('staging','replaced','failed','deleted')
+		       OR (media_purpose='user_avatar' AND user_id IS NULL)
+		       OR (media_purpose='client_logo' AND client_id IS NULL))
 	`, backend).Scan(&count); err != nil {
 		return 0, fmt.Errorf("counting avatar cleanup backlog: %w", err)
 	}
@@ -293,7 +363,9 @@ func cleanupBatch(ctx context.Context, conn *pgxpool.Conn, backend StorageBacken
 	rows, err := tx.Query(ctx, `
 		WITH candidates AS (
 			SELECT id FROM user_avatars
-			WHERE (status IN ('staging','replaced','failed','deleted') OR user_id IS NULL)
+			WHERE (status IN ('staging','replaced','failed','deleted')
+			       OR (media_purpose='user_avatar' AND user_id IS NULL)
+			       OR (media_purpose='client_logo' AND client_id IS NULL))
 			  AND storage_backend=$5::text
 			  AND storage_deleted_at IS NULL
 			  AND (cleanup_claimed_at IS NULL OR cleanup_claimed_at <= $2::timestamptz)

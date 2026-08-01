@@ -1045,3 +1045,76 @@ describe('runtime observability API contract', () => {
     expect(body).toHaveProperty('authorization', '');
   });
 });
+
+describe('OAuth application identity API contract', () => {
+  afterEach(() => {
+    setCsrfToken('');
+    vi.unstubAllGlobals();
+  });
+
+  it('uses owned/admin logo endpoints and normalizes nullable collections', async () => {
+    const client = {
+      id: 'client /1', name: 'Example', homepage_uri: '', privacy_policy_uri: '', terms_of_service_uri: '',
+      identity_revision: 2, authorization_revision: 3,
+      redirect_uris: null, post_logout_redirect_uris: null, grants: null, scopes: null,
+      optional_scopes: null, allowed_claims: null, is_public: false, secret_version: 1,
+      publisher_type: 'user_registered', publisher_verification_status: 'unverified',
+      created_at: '2026-08-01T00:00:00Z', updated_at: '2026-08-01T00:00:00Z',
+    };
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(client), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    setCsrfToken('oauth-identity-csrf');
+
+    const updated = await api.my.updateClient('client /1', { homepage_uri: 'https://app.example' });
+    await api.my.uploadClientLogo('client /1', new Blob(['logo'], { type: 'image/webp' }));
+    await api.my.removeClientLogo('client /1');
+    await api.admin.uploadClientLogo('client /1', new Blob(['logo'], { type: 'image/png' }));
+    await api.admin.removeClientLogo('client /1');
+
+    expect(updated.redirect_uris).toEqual([]);
+    expect(updated.allowed_claims).toEqual([]);
+    const calls = fetchMock.mock.calls as unknown as Array<[string, RequestInit]>;
+    expect(calls.map(([url, options]) => [url, options.method])).toEqual([
+      ['/api/my/clients/client%20%2F1', 'PUT'],
+      ['/api/my/clients/client%20%2F1/logo', 'POST'],
+      ['/api/my/clients/client%20%2F1/logo', 'DELETE'],
+      ['/api/admin/clients/client%20%2F1/logo', 'POST'],
+      ['/api/admin/clients/client%20%2F1/logo', 'DELETE'],
+    ]);
+    expect((calls[1][1].body as FormData).get('logo')).toBeInstanceOf(Blob);
+    for (const [, options] of calls) {
+      expect(new Headers(options.headers).get('X-CSRF-Token')).toBe('oauth-identity-csrf');
+    }
+  });
+
+  it('normalizes missing consent and authorization arrays instead of exposing null to pages', async () => {
+    const responses = [
+      {
+        challenge: 'challenge', client_name: 'Example', client_id: 'client', scopes: null,
+        permissions: [{ scope: 'openid', display_name: 'Identity', description: '', risk_level: 'low', required: true, claims: null }],
+        redirect_uri: 'https://app.example/callback', redirect_origin: 'https://app.example',
+        publisher_type: 'system_managed', verification_status: 'not_applicable',
+        new_scopes: null, new_claims: null,
+      },
+      [{
+        id: 'grant', client_id: 'client', client_name: 'Example', scopes: null, allowed_claims: null,
+        granted_at: '2026-08-01T00:00:00Z', created_at: '2026-08-01T00:00:00Z', updated_at: '2026-08-01T00:00:00Z',
+      }],
+    ];
+    vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
+      status: 200,
+      headers: { 'Content-Type': 'application/json' },
+    })));
+
+    const consent = await api.consent.get('challenge');
+    const authorizations = await api.getMyAuthorizations();
+    expect(consent.permissions[0].claims).toEqual([]);
+    expect(consent.new_scopes).toEqual([]);
+    expect(consent.permissions[0].newly_requested).toBe(false);
+    expect(authorizations[0].scopes).toEqual([]);
+    expect(authorizations[0].client_name_at_grant).toBe('Example');
+  });
+});

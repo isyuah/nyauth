@@ -135,6 +135,13 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 	jwkManager := auth.NewJWKManager(db, cfg.Auth.JWK.KeySize, cfg.Auth.JWK.RotationInterval)
 	tokenService := auth.NewTokenService(jwkManager, sessionStore, cfg.Auth.Issuer, cfg.Auth.AccessTokenTTL, cfg.Auth.RefreshTokenTTL)
 	tokenService.SetAuthorizationCodeFallback(cfg.Auth.AuthorizationCodeTTL)
+	tokenService.SetAuthorizationUsageSink(func(ctx context.Context, subject, clientID string, usedAt time.Time) error {
+		userID, err := uuid.Parse(subject)
+		if err != nil {
+			return fmt.Errorf("parsing OAuth authorization subject: %w", err)
+		}
+		return authorizationStore.MarkUsed(ctx, userID, clientID, usedAt)
+	})
 	tokenService.SetLifetimeSource(func() auth.TokenLifetimes {
 		lifecycle := settingsMgr.Lifecycle()
 		return auth.TokenLifetimes{
@@ -489,6 +496,7 @@ func (s *Server) buildRouter() *chi.Mux {
 	r.Get("/livez", s.handleLiveness)
 	r.Get("/readyz", s.handleReadiness)
 	r.Get("/media/avatars/{avatar_id}/{size}.webp", s.handleAvatarMedia)
+	r.Get("/media/client-logos/{logo_id}/{size}.webp", s.handleClientLogoMedia)
 	if s.telemetry != nil {
 		r.With(s.requireInternalMetricsClient).Handle("/metrics", s.telemetry.PrometheusHandler())
 	}
@@ -563,6 +571,9 @@ func (s *Server) buildRouter() *chi.Mux {
 			r.Post("/consent/deny", s.consentHandler.DenyConsent)
 			r.Get("/my/clients", s.handleListMyClients)
 			r.With(accountMutations).Post("/my/clients", s.handleCreateMyClient)
+			r.With(accountMutations).Put("/my/clients/{id}", s.handleUpdateMyClient)
+			r.With(accountMediaWrites).Post("/my/clients/{id}/logo", s.handleUploadMyClientLogo)
+			r.With(accountMediaWrites).Delete("/my/clients/{id}/logo", s.handleDeleteMyClientLogo)
 			r.With(accountMutations).Post("/my/clients/{id}/rotate-secret", s.handleRotateMyClientSecret)
 			r.With(accountMutations).Delete("/my/clients/{id}", s.handleDeleteMyClient)
 		})
@@ -657,6 +668,8 @@ func (s *Server) buildRouter() *chi.Mux {
 			r.With(adminMutations).Post("/admin/clients", clientHandler.Create)
 			r.Get("/admin/clients/{id}", clientHandler.Get)
 			r.With(adminMutations).Put("/admin/clients/{id}", clientHandler.Update)
+			r.With(adminMediaWrites).Post("/admin/clients/{id}/logo", s.handleUploadAdminClientLogo)
+			r.With(adminMediaWrites).Delete("/admin/clients/{id}/logo", s.handleDeleteAdminClientLogo)
 			r.With(adminMutations).Put("/admin/clients/{id}/owner", clientHandler.UpdateOwner)
 			r.With(adminMutations, s.recentAuthenticationMiddleware).Post("/admin/clients/{id}/publisher-verification", clientHandler.VerifyPublisher)
 			r.With(adminMutations, s.recentAuthenticationMiddleware).Delete("/admin/clients/{id}/publisher-verification", clientHandler.RevokePublisherVerification)

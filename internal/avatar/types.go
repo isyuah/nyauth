@@ -36,6 +36,7 @@ const (
 	SourceUserUpload     = models.AvatarSourceUserUpload
 	SourceAdminUpload    = models.AvatarSourceAdminUpload
 	SourceProviderImport = models.AvatarSourceProviderImport
+	SourceClientUpload   = models.AvatarSourceClientUpload
 	StorageLocal         = models.AvatarStorageLocal
 	StorageS3            = models.AvatarStorageS3
 )
@@ -62,7 +63,9 @@ type ActiveVariant struct {
 
 type CreateAvatarParams struct {
 	ID                uuid.UUID
-	UserID            uuid.UUID
+	UserID            *uuid.UUID
+	ClientID          *string
+	MediaPurpose      string
 	Source            Source
 	StorageBackend    StorageBackend
 	StorageProfileID  *uuid.UUID

@@ -22,6 +22,7 @@ const (
 	AvatarSourceUserUpload     AvatarSource = "user_upload"
 	AvatarSourceAdminUpload    AvatarSource = "admin_upload"
 	AvatarSourceProviderImport AvatarSource = "provider_import"
+	AvatarSourceClientUpload   AvatarSource = "client_upload"
 )
 
 type AvatarStorageBackend string

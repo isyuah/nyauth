@@ -1,15 +1,15 @@
-# nyauth 0.5.0
+# nyauth 0.6.0-dev
 
 统一认证与用户系统，提供 OAuth 2.0 Authorization Server、OpenID Connect Provider 和第一方管理后台。
 
-## 0.3.0 基线与 0.5.0 兼容演进
+## 0.3.0 基线与 0.6.0 兼容演进
 
 `0.3.0` 是全新的破坏性开发基线，不提供旧数据库、配置、接口或 SDK 的兼容层：
 
 - 第一方后台仅使用 `HttpOnly + SameSite=Lax` 会话 Cookie，并对修改请求强制校验 CSRF。
 - OAuth 授权码客户端强制使用 PKCE S256；不支持 plain、implicit 或 hybrid 流程。
 - JWT 固定使用 RS256，refresh token 采用 family 轮换与重复使用检测。
-- 数据库以嵌入二进制的 `000001_baseline` 建立破坏性发布基线，并通过兼容的 `000002` 至 `000013_oauth_publisher_trust` 加法迁移演进；当前 `0.5.0` 要求 schema version 13，可从正式 `0.3.0` 的 schema version 3 依次迁移。服务启动只校验 schema，不再隐式迁移。
+- 数据库以嵌入二进制的 `000001_baseline` 建立破坏性发布基线，并通过兼容的 `000002` 至 `000014_oauth_application_identity` 加法迁移演进；当前 `0.6.0-dev` 要求 schema version 14，可从正式 `0.5.0` 的 schema version 13 继续迁移。服务启动只校验 schema，不再隐式迁移。
 - 旧数据库、session、token、JWK、Provider 凭据和 OAuth 客户端注册均不兼容。
 - 旧 Go/TypeScript SDK 已删除；OAuth/OIDC 集成以标准协议和成熟语言库为准。
 
@@ -24,6 +24,8 @@
 - OpenID Connect：Discovery、JWKS、ID Token、UserInfo、RP-Initiated Logout
 - OIDC 授权体验：运行时 Scope Catalog、客户端级 Scope/Claim 上限、可选权限声明、详细 Consent 和实际授权收敛
 - OAuth 发布者可信状态：区分系统管理、用户注册未验证和管理员已审核；Consent 展示可信状态与实际回调来源
+- OAuth 应用身份：受控应用 Logo、主页、隐私政策与服务条款，授权时保存身份快照并提示后续变化
+- OAuth 授权变化：Consent 区分既有与新增 Scope/Claim；Redirect URI、Grant、访问策略或权限收紧会要求用户重新授权
 - 控制面认证：HttpOnly 会话、CSRF、强制首次改密、会话与令牌即时失效
 - 外部身份：GitHub、Google、通用 HTTPS OIDC Provider；不按邮箱自动合并账户
 - 管理后台：用户、客户端、Provider、审计与统计
@@ -242,7 +244,10 @@ Nyauth 只通过 SMTP 发送邮件，不读取邮箱，也不需要 IMAP。生�
 | POST | `/api/me/identities/{provider}/bind` | 发起当前用户的身份绑定 |
 | DELETE | `/api/me/identities/{id}` | 在近期重新认证后解绑身份 |
 | GET/POST | `/api/my/clients` | 管理当前用户拥有的 OAuth 客户端；列表返回权威 `quota_used/quota_limit/quota_override` |
+| PUT | `/api/my/clients/{id}` | 编辑本人应用的 OAuth 配置、主页和政策链接 |
+| POST/DELETE | `/api/my/clients/{id}/logo` | 上传浏览器裁剪后的应用 Logo，或删除当前 Logo |
 | POST | `/api/my/clients/{id}/rotate-secret` | 立即轮换 confidential client Secret，仅返回一次明文 |
+| GET | `/media/client-logos/{logo_id}/{size}.webp` | 读取 active 应用 Logo 的 64/128/256/512 WebP 变体 |
 
 所有已认证修改请求都必须携带完整会话返回的 `X-CSRF-Token`。MFA pending 使用独立的 `nyauth_mfa_pending` HttpOnly Cookie 和 challenge 响应中的临时 CSRF；临时令牌不得覆盖正式会话 CSRF。WebAuthn options 返回独立、不透明的 `ceremony_id`，完成请求通过 `X-WebAuthn-Ceremony` 携带；Conditional UI、显式登录和多标签页 ceremony 因此不会互相覆盖。pending 与 WebAuthn ceremony 都只保留约 5 分钟，不进入设备会话列表或活跃会话统计。后台接口只接受会话 Cookie，不接受 OAuth Bearer token。
 
@@ -282,6 +287,8 @@ await fetch('/api/me', {
 只有 authorization-code 请求显式申请并获准 `offline_access` 时才会签发 refresh token。Client Credentials 不会获得 refresh token。
 
 每个客户端的 `scopes` 是可请求权限上限；`optional_scopes` 必须是其中的子集，并只作用于 Authorization Code 用户授权；`allowed_claims` 再限制 ID Token 与 UserInfo 可以返回的用户字段。`openid` 始终是必需权限，且客户端至少保留一个必需 Scope。授权页从运行时 Scope Catalog 展示名称、说明、风险等级和实际 Claim，将请求分成必需和可选两组；用户可以逐项关闭可选权限，授权记录、授权码、Access/Refresh Token 都只保存实际获准集合与 Claim 白名单。若实际集合比请求集合更小，授权回调和 Token 响应都会返回实际 `scope`。现有客户端升级后 `optional_scopes` 默认为空，`allowed_claims` 按旧版本真实返回过的标准字段回填；例如旧 `email` 授权不会在升级后自动增加 `email_verified`。
+
+客户端可保存 HTTPS 主页、隐私政策和服务条款，并上传与头像相同安全管线处理的方形 Logo；不接受任意外部图片 URL。每次同意会保存当时的应用名称、政策链接和客户端 revision，授权记录的 `last_used_at` 只在客户端真实换取 Access Token 或轮换 Refresh Token 后更新。后续新增 Scope/Claim 只在下一次 Consent 中标为新增请求，新增可选 Scope 默认不勾选，也不会被静默加入既有 Token；Redirect URI 变化、Grant/Scope/Claim 移除或访问策略变化会推进授权 revision，使 Nyauth 的授权码兑换、Access Token 校验和 Refresh Token 轮换拒绝旧版本，并要求用户重新授权。自包含 JWT 若由第三方资源服务器完全离线验签，仍只能在其原始短期 `exp` 到达后自然失效；需要即时状态的集成应调用 introspection 或使用 Nyauth 的 UserInfo。
 
 管理员直接创建的客户端标记为 `system_managed`；用户自助创建的客户端标记为 `user_registered/unverified`，Consent 会显示发布者未验证警告。管理员在核对应用身份和回调来源后，可通过后台将用户注册客户端标记为已审核，或撤销审核；两种操作都要求近期重新认证并与审计事件同事务提交。该状态是 Nyauth 管理员的人工审核结论，不是 DNS、TLS 或域名所有权的自动证明。
 
@@ -355,6 +362,7 @@ Provider 不再从 YAML 或环境变量静态加载，只能由管理员写入�
 - `GET /api/admin/audit-logs`：按事件、结果、风险、Actor、模糊 Target、精确 subject user/target、IP 和时间筛选；管理员 DTO 包含 User-Agent，details 会在服务端递归脱敏。
 - `GET /api/admin/audit-logs/export`：复用列表的全部筛选语义，按最多 31 天、50,000 条流式导出 NDJSON 或 CEF；CEF 可导入常见 SIEM。
 - `POST /api/admin/clients/{id}/rotate-secret`：立即轮换客户端 Secret，新值仅展示一次。
+- `POST/DELETE /api/admin/clients/{id}/logo`：管理员上传或删除受控应用 Logo；对象继续使用当前本地/S3 媒体存储。
 - `POST/DELETE /api/admin/clients/{id}/publisher-verification`：审核或撤销用户注册客户端的发布者可信状态；系统管理客户端不适用，操作要求近期重新认证。
 - `GET /api/admin/users/{id}/sessions`、`DELETE /api/admin/users/{id}/sessions`：查看或撤销用户会话。
 - `GET /api/admin/users/{id}/clients`、`PUT /api/admin/users/{id}/client-quota`：查看权威客户端配额，或设置 0–1000 的用户覆盖值；`null` 恢复继承全局默认，降低配额不删除已有客户端。

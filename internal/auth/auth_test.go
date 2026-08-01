@@ -266,7 +266,7 @@ func TestConfidentialIntrospectionSupportsOwnedRefreshTokens(t *testing.T) {
 	if err := store.SaveRefreshToken(ctx, "refresh", data, time.Hour); err != nil {
 		t.Fatal(err)
 	}
-	service := &TokenService{session: store}
+	service := &TokenService{session: store, accessPolicy: fakeAccessPolicy{allowed: true}}
 	owned, err := service.IntrospectTokenForClient(ctx, "refresh", "owner", []string{"offline_access"})
 	if err != nil || owned["active"] != true || owned["token_type"] != "refresh_token" {
 		t.Fatalf("owned refresh introspection = %#v, err=%v", owned, err)
@@ -367,6 +367,22 @@ func TestConsentPermissionsDescribeStandardClaims(t *testing.T) {
 	}
 	if bytes.Contains(encodedPermissions, []byte(`"claims":null`)) {
 		t.Fatalf("consent API encoded an absent claim list as null: %s", encodedPermissions)
+	}
+}
+
+func TestConsentPermissionsMarkOnlyChangesToExistingGrant(t *testing.T) {
+	t.Parallel()
+	permissions := consentPermissionsWithHistory(
+		[]string{"openid", "profile", "email"}, []string{"email"}, nil, nil, []string{"openid", "profile"},
+	)
+	if len(permissions) != 3 || !permissions[0].PreviouslyGranted || permissions[0].NewlyRequested ||
+		!permissions[1].PreviouslyGranted || permissions[1].NewlyRequested ||
+		permissions[2].PreviouslyGranted || !permissions[2].NewlyRequested {
+		t.Fatalf("permission history = %#v", permissions)
+	}
+	firstConsent := consentPermissionsWithHistory([]string{"openid"}, nil, nil, nil, nil)
+	if len(firstConsent) != 1 || firstConsent[0].NewlyRequested {
+		t.Fatalf("first consent must not be presented as a change: %#v", firstConsent)
 	}
 }
 
@@ -773,7 +789,7 @@ func TestAuthorizationRevocationInvalidatesOnlyEarlierUserTokens(t *testing.T) {
 	client := redis.NewClient(&redis.Options{Addr: mini.Addr()})
 	t.Cleanup(func() { _ = client.Close() })
 	store := session.NewStore(client)
-	service := &TokenService{session: store}
+	service := &TokenService{session: store, accessPolicy: fakeAccessPolicy{allowed: true}}
 	ctx := context.Background()
 	mini.SetTime(time.Date(2026, 7, 26, 9, 30, 0, 0, time.UTC))
 
@@ -804,7 +820,7 @@ func TestRevokedAuthorizationCodeCannotIssueTokens(t *testing.T) {
 	client := redis.NewClient(&redis.Options{Addr: mini.Addr()})
 	t.Cleanup(func() { _ = client.Close() })
 	store := session.NewStore(client)
-	service := &TokenService{session: store}
+	service := &TokenService{session: store, accessPolicy: fakeAccessPolicy{allowed: true}}
 	ctx := context.Background()
 	mini.SetTime(time.Date(2026, 7, 26, 9, 45, 0, 0, time.UTC))
 	revokedAt, err := store.RevokeUserClientAuthorization(ctx, "user-1", "client-1", time.Hour)
@@ -818,12 +834,46 @@ func TestRevokedAuthorizationCodeCannotIssueTokens(t *testing.T) {
 }
 
 type fakeAccessPolicy struct {
-	allowed bool
-	err     error
+	allowed  bool
+	err      error
+	revision int64
 }
 
 func (f fakeAccessPolicy) UserMayAccess(context.Context, string, string) (bool, error) {
 	return f.allowed, f.err
+}
+
+func (f fakeAccessPolicy) ClientAuthorizationRevision(context.Context, string) (int64, error) {
+	if f.revision == 0 {
+		return 1, f.err
+	}
+	return f.revision, f.err
+}
+
+func TestValidateAuthorizationRejectsStaleClientRevision(t *testing.T) {
+	mini := miniredis.RunT(t)
+	redisClient := redis.NewClient(&redis.Options{Addr: mini.Addr()})
+	t.Cleanup(func() { _ = redisClient.Close() })
+	store := session.NewStore(redisClient)
+	service := &TokenService{session: store, accessPolicy: fakeAccessPolicy{allowed: true, revision: 2}}
+	issuedAt, err := store.AuthorizationIssueTime(context.Background(), "user-1", "client-1", time.Hour)
+	if err != nil {
+		t.Fatal(err)
+	}
+	stale := &session.TokenData{ClientID: "client-1", UserID: "user-1", AuthVersion: 1, AuthorizationIssuedAt: issuedAt, ClientAuthorizationRevision: 1}
+	if err := service.validateAuthorization(context.Background(), stale); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("stale client revision error = %v", err)
+	}
+	current := *stale
+	current.ClientAuthorizationRevision = 2
+	if err := service.validateAuthorization(context.Background(), &current); err != nil {
+		t.Fatalf("current client revision rejected: %v", err)
+	}
+	if _, err := service.GenerateAuthorizationCodeTokenPairAtRevisionWithClaims(
+		context.Background(), "client-1", "user-1", []string{"openid"}, []string{"sub"}, 1, issuedAt, 1, false,
+	); !errors.Is(err, ErrInvalidToken) {
+		t.Fatalf("stale authorization code revision error = %v", err)
+	}
 }
 
 func TestValidateAccessPolicyEnforcesClientPolicy(t *testing.T) {

@@ -1,10 +1,12 @@
 # 安全头像媒体契约
 
-> 状态：已实现；`0.4.0-rc.1` 的 `000006_runtime_media_storage` 增加版本化运行时 S3 配置与可续跑迁移，`000007_runtime_media_fallback` 补充迁回已配置本地 fallback。
+> 状态：已实现；`0.4.0-rc.1` 的 `000006_runtime_media_storage` 增加版本化运行时 S3 配置与可续跑迁移，`000007_runtime_media_fallback` 补充迁回已配置本地 fallback；`0.6.0-dev` 的 `000014_oauth_application_identity` 将同一安全管线扩展到 OAuth 应用 Logo。
 
 ## 1. 结论与边界
 
 Nyauth 不再接受、保存或直接渲染用户提供的任意头像 URL。用户和管理员只能上传图片内容，服务端校验并重新编码后，将头像保存到受控的本地目录或私有 S3 兼容对象存储。用户 DTO 中的 `avatar_url` 是只读字段，只会返回 Nyauth 生成的 `/media/avatars/{avatar_id}/256.webp`；OIDC `picture` 基于 issuer 生成对应的绝对地址。
+
+OAuth 应用 Logo 遵循相同边界：所有者或管理员通过字段名 `logo` 上传正方形图片，服务端生成同样的四种 WebP 变体，只返回 `/media/client-logos/{logo_id}/{size}.webp`。客户端注册不接受任意 `logo_url`，因此应用 Logo 也不能变成外部追踪、动态换图或主动内容入口。
 
 这条媒体管线解决以下可达风险：
 
@@ -88,7 +90,7 @@ S3 候选必须在十秒有界操作窗口内实际执行 Put、Get、字节校�
 
 ## 4. 数据与事务生命周期
 
-`user_avatars` 保存头像元数据和对象变体，不保存图片二进制。记录包含用户、来源、状态、存储后端、可空的不可变存储 profile、对象前缀、四种变体、原始媒体类型与尺寸、内容 SHA-256，以及激活、替换、删除、失败和存储清理时间。`storage_profile_id=NULL` 明确表示部署期静态 fallback，不表示“当前任意同类型 store”。
+`user_avatars` 保存受控图片元数据和对象变体，不保存图片二进制。为兼容已经发布并部署的 0.5.0 表与媒体迁移外键，0.6.0 通过 `media_purpose=user_avatar/client_logo` 和互斥的 `user_id/client_id` 扩展该表，而不在兼容迁移中破坏性重命名；表名属于内部实现，不进入 API。记录包含所有者、用途、来源、状态、存储后端、可空的不可变存储 profile、对象前缀、四种变体、原始媒体类型与尺寸、内容 SHA-256，以及激活、替换、删除、失败和存储清理时间。`storage_profile_id=NULL` 明确表示部署期静态 fallback，不表示“当前任意同类型 store”。
 
 状态固定为：
 

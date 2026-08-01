@@ -380,7 +380,8 @@ func (h *Handler) Authorize(w http.ResponseWriter, r *http.Request) {
 	}
 	data := &session.ConsentData{ClientID: clientID, UserID: currentUser.ID.String(), RedirectURI: redirectURI, Scopes: scopes,
 		OptionalScopes: optionalScopes, ScopeClaims: scopeClaims, ScopeDetails: scopeDetails,
-		State: state, CodeChallenge: challenge, ChallengeMethod: "S256", Nonce: nonce, AuthVersion: currentUser.AuthVersion}
+		State: state, CodeChallenge: challenge, ChallengeMethod: "S256", Nonce: nonce, AuthVersion: currentUser.AuthVersion,
+		ClientIdentityRevision: cl.IdentityRevision, ClientAuthorizationRevision: cl.AuthorizationRevision}
 	if err := h.sessionStore.SaveConsent(r.Context(), consentChallenge, data, 10*time.Minute); err != nil {
 		writeOAuthError(w, http.StatusInternalServerError, "server_error", "failed to persist consent challenge")
 		return
@@ -436,6 +437,7 @@ func (h *Handler) handleAuthorizationCodeGrant(w http.ResponseWriter, r *http.Re
 		return
 	}
 	if clientID != stored.ClientID || !cl.HasGrant(models.GrantAuthorizationCode) || redirectURI != stored.RedirectURI ||
+		!cl.HasRedirectURI(stored.RedirectURI) || normalizedClientRevision(stored.ClientAuthorizationRevision) != cl.AuthorizationRevision ||
 		stored.ChallengeMethod != "S256" || !validatePKCE(verifier, stored.CodeChallenge, stored.ChallengeMethod) {
 		h.recordGrantAudit(r.Context(), models.AuditTokenGrantFailed, models.GrantAuthorizationCode, stored.ClientID, "failure", "high", "code_binding_validation")
 		writeTokenError(w, http.StatusBadRequest, "invalid_grant", "authorization code binding validation failed")
@@ -483,7 +485,7 @@ func (h *Handler) handleAuthorizationCodeGrant(w http.ResponseWriter, r *http.Re
 		return
 	}
 	issueRefresh := containsScope(stored.Scopes, "offline_access") && cl.HasGrant(models.GrantRefreshToken)
-	pair, err := h.tokenService.GenerateAuthorizationCodeTokenPairWithClaims(r.Context(), cl.ID, stored.UserID, stored.Scopes, allowedClaims, stored.AuthVersion, stored.AuthorizationIssuedAt, issueRefresh)
+	pair, err := h.tokenService.GenerateAuthorizationCodeTokenPairAtRevisionWithClaims(r.Context(), cl.ID, stored.UserID, stored.Scopes, allowedClaims, stored.AuthVersion, stored.AuthorizationIssuedAt, stored.ClientAuthorizationRevision, issueRefresh)
 	if err != nil {
 		if errors.Is(err, ErrInvalidToken) {
 			h.recordGrantAudit(r.Context(), models.AuditTokenGrantFailed, models.GrantAuthorizationCode, cl.ID, "failure", "high", "authorization_inactive")
@@ -505,6 +507,13 @@ func (h *Handler) handleAuthorizationCodeGrant(w http.ResponseWriter, r *http.Re
 	}
 	h.recordGrantAudit(r.Context(), models.AuditTokenIssued, models.GrantAuthorizationCode, cl.ID, "success", "low", "")
 	writeJSON(w, http.StatusOK, pair)
+}
+
+func normalizedClientRevision(revision int64) int64 {
+	if revision == 0 {
+		return 1
+	}
+	return revision
 }
 
 func (h *Handler) rejectAuthorizationCodeReuse(w http.ResponseWriter, r *http.Request, stored *session.AuthorizationData) {
