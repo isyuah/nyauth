@@ -204,8 +204,14 @@ func (s *Server) renderEmailTemplateDraft(templateID string, draft account.Email
 	if err != nil {
 		return account.EmailMessage{}, err
 	}
+	branding := s.settingsMgr.Branding()
+	issuer := ""
+	if s.cfg != nil {
+		issuer = s.cfg.Auth.Issuer
+	}
 	return account.RenderEmailTemplate(strings.TrimSpace(templateID), recipient, account.EmailPresentation{
-		SiteName: s.settingsMgr.Branding().Title, Settings: draft,
+		SiteName: branding.Title, LogoURL: absoluteBrandingAssetURL(issuer, branding.LightLogoURL),
+		PrimaryColor: branding.PrimaryColor, PrimaryTextColor: branding.PrimaryTextColor, Settings: draft,
 	}, sampleEmailRenderData())
 }
 

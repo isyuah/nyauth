@@ -86,6 +86,7 @@ interface MockState {
   avatarUploadContentType?: string | null;
   avatarDeleteCSRF?: string | null;
   meRequests?: number;
+	selfUpdateBody?: unknown;
   mfaStatusRequests?: number;
   passkeyListRequests?: number;
   sessionListRequests?: number;
@@ -763,7 +764,8 @@ async function installAPIMocks(page: Page, state: MockState) {
 
     if (path === '/api/me') {
       state.meRequests = (state.meRequests || 0) + 1;
-      await fulfillJSON(route, 200, { ...user, role: state.role, avatar_url: state.avatarURL ?? user.avatar_url });
+	  if (request.method() === 'PUT') state.selfUpdateBody = request.postDataJSON();
+	  await fulfillJSON(route, 200, { ...user, role: state.role, avatar_url: state.avatarURL ?? user.avatar_url, ...(state.selfUpdateBody as object || {}) });
       return;
     }
 
@@ -1488,6 +1490,26 @@ test('users crop, upload, and remove a managed avatar with CSRF', async ({ page 
   await page.getByRole('button', { name: '删除头像' }).click();
   await expect(page.getByAltText('用户头像')).toHaveCount(0);
   expect(state.avatarDeleteCSRF).toBe('csrf-avatar');
+});
+
+test('theme preference is browser-local, applies immediately, and survives reload', async ({ page }) => {
+	const state: MockState = {
+		authenticated: true,
+		mustChangePassword: false,
+		role: 'user',
+		csrfToken: 'csrf-theme',
+	};
+	await installAPIMocks(page, state);
+	await page.goto('/profile');
+	await page.getByRole('button', { name: '深色主题' }).first().click();
+
+	await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+	expect(await page.evaluate(() => localStorage.getItem('nyauth:theme'))).toBe('dark');
+	await page.reload();
+	await expect(page.locator('html')).toHaveAttribute('data-theme', 'dark');
+	await page.getByRole('button', { name: '保存更改' }).click();
+
+	expect(state.selfUpdateBody).toEqual({ display_name: 'Alice' });
 });
 
 test('owned applications show the used quota as a compact fraction', async ({ page }) => {
@@ -3140,15 +3162,23 @@ test('runtime branding propagates to the sidebar and saves with CSRF', async ({ 
     csrfToken: 'csrf-brand',
     systemStatus,
   });
-  await page.route('**/api/branding', (route) => fulfillJSON(route, 200, { title: 'Acme ID', logo_url: '' }));
+	const initialBranding = {
+		title: 'Acme ID', primary_color: '#704DE8', primary_text_color: 'auto',
+		light_logo_url: '', dark_logo_url: '', favicon_url: '',
+	};
+	await page.route('**/api/branding', (route) => fulfillJSON(route, 200, initialBranding));
   await page.route('**/api/admin/settings/branding', async (route) => {
     if (route.request().method() === 'GET') {
-      await fulfillJSON(route, 200, { revision: 1, title: 'Acme ID', logo_url: '' });
+	  await fulfillJSON(route, 200, { revision: 1, ...initialBranding });
       return;
     }
     updateCSRF = route.request().headers()['x-csrf-token'] ?? null;
     updateBody = route.request().postDataJSON();
-    await fulfillJSON(route, 200, { revision: 2, title: 'Acme SSO', logo_url: 'https://cdn.example.com/logo.png' });
+	await fulfillJSON(route, 200, {
+		revision: 2, title: 'Acme SSO', primary_color: '#2367D1', primary_text_color: 'white',
+		light_logo_url: 'https://cdn.example.com/light.png', dark_logo_url: 'https://cdn.example.com/dark.png',
+		favicon_url: 'https://cdn.example.com/favicon.ico',
+	});
   });
 
   await page.goto('/admin/settings/branding');
@@ -3160,12 +3190,21 @@ test('runtime branding propagates to the sidebar and saves with CSRF', async ({ 
   await expect(page.getByRole('link', { name: '品牌', exact: true })).toHaveClass(/border-nya-primary/);
   await expect(page.getByRole('link', { name: '品牌', exact: true })).not.toHaveClass(/border-transparent/);
 
-  await page.getByLabel('站点名称').fill('Acme SSO');
-  await page.getByLabel(/Logo URL/).fill('https://cdn.example.com/logo.png');
+	await page.getByRole('textbox', { name: '站点名称', exact: true }).fill('Acme SSO');
+	await page.getByRole('textbox', { name: '主色', exact: true }).fill('#2367D1');
+	await page.getByLabel('主色文字').click();
+	await page.getByRole('option', { name: '始终使用白色文字' }).click();
+	await page.getByRole('textbox', { name: '浅色主题 Logo', exact: true }).fill('https://cdn.example.com/light.png');
+	await page.getByRole('textbox', { name: '深色主题 Logo', exact: true }).fill('https://cdn.example.com/dark.png');
+	await page.getByRole('textbox', { name: 'Favicon', exact: true }).fill('https://cdn.example.com/favicon.ico');
   await page.getByRole('button', { name: '保存品牌设置' }).click();
 
-  await expect(page.getByText('品牌设置已保存，立即对所有实例生效。')).toBeVisible();
-  expect(updateBody).toEqual({ expected_revision: 1, title: 'Acme SSO', logo_url: 'https://cdn.example.com/logo.png' });
+	await expect(page.getByText('品牌与主题设置已保存，立即对所有实例生效。')).toBeVisible();
+	expect(updateBody).toEqual({
+		expected_revision: 1, title: 'Acme SSO', primary_color: '#2367D1', primary_text_color: 'white',
+		light_logo_url: 'https://cdn.example.com/light.png', dark_logo_url: 'https://cdn.example.com/dark.png',
+		favicon_url: 'https://cdn.example.com/favicon.ico',
+	});
   expect(updateCSRF).toBe('csrf-brand');
   await expect(sidebar.getByText('Acme SSO')).toBeVisible();
 });

@@ -183,7 +183,7 @@ async function installAPIMocks(
       return;
     }
     if (path === '/api/branding' && method === 'GET') {
-      await json(route, 200, { title: 'Nya', logo_url: '' });
+      await json(route, 200, { title: 'Nya', primary_color: '#704DE8', primary_text_color: 'auto', light_logo_url: '', dark_logo_url: '', favicon_url: '' });
       return;
     }
     if (path === '/api/session' && method === 'GET') {
@@ -338,7 +338,7 @@ test('rate-limit warning disappears immediately after the disabled group is enab
 
   await page.goto('/admin/settings/protection');
   await expect(page.getByText('头像限流已关闭')).toBeVisible();
-  await page.getByRole('switch', { name: '启用头像限流' }).click();
+  await page.getByRole('switch', { name: '启用图片写入限流' }).click();
   await page.getByRole('button', { name: '保存访问保护设置' }).click();
 
   await expect(page.getByText('访问保护设置已保存，立即对所有实例生效。')).toBeVisible();

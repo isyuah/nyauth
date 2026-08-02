@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Nyauth 授权界面静态原型</title>
+  <link rel="stylesheet" href="./styles.css">
+</head>
+<body>
+  <header class="preview-toolbar" aria-label="原型控制栏">
+    <div class="preview-title">
+      <span class="preview-mark">N</span>
+      <span><strong>授权界面原型</strong><small>静态数据，不会发起请求</small></span>
+    </div>
+    <div class="preview-controls">
+      <div class="segmented" role="group" aria-label="设计方案">
+        <button type="button" data-scheme="focused" aria-pressed="true">方案 A · 按你的范围</button>
+        <button type="button" data-scheme="complete" aria-pressed="false">方案 B · 完整优化</button>
+      </div>
+      <label class="state-picker">
+        <span>界面状态</span>
+        <select id="state-select">
+          <option value="code">输入设备代码</option>
+          <option value="consent-mixed" selected>混合权限授权</option>
+          <option value="consent-required">仅必需权限</option>
+          <option value="approved">授权成功</option>
+          <option value="denied">拒绝授权</option>
+        </select>
+      </label>
+    </div>
+  </header>
+
+  <main class="preview-stage">
+    <div class="backdrop-band" aria-hidden="true"></div>
+    <div id="preview-root" class="preview-root" aria-live="polite"></div>
+  </main>
+
+  <script src="./preview.js"></script>
+</body>
+</html>

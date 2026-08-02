@@ -2,6 +2,8 @@
   import { page } from '$app/stores';
   import { api, ApiError, humanVerificationChallengeFromError, isAPIErrorCode, isMFARequiredResponse, type HumanVerificationChallenge, type HumanVerificationProof, type ProviderSummary } from '$lib/api';
   import { brandingStore, consumeProviderAuthError, safeReturnPath, sessionStore } from '$lib/stores';
+  import BrandLogo from '$lib/components/layout/BrandLogo.svelte';
+  import ThemeSelector from '$lib/components/layout/ThemeSelector.svelte';
   import { capabilityPauseReason, isCapabilityPaused, serviceStatusStore } from '$lib/service-control';
   import { goto } from '$app/navigation';
   import { onMount } from 'svelte';
@@ -318,14 +320,16 @@
   }
 </script>
 
-<svelte:head><title>登录 - Nya</title></svelte:head>
+<svelte:head><title>登录 - {$brandingStore.title}</title></svelte:head>
 
 <main class="min-h-screen flex items-center justify-center px-4" style="background: var(--nya-gradient-soft)">
+  <div class="fixed right-4 top-4 z-20"><ThemeSelector /></div>
   <div class="w-full max-w-[400px]">
     <!-- 品牌区 -->
     <div class="text-center mb-8">
-      <img src={$brandingStore.logo_url || '/logo.png'} alt="" class="mx-auto mb-3 h-16 w-16 select-none" draggable="false" />
-      <h1 class="text-[38px] font-bold leading-none text-nya-primary">{$brandingStore.title}</h1>
+      <h1 class="flex justify-center">
+        <BrandLogo size={64} showName />
+      </h1>
       <p class="text-body text-nya-text-secondary mt-2">欢迎回来，今天也要元气满满喵～</p>
     </div>
 

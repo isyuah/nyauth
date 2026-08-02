@@ -247,7 +247,7 @@ async function installPasskeyMocks(page: Page, state: PasskeyMockState) {
     const method = request.method();
 
     if (path === '/api/branding' && method === 'GET') {
-      await fulfillJSON(route, 200, { title: 'Nyauth', logo_url: '' });
+      await fulfillJSON(route, 200, { title: 'Nyauth', primary_color: '#704DE8', primary_text_color: 'auto', light_logo_url: '', dark_logo_url: '', favicon_url: '' });
       return;
     }
     if (path === '/api/session' && method === 'GET') {

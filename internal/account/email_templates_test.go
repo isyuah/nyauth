@@ -48,6 +48,42 @@ func TestStructuredEmailTemplateEscapesContentAndKeepsActionLinkSystemOwned(t *t
 	}
 }
 
+func TestStructuredEmailTemplateUsesValidatedBrandPresentation(t *testing.T) {
+	message, err := RenderEmailTemplate(MessageEmailVerification, "alice@example.test", EmailPresentation{
+		SiteName: "Acme ID", LogoURL: "https://auth.example.test/media/logo.webp",
+		PrimaryColor: "#F6D365", PrimaryTextColor: "white", Settings: DefaultEmailTemplateSettings(),
+	}, EmailRenderData{
+		Username: "Alice", TTL: "24 小时",
+		ActionURL: "https://auth.example.test/verify-email?token=secret",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, expected := range []string{
+		`src="https://auth.example.test/media/logo.webp"`, `bgcolor="#F6D365"`,
+		`background-color:#F6D365`, `color:#FFFFFF`,
+	} {
+		if !strings.Contains(message.HTMLBody, expected) {
+			t.Fatalf("branded HTML does not contain %q: %s", expected, message.HTMLBody)
+		}
+	}
+}
+
+func TestStructuredEmailTemplateRejectsUnsafeBrandPresentation(t *testing.T) {
+	for name, presentation := range map[string]EmailPresentation{
+		"relative logo": {SiteName: "Nya", LogoURL: "/logo.png", Settings: DefaultEmailTemplateSettings()},
+		"script logo":   {SiteName: "Nya", LogoURL: "javascript:alert(1)", Settings: DefaultEmailTemplateSettings()},
+		"invalid color": {SiteName: "Nya", PrimaryColor: "red", Settings: DefaultEmailTemplateSettings()},
+		"invalid text":  {SiteName: "Nya", PrimaryColor: "#704DE8", PrimaryTextColor: "purple", Settings: DefaultEmailTemplateSettings()},
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := RenderEmailTemplate(MessagePasswordChanged, "alice@example.test", presentation, EmailRenderData{}); err == nil {
+				t.Fatal("unsafe presentation was accepted")
+			}
+		})
+	}
+}
+
 func TestEmailTemplateSettingsRejectUnknownVariablesHeadersAndMessageTypes(t *testing.T) {
 	tests := []struct {
 		name   string

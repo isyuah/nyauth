@@ -1,5 +1,6 @@
 <script lang="ts">
   import { api, ApiError, type HumanVerificationChallenge, type HumanVerificationProof } from '$lib/api';
+	import { brandingStore } from '$lib/stores';
   import AccountActionCard from '$lib/components/account/AccountActionCard.svelte';
   import Button from '$lib/components/ui/Button.svelte';
   import Input from '$lib/components/ui/Input.svelte';
@@ -46,7 +47,7 @@
   }
 </script>
 
-<svelte:head><title>重发验证邮件 - Nya</title></svelte:head>
+<svelte:head><title>重发验证邮件 - {$brandingStore.title}</title></svelte:head>
 
 <AccountActionCard title="重发验证邮件" description="为尚未完成验证的注册重新生成确认链接">
   {#if accepted}

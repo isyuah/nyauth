@@ -58,7 +58,7 @@ async function installOperationsMocks(
   await page.route('**/api/**', async (route) => {
     const path = new URL(route.request().url()).pathname;
     if (path === '/api/service-status') return json(route, 200, normalStatus);
-    if (path === '/api/branding') return json(route, 200, { title: 'Nya', logo_url: '' });
+    if (path === '/api/branding') return json(route, 200, { title: 'Nya', primary_color: '#704DE8', primary_text_color: 'auto', light_logo_url: '', dark_logo_url: '', favicon_url: '' });
     if (path === '/api/session') return json(route, 200, currentSession);
     if (path === '/api/admin/settings/operations' && route.request().method() === 'GET') return json(route, 200, operationsSettings);
     if (path === '/api/admin/settings/operations' && route.request().method() === 'PUT') {
@@ -217,7 +217,7 @@ test('public maintenance status updates the UI immediately when the SSE stream r
       });
       return;
     }
-    if (path === '/api/branding') return json(route, 200, { title: 'Nya', logo_url: '' });
+    if (path === '/api/branding') return json(route, 200, { title: 'Nya', primary_color: '#704DE8', primary_text_color: 'auto', light_logo_url: '', dark_logo_url: '', favicon_url: '' });
     if (path === '/api/session') return json(route, 401, { error: 'authentication required' });
     if (path === '/api/providers') return json(route, 200, [{ name: 'github', type: 'github' }]);
     if (path === '/api/registration') return json(route, 200, { available: false, mode: 'open', require_email_verification: true, allowed_email_domains: [] });

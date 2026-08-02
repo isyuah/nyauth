@@ -14,7 +14,7 @@ const normalStatus: ServiceStatus = {
 const session: SessionInfo = {
   user: {
     id: '11111111-1111-4111-8111-111111111111', username: 'admin', email: 'admin@example.test',
-    display_name: 'Admin', role: 'admin', status: 'active', created_at: '2026-07-30T00:00:00Z',
+	display_name: 'Admin', role: 'admin', status: 'active', created_at: '2026-07-30T00:00:00Z',
   },
   csrf_token: 'observability-csrf', must_change_password: false, has_password: true, email_verified: true,
   authenticated_at: '2026-07-30T01:00:00Z', session_expires_at: '2099-07-30T01:00:00Z',
@@ -74,7 +74,7 @@ async function installMocks(page: Page, options: MockOptions = {}) {
     const path = new URL(request.url()).pathname;
     const method = request.method();
     if (path === '/api/service-status') return json(route, 200, normalStatus);
-    if (path === '/api/branding') return json(route, 200, { title: 'Nya', logo_url: '' });
+    if (path === '/api/branding') return json(route, 200, { title: 'Nya', primary_color: '#704DE8', primary_text_color: 'auto', light_logo_url: '', dark_logo_url: '', favicon_url: '' });
     if (path === '/api/site-banner') return json(route, 200, { site_banner: null });
     if (path === '/api/site-banner/events') return route.fulfill({ status: 200, contentType: 'text/event-stream', body: 'event: site_banner\ndata: {"site_banner":null}\n\n' });
     if (path === '/api/session') return json(route, 200, currentSession);

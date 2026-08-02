@@ -1,6 +1,7 @@
 import { writable } from 'svelte/store';
-import { api, ApiError, setCsrfToken, type Branding, type SessionInfo } from './api';
+import { api, ApiError, setCsrfToken, type Branding, type ResolvedTheme, type SessionInfo, type Theme } from './api';
 import { cleanProviderAuthError, safeReturnPath, type ProviderAuthErrorResult } from './navigation';
+import { applyThemeToDocument, DEFAULT_PRIMARY_COLOR, normalizeHexColor, resolveTheme } from './theme';
 
 export { safeReturnPath } from './navigation';
 
@@ -111,11 +112,65 @@ export function createSessionStore() {
 
 export const sessionStore = createSessionStore();
 
-export const DEFAULT_BRANDING: Branding = { title: 'Nya', logo_url: '' };
+export const DEFAULT_BRANDING: Branding = {
+  title: 'Nya',
+  primary_color: DEFAULT_PRIMARY_COLOR,
+  primary_text_color: 'auto',
+  light_logo_url: '',
+  dark_logo_url: '',
+  favicon_url: '',
+};
 
 // Server-configured branding with a static fallback: pages render the default
 // immediately and update if the deployment has customized it.
 export const brandingStore = writable<Branding>(DEFAULT_BRANDING);
+export const resolvedThemeStore = writable<ResolvedTheme>('light');
+const brandingReadyStore = writable(false);
+
+const themeStorageKey = 'nyauth:theme';
+const localTheme = writable<Theme>('system');
+
+function normalizeTheme(value: unknown): Theme {
+  return value === 'light' || value === 'dark' || value === 'system' ? value : 'system';
+}
+
+function readStoredTheme(): Theme {
+  if (typeof window === 'undefined') return 'system';
+  try {
+    return normalizeTheme(window.localStorage.getItem(themeStorageKey));
+  } catch {
+    return 'system';
+  }
+}
+
+export const localThemeStore = {
+  subscribe: localTheme.subscribe,
+  set(value: Theme) {
+    const normalized = normalizeTheme(value);
+    localTheme.set(normalized);
+    if (typeof window !== 'undefined') {
+      try {
+        window.localStorage.setItem(themeStorageKey, normalized);
+      } catch {
+        // The current page still applies the preference when storage is unavailable.
+      }
+    }
+  },
+};
+
+function normalizeBranding(value: Branding): Branding {
+  const primaryTextColor = value.primary_text_color === 'white' || value.primary_text_color === 'black'
+    ? value.primary_text_color
+    : 'auto';
+  return {
+    title: typeof value.title === 'string' && value.title.trim() ? value.title : DEFAULT_BRANDING.title,
+    primary_color: normalizeHexColor(value.primary_color || '') ?? DEFAULT_PRIMARY_COLOR,
+    primary_text_color: primaryTextColor,
+    light_logo_url: typeof value.light_logo_url === 'string' ? value.light_logo_url : '',
+    dark_logo_url: typeof value.dark_logo_url === 'string' ? value.dark_logo_url : '',
+    favicon_url: typeof value.favicon_url === 'string' ? value.favicon_url : '',
+  };
+}
 
 let brandingLoaded = false;
 export async function initializeBranding(force = false): Promise<void> {
@@ -123,10 +178,56 @@ export async function initializeBranding(force = false): Promise<void> {
   brandingLoaded = true;
   try {
     const branding = await api.getBranding();
-    if (branding?.title) brandingStore.set(branding);
+    brandingStore.set(normalizeBranding(branding));
+    brandingReadyStore.set(true);
   } catch {
     // Keep the default branding when the endpoint is unavailable.
   }
+}
+
+export function startThemeController(): () => void {
+  if (typeof window === 'undefined') return () => {};
+  const media = window.matchMedia('(prefers-color-scheme: dark)');
+  let branding = DEFAULT_BRANDING;
+  let brandingReady = false;
+  let preference = readStoredTheme();
+  localTheme.set(preference);
+
+  const apply = () => {
+    const resolved = resolveTheme(preference, media.matches);
+    if (brandingReady) {
+      applyThemeToDocument(branding, resolved);
+    } else {
+      document.documentElement.dataset.theme = resolved;
+      document.documentElement.style.colorScheme = resolved;
+    }
+    resolvedThemeStore.set(resolved);
+  };
+  const stopBranding = brandingStore.subscribe((value) => {
+    branding = value;
+    apply();
+  });
+  const stopTheme = localTheme.subscribe((value) => {
+    preference = value;
+    apply();
+  });
+  const stopBrandingReady = brandingReadyStore.subscribe((value) => {
+    brandingReady = value;
+    apply();
+  });
+  const handleSystemTheme = () => apply();
+  const handleStorage = (event: StorageEvent) => {
+    if (event.key === themeStorageKey) localTheme.set(normalizeTheme(event.newValue));
+  };
+  media.addEventListener('change', handleSystemTheme);
+  window.addEventListener('storage', handleStorage);
+  return () => {
+    stopBranding();
+    stopTheme();
+    stopBrandingReady();
+    media.removeEventListener('change', handleSystemTheme);
+    window.removeEventListener('storage', handleStorage);
+  };
 }
 
 export function consumeProviderAuthError(): ProviderAuthErrorResult | null {

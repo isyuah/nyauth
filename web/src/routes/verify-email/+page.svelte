@@ -3,7 +3,7 @@
   import { onMount } from 'svelte';
   import { api } from '$lib/api';
   import { takeQuerySecret } from '$lib/query-secret';
-  import { sessionStore } from '$lib/stores';
+	import { brandingStore, sessionStore } from '$lib/stores';
   import AccountActionCard from '$lib/components/account/AccountActionCard.svelte';
   import Button from '$lib/components/ui/Button.svelte';
   import { CheckCircle, MailCheck } from 'lucide-svelte';
@@ -33,7 +33,7 @@
   }
 </script>
 
-<svelte:head><title>验证邮箱 - Nya</title></svelte:head>
+<svelte:head><title>验证邮箱 - {$brandingStore.title}</title></svelte:head>
 
 <AccountActionCard title="验证邮箱" description="请主动确认操作；打开邮件或安全扫描不会自动消费链接">
   {#if complete}

@@ -6,21 +6,19 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
-	"unicode"
-	"unicode/utf8"
 
+	brandpalette "github.com/nyasharp/nyauth/internal/branding"
 	"github.com/nyasharp/nyauth/internal/settings"
-)
-
-const (
-	brandingTitleMaxLength   = 64
-	brandingLogoURLMaxLength = 512
 )
 
 type brandingUpdateRequest struct {
 	ExpectedRevision int64  `json:"expected_revision"`
 	Title            string `json:"title"`
-	LogoURL          string `json:"logo_url"`
+	PrimaryColor     string `json:"primary_color"`
+	PrimaryTextColor string `json:"primary_text_color"`
+	LightLogoURL     string `json:"light_logo_url"`
+	DarkLogoURL      string `json:"dark_logo_url"`
+	FaviconURL       string `json:"favicon_url"`
 }
 
 type brandingSettingsResponse struct {
@@ -29,7 +27,41 @@ type brandingSettingsResponse struct {
 }
 
 func (s *Server) handleGetBranding(w http.ResponseWriter, r *http.Request) {
+	w.Header().Set("Cache-Control", "no-store")
 	writeJSON(w, http.StatusOK, s.settingsMgr.Branding())
+}
+
+func (s *Server) handleGetBrandingStylesheet(w http.ResponseWriter, _ *http.Request) {
+	branding := s.settingsMgr.Branding()
+	light, lightErr := brandpalette.NewPalette(branding.PrimaryColor, branding.PrimaryTextColor, false)
+	dark, darkErr := brandpalette.NewPalette(branding.PrimaryColor, branding.PrimaryTextColor, true)
+	if lightErr != nil || darkErr != nil {
+		writeAPIError(w, http.StatusInternalServerError, "branding stylesheet is unavailable")
+		return
+	}
+	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Content-Type", "text/css; charset=utf-8")
+	w.Header().Set("X-Content-Type-Options", "nosniff")
+	_, _ = fmt.Fprint(w, brandingStylesheet(light, dark))
+}
+
+func brandingStylesheet(light, dark brandpalette.Palette) string {
+	var css strings.Builder
+	css.WriteString(":root,[data-theme=\"light\"]{")
+	writeBrandingCSSVariables(&css, light)
+	css.WriteString("}[data-theme=\"dark\"]{")
+	writeBrandingCSSVariables(&css, dark)
+	css.WriteString("}")
+	return css.String()
+}
+
+func writeBrandingCSSVariables(css *strings.Builder, palette brandpalette.Palette) {
+	_, _ = fmt.Fprintf(css,
+		"--nya-primary:%s;--nya-primary-rgb:%s;--nya-primary-hover:%s;--nya-primary-active:%s;"+
+			"--nya-primary-soft:%s;--nya-primary-softer:%s;--nya-primary-border:%s;--nya-primary-contrast:%s;",
+		palette.Primary, palette.RGB, palette.Hover, palette.Active,
+		palette.Soft, palette.Softer, palette.Border, palette.Contrast,
+	)
 }
 
 func (s *Server) handleUpdateBranding(w http.ResponseWriter, r *http.Request) {
@@ -42,7 +74,10 @@ func (s *Server) handleUpdateBranding(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	branding, err := validateBranding(request.Title, request.LogoURL)
+	branding, err := validateBranding(
+		request.Title, request.PrimaryColor, request.PrimaryTextColor,
+		request.LightLogoURL, request.DarkLogoURL, request.FaviconURL,
+	)
 	if err != nil {
 		writeAPIError(w, http.StatusBadRequest, err.Error())
 		return
@@ -66,36 +101,29 @@ func (s *Server) handleGetBrandingSettings(w http.ResponseWriter, _ *http.Reques
 	writeJSON(w, http.StatusOK, brandingSettingsResponse{Revision: snapshot.Revision, Branding: snapshot.Value})
 }
 
-func validateBranding(title, logoURL string) (settings.Branding, error) {
-	title = strings.TrimSpace(title)
-	logoURL = strings.TrimSpace(logoURL)
-	if title == "" {
-		return settings.Branding{}, fmt.Errorf("title is required")
-	}
-	if utf8.RuneCountInString(title) > brandingTitleMaxLength {
-		return settings.Branding{}, fmt.Errorf("title must be at most %d characters", brandingTitleMaxLength)
-	}
-	for _, character := range title {
-		if unicode.IsControl(character) || isBidirectionalControl(character) {
-			return settings.Branding{}, fmt.Errorf("title contains unsupported control characters")
-		}
-	}
-	if logoURL != "" {
-		if len(logoURL) > brandingLogoURLMaxLength {
-			return settings.Branding{}, fmt.Errorf("logo_url must be at most %d characters", brandingLogoURLMaxLength)
-		}
-		parsed, err := url.Parse(logoURL)
-		sameOriginPath := err == nil && parsed.IsAbs() == false && parsed.Host == "" && strings.HasPrefix(parsed.Path, "/") && !strings.HasPrefix(logoURL, "//") && !strings.Contains(logoURL, `\`)
-		secureAbsolute := err == nil && parsed.Scheme == "https" && parsed.Host != "" && parsed.User == nil
-		if !sameOriginPath && !secureAbsolute {
-			return settings.Branding{}, fmt.Errorf("logo_url must be a same-origin path or an absolute HTTPS URL without credentials")
-		}
-	}
-	return settings.Branding{Title: title, LogoURL: logoURL}, nil
+func validateBranding(
+	title, primaryColor, primaryTextColor, lightLogoURL, darkLogoURL, faviconURL string,
+) (settings.Branding, error) {
+	return settings.NormalizeBranding(settings.Branding{
+		Title: title, PrimaryColor: primaryColor, PrimaryTextColor: primaryTextColor,
+		LightLogoURL: lightLogoURL, DarkLogoURL: darkLogoURL, FaviconURL: faviconURL,
+	})
 }
 
-func isBidirectionalControl(character rune) bool {
-	return character == '\u200e' || character == '\u200f' ||
-		(character >= '\u202a' && character <= '\u202e') ||
-		(character >= '\u2066' && character <= '\u2069')
+func absoluteBrandingAssetURL(issuer, assetURL string) string {
+	if assetURL == "" {
+		return ""
+	}
+	asset, err := url.Parse(assetURL)
+	if err != nil {
+		return ""
+	}
+	if asset.IsAbs() {
+		return asset.String()
+	}
+	base, err := url.Parse(issuer)
+	if err != nil || base.Scheme == "" || base.Host == "" {
+		return ""
+	}
+	return base.ResolveReference(asset).String()
 }

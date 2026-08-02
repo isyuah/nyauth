@@ -1,5 +1,6 @@
 <script lang="ts">
   import { sessionStore } from '$lib/stores';
+  import ThemeSelector from './ThemeSelector.svelte';
   import { Menu, PanelLeft, PanelLeftClose } from 'lucide-svelte';
 
   let {
@@ -20,7 +21,7 @@
   let initials = $derived((user?.display_name || user?.username || '?').slice(0, 1).toUpperCase());
 </script>
 
-<header class="sticky z-20 flex h-16 items-center justify-between border-b border-nya-divider bg-white/95 px-4 backdrop-blur-[10px] md:px-5" style="top: var(--nya-global-banner-height, 0px);">
+<header class="sticky z-20 flex h-16 items-center justify-between border-b border-nya-divider bg-nya-surface px-4 backdrop-blur-[10px] md:px-5" style="top: var(--nya-global-banner-height, 0px);">
   <div class="flex items-center gap-3">
     {#if isMobile}
       <button
@@ -41,10 +42,13 @@
     <span class="text-body-medium text-nya-text-secondary">{section === 'admin' ? '管理后台' : '用户中心'}</span>
   </div>
 
-  <a href="/profile" class="flex items-center gap-2 rounded-nya-md px-1.5 py-1 hover:bg-nya-surface-muted" aria-label="打开个人资料">
-    <span class="hidden max-w-48 truncate text-body-medium text-nya-text-secondary sm:block">{user?.display_name || user?.username || '当前用户'}</span>
-    <span class="flex h-8 w-8 items-center justify-center overflow-hidden rounded-full bg-nya-primary-soft text-small font-semibold text-nya-primary">
-      {#if user?.avatar_url}<img src={user.avatar_url} alt="" class="h-full w-full object-cover" />{:else}{initials}{/if}
-    </span>
-  </a>
+  <div class="flex items-center gap-2">
+    <ThemeSelector />
+    <a href="/profile" class="flex items-center gap-2 rounded-nya-md px-1.5 py-1 hover:bg-nya-surface-muted" aria-label="打开个人资料">
+      <span class="hidden max-w-48 truncate text-body-medium text-nya-text-secondary sm:block">{user?.display_name || user?.username || '当前用户'}</span>
+      <span class="flex h-8 w-8 items-center justify-center overflow-hidden rounded-full bg-nya-primary-soft text-small font-semibold text-nya-primary">
+        {#if user?.avatar_url}<img src={user.avatar_url} alt="" class="h-full w-full object-cover" />{:else}{initials}{/if}
+      </span>
+    </a>
+  </div>
 </header>

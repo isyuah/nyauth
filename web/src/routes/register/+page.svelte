@@ -7,6 +7,7 @@
   import HumanVerificationWidget from '$lib/components/security/HumanVerificationWidget.svelte';
   import { PASSWORD_REQUIREMENT, passwordPolicyError } from '$lib/password-policy';
   import { takeQuerySecret } from '$lib/query-secret';
+	import { brandingStore } from '$lib/stores';
   import { capabilityPauseReason, isCapabilityPaused, serviceStatusStore } from '$lib/service-control';
   import { CheckCircle, MailCheck, UserPlus } from 'lucide-svelte';
 
@@ -89,7 +90,7 @@
   }
 </script>
 
-<svelte:head><title>注册 - Nya</title></svelte:head>
+<svelte:head><title>注册 - {$brandingStore.title}</title></svelte:head>
 
 <AccountActionCard title="注册账号" description="注册完成后即可登录用户中心并授权应用">
   {#if result === 'pending_verification'}

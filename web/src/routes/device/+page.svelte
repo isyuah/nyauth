@@ -3,19 +3,23 @@
   import { goto } from '$app/navigation';
   import { onMount } from 'svelte';
   import { api } from '$lib/api';
-  import { sessionStore } from '$lib/stores';
+  import { brandingStore, sessionStore } from '$lib/stores';
+  import AuthorizationShell from '$lib/components/oauth/AuthorizationShell.svelte';
+  import BrandLogo from '$lib/components/layout/BrandLogo.svelte';
+  import OAuthClientLogo from '$lib/components/oauth/OAuthClientLogo.svelte';
   import Button from '$lib/components/ui/Button.svelte';
-  import Card from '$lib/components/ui/Card.svelte';
-  import Input from '$lib/components/ui/Input.svelte';
-  import { CheckCircle, KeyRound, MonitorCheck, ShieldCheck, XCircle } from 'lucide-svelte';
+  import { CheckCircle2, KeyRound, ShieldCheck, XCircle } from 'lucide-svelte';
 
   type ResultState = 'approved' | 'denied' | '';
+  type DeviceResult = { approved: boolean; client_name: string; logo_url?: string | null; permission_count: number };
+  const resultStorageKey = 'nyauth:device-authorization-result';
 
   let userCode = $state('');
   let loading = $state(true);
   let submitting = $state(false);
   let error = $state('');
   let result = $state<ResultState>('');
+  let resultDetail = $state<DeviceResult | null>(null);
 
   function formatUserCode(value: string): string {
     const normalized = value.toUpperCase().replace(/[^A-Z0-9]/g, '').slice(0, 8);
@@ -27,10 +31,31 @@
     error = '';
   }
 
+  function consumeResultDetail(): DeviceResult | null {
+    const raw = sessionStorage.getItem(resultStorageKey);
+    sessionStorage.removeItem(resultStorageKey);
+    if (!raw) return null;
+    try {
+      const value: unknown = JSON.parse(raw);
+      if (!value || typeof value !== 'object') return null;
+      const detail = value as Record<string, unknown>;
+      if (typeof detail.approved !== 'boolean' || typeof detail.client_name !== 'string' || typeof detail.permission_count !== 'number') return null;
+      return {
+        approved: detail.approved,
+        client_name: detail.client_name,
+        logo_url: typeof detail.logo_url === 'string' ? detail.logo_url : null,
+        permission_count: detail.permission_count,
+      };
+    } catch {
+      return null;
+    }
+  }
+
   onMount(async () => {
     const status = $page.url.searchParams.get('status');
     if (status === 'approved' || status === 'denied') {
       result = status;
+      resultDetail = consumeResultDetail();
       sessionStorage.removeItem('nya_device_verification_pending');
       loading = false;
       return;
@@ -73,60 +98,67 @@
   }
 </script>
 
-<svelte:head><title>设备授权 - Nya</title></svelte:head>
+<svelte:head><title>设备授权 - {$brandingStore.title}</title></svelte:head>
 
-<div class="flex min-h-screen items-center justify-center bg-nya-page px-4 py-10">
-  <div class="w-full max-w-[440px]">
-    <div class="mb-6 text-center">
-      <span class="mb-3 inline-flex h-12 w-12 items-center justify-center rounded-nya-lg bg-nya-primary-soft text-nya-primary">
-        <MonitorCheck size={24} />
-      </span>
-      <h1 class="text-section-title text-nya-text-primary">连接您的设备</h1>
-      <p class="mt-2 text-small text-nya-text-secondary">输入电视、终端或其他设备上显示的代码。</p>
+{#if result}
+  <AuthorizationShell maxWidth="660px" label="设备授权结果">
+    <div class="grid min-h-[340px] md:grid-cols-[0.92fr_1.08fr]">
+      <div class="flex flex-col items-center justify-center p-7 text-center {result === 'approved' ? 'bg-nya-success-soft' : 'bg-nya-danger-soft'}">
+        <span class="mb-4 grid h-16 w-16 place-items-center rounded-full bg-nya-surface {result === 'approved' ? 'text-nya-success' : 'text-nya-danger'}">
+          {#if result === 'approved'}<CheckCircle2 size={36} />{:else}<XCircle size={36} />{/if}
+        </span>
+        <h1 class="text-xl font-bold text-nya-text-primary">{result === 'approved' ? '设备已获授权' : '设备访问已拒绝'}</h1>
+        <p class="mt-2 text-small text-nya-text-secondary">{resultDetail?.client_name || '发起请求的设备'}{result === 'approved' ? ' 可以继续完成登录。' : ' 未获得任何访问权限。'}</p>
+      </div>
+      <div class="flex flex-col justify-center p-7">
+        <BrandLogo size={32} showName compact />
+        <h2 class="mb-3 mt-7 text-body font-semibold text-nya-text-primary">本次操作</h2>
+        <div class="flex items-center gap-3 rounded-nya-md border border-nya-border bg-nya-surface-soft p-3">
+          <OAuthClientLogo name={resultDetail?.client_name || '设备应用'} url={resultDetail?.logo_url} />
+          <span class="min-w-0"><strong class="block truncate text-body text-nya-text-primary">{resultDetail?.client_name || '设备应用'}</strong><span class="block text-small text-nya-text-secondary">{result === 'approved' ? `已允许 ${resultDetail?.permission_count ?? 0} 项权限` : '本次请求未获得授权'}</span></span>
+        </div>
+        <div class="mt-3 rounded-nya-sm bg-nya-info-soft px-3 py-2.5 text-small text-nya-info"><strong class="block">{result === 'approved' ? '返回发起请求的设备' : '无需进行其他操作'}</strong>{result === 'approved' ? '设备会自动继续；本页面可以安全关闭。' : '可以关闭本页面，需要时由设备重新发起授权。'}</div>
+      </div>
     </div>
-
-    <Card>
-      {#if loading}
-        <p class="py-8 text-center text-small text-nya-text-tertiary" role="status">正在检查登录状态…</p>
-      {:else if result === 'approved'}
-        <div class="py-4 text-center">
-          <CheckCircle size={36} class="mx-auto mb-3 text-nya-success" />
-          <h2 class="text-card-title text-nya-text-primary">设备已获授权</h2>
-          <p class="mt-2 text-small text-nya-text-secondary">您可以返回设备继续操作，此页面可以安全关闭。</p>
-        </div>
-      {:else if result === 'denied'}
-        <div class="py-4 text-center">
-          <XCircle size={36} class="mx-auto mb-3 text-nya-danger" />
-          <h2 class="text-card-title text-nya-text-primary">已拒绝设备访问</h2>
-          <p class="mt-2 text-small text-nya-text-secondary">设备不会获得您的账户 Token。需要时可由设备重新发起请求。</p>
-        </div>
-      {:else}
-        <form class="space-y-5" onsubmit={submit}>
-          <Input
-            id="device-user-code"
-            label="设备代码"
-            placeholder="ABCD-EFGH"
-            bind:value={userCode}
-            oninput={handleCodeInput}
-            autocomplete="one-time-code"
-            inputmode="text"
-            maxlength={9}
-            mono
-            required
-            ignorePasswordManagers
-            error={error}
-            hint="代码不区分大小写，连字符可以省略。"
-          />
-          <Button type="submit" size="lg" fullWidth loading={submitting} requiredCapability="auth_issuance">
-            <KeyRound size={16} /> 验证代码
-          </Button>
-        </form>
-
-        <div class="mt-5 flex items-start gap-2 rounded-nya-sm bg-nya-info-soft px-3 py-2 text-small text-nya-info">
-          <ShieldCheck size={16} class="mt-0.5 shrink-0" />
-          <p>下一步会显示应用身份和具体权限。只有在您刚刚主动操作该设备时才应继续授权。</p>
-        </div>
-      {/if}
-    </Card>
-  </div>
-</div>
+  </AuthorizationShell>
+{:else}
+	<AuthorizationShell maxWidth="720px" label="设备代码验证">
+    <div class="grid md:grid-cols-[240px_minmax(0,1fr)]">
+      <aside class="bg-[#273044] p-6 text-[#F7F8FF] sm:p-8">
+        <BrandLogo size={34} showName compact theme="dark" textClass="text-white" />
+        <h1 class="mt-8 text-xl font-bold md:mt-[72px]">连接您的设备</h1>
+        <p class="mt-2 text-small text-[#C9D0DF]">代码只用于找到设备发起的授权请求，不会直接授予任何权限。</p>
+        <ul class="mt-6 hidden space-y-3 text-small text-[#DCE1EB] md:block"><li>✓ 核对应用身份</li><li>✓ 逐项确认请求权限</li><li>✓ 可随时拒绝整个请求</li></ul>
+      </aside>
+      <div class="p-6 sm:p-9">
+        {#if loading}
+          <p class="py-16 text-center text-small text-nya-text-tertiary" role="status">正在检查登录状态…</p>
+        {:else}
+          <form onsubmit={submit}>
+            <h2 class="text-xl font-bold text-nya-text-primary">输入设备代码</h2>
+            <p class="mb-7 mt-2 text-body text-nya-text-secondary">在下方输入电视、终端或其他设备显示的代码。</p>
+            <label for="device-user-code" class="mb-2 block text-body font-semibold text-nya-text-primary">设备代码</label>
+            <input
+              id="device-user-code"
+              class="h-14 w-full rounded-nya-sm border bg-nya-surface px-4 text-center font-mono text-xl font-semibold tracking-[0.08em] text-nya-text-primary outline-none transition focus:ring-2 {error ? 'border-nya-danger focus:ring-nya-danger/24' : 'border-nya-border-strong focus:border-nya-primary focus:ring-nya-primary/24'}"
+              placeholder="ABCD-EFGH"
+              value={userCode}
+              oninput={handleCodeInput}
+              autocomplete="one-time-code"
+              inputmode="text"
+              maxlength={9}
+              required
+              data-bwignore="true"
+              data-1p-ignore="true"
+              aria-invalid={error ? 'true' : undefined}
+              aria-describedby={error ? 'device-code-error' : 'device-code-hint'}
+            />
+            {#if error}<p id="device-code-error" class="mt-2 text-small text-nya-danger" role="alert">{error}</p>{:else}<p id="device-code-hint" class="mt-2 text-small text-nya-text-tertiary">支持直接粘贴；字母大小写和连字符不会影响验证。</p>{/if}
+            <div class="mt-6"><Button type="submit" size="lg" fullWidth loading={submitting} requiredCapability="auth_issuance"><KeyRound size={16} /> 验证并继续</Button></div>
+            <div class="mt-5 flex items-start gap-2 rounded-nya-sm bg-nya-info-soft px-3 py-2.5 text-small text-nya-info"><ShieldCheck size={16} class="mt-0.5 shrink-0" /><p>下一步会显示应用身份和具体权限。只有在您刚刚主动操作该设备时才应继续。</p></div>
+          </form>
+        {/if}
+      </div>
+    </div>
+  </AuthorizationShell>
+{/if}

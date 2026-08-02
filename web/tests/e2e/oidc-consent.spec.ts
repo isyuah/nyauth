@@ -18,7 +18,7 @@ async function installConsentMocks(
       await fulfillJSON(route, 200, {
         user: {
           id: '11111111-1111-1111-1111-111111111111', username: 'alice',
-          display_name: 'Alice', role: 'user', status: 'active', created_at: '2026-01-01T00:00:00Z',
+		  display_name: 'Alice', role: 'user', status: 'active', created_at: '2026-01-01T00:00:00Z',
         },
         csrf_token: 'consent-csrf', must_change_password: false, has_password: true,
         email_verified: true, authenticated_at: '2026-07-31T00:00:00Z',
@@ -51,7 +51,7 @@ async function installConsentMocks(
       return;
     }
     if (path === '/api/branding') {
-      await fulfillJSON(route, 200, { title: 'Nya', logo_url: '' });
+      await fulfillJSON(route, 200, { title: 'Nya', primary_color: '#704DE8', primary_text_color: 'auto', light_logo_url: '', dark_logo_url: '', favicon_url: '' });
       return;
     }
     if (path === '/api/service-status') {
@@ -71,7 +71,7 @@ test('consent separates required permissions and submits only selected optional 
   await installConsentMocks(page, decision);
   await page.goto('/consent?challenge=consent-challenge');
 
-  await expect(page.getByRole('heading', { name: '授权确认' })).toBeVisible();
+	await expect(page.getByRole('heading', { name: 'Example Workspace' })).toBeVisible();
   await expect(page.getByText('必需权限')).toBeVisible();
   await expect(page.getByText('可选权限', { exact: true })).toBeVisible();
   await expect(page.getByText('稳定用户 ID')).toBeVisible();
@@ -79,10 +79,11 @@ test('consent separates required permissions and submits only selected optional 
   await expect(page.getByText('账户角色', { exact: true }).first()).toBeVisible();
   await expect(page.getByText('读取当前账户的管理员或普通用户角色。')).toBeVisible();
   await expect(page.getByText('新增请求', { exact: true })).toBeVisible();
-  await expect(page.getByRole('link', { name: '应用主页' })).toHaveAttribute('href', 'https://client.example');
+	await page.getByRole('button', { name: '应用技术信息' }).click();
+	await expect(page.getByRole('link', { name: '应用主页' })).toHaveAttribute('href', 'https://client.example');
   await expect(page.getByRole('link', { name: '隐私政策' })).toHaveAttribute('href', 'https://client.example/privacy');
-  await expect(page.getByText('此应用由 Nyauth 管理员直接配置和管理。')).toBeVisible();
-  await expect(page.getByText('Nyauth 尚未验证此应用的发布者')).toHaveCount(0);
+	await expect(page.getByText('此应用由 Nya 管理员直接配置和管理。')).toBeVisible();
+	await expect(page.getByText('Nya 尚未验证此应用的发布者')).toHaveCount(0);
 
   const profile = page.getByRole('checkbox', { name: /基本资料/ });
   const email = page.getByRole('checkbox', { name: /邮箱信息/ });
@@ -90,9 +91,12 @@ test('consent separates required permissions and submits only selected optional 
   await expect(profile).not.toBeChecked();
   await expect(email).toBeChecked();
   await expect(offline).toBeChecked();
-  await profile.check();
-  await email.uncheck();
-  await offline.uncheck();
+	await page.getByText('基本资料', { exact: true }).click();
+	await page.getByText('邮箱信息', { exact: true }).click();
+	await page.getByText('离线访问', { exact: true }).click();
+	await expect(profile).toBeChecked();
+	await expect(email).not.toBeChecked();
+	await expect(offline).not.toBeChecked();
   await page.getByRole('button', { name: '授权所选权限' }).click();
 
   await expect.poll(() => decision.body).toEqual({
@@ -104,12 +108,12 @@ test('consent distinguishes verified and unverified user-registered publishers',
   const decision: { body?: unknown } = {};
   await installConsentMocks(page, decision, { type: 'user_registered', status: 'verified' });
   await page.goto('/consent?challenge=consent-challenge');
-  await expect(page.getByText('已由管理员审核', { exact: true })).toBeVisible();
-  await expect(page.getByText(/此用户注册应用已经由 Nyauth 管理员审核/)).toBeVisible();
+	await expect(page.getByText('已验证发布者', { exact: true })).toBeVisible();
+	await expect(page.getByText(/此应用已经由 Nya 管理员审核/)).toBeVisible();
 
   await page.unrouteAll({ behavior: 'wait' });
   await installConsentMocks(page, decision, { type: 'user_registered', status: 'unverified' });
   await page.reload();
-  await expect(page.getByText('尚未验证', { exact: true })).toBeVisible();
-  await expect(page.getByText(/Nyauth 尚未验证此应用的发布者/)).toBeVisible();
+	await expect(page.getByText('发布者未验证', { exact: true })).toBeVisible();
+	await expect(page.getByText(/Nya 尚未验证此应用的发布者/)).toBeVisible();
 });

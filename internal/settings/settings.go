@@ -9,11 +9,15 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"net/url"
+	"regexp"
 	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
@@ -54,8 +58,94 @@ func (e *AdminsMissingMFAError) Error() string {
 // Branding holds the values the web UI uses to present the deployment
 // (sidebar wordmark, login heading, logo).
 type Branding struct {
-	Title   string `json:"title"`
-	LogoURL string `json:"logo_url"`
+	Title            string `json:"title"`
+	PrimaryColor     string `json:"primary_color"`
+	PrimaryTextColor string `json:"primary_text_color"`
+	LightLogoURL     string `json:"light_logo_url"`
+	DarkLogoURL      string `json:"dark_logo_url"`
+	FaviconURL       string `json:"favicon_url"`
+}
+
+const (
+	DefaultPrimaryColor    = "#704DE8"
+	PrimaryTextAuto        = "auto"
+	PrimaryTextWhite       = "white"
+	PrimaryTextBlack       = "black"
+	brandingTitleMaxRunes  = 64
+	brandingAssetURLMaxLen = 512
+)
+
+var brandingColorPattern = regexp.MustCompile(`^#[0-9A-F]{6}$`)
+
+func DefaultBranding(title, logoURL string) Branding {
+	return Branding{
+		Title: title, PrimaryColor: DefaultPrimaryColor, PrimaryTextColor: PrimaryTextAuto,
+		LightLogoURL: logoURL, DarkLogoURL: logoURL,
+	}
+}
+
+// NormalizeBranding canonicalizes and validates runtime branding before it is
+// published to process snapshots or persisted by an administrator.
+func NormalizeBranding(value Branding) (Branding, error) {
+	value.Title = strings.TrimSpace(value.Title)
+	value.PrimaryColor = strings.ToUpper(strings.TrimSpace(value.PrimaryColor))
+	value.PrimaryTextColor = strings.ToLower(strings.TrimSpace(value.PrimaryTextColor))
+	if value.PrimaryTextColor == "" {
+		value.PrimaryTextColor = PrimaryTextAuto
+	}
+	value.LightLogoURL = strings.TrimSpace(value.LightLogoURL)
+	value.DarkLogoURL = strings.TrimSpace(value.DarkLogoURL)
+	value.FaviconURL = strings.TrimSpace(value.FaviconURL)
+	if value.Title == "" {
+		return Branding{}, errors.New("title is required")
+	}
+	if utf8.RuneCountInString(value.Title) > brandingTitleMaxRunes {
+		return Branding{}, fmt.Errorf("title must be at most %d characters", brandingTitleMaxRunes)
+	}
+	for _, character := range value.Title {
+		if unicode.IsControl(character) || isBidirectionalControl(character) {
+			return Branding{}, errors.New("title contains unsupported control characters")
+		}
+	}
+	if !brandingColorPattern.MatchString(value.PrimaryColor) {
+		return Branding{}, errors.New("primary_color must use #RRGGBB format")
+	}
+	if value.PrimaryTextColor != PrimaryTextAuto && value.PrimaryTextColor != PrimaryTextWhite && value.PrimaryTextColor != PrimaryTextBlack {
+		return Branding{}, errors.New("primary_text_color must be auto, white, or black")
+	}
+	for field, assetURL := range map[string]string{
+		"light_logo_url": value.LightLogoURL,
+		"dark_logo_url":  value.DarkLogoURL,
+		"favicon_url":    value.FaviconURL,
+	} {
+		if err := validateBrandingAssetURL(field, assetURL); err != nil {
+			return Branding{}, err
+		}
+	}
+	return value, nil
+}
+
+func validateBrandingAssetURL(field, value string) error {
+	if value == "" {
+		return nil
+	}
+	if len(value) > brandingAssetURLMaxLen {
+		return fmt.Errorf("%s must be at most %d characters", field, brandingAssetURLMaxLen)
+	}
+	parsed, err := url.Parse(value)
+	sameOriginPath := err == nil && !parsed.IsAbs() && parsed.Host == "" && strings.HasPrefix(parsed.Path, "/") &&
+		!strings.HasPrefix(value, "//") && !strings.Contains(value, `\`)
+	secureAbsolute := err == nil && parsed.Scheme == "https" && parsed.Host != "" && parsed.User == nil
+	if !sameOriginPath && !secureAbsolute {
+		return fmt.Errorf("%s must be a same-origin path or an absolute HTTPS URL without credentials", field)
+	}
+	return nil
+}
+
+func isBidirectionalControl(character rune) bool {
+	return character == '\u200e' || character == '\u200f' ||
+		(character >= '\u202a' && character <= '\u202e') ||
+		(character >= '\u2066' && character <= '\u2069')
 }
 
 // Registration modes for public self-registration.
@@ -161,17 +251,27 @@ type Manager struct {
 }
 
 func NewManager(db *pgxpool.Pool, brandingDefaults Branding) *Manager {
-	return &Manager{db: db, brandingDefaults: brandingDefaults, auditRetentionDays: 365}
+	return &Manager{db: db, brandingDefaults: normalizeBrandingDefaults(brandingDefaults), auditRetentionDays: 365}
 }
 
 // NewManagerForRP scopes factor-policy checks to Passkeys that are usable by
 // the deployment's current WebAuthn relying party.
 func NewManagerForRP(db *pgxpool.Pool, brandingDefaults Branding, passkeyRPID string) *Manager {
 	return &Manager{
-		db: db, brandingDefaults: brandingDefaults,
+		db: db, brandingDefaults: normalizeBrandingDefaults(brandingDefaults),
 		auditRetentionDays: 365,
 		passkeyRPID:        strings.ToLower(strings.TrimSpace(passkeyRPID)),
 	}
+}
+
+func normalizeBrandingDefaults(value Branding) Branding {
+	if value.PrimaryColor == "" {
+		value.PrimaryColor = DefaultPrimaryColor
+	}
+	if value.PrimaryTextColor == "" {
+		value.PrimaryTextColor = PrimaryTextAuto
+	}
+	return value
 }
 
 // SetAuditRetentionFallback sets the deployment fallback used only while no
@@ -381,6 +481,10 @@ func (m *Manager) Load(ctx context.Context) error {
 		if err := json.Unmarshal(storedValue.value, &value); err != nil {
 			return fmt.Errorf("decoding stored branding: %w", err)
 		}
+		value, err := NormalizeBranding(value)
+		if err != nil {
+			return fmt.Errorf("decoding stored branding: %w", err)
+		}
 		branding = &Versioned[Branding]{Revision: storedValue.revision, Value: value}
 	}
 
@@ -484,7 +588,7 @@ func (m *Manager) Load(ctx context.Context) error {
 }
 
 // SetBranding persists the branding, refreshes the local snapshot, and
-// notifies other instances. Validation is the caller's responsibility.
+// notifies other instances.
 func (m *Manager) SetBranding(
 	ctx context.Context,
 	branding Branding,
@@ -492,10 +596,17 @@ func (m *Manager) SetBranding(
 	updatedBy string,
 	mutation audit.MutationAudit,
 ) (int64, error) {
+	branding, err := NormalizeBranding(branding)
+	if err != nil {
+		return 0, err
+	}
 	m.loadMu.Lock()
 	defer m.loadMu.Unlock()
 	revision, err := m.storeAudited(ctx, brandingKey, branding, expectedRevision, updatedBy, mutation, map[string]any{
-		"title": branding.Title, "logo_url": branding.LogoURL,
+		"title": branding.Title, "primary_color": branding.PrimaryColor,
+		"primary_text_color":    branding.PrimaryTextColor,
+		"light_logo_configured": branding.LightLogoURL != "", "dark_logo_configured": branding.DarkLogoURL != "",
+		"favicon_configured": branding.FaviconURL != "",
 	})
 	if err != nil {
 		return 0, err

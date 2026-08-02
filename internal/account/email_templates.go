@@ -9,6 +9,8 @@ import (
 	"strings"
 	"unicode"
 	"unicode/utf8"
+
+	brandpalette "github.com/nyasharp/nyauth/internal/branding"
 )
 
 const (
@@ -41,8 +43,11 @@ type EmailTemplateSettings struct {
 }
 
 type EmailPresentation struct {
-	SiteName string
-	Settings EmailTemplateSettings
+	SiteName         string
+	LogoURL          string
+	PrimaryColor     string
+	PrimaryTextColor string
+	Settings         EmailTemplateSettings
 }
 
 type EmailRenderData struct {
@@ -129,16 +134,20 @@ var emailTemplateDefinitions = []emailTemplateDefinition{
 }
 
 type emailHTMLTemplateData struct {
-	SiteName    string
-	Subject     string
-	Heading     string
-	Body        string
-	ButtonLabel string
-	ActionURL   string
-	Expiry      string
-	Footer      string
-	HasAction   bool
-	HasFooter   bool
+	SiteName         string
+	LogoURL          string
+	PrimaryColor     string
+	PrimaryTextColor string
+	Subject          string
+	Heading          string
+	Body             string
+	ButtonLabel      string
+	ActionURL        string
+	Expiry           string
+	Footer           string
+	HasAction        bool
+	HasFooter        bool
+	HasLogo          bool
 }
 
 var structuredEmailHTMLTemplate = template.Must(template.New("structured-email").Parse(`<!doctype html>
@@ -155,7 +164,8 @@ var structuredEmailHTMLTemplate = template.Must(template.New("structured-email")
     <tr><td align="center" style="padding:32px 16px;">
       <table role="presentation" width="100%" cellspacing="0" cellpadding="0" border="0" style="width:100%;max-width:600px;background:#ffffff;border:1px solid #e2e4e9;border-radius:8px;">
         <tr><td style="padding:22px 30px;border-bottom:1px solid #e8e9ed;">
-          <span style="font-size:21px;font-weight:700;color:#5b45d6;">{{.SiteName}}</span>
+          {{if .HasLogo}}<img src="{{.LogoURL}}" width="34" height="34" alt="" style="display:inline-block;width:34px;height:34px;margin-right:10px;vertical-align:middle;object-fit:contain;">{{end}}
+          <span style="font-size:21px;font-weight:700;color:{{.PrimaryColor}};vertical-align:middle;">{{.SiteName}}</span>
           <span style="margin-left:10px;font-size:13px;color:#6f7280;">账户安全</span>
         </td></tr>
         <tr><td style="padding:30px;">
@@ -163,10 +173,10 @@ var structuredEmailHTMLTemplate = template.Must(template.New("structured-email")
           <p style="margin:0 0 22px;white-space:pre-line;font-size:16px;line-height:1.75;color:#4c4f5d;">{{.Body}}</p>
           {{if .HasAction}}
           <table role="presentation" cellspacing="0" cellpadding="0" border="0" style="margin:0 0 22px;"><tr>
-            <td align="center" bgcolor="#5b45d6" style="border-radius:8px;"><a href="{{.ActionURL}}" style="display:inline-block;padding:13px 22px;font-size:16px;font-weight:700;line-height:1;color:#ffffff;text-decoration:none;border-radius:8px;">{{.ButtonLabel}}</a></td>
+            <td align="center" bgcolor="{{.PrimaryColor}}" style="border-radius:8px;background-color:{{.PrimaryColor}};"><a href="{{.ActionURL}}" style="display:inline-block;padding:13px 22px;font-size:16px;font-weight:700;line-height:1;color:{{.PrimaryTextColor}};text-decoration:none;border-radius:8px;">{{.ButtonLabel}}</a></td>
           </tr></table>
           <p style="margin:0 0 8px;font-size:13px;line-height:1.6;color:#6f7280;">如果按钮无法打开，请复制下面的完整链接到浏览器：</p>
-          <p style="margin:0 0 18px;padding:12px 14px;background:#f7f7fa;border:1px solid #e8e9ed;border-radius:6px;font-size:13px;line-height:1.6;word-break:break-all;"><a href="{{.ActionURL}}" style="color:#4f3bc4;text-decoration:underline;">{{.ActionURL}}</a></p>
+          <p style="margin:0 0 18px;padding:12px 14px;background:#f7f7fa;border:1px solid #e8e9ed;border-radius:6px;font-size:13px;line-height:1.6;word-break:break-all;"><a href="{{.ActionURL}}" style="color:{{.PrimaryColor}};text-decoration:underline;">{{.ActionURL}}</a></p>
           <p style="margin:0 0 18px;font-size:14px;line-height:1.7;color:#5f6270;">{{.Expiry}}</p>
           <p style="margin:0 0 18px;font-size:13px;line-height:1.7;color:#6f7280;">如果你没有发起此操作，可以忽略这封邮件。请不要转发邮件或向任何人分享上面的链接。</p>
           {{end}}
@@ -294,6 +304,24 @@ func RenderEmailTemplate(messageType, recipient string, presentation EmailPresen
 	if utf8.RuneCountInString(siteName) > 64 || containsUnsafeEmailText(siteName, false) {
 		return EmailMessage{}, fmt.Errorf("invalid email site name")
 	}
+	logoURL := strings.TrimSpace(presentation.LogoURL)
+	if logoURL != "" {
+		parsed, parseErr := url.Parse(logoURL)
+		if parseErr != nil || (parsed.Scheme != "http" && parsed.Scheme != "https") || parsed.Host == "" || parsed.User != nil {
+			return EmailMessage{}, fmt.Errorf("invalid email logo URL")
+		}
+	}
+	primaryColor := strings.ToUpper(strings.TrimSpace(presentation.PrimaryColor))
+	if primaryColor == "" {
+		primaryColor = "#5B45D6"
+	}
+	if !validEmailHexColor(primaryColor) {
+		return EmailMessage{}, fmt.Errorf("invalid email primary color")
+	}
+	primaryTextColor, err := brandpalette.TextColor(primaryColor, presentation.PrimaryTextColor)
+	if err != nil {
+		return EmailMessage{}, fmt.Errorf("invalid email primary text color")
+	}
 	variables := map[string]string{
 		EmailVariableSiteName: siteName,
 		EmailVariableUsername: strings.TrimSpace(data.Username),
@@ -334,9 +362,10 @@ func RenderEmailTemplate(messageType, recipient string, presentation EmailPresen
 		expiry = "此安全链接将在 " + variables[EmailVariableTTL] + "后失效，并且只能使用一次。"
 	}
 	htmlData := emailHTMLTemplateData{
-		SiteName: siteName, Subject: subject, Heading: heading, Body: body,
+		SiteName: siteName, LogoURL: logoURL, PrimaryColor: primaryColor,
+		PrimaryTextColor: primaryTextColor, Subject: subject, Heading: heading, Body: body,
 		ButtonLabel: buttonLabel, ActionURL: data.ActionURL, Expiry: expiry,
-		Footer: footer, HasAction: definition.Action, HasFooter: footer != "",
+		Footer: footer, HasAction: definition.Action, HasFooter: footer != "", HasLogo: logoURL != "",
 	}
 	var htmlBody bytes.Buffer
 	if err := structuredEmailHTMLTemplate.Execute(&htmlBody, htmlData); err != nil {
@@ -351,6 +380,18 @@ func RenderEmailTemplate(messageType, recipient string, presentation EmailPresen
 	}
 	textSections = append(textSections, "", "这是一封自动发送的事务邮件，请勿直接回复。")
 	return EmailMessage{To: recipient, Subject: subject, TextBody: strings.Join(textSections, "\n"), HTMLBody: htmlBody.String()}, nil
+}
+
+func validEmailHexColor(value string) bool {
+	if len(value) != 7 || value[0] != '#' {
+		return false
+	}
+	for _, character := range value[1:] {
+		if !((character >= '0' && character <= '9') || (character >= 'A' && character <= 'F')) {
+			return false
+		}
+	}
+	return true
 }
 
 func emailTemplateDefinitionFor(messageType string) (emailTemplateDefinition, bool) {

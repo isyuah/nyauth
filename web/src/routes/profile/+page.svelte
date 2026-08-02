@@ -1,10 +1,11 @@
 <script lang="ts">
   import { onMount } from 'svelte';
   import { api, isRecentAuthenticationError, type SessionInfo, type User } from '$lib/api';
-  import { consumeProviderAuthError, sessionStore } from '$lib/stores';
+  import { brandingStore, consumeProviderAuthError, sessionStore } from '$lib/stores';
   import { isCapabilityPaused, serviceStatusStore } from '$lib/service-control';
   import AvatarCropper from '$lib/components/account/AvatarCropper.svelte';
   import ReauthenticationDialog from '$lib/components/account/ReauthenticationDialog.svelte';
+  import ThemeSelector from '$lib/components/layout/ThemeSelector.svelte';
   import Badge from '$lib/components/ui/Badge.svelte';
   import Button from '$lib/components/ui/Button.svelte';
   import Input from '$lib/components/ui/Input.svelte';
@@ -75,7 +76,7 @@
     actionError = '';
     saved = false;
     try {
-      const updated = await api.updateMe({ display_name: displayName || null });
+	  const updated = await api.updateMe({ display_name: displayName || null });
       me = updated;
       sessionStore.setSession({ ...currentSession, user: updated });
       saved = true;
@@ -139,7 +140,7 @@
   }
 </script>
 
-<svelte:head><title>个人资料 - Nya</title></svelte:head>
+<svelte:head><title>个人资料 - {$brandingStore.title}</title></svelte:head>
 
 {#if notice}<div class="mb-4 rounded-nya-sm bg-nya-warning-soft px-4 py-3 text-small text-nya-warning" role="status">{notice}</div>{/if}
 {#if actionError}<div class="mb-4 rounded-nya-sm bg-nya-danger-soft px-4 py-3 text-small text-nya-danger" role="alert">{actionError}</div>{/if}
@@ -149,7 +150,7 @@
     {#if me}
       <div class="space-y-5">
         <section class="overflow-hidden rounded-nya-card border border-nya-border bg-nya-surface shadow-nya-card">
-          <div class="h-20 bg-gradient-to-br from-[#f1edff] via-[#fff0f6] to-[#edf8ff]"></div>
+          <div class="h-20 bg-gradient-to-br from-nya-primary-soft via-nya-pink-soft to-nya-blue-soft"></div>
           <div class="px-7 pb-6">
             <div class="-mt-9 flex items-end gap-5">
               <div class="flex h-[88px] w-[88px] shrink-0 items-center justify-center overflow-hidden rounded-full border-4 border-nya-surface bg-nya-primary-soft text-[32px] font-bold text-nya-primary">
@@ -174,6 +175,13 @@
           <div class="space-y-5 px-7 py-6">
             {#if saved}<div class="flex items-center gap-2 rounded-nya-sm bg-nya-success-soft px-4 py-3 text-small text-nya-success" role="status"><CheckCircle size={16} /> 保存成功</div>{/if}
             <Input id="profile-display-name" label="显示名称" bind:value={displayName} placeholder="给自己取个名字" />
+            <div>
+              <p class="mb-1.5 text-body-medium text-nya-text-primary">此浏览器的界面主题</p>
+              <div class="flex items-center justify-between gap-4 rounded-nya-sm border border-nya-border bg-nya-surface-muted px-3 py-2">
+                <p class="text-small text-nya-text-tertiary">只保存在当前浏览器，不跟随账号同步。</p>
+                <ThemeSelector />
+              </div>
+            </div>
             <div><p class="mb-2 text-body-medium text-nya-text-primary">头像</p><AvatarCropper currentUrl={me.avatar_url} disabled={avatarWritesPaused} onupload={uploadAvatar} onremove={removeAvatar} /></div>
             <div class="flex justify-end"><Button variant="primary" requiredCapability="account_mutations" onclick={handleSave} loading={saving}><Save size={16} /> 保存更改</Button></div>
           </div>

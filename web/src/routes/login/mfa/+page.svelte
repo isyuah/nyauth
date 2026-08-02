@@ -4,6 +4,7 @@
   import { onMount } from 'svelte';
   import { api, ApiError, isAPIErrorCode, type MFAMethod, type MFAPurpose, type MFARequiredResponse, type SessionInfo } from '$lib/api';
   import { brandingStore, safeReturnPath, sessionStore } from '$lib/stores';
+  import BrandLogo from '$lib/components/layout/BrandLogo.svelte';
   import Button from '$lib/components/ui/Button.svelte';
   import Input from '$lib/components/ui/Input.svelte';
   import {
@@ -215,12 +216,12 @@
   }
 </script>
 
-<svelte:head><title>{activePurpose === 'reauthentication' ? '重新验证身份' : '多因素验证'} - Nya</title></svelte:head>
+<svelte:head><title>{activePurpose === 'reauthentication' ? '重新验证身份' : '多因素验证'} - {$brandingStore.title}</title></svelte:head>
 
 <main class="flex min-h-screen items-center justify-center px-4" style="background: var(--nya-gradient-soft)">
   <div class="w-full max-w-[430px]">
     <div class="mb-7 text-center">
-      <img src={$brandingStore.logo_url || '/logo.png'} alt="" class="mx-auto mb-3 h-14 w-14 select-none" draggable="false" />
+		<BrandLogo size={56} />
       <h1 class="text-2xl font-bold text-nya-text-primary">{activePurpose === 'reauthentication' ? '完成重新认证' : '完成多因素验证'}</h1>
       <p class="mt-2 text-body text-nya-text-secondary">{activePurpose === 'reauthentication' ? '验证第二项凭据后返回刚才的敏感操作。' : '验证第二项凭据后才会创建完整登录会话。'}</p>
     </div>

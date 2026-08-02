@@ -143,6 +143,76 @@ func TestRuntimeObservabilityUpgradesSchema8To9(t *testing.T) {
 	}
 }
 
+func TestDeviceOptionalScopesAndThemeBrandingUpgradeSchema15To17(t *testing.T) {
+	schema := newPostgresTestSchema(t)
+	source, err := iofs.New(migrationfiles.Files, ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner, err := migrate.NewWithSourceInstance("iofs", source, schema.migrationDSN)
+	if err != nil {
+		_ = source.Close()
+		t.Fatal(err)
+	}
+	if err := runner.Migrate(15); err != nil {
+		_, _ = runner.Close()
+		t.Fatalf("migrate to schema 15: %v", err)
+	}
+	if _, err := schema.pool.Exec(t.Context(), `
+		INSERT INTO users (username,status,role,creation_source)
+		VALUES ('theme-upgrade-user','active','user','legacy')
+	`); err != nil {
+		t.Fatalf("insert schema 15 user: %v", err)
+	}
+	if _, err := schema.pool.Exec(t.Context(), `
+		INSERT INTO runtime_settings (key,value,updated_by,revision)
+		VALUES ('branding','{"title":"Existing Nya","logo_url":"/media/existing-logo.webp"}'::jsonb,'upgrade-test',7)
+	`); err != nil {
+		t.Fatalf("insert schema 15 branding: %v", err)
+	}
+	if sourceErr, databaseErr := runner.Close(); sourceErr != nil || databaseErr != nil {
+		t.Fatalf("close schema 15 runner: source=%v database=%v", sourceErr, databaseErr)
+	}
+
+	if err := database.RunMigrations(schema.migrationDSN); err != nil {
+		t.Fatalf("upgrade schema 15 to 16: %v", err)
+	}
+	var title, defaultTheme, primaryColor, lightLogo, darkLogo, favicon, preference string
+	var revision int64
+	if err := schema.pool.QueryRow(t.Context(), `
+		SELECT value->>'title',value->>'default_theme',value->>'primary_color',
+		       value->>'light_logo_url',value->>'dark_logo_url',value->>'favicon_url',revision
+		FROM runtime_settings WHERE key='branding'
+	`).Scan(&title, &defaultTheme, &primaryColor, &lightLogo, &darkLogo, &favicon, &revision); err != nil {
+		t.Fatalf("read migrated branding: %v", err)
+	}
+	if title != "Existing Nya" || defaultTheme != "system" || primaryColor != "#704DE8" ||
+		lightLogo != "/media/existing-logo.webp" || darkLogo != lightLogo || favicon != "" || revision != 7 {
+		t.Fatalf("migrated branding title=%q theme=%q color=%q light=%q dark=%q favicon=%q revision=%d",
+			title, defaultTheme, primaryColor, lightLogo, darkLogo, favicon, revision)
+	}
+	if err := schema.pool.QueryRow(t.Context(), `SELECT theme_preference FROM users WHERE username='theme-upgrade-user'`).Scan(&preference); err != nil {
+		t.Fatalf("read migrated user theme preference: %v", err)
+	}
+	if preference != "default" {
+		t.Fatalf("migrated user theme preference = %q, want default", preference)
+	}
+	if _, err := schema.pool.Exec(t.Context(), `UPDATE users SET theme_preference='unknown' WHERE username='theme-upgrade-user'`); err == nil {
+		t.Fatal("schema 17 accepted an unknown user theme preference")
+	}
+	if _, err := schema.pool.Exec(t.Context(), `
+		INSERT INTO oauth_clients (
+			id,secret_hash,secret_hint,secret_version,secret_rotated_at,name,redirect_uris,grants,
+			scopes,optional_scopes,allowed_claims,is_public,metadata
+		) VALUES (
+			'theme-upgrade-device-client',NULL,NULL,0,NULL,'Device client','{}',
+			ARRAY['urn:ietf:params:oauth:grant-type:device_code'],ARRAY['openid','profile'],ARRAY['profile'],ARRAY['sub'],TRUE,'{}'
+		)
+	`); err != nil {
+		t.Fatalf("schema 17 rejected optional scopes for a Device Authorization client: %v", err)
+	}
+}
+
 func assertReleaseBaseline(t *testing.T, schema *postgresTestSchema) {
 	t.Helper()
 	ctx := context.Background()
@@ -176,6 +246,7 @@ func assertReleaseBaseline(t *testing.T, schema *postgresTestSchema) {
 
 	for _, column := range []struct{ table, name string }{
 		{"users", "current_avatar_id"}, {"users", "creation_source"}, {"users", "created_by"},
+		{"users", "theme_preference"},
 		{"oauth_clients", "access_policy"}, {"oauth_clients", "optional_scopes"}, {"oauth_clients", "allowed_claims"},
 		{"oauth_clients", "homepage_uri"}, {"oauth_clients", "current_logo_id"}, {"oauth_clients", "identity_revision"}, {"oauth_clients", "authorization_revision"},
 		{"oauth_authorizations", "allowed_claims"}, {"oauth_authorizations", "client_name_snapshot"}, {"oauth_authorizations", "client_authorization_revision"},

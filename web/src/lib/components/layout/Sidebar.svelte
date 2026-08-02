@@ -2,7 +2,8 @@
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
   import { api } from '$lib/api';
-  import { brandingStore, sessionStore } from '$lib/stores';
+  import { sessionStore } from '$lib/stores';
+  import BrandLogo from './BrandLogo.svelte';
   import {
     AppWindow,
     FlaskConical,
@@ -80,15 +81,12 @@
     style="top: {mobile ? '0' : 'var(--nya-global-banner-height, 0px)'}; width: {width};"
     aria-label={section === 'admin' ? '管理后台导航' : '用户中心导航'}
   >
-    <a href={section === 'admin' ? '/admin' : '/dashboard'} onclick={onNavigate} class="flex h-[132px] shrink-0 flex-col items-center justify-center overflow-hidden bg-gradient-to-br from-[#f8f5ff] to-[#fff0f6] px-5">
+    <a href={section === 'admin' ? '/admin' : '/dashboard'} onclick={onNavigate} class="flex h-[132px] shrink-0 flex-col items-center justify-center overflow-hidden bg-gradient-to-br from-nya-primary-softer to-nya-pink-soft px-5">
       {#if showLabels}
-        <span class="flex items-center gap-2">
-          <img src={$brandingStore.logo_url || '/logo.png'} alt="" class="h-11 w-11 select-none" draggable="false" />
-          <span class="select-none bg-gradient-to-br from-[#8A6CFF] via-[#C28BFF] to-[#FF9BCB] bg-clip-text text-[30px] font-bold leading-none text-transparent">{$brandingStore.title}</span>
-        </span>
+		<BrandLogo size={44} showName />
         <span class="mt-2 text-small text-nya-text-tertiary">{section === 'admin' ? '管理后台' : '用户中心'}</span>
       {:else}
-        <img src={$brandingStore.logo_url || '/logo.png'} alt={$brandingStore.title} class="h-9 w-9 select-none" draggable="false" />
+		<BrandLogo size={36} />
       {/if}
     </a>
 

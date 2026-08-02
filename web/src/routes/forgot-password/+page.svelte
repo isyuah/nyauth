@@ -1,5 +1,6 @@
 <script lang="ts">
   import { api, type HumanVerificationChallenge, type HumanVerificationProof } from '$lib/api';
+	import { brandingStore } from '$lib/stores';
   import AccountActionCard from '$lib/components/account/AccountActionCard.svelte';
   import Button from '$lib/components/ui/Button.svelte';
   import Input from '$lib/components/ui/Input.svelte';
@@ -41,7 +42,7 @@
   }
 </script>
 
-<svelte:head><title>找回密码 - Nya</title></svelte:head>
+<svelte:head><title>找回密码 - {$brandingStore.title}</title></svelte:head>
 
 <AccountActionCard title="找回密码" description="输入账户邮箱，我们会发送一次性重置链接">
   {#if sent}

@@ -4,7 +4,7 @@
   import { onMount } from 'svelte';
   import { api } from '$lib/api';
   import { PASSWORD_REQUIREMENT, passwordPolicyError } from '$lib/password-policy';
-  import { safeReturnPath, sessionStore } from '$lib/stores';
+	import { brandingStore, safeReturnPath, sessionStore } from '$lib/stores';
   import Button from '$lib/components/ui/Button.svelte';
   import Input from '$lib/components/ui/Input.svelte';
   import ResourceState from '$lib/components/ui/ResourceState.svelte';
@@ -72,7 +72,7 @@
   }
 </script>
 
-<svelte:head><title>修改密码 - Nya</title></svelte:head>
+<svelte:head><title>修改密码 - {$brandingStore.title}</title></svelte:head>
 
 {#if sessionError}
   <div class="min-h-screen bg-nya-bg p-6"><div class="mx-auto max-w-xl pt-24"><ResourceState loading={false} error={sessionError} onretry={initialize}>{#snippet children()}{/snippet}</ResourceState></div></div>

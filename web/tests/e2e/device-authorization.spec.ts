@@ -6,11 +6,11 @@ async function json(route: Route, status: number, body: unknown, headers: Record
 }
 
 async function installShellMocks(page: Page) {
-  await page.route('**/api/branding', (route) => json(route, 200, { title: 'Nya', logo_url: '' }));
+  await page.route('**/api/branding', (route) => json(route, 200, { title: 'Nya', primary_color: '#704DE8', primary_text_color: 'auto', light_logo_url: '', dark_logo_url: '', favicon_url: '' }));
   await page.route('**/api/service-status', (route) => json(route, 200, { state: 'normal', paused_capabilities: [], public_message: '', retry_after_seconds: 0 }));
   await page.route('**/api/site-banner', (route) => json(route, 200, { active: false, version: 0 }));
   await page.route('**/api/session', (route) => json(route, 200, {
-    user: { id: '11111111-1111-1111-1111-111111111111', username: 'alice', role: 'admin', status: 'active', created_at: '2026-01-01T00:00:00Z' },
+	user: { id: '11111111-1111-1111-1111-111111111111', username: 'alice', role: 'admin', status: 'active', created_at: '2026-01-01T00:00:00Z' },
     csrf_token: 'device-csrf', must_change_password: false, has_password: true, email_verified: true,
   }));
   await page.route('**/api/admin/settings/oauth', (route) => json(route, 200, {
@@ -43,14 +43,15 @@ test('device verification normalizes the user code and opens the shared consent 
   }));
 
   await page.goto('/device?user_code=abcd%20efgh');
-  await expect(page.getByLabel('设备代码')).toHaveValue('ABCD-EFGH');
-  await page.getByRole('button', { name: '验证代码' }).click();
+	await expect(page.getByRole('textbox', { name: '设备代码', exact: true })).toHaveValue('ABCD-EFGH');
+	await page.getByRole('button', { name: '验证并继续' }).click();
 
   await expect(page).toHaveURL(/\/consent\?challenge=device-consent$/);
   expect(requestBody).toEqual({ user_code: 'ABCD-EFGH' });
   expect(csrf).toBe('device-csrf');
-  await expect(page.getByRole('heading', { name: '设备授权' })).toBeVisible();
-  await expect(page.getByText('设备代码授权，不会跳转到第三方回调地址')).toBeVisible();
+	await expect(page.getByRole('heading', { name: 'Living Room TV' })).toBeVisible();
+	await page.getByRole('button', { name: '应用技术信息' }).click();
+	await expect(page.getByText('设备代码授权，不会跳转至第三方回调地址')).toBeVisible();
   await expect(page.getByRole('button', { name: '允许设备访问' })).toBeVisible();
 });
 

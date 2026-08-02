@@ -283,3 +283,51 @@ func TestRuntimePolicySettingsSynchronizeByNotification(t *testing.T) {
 	}
 	t.Fatalf("reader did not load notified protection setting: %#v", reader.ProtectionSnapshot())
 }
+
+func TestRuntimeBrandingCASAuditAndLastKnownGood(t *testing.T) {
+	schema := newSecuritySettingsTestSchema(t)
+	if err := database.RunMigrations(schema.migrationDSN); err != nil {
+		t.Fatalf("run settings migrations: %v", err)
+	}
+	ctx := t.Context()
+	manager := NewManager(schema.pool, DefaultBranding("Fallback", "/logo.png"))
+	value := Branding{
+		Title: "Runtime Nya", PrimaryColor: "#1A73E8", PrimaryTextColor: PrimaryTextWhite,
+		LightLogoURL: "/media/light.webp", DarkLogoURL: "https://cdn.example.test/dark.webp",
+		FaviconURL: "/media/favicon.ico",
+	}
+	mutation := audit.MutationAudit{
+		Event: models.AuditSettingsUpdated, ActorID: uuid.New(), ActorName: "branding-admin",
+		Result: "success", RiskLevel: "high", IPAddress: "192.0.2.44",
+	}
+	revision, err := manager.SetBranding(ctx, value, 0, "branding-admin", mutation)
+	if err != nil || revision != 1 {
+		t.Fatalf("store branding revision=%d err=%v", revision, err)
+	}
+	if got := manager.BrandingSnapshot(); got.Revision != 1 || got.Value != value {
+		t.Fatalf("published branding = %#v", got)
+	}
+	if _, err := manager.SetBranding(ctx, value, 0, "branding-admin", mutation); !errors.Is(err, ErrRevisionConflict) {
+		t.Fatalf("stale branding update error = %v", err)
+	}
+	var audits int
+	if err := schema.pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM audit_event_outbox
+		WHERE event=$1 AND aggregate_type='settings' AND aggregate_id='branding'
+	`, models.AuditSettingsUpdated).Scan(&audits); err != nil || audits != 1 {
+		t.Fatalf("branding audit rows=%d err=%v", audits, err)
+	}
+	if _, err := schema.pool.Exec(ctx, `
+		UPDATE runtime_settings
+		SET value=jsonb_set(value,'{primary_color}','"not-a-color"'::jsonb), revision=revision+1
+		WHERE key='branding'
+	`); err != nil {
+		t.Fatalf("inject corrupt branding: %v", err)
+	}
+	if err := manager.Load(ctx); err == nil {
+		t.Fatal("corrupt stored branding unexpectedly loaded")
+	}
+	if got := manager.BrandingSnapshot(); got.Revision != 1 || got.Value != value {
+		t.Fatalf("corrupt reload replaced last-known-good branding: %#v", got)
+	}
+}

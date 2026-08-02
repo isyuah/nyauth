@@ -116,7 +116,10 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 	}
 	passkeyRPID := strings.ToLower(issuerURL.Hostname())
 	rpOrigin := (&url.URL{Scheme: issuerURL.Scheme, Host: issuerURL.Host}).String()
-	brandingDefaults, err := validateBranding(cfg.Web.Title, cfg.Web.LogoURL)
+	brandingDefaults, err := validateBranding(
+		cfg.Web.Title, settings.DefaultPrimaryColor, settings.PrimaryTextAuto,
+		cfg.Web.LogoURL, cfg.Web.LogoURL, "",
+	)
 	if err != nil {
 		return nil, fmt.Errorf("validating web branding: %w", err)
 	}
@@ -410,8 +413,10 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 		MasterKeys:      map[string][]byte{"primary": cfg.Auth.MasterKey},
 		OnEmailVerified: telemetryRuntime.RecordEmailVerificationDuration,
 		EmailPresentationProvider: func() account.EmailPresentation {
+			branding := settingsMgr.Branding()
 			return account.EmailPresentation{
-				SiteName: settingsMgr.Branding().Title,
+				SiteName: branding.Title, LogoURL: absoluteBrandingAssetURL(cfg.Auth.Issuer, branding.LightLogoURL),
+				PrimaryColor: branding.PrimaryColor, PrimaryTextColor: branding.PrimaryTextColor,
 				Settings: settingsMgr.Communications().Email,
 			}
 		},
@@ -503,6 +508,7 @@ func (s *Server) buildRouter() *chi.Mux {
 	issuer, _ := url.Parse(s.cfg.Auth.Issuer)
 	allowedOrigin := issuer.Scheme + "://" + issuer.Host
 	r.Use(cors.Handler(cors.Options{AllowedOrigins: []string{allowedOrigin}, AllowedMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"}, AllowedHeaders: []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token", "X-WebAuthn-Ceremony"}, ExposedHeaders: []string{"Retry-After"}, AllowCredentials: true, MaxAge: 300}))
+	r.Get("/branding.css", s.handleGetBrandingStylesheet)
 	r.Get("/livez", s.handleLiveness)
 	r.Get("/readyz", s.handleReadiness)
 	r.Get("/media/avatars/{avatar_id}/{size}.webp", s.handleAvatarMedia)

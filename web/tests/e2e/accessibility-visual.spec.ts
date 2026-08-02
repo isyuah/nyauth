@@ -104,13 +104,24 @@ test('login page has no automatically detectable accessibility violations', asyn
   expect(results.violations).toEqual([]);
 });
 
+test('runtime branding stylesheet remains authoritative until the JSON snapshot loads', async ({ page }) => {
+  await installPublicMocks(page);
+  await page.route('**/branding.css', (route) => route.fulfill({
+    status: 200,
+    contentType: 'text/css',
+    body: ':root,[data-theme="light"]{--nya-primary:#D7263D;--nya-primary-rgb:215 38 61;--nya-primary-contrast:#FFFFFF}',
+  }));
+  await page.goto('/login');
+
+  await expect(page.getByRole('button', { name: '登录', exact: true })).toHaveCSS('background-color', 'rgb(215, 38, 61)');
+});
+
 test('login page matches the light-theme visual baseline', async ({ page }) => {
   await installPublicMocks(page);
   await page.setViewportSize({ width: 1280, height: 800 });
   await page.goto('/login');
   const heading = page.getByRole('heading', { name: 'Nya' });
   await expect(heading).toBeVisible();
-  await expect(heading).toHaveCSS('font-size', '38px');
 
   await expect(page).toHaveScreenshot('login-page.png', {
     animations: 'disabled',

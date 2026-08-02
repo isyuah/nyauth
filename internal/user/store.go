@@ -126,7 +126,7 @@ func insertUser(ctx context.Context, execer userExecer, u *models.User, creation
 			id, username, email, password_hash, password_changed_at, display_name,
 			status, role, auth_version, session_version, must_change_password, metadata,
 			creation_source, created_by
-		) VALUES ($1,$2,$3,$4,NOW(),$5,$6,$7,$8,$9,$10,$11,$12,$13)
+		) VALUES ($1,$2,$3,$4,CASE WHEN $4::text IS NULL THEN NULL ELSE NOW() END,$5,$6,$7,$8,$9,$10,$11,$12,$13)
 	`, u.ID, u.Username, u.Email, u.PasswordHash, u.DisplayName,
 		u.Status, u.Role, u.AuthVersion, u.SessionVersion, u.MustChangePassword, u.Metadata,
 		creationSource, createdBy)

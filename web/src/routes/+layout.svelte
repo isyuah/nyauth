@@ -2,7 +2,7 @@
   import '../app.css';
   import { onMount } from 'svelte';
   import { Tooltip } from 'bits-ui';
-  import { initializeBranding } from '$lib/stores';
+  import { initializeBranding, startThemeController } from '$lib/stores';
   import { siteBannerStore } from '$lib/site-banner';
   import { serviceStatusStore } from '$lib/service-control';
   import SiteWideBanner from '$lib/components/layout/SiteWideBanner.svelte';
@@ -11,6 +11,7 @@
   let { children } = $props();
   let globalBannerStack: HTMLDivElement | null = null;
   onMount(() => {
+    const stopTheme = startThemeController();
     void initializeBranding();
     const stopSiteBanner = siteBannerStore.start();
     const stopServiceStatus = serviceStatusStore.startPolling();
@@ -25,6 +26,7 @@
     return () => {
       stopSiteBanner();
       stopServiceStatus();
+		stopTheme();
       resizeObserver?.disconnect();
       root.style.removeProperty('--nya-global-banner-height');
     };

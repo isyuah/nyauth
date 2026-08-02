@@ -37,7 +37,7 @@
     : '');
 
   const styles: Record<string, string> = {
-    primary: 'background: var(--nya-primary); color: #fff; box-shadow: 0 5px 12px rgba(124, 92, 255, 0.20);',
+    primary: 'background: var(--nya-primary); color: var(--nya-primary-contrast); box-shadow: 0 5px 12px rgb(var(--nya-primary-rgb) / 0.20);',
     secondary: 'background: var(--nya-surface); color: var(--nya-text-primary); border: 1px solid var(--nya-border-strong);',
     soft: 'background: var(--nya-primary-soft); color: var(--nya-primary);',
     ghost: 'background: transparent; color: var(--nya-text-secondary);',

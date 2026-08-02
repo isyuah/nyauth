@@ -216,7 +216,9 @@ func (s *Server) handleUpdateMe(w http.ResponseWriter, r *http.Request) {
 		writeAPIError(w, http.StatusBadRequest, "invalid request body")
 		return
 	}
-	updated, err := s.userService.Update(r.Context(), current.ID, models.UpdateUserRequest{DisplayName: request.DisplayName})
+	updated, err := s.userService.Update(r.Context(), current.ID, models.UpdateUserRequest{
+		DisplayName: request.DisplayName,
+	})
 	if err != nil {
 		if user.IsInvalidInput(err) {
 			writeAPIError(w, http.StatusBadRequest, err.Error())

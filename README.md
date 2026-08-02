@@ -9,7 +9,7 @@
 - 第一方后台仅使用 `HttpOnly + SameSite=Lax` 会话 Cookie，并对修改请求强制校验 CSRF。
 - OAuth 授权码客户端强制使用 PKCE S256；不支持 plain、implicit 或 hybrid 流程。
 - JWT 固定使用 RS256，refresh token 采用 family 轮换与重复使用检测。
-- 数据库以嵌入二进制的 `000001_baseline` 建立破坏性发布基线，并通过兼容的 `000002` 至 `000015_trusted_devices` 加法迁移演进；当前 `0.6.0-dev` 要求 schema version 15，可从正式 `0.5.0` 的 schema version 13 依次迁移。服务启动只校验 schema，不再隐式迁移。
+- 数据库以嵌入二进制的 `000001_baseline` 建立破坏性发布基线，并通过兼容的 `000002` 至 `000017_theme_branding` 加法迁移演进；当前 `0.6.0-dev` 要求 schema version 17，可从正式 `0.5.0` 的 schema version 13 依次迁移。服务启动只校验 schema，不再隐式迁移。
 - 旧数据库、session、token、JWK、Provider 凭据和 OAuth 客户端注册均不兼容。
 - 旧 Go/TypeScript SDK 已删除；OAuth/OIDC 集成以标准协议和成熟语言库为准。
 
@@ -33,6 +33,7 @@
 - 自助注册：关闭 / 邀请制 / 开放三种模式，域名白名单与邀请码均为运行时设置
 - 动态邮件：数据库版本化 SMTP 配置、结构化事务邮件模板、真实预览/测试、免重启激活/回滚与共享熔断
 - 全站横幅：信息/警告/严重三级横幅，开始与结束时间可独立省略，浏览器按版本关闭，以及 SSE 实时同步
+- 主题与品牌：访问者浏览器本地的浅色、深色、跟随系统偏好，受控主色色阶与文字模式、浅/深 Logo、favicon、认证界面与事务邮件统一品牌；服务端 `/branding.css` 在 SPA 首次绘制前提供当前色阶，避免先显示内置紫色再切换
 - 安全头像：浏览器 1:1 裁剪、服务端重编码、本地持久化或私有 S3、Provider 首次异步导入，以及版本化运行时 S3 配置与可续跑迁移
 - 运行时服务控制：六类能力独立暂停、常用维护预设、多实例排空确认、定时恢复与 CLI 紧急解锁
 - 运行时运营策略：动态限流、会话与近期认证期限、审计保留和用户客户端配额，revision CAS 与多实例同步
@@ -213,7 +214,7 @@ Nyauth 只通过 SMTP 发送邮件，不读取邮箱，也不需要 IMAP。生�
 | GET | `/api/session` | 返回用户、CSRF、认证状态、会话绝对截止与近期认证截止时间 |
 | POST | `/api/logout` | 销毁当前会话 |
 | GET | `/api/me` | 当前用户资料 |
-| PUT | `/api/me` | 修改 display name |
+| PUT | `/api/me` | 修改 display name；界面主题只保存在访问者当前浏览器，不属于账号资料 |
 | POST | `/api/me/avatar` | 上传浏览器裁剪后的受控头像，返回更新后的用户资料 |
 | DELETE | `/api/me/avatar` | 删除当前头像，返回更新后的用户资料 |
 | GET | `/media/avatars/{avatar_id}/{size}.webp` | 读取 active 头像的 64/128/256/512 WebP 变体 |
@@ -356,7 +357,7 @@ Provider 不再从 YAML 或环境变量静态加载，只能由管理员写入�
 - `GET /api/admin/system/status`：版本、schema、PostgreSQL/Redis/JWK/Provider、SMTP、头像媒体、人机验证与可观测性状态，以及当前运营告警。
 - `GET/PUT /api/admin/settings/operations`：六类能力的运行时暂停、恢复、到期和多实例应用进度；修改要求近期重新认证，使用 revision CAS 并与审计同事务提交。
 - `GET /api/admin/settings/media`、候选保存/测试、迁移及 `fallback/migrate` 接口：私有 S3 运行时配置、迁回已配置本地 fallback、真实对象测试、迁移进度和失败重试；凭据只加密保存且永不回显。
-- `GET/PUT /api/admin/settings/branding`、`registration`、`security`、`protection`、`lifecycle`、`oauth`：六组运行时设置统一使用 revision CAS；写入要求近期重新认证、固定保护限流，并与 `settings.updated` 审计同事务提交。
+- `GET/PUT /api/admin/settings/branding`、`registration`、`security`、`protection`、`lifecycle`、`oauth`：六组运行时设置统一使用 revision CAS；写入要求近期重新认证、固定保护限流，并与 `settings.updated` 审计同事务提交。品牌设置包含主色、主色文字自动/白色/黑色模式、浅/深 Logo 和 favicon；主色只接受 `#RRGGBB`，资源只接受同源路径或无凭据 HTTPS URL，不允许任意 CSS、HTML、字体或脚本。浅色、深色与跟随系统属于访问者当前浏览器的本地偏好，不由管理员替访问者指定，也不写入用户账号。
 - `GET /api/site-banner`、`GET /api/site-banner/events`：读取全站横幅并通过 SSE 接收实时状态；公开响应不包含设置 revision 或邮件模板。
 - `GET/PUT /api/admin/settings/communications`、邮件模板 `preview/test`、横幅 Markdown `site-banner/preview`：动态管理结构化事务邮件模板和全站横幅。模板只接受受限纯文本字段与按字段授权的变量，动作链接和安全提示由服务端生成；测试邮件只能发往当前管理员已验证邮箱。
 - `GET/PUT /api/admin/settings/observability` 及其 `otlp/candidate`、`test`、`activate`、`rollback`、`disable` 接口：动态日志级别、最长 24 小时的临时 Debug、五项固定低基数告警阈值和加密的 OTLP 版本状态机；修改要求近期重新认证、CSRF、固定限流与审计。
@@ -382,6 +383,8 @@ Provider 不再从 YAML 或环境变量静态加载，只能由管理员写入�
 - `GET /api/admin/settings/mail`、`PUT /api/admin/settings/mail/candidate`，以及邮件设置下的 `candidate/test`、`activate`、`rollback`、`disable` POST：数据库动态 SMTP；候选必须实际测试成功并在十分钟内激活，所有读取和变更均要求近期重新认证，写操作还受 CSRF、限流和审计保护。
 
 事务邮件模板和 SMTP 投递配置相互独立：模板保存后只影响之后新入队的邮件；已经入队的邮件正文在加密 outbox 中保持不变。模板不能注入任意 HTML、CSS、脚本或自定义动作链接，预览使用 `example.invalid` 的不可用示例 Token，真实测试不会生成账户操作 Token。
+
+主题按当前浏览器保存的“浅色 / 深色 / 跟随系统”偏好解析，不写入账号，也不存在管理员指定的站点默认主题。主题修改无需重启或刷新即可应用；主色、文字模式、Logo 与 favicon 作为运行时品牌设置，通过多实例通知与定时对账同步。服务端根据管理员选择的单一主色生成完整交互色阶，自动模式选择可读文字色，管理员也可强制白色或黑色；管理界面同时预览浅/深主题和 WCAG 对比度。事务邮件使用固定可信 HTML 外壳、当前品牌名称、浅色 Logo、主色及同一文字模式；已经入队的加密邮件不会被后续品牌变更改写。
 
 注册与邮件趋势使用业务事务内的低基数日聚合，后台快照每分钟在 PostgreSQL advisory lock 下刷新。30 日注册完成率按“最近 30 天创建的注册 cohort 中已完成的比例”计算，分母为空时返回 `null`。全新 baseline 会把 `mail_stats_available_from` / `available_from` 初始化为该数据库开始观测邮件投递的时间，不能把此前不存在的数据解释为零。邮件成功投递不会逐封写审计日志；配置、熔断和现有注册/邀请生命周期事件仍按既定审计契约记录。
 

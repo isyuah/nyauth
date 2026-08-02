@@ -2,7 +2,7 @@
   import { page } from '$app/stores';
   import { onMount } from 'svelte';
   import { api } from '$lib/api';
-  import { sessionStore } from '$lib/stores';
+	import { brandingStore, sessionStore } from '$lib/stores';
   import AccountActionCard from '$lib/components/account/AccountActionCard.svelte';
   import Button from '$lib/components/ui/Button.svelte';
   import Input from '$lib/components/ui/Input.svelte';
@@ -41,7 +41,7 @@
   }
 </script>
 
-<svelte:head><title>重置密码 - Nya</title></svelte:head>
+<svelte:head><title>重置密码 - {$brandingStore.title}</title></svelte:head>
 
 <AccountActionCard title="重置密码" description="链接只会在你确认后使用，不会因邮件预览而自动生效">
   {#if complete}

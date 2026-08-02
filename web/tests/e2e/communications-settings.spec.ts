@@ -98,7 +98,7 @@ async function installMocks(page: Page, options: MockOptions = {}) {
     const path = new URL(request.url()).pathname;
     const method = request.method();
     if (path === '/api/service-status') return json(route, 200, normalStatus);
-    if (path === '/api/branding') return json(route, 200, { title: 'Nya', logo_url: '' });
+    if (path === '/api/branding') return json(route, 200, { title: 'Nya', primary_color: '#704DE8', primary_text_color: 'auto', light_logo_url: '', dark_logo_url: '', favicon_url: '' });
     if (path === '/api/site-banner') return json(route, 200, publicSiteBanner);
     if (path === '/api/site-banner/events') {
       return route.fulfill({

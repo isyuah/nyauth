@@ -653,8 +653,16 @@ export interface LoginHistoryEntry {
 
 export interface Branding {
   title: string;
-  logo_url: string;
+	primary_color: string;
+	primary_text_color: PrimaryTextColor;
+	light_logo_url: string;
+	dark_logo_url: string;
+	favicon_url: string;
 }
+
+export type Theme = 'light' | 'dark' | 'system';
+export type ResolvedTheme = Exclude<Theme, 'system'>;
+export type PrimaryTextColor = 'auto' | 'white' | 'black';
 
 export interface BrandingSettings extends Branding {
 	revision: number;

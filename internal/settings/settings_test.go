@@ -33,6 +33,30 @@ func TestSecurityTrustedDeviceDefaultsAndBounds(t *testing.T) {
 	}
 }
 
+func TestNormalizeBrandingCanonicalizesAndRejectsUnsafeValues(t *testing.T) {
+	branding, err := NormalizeBranding(Branding{
+		Title: "  Nya  ", PrimaryColor: " #704de8 ", PrimaryTextColor: " WHITE ",
+		LightLogoURL: " /media/logo-light.webp ", DarkLogoURL: " https://cdn.example.test/dark.webp ",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if branding.Title != "Nya" || branding.PrimaryColor != "#704DE8" || branding.PrimaryTextColor != PrimaryTextWhite ||
+		branding.LightLogoURL != "/media/logo-light.webp" || branding.DarkLogoURL != "https://cdn.example.test/dark.webp" {
+		t.Fatalf("normalized branding = %#v", branding)
+	}
+	for _, invalid := range []Branding{
+		{Title: "Nya", PrimaryColor: "704DE8"},
+		{Title: "Nya", PrimaryColor: DefaultPrimaryColor, PrimaryTextColor: "purple"},
+		{Title: "Nya\u202e", PrimaryColor: DefaultPrimaryColor},
+		{Title: "Nya", PrimaryColor: DefaultPrimaryColor, LightLogoURL: "javascript:alert(1)"},
+	} {
+		if _, err := NormalizeBranding(invalid); err == nil {
+			t.Fatalf("unsafe branding accepted: %#v", invalid)
+		}
+	}
+}
+
 func TestLifecycleDefaultsUseDeploymentAuthenticationFallbacks(t *testing.T) {
 	manager := NewManager(nil, Branding{Title: "Nya"})
 	manager.SetAuthenticationFallbacks(45*time.Minute, 14*24*time.Hour, 90*time.Second)
@@ -240,18 +264,19 @@ func TestValidateLifecycleAuthenticationAndSessionBounds(t *testing.T) {
 }
 
 func TestBrandingFallsBackToDefaults(t *testing.T) {
-	manager := NewManager(nil, Branding{Title: "Nya", LogoURL: "https://cdn.example.com/logo.png"})
+	manager := NewManager(nil, Branding{Title: "Nya", LightLogoURL: "https://cdn.example.com/logo.png"})
 	branding := manager.Branding()
-	if branding.Title != "Nya" || branding.LogoURL != "https://cdn.example.com/logo.png" {
+	if branding.Title != "Nya" || branding.LightLogoURL != "https://cdn.example.com/logo.png" ||
+		branding.PrimaryColor != DefaultPrimaryColor || branding.PrimaryTextColor != PrimaryTextAuto {
 		t.Fatalf("branding = %#v", branding)
 	}
 }
 
 func TestBrandingUsesStoredSnapshot(t *testing.T) {
 	manager := NewManager(nil, Branding{Title: "Nya"})
-	stored := Branding{Title: "Custom", LogoURL: ""}
+	stored := Branding{Title: "Custom", PrimaryColor: "#123456", PrimaryTextColor: PrimaryTextBlack}
 	manager.branding.Store(&Versioned[Branding]{Revision: 2, Value: stored})
-	if branding := manager.Branding(); branding.Title != "Custom" || branding.LogoURL != "" {
+	if branding := manager.Branding(); branding.Title != "Custom" || branding.PrimaryColor != "#123456" || branding.PrimaryTextColor != PrimaryTextBlack {
 		t.Fatalf("branding = %#v", branding)
 	}
 	manager.branding.Store(nil)

@@ -94,7 +94,7 @@ async function installMediaMocks(page: Page, options: MediaMockOptions = {}) {
     const path = new URL(route.request().url()).pathname;
     const method = route.request().method();
     if (path === '/api/service-status') return json(route, 200, normalStatus);
-    if (path === '/api/branding') return json(route, 200, { title: 'Nya', logo_url: '' });
+    if (path === '/api/branding') return json(route, 200, { title: 'Nya', primary_color: '#704DE8', primary_text_color: 'auto', light_logo_url: '', dark_logo_url: '', favicon_url: '' });
     if (path === '/api/session') return json(route, 200, currentSession);
     if (path === '/api/admin/settings/protection') {
       return json(route, 200, {

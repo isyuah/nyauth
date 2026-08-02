@@ -12,16 +12,21 @@
 - Consent 标出此前已授权与本次新增的 Scope/Claim；再次授权时历史可选权限保持勾选，新增可选权限默认不勾选
 - 个人中心新增受限登录历史，只展示本人登录成功、登录失败和登录 MFA 失败的固定字段投影
 - 新增可信浏览器：用户完成登录 MFA 后可选择在受控期限内跳过后续登录的第二因素，并可在设备页逐个或批量撤销
+- OAuth Consent 与 Device Authorization 使用共享品牌化授权外壳，展示应用身份、发布者状态、技术信息、权限变化和明确的成功/拒绝结果，并为低高度与移动视口提供不遮挡内容的快速操作栏
+- 新增浅色、深色与跟随系统主题；访问者的选择只保存在当前浏览器，管理员可热更新主色、主色文字自动/白色/黑色模式、浅/深 Logo 与 favicon
+- 登录、注册、账户操作、Consent、Device Authorization 和事务邮件统一使用运行时品牌名称与标识；管理后台提供双主题实时预览和 WCAG 对比度结果
+- 运行时品牌色通过绘制阻塞的同源样式表进入 SPA 首帧，浏览器本地主题也在页面内容绘制前解析，避免强制刷新时短暂显示内置紫色或错误深浅主题
 
 ### 安全
 
 - Redirect URI 变化、Grant/Scope/Claim 移除和访问策略变化推进客户端授权 revision；授权码兑换、Access Token 本机校验和 Refresh Token 轮换都会拒绝旧 revision
 - Consent 提交与客户端修改通过 PostgreSQL 行锁建立顺序，避免并发修改被错误记录为用户已经同意
 - 可信浏览器 Token 仅以 SHA-256 哈希存储，并绑定用户认证/会话版本；不会跳过主验证、近期重新认证或延长会话
+- 品牌配置仅接受 `#RRGGBB` 主色、受限的主色文字模式以及同源路径或无凭据 HTTPS 图片地址；不允许任意 CSS、HTML、字体 URL 或脚本，坏配置不会替换实例的最后有效快照
 
 ### 变更
 
-- 开发版本进入 `0.6.0-dev`；新增兼容迁移 `000014_oauth_application_identity` 与 `000015_trusted_devices`，schema version 从 13 提升到 15
+- 开发版本进入 `0.6.0-dev`；新增兼容迁移 `000014_oauth_application_identity` 至 `000017_theme_branding`，schema version 从 13 提升到 17；`000016` 使 Device Authorization 与客户端服务层一致地支持可选 Scope
 
 ## [0.5.0] — 2026-07-31
 
