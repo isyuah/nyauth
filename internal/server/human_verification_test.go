@@ -19,9 +19,9 @@ type humanVerificationRuntimeStub struct {
 	attempt   int
 }
 
-func (s *humanVerificationRuntimeStub) PublicChallenge(action string, _ int) humanverification.PublicChallenge {
+func (s *humanVerificationRuntimeStub) PublicChallenge(action humanverification.Action, _ int) humanverification.PublicChallenge {
 	result := s.challenge
-	result.Action = action
+	result.Action = action.String()
 	return result
 }
 
@@ -58,7 +58,7 @@ func TestGetHumanVerificationReturnsPublicNoStoreDTO(t *testing.T) {
 
 func TestGetHumanVerificationRejectsUnknownAndAdminActions(t *testing.T) {
 	server := &Server{}
-	for _, action := range []string{"private_action", humanverification.ActionAdminTest} {
+	for _, action := range []string{"private_action", humanverification.ActionAdminTest.String()} {
 		request := httptest.NewRequest(http.MethodGet, "/api/human-verification?action="+action, nil)
 		recorder := httptest.NewRecorder()
 		server.handleGetHumanVerification(recorder, request)

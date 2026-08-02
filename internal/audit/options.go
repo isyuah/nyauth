@@ -30,6 +30,7 @@ func KnownFilterOptions() FilterOptions {
 		models.AuditClientSecretRotated,
 		models.AuditClientUpdated,
 		models.AuditConsentAccepted,
+		models.AuditDeviceAuthorizationStarted,
 		models.AuditConsentDenied,
 		models.AuditIdentityBindStarted,
 		models.AuditIdentityBound,

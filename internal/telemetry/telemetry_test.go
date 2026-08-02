@@ -9,6 +9,8 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/nyasharp/nyauth/internal/humanverification"
+	"github.com/nyasharp/nyauth/internal/securityaction"
 	"github.com/nyasharp/nyauth/internal/settings"
 	"github.com/redis/go-redis/v9"
 )
@@ -82,12 +84,12 @@ func TestSecurityMetricsBoundAllLabelValues(t *testing.T) {
 	runtime.RecordProviderEvent(t.Context(), "callback", "login", "failure", "provider_authentication_failed", time.Millisecond)
 	runtime.RecordProviderEvent(t.Context(), "synchronization", "none", "degraded", "provider_rows_skipped", time.Millisecond)
 	runtime.RecordProviderEvent(t.Context(), "provider-name-123", "user-id-123", "unexpected", "upstream-secret", time.Millisecond)
-	runtime.RecordHumanVerification(t.Context(), "turnstile", "register", "success", "none", time.Millisecond)
-	runtime.RecordHumanVerification(t.Context(), "private-provider", "private-action", "unexpected", "token-secret", time.Millisecond)
+	runtime.RecordHumanVerification(t.Context(), "turnstile", humanverification.ActionRegistration, "success", "none", time.Millisecond)
+	runtime.RecordHumanVerification(t.Context(), "private-provider", humanverification.Action(255), "unexpected", "token-secret", time.Millisecond)
 	runtime.RecordJWKRotation(t.Context(), "scheduled", "success", "none", time.Millisecond)
-	runtime.RecordRateLimit(t.Context(), "account_action", "email_change", "rejected")
-	runtime.RecordRateLimit(t.Context(), "account_action", "register", "rejected")
-	runtime.RecordRateLimit(t.Context(), "ip-address", "user-id", "unexpected")
+	runtime.RecordRateLimit(t.Context(), securityaction.AccountEmailChange, "rejected")
+	runtime.RecordRateLimit(t.Context(), securityaction.AccountRegister, "rejected")
+	runtime.RecordRateLimit(t.Context(), securityaction.AccountOperation(255), "unexpected")
 	runtime.RecordRegistrationOutcome(t.Context(), "success", "pending_verification")
 	runtime.RecordRegistrationOutcome(t.Context(), "unexpected", "private-registration-reason")
 	runtime.RecordEmailVerificationDuration(t.Context(), 15*time.Minute)

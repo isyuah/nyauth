@@ -145,11 +145,12 @@
   let currentURLKey = '';
   let listRequestVersion = 0;
   let createAuthorizationCodeSelected = $derived(newClient.grants.includes('authorization_code'));
+  let createInteractiveGrantSelected = $derived(createAuthorizationCodeSelected || newClient.grants.includes('urn:ietf:params:oauth:grant-type:device_code'));
 
   function defaultClientForm(policy: OAuthClientPolicy): ClientForm {
     const grants: OAuthGrantType[] = [];
     if (policy.allowed_grant_types.includes('authorization_code')) grants.push('authorization_code');
-    if (policy.allowed_grant_types.includes('refresh_token') && grants.includes('authorization_code')) grants.push('refresh_token');
+    if (policy.allowed_grant_types.includes('refresh_token') && (grants.includes('authorization_code') || grants.includes('urn:ietf:params:oauth:grant-type:device_code'))) grants.push('refresh_token');
     if (grants.length === 0 && policy.allowed_grant_types[0]) grants.push(policy.allowed_grant_types[0]);
     const scopes = policy.allowed_scopes.filter((scope) => OAUTH_SCOPES.some((standard) => standard === scope)
       && (scope !== 'offline_access' || grants.includes('refresh_token')));
@@ -497,7 +498,7 @@
   }
 
   function knownGrant(grant: string): grant is OAuthGrantType {
-    return grant === 'authorization_code' || grant === 'refresh_token' || grant === 'client_credentials';
+    return grant === 'authorization_code' || grant === 'urn:ietf:params:oauth:grant-type:device_code' || grant === 'refresh_token' || grant === 'client_credentials';
   }
 
   async function openEdit(client: OAuthClient) {
@@ -545,8 +546,8 @@
     if (!name) { editError = '应用名称不能为空。'; return; }
     if (grants.includes('authorization_code') && redirectURIs.length === 0) { editError = 'Authorization Code 客户端至少需要一个 Redirect URI。'; return; }
     if (grants.length === 0) { editError = '至少需要一个 Grant。'; return; }
-    if (grants.includes('refresh_token') && !grants.includes('authorization_code')) {
-      editError = 'Refresh Token 必须与 Authorization Code 同时启用。';
+    if (grants.includes('refresh_token') && !grants.includes('authorization_code') && !grants.includes('urn:ietf:params:oauth:grant-type:device_code')) {
+      editError = 'Refresh Token 必须与 Authorization Code 或 Device Authorization 同时启用。';
       return;
     }
     if (target.is_public && grants.includes('client_credentials')) {
@@ -838,12 +839,12 @@
       bind:scopes={newClient.scopes}
       bind:optionalScopes={newClient.optional_scopes}
       bind:allowedClaims={newClient.allowed_claims}
-      onAuthorizationCodeDisabled={() => (newClient.is_public = false)}
+      onInteractiveGrantDisabled={() => (newClient.is_public = false)}
     />
     <div class="flex flex-col gap-1.5"><label for="admin-redirect-uris" class="text-body-medium text-nya-text-primary">Redirect URI <span class="text-small text-nya-text-tertiary">（每行一个，最多 {clientPolicy.max_redirect_uris} 个）</span></label><textarea id="admin-redirect-uris" bind:value={newClient.redirect_uris} required={createAuthorizationCodeSelected} rows="3" placeholder="https://app.example.com/callback" class="w-full rounded-nya-sm border border-nya-border bg-nya-surface px-3 py-2 font-mono text-small text-nya-text-primary focus:border-nya-primary focus:outline-none focus:ring-2 focus:ring-nya-primary/24"></textarea></div>
     <div class="flex flex-col gap-1.5"><label for="admin-post-logout-uris" class="text-body-medium text-nya-text-primary">Post-logout Redirect URI <span class="text-small text-nya-text-tertiary">（每行一个，最多 {clientPolicy.max_post_logout_redirect_uris} 个）</span></label><textarea id="admin-post-logout-uris" bind:value={newClient.post_logout_redirect_uris} rows="2" placeholder="https://app.example.com/signed-out" disabled={clientPolicy.max_post_logout_redirect_uris === 0} class="w-full rounded-nya-sm border border-nya-border bg-nya-surface px-3 py-2 font-mono text-small text-nya-text-primary focus:border-nya-primary focus:outline-none focus:ring-2 focus:ring-nya-primary/24 disabled:opacity-50"></textarea></div>
     {@render ownerPicker(newClient.owner_id, selectCreateOwner, 'create-client-owner')}
-    <label class="flex cursor-pointer items-start gap-2 {clientPolicy.public_clients_enabled && createAuthorizationCodeSelected ? '' : 'opacity-50'}"><input type="checkbox" bind:checked={newClient.is_public} disabled={!clientPolicy.public_clients_enabled || !createAuthorizationCodeSelected} class="mt-0.5 rounded" /><span><span class="block text-body text-nya-text-primary">公共客户端</span><span class="block text-small text-nya-text-tertiary">仅用于无法安全保存 Secret 的原生应用；浏览器 SPA 暂不作为正式支持模式。</span></span></label>
+    <label class="flex cursor-pointer items-start gap-2 {clientPolicy.public_clients_enabled && createInteractiveGrantSelected ? '' : 'opacity-50'}"><input type="checkbox" bind:checked={newClient.is_public} disabled={!clientPolicy.public_clients_enabled || !createInteractiveGrantSelected} class="mt-0.5 rounded" /><span><span class="block text-body text-nya-text-primary">公共客户端</span><span class="block text-small text-nya-text-tertiary">用于无法安全保存 Secret 的原生应用、CLI 或输入受限设备。</span></span></label>
     <div class="flex justify-end gap-2 pt-2"><Button variant="secondary" onclick={() => (showCreate = false)} disabled={creating}>取消</Button><Button type="submit" variant="primary" requiredCapability="admin_mutations" loading={creating}>创建</Button></div>
   </form>
 </Modal>

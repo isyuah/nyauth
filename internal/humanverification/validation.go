@@ -53,27 +53,86 @@ func NormalizePolicy(value Policy) (Policy, error) {
 	return value, nil
 }
 
-func ValidAction(action string) bool {
-	switch action {
-	case ActionRegistration, ActionLogin, ActionPasswordReset,
-		ActionEmailVerificationResend, ActionProviderLogin, ActionAdminTest:
-		return true
-	default:
-		return false
-	}
+type policyRequirement uint8
+
+const (
+	requirementNone policyRequirement = iota
+	requirementRegistration
+	requirementLogin
+	requirementPasswordReset
+	requirementEmailVerificationResend
+	requirementProviderLogin
+)
+
+type actionDefinition struct {
+	external    string
+	public      bool
+	requirement policyRequirement
 }
 
-func PolicyRequires(policy Policy, action string, loginAttempt int) bool {
-	switch action {
-	case ActionRegistration:
+var actionDefinitions = [...]actionDefinition{
+	ActionRegistration:            {external: "register", public: true, requirement: requirementRegistration},
+	ActionLogin:                   {external: "login", public: true, requirement: requirementLogin},
+	ActionPasswordReset:           {external: "password_reset", public: true, requirement: requirementPasswordReset},
+	ActionEmailVerificationResend: {external: "email_verification_resend", public: true, requirement: requirementEmailVerificationResend},
+	ActionProviderLogin:           {external: "provider_login", public: true, requirement: requirementProviderLogin},
+	ActionAdminTest:               {external: "admin_test", public: false, requirement: requirementNone},
+}
+
+func (action Action) String() string {
+	definition, ok := actionDefinitionFor(action)
+	if !ok {
+		return ""
+	}
+	return definition.external
+}
+
+func ValidAction(action Action) bool {
+	_, ok := actionDefinitionFor(action)
+	return ok
+}
+
+func ParseAction(value string) (Action, bool) {
+	for action := ActionRegistration; action <= ActionAdminTest; action++ {
+		if action.String() == value {
+			return action, true
+		}
+	}
+	return 0, false
+}
+
+func ParsePublicAction(value string) (Action, bool) {
+	action, ok := ParseAction(value)
+	if !ok {
+		return 0, false
+	}
+	definition, _ := actionDefinitionFor(action)
+	return action, definition.public
+}
+
+func AllActions() []Action {
+	actions := make([]Action, 0, len(actionDefinitions)-1)
+	for action := ActionRegistration; action <= ActionAdminTest; action++ {
+		actions = append(actions, action)
+	}
+	return actions
+}
+
+func PolicyRequires(policy Policy, action Action, loginAttempt int) bool {
+	definition, ok := actionDefinitionFor(action)
+	if !ok {
+		return false
+	}
+	switch definition.requirement {
+	case requirementRegistration:
 		return policy.Registration
-	case ActionPasswordReset:
+	case requirementPasswordReset:
 		return policy.PasswordReset
-	case ActionEmailVerificationResend:
+	case requirementEmailVerificationResend:
 		return policy.EmailVerificationResend
-	case ActionProviderLogin:
+	case requirementProviderLogin:
 		return policy.ProviderLogin
-	case ActionLogin:
+	case requirementLogin:
 		switch policy.LoginMode {
 		case LoginAlways:
 			return true
@@ -82,6 +141,14 @@ func PolicyRequires(policy Policy, action string, loginAttempt int) bool {
 		}
 	}
 	return false
+}
+
+func actionDefinitionFor(action Action) (actionDefinition, bool) {
+	if action <= 0 || int(action) >= len(actionDefinitions) {
+		return actionDefinition{}, false
+	}
+	definition := actionDefinitions[action]
+	return definition, definition.external != ""
 }
 
 func validBoundedPlainText(value string, minRunes, maxRunes int) bool {

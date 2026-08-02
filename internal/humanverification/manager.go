@@ -194,9 +194,10 @@ func (m *Manager) Snapshot() EffectiveConfig {
 	return EffectiveConfig{State: State{Mode: ModeDisabled, Policy: DefaultPolicy()}}
 }
 
-func (m *Manager) PublicChallenge(action string, loginAttempt int) PublicChallenge {
-	result := PublicChallenge{Action: action}
-	if !ValidAction(action) || action == ActionAdminTest {
+func (m *Manager) PublicChallenge(action Action, loginAttempt int) PublicChallenge {
+	result := PublicChallenge{Action: action.String()}
+	definition, valid := actionDefinitionFor(action)
+	if !valid || !definition.public {
 		return result
 	}
 	snapshot := m.snapshot.Load()

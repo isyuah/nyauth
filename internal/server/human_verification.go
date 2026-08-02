@@ -30,7 +30,7 @@ type humanVerificationRuntime interface {
 	Enable(context.Context, humanverification.StateMutationInput) (humanverification.State, error)
 	CandidateVerifier(context.Context, uuid.UUID) (humanverification.Version, humanverification.Verifier, error)
 	Load(context.Context) error
-	PublicChallenge(string, int) humanverification.PublicChallenge
+	PublicChallenge(humanverification.Action, int) humanverification.PublicChallenge
 	Verify(context.Context, humanverification.VerifyInput, int) error
 	Status() humanverification.RuntimeStatus
 	StartSynchronization(context.Context)
@@ -76,14 +76,14 @@ type humanVerificationStateMutationRequest struct {
 }
 
 func (s *Server) handleGetHumanVerification(w http.ResponseWriter, r *http.Request) {
-	action := strings.TrimSpace(r.URL.Query().Get("action"))
-	if !humanverification.ValidAction(action) || action == humanverification.ActionAdminTest {
+	action, ok := humanverification.ParsePublicAction(strings.TrimSpace(r.URL.Query().Get("action")))
+	if !ok {
 		writeAPIError(w, http.StatusBadRequest, "unsupported human verification action")
 		return
 	}
 	w.Header().Set("Cache-Control", "no-store")
 	if s.humanVerification == nil {
-		writeJSON(w, http.StatusOK, humanverification.PublicChallenge{Action: action})
+		writeJSON(w, http.StatusOK, humanverification.PublicChallenge{Action: action.String()})
 		return
 	}
 	writeJSON(w, http.StatusOK, s.humanVerification.PublicChallenge(action, 0))
@@ -296,7 +296,7 @@ func (s *Server) loadHumanVerificationSettings(r *http.Request) (humanVerificati
 }
 
 func (s *Server) requireHumanVerification(
-	w http.ResponseWriter, r *http.Request, action string, loginAttempt int, proof *humanVerificationProof,
+	w http.ResponseWriter, r *http.Request, action humanverification.Action, loginAttempt int, proof *humanVerificationProof,
 ) bool {
 	// Production construction always supplies the manager. Isolated handler
 	// tests intentionally build a minimal Server and therefore inherit the
@@ -336,7 +336,7 @@ func (s *Server) requireHumanVerification(
 		return false
 	}
 	s.telemetry.RecordHumanVerification(r.Context(), challenge.Provider, action, "unavailable", "provider_unavailable", time.Since(started))
-	slog.WarnContext(r.Context(), "human verification provider request failed", "action", action, "error_class", "provider_unavailable")
+	slog.WarnContext(r.Context(), "human verification provider request failed", "action", action.String(), "error_class", "provider_unavailable")
 	writeAPIError(w, http.StatusServiceUnavailable, "human verification is temporarily unavailable")
 	return false
 }

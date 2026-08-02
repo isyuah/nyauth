@@ -13,6 +13,7 @@ Nyauth 以标准协议为正式集成契约，不要求使用专有 SDK。Web �
 - return path 只允许同源相对路径。
 - confidential client secret 只能保存在服务端。
 - 不要把 access token、refresh token 或 ID Token 放入 `localStorage`。
+- Device Authorization 的 `device_code` 与 Client Secret 同样属于 bearer secret，不得写入日志、URL、持久化浏览器存储或终端历史。
 
 ## 推荐库
 
@@ -48,7 +49,7 @@ GET /authorize
 客户端注册中的 `scopes` 是该客户端可请求的权限上限，授权请求出现未登记 Scope 时会返回 `invalid_scope`。管理员或客户端创建者可以把其中一部分非 `openid` Scope 声明为 `optional_scopes`：
 
 - `openid` 始终是 OIDC 身份流程的必需权限，不能声明为可选。
-- `optional_scopes` 必须是 `scopes` 的子集，并且只适用于包含 Authorization Code Grant 的客户端。
+- `optional_scopes` 必须是 `scopes` 的子集，并且只适用于包含 Authorization Code 或 Device Authorization Grant 的客户端。
 - 客户端以及每次非空授权请求都必须至少保留一个必需 Scope；现有客户端升级后默认没有可选 Scope，行为不变。
 - Consent 页面允许用户逐项关闭可选权限；必需权限只能整体接受或拒绝。
 
@@ -81,7 +82,7 @@ Consent 会同时展示客户端注册来源、发布者可信状态和本次请
 
 ## 管理员 OAuth 测试台
 
-管理员可从后台“OAuth 测试”进入 `/admin/oauth/test`，使用真实 Authorization Code + S256 PKCE 流程检查 Consent、Token 与 UserInfo：
+管理员可从后台“OAuth 测试”进入 `/admin/oauth/test`，切换真实 Authorization Code + S256 PKCE 或 Device Authorization 流程检查 Consent、Token 与 UserInfo：
 
 1. 在目标客户端中登记测试台显示的 Redirect URI，例如 `https://issuer.example/admin/oauth/test`。
 2. 输入 Client ID；Public Client 将 Secret 留空，Confidential Client 输入只展示一次的 Secret。
@@ -90,9 +91,56 @@ Consent 会同时展示客户端注册来源、发布者可信状态和本次请
 
 测试台不会把 Client Secret、PKCE verifier 或 Token 写入 URL 或 `localStorage`；Secret 只保存在当前页面内存。它用于管理员人工诊断，不是业务 SPA 保存 Confidential Client Secret 的许可。
 
+## Device Authorization Grant
+
+Device Authorization 适用于电视、CLI 和其他不便直接打开完整登录页的设备。客户端必须登记 `urn:ietf:params:oauth:grant-type:device_code` Grant；纯设备客户端不需要 Redirect URI。Public Client 直接发送 `client_id`，Confidential Client 仍必须使用 HTTP Basic 或表单 Secret 完成客户端认证。
+
+先创建设备授权请求：
+
+```http
+POST /device_authorization
+Content-Type: application/x-www-form-urlencoded
+
+client_id=tv-client&scope=openid%20profile
+```
+
+成功响应示例：
+
+```json
+{
+  "device_code": "opaque-high-entropy-secret",
+  "user_code": "BCDF-2345",
+  "verification_uri": "https://issuer.example/device",
+  "verification_uri_complete": "https://issuer.example/device?user_code=BCDF-2345",
+  "expires_in": 600,
+  "interval": 5
+}
+```
+
+设备应显示 `user_code` 和 `verification_uri`，可额外生成指向 `verification_uri_complete` 的二维码，但不能把 `device_code` 展示给用户。用户在浏览器登录后仍会看到客户端身份、发布者可信状态、必需/可选 Scope 和实际 Claim；批准或拒绝均不会跳转到第三方回调地址。
+
+设备必须等待至少 `interval` 秒再轮询 Token：
+
+```http
+POST /token
+Content-Type: application/x-www-form-urlencoded
+
+grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code
+&device_code=opaque-high-entropy-secret
+&client_id=tv-client
+```
+
+- `authorization_pending`：用户尚未决定，继续按当前间隔轮询。
+- `slow_down`：轮询过快；读取 `Retry-After`，后续间隔至少增加 5 秒。
+- `access_denied`：用户拒绝，立即终止且不要自动重试。
+- `expired_token`：代码已过期、已消费或绑定已失效，重新创建一轮设备授权。
+- `temporarily_unavailable`：服务暂时不可用，遵循 `Retry-After` 或指数退避，不得高频重试。
+
+设备码批准后仍会在 Token 兑换时重新检查客户端 revision、Scope/Claim 白名单、用户状态、认证版本、访问策略和授权撤销时间；只有一个并发轮询者能够完成一次性消费。请求 `openid` 时会签发 ID Token，但 Device Authorization 没有浏览器 Authorization Request 的 `nonce` 参数，调用方仍必须验证签名、issuer、audience、时间和 `token_use=id`。
+
 ## Refresh Token
 
-只有 authorization-code 请求显式申请且用户最终获准 `offline_access` 时才会返回 refresh token。调用方必须保存最新 refresh token；如果旧 token 被重复使用，Nyauth 会撤销整个 token family。
+只有 Authorization Code 或 Device Authorization 请求显式申请且用户最终获准 `offline_access` 时才会返回 refresh token。调用方必须保存最新 refresh token；如果旧 token 被重复使用，Nyauth 会撤销整个 token family。
 
 ## 浏览器与原生应用
 

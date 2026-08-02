@@ -257,6 +257,7 @@ func (p Protection) MailWindow() time.Duration    { return mustDuration(p.Mail.W
 var supportedOAuthScopes = []string{"openid", "profile", "email", "offline_access"}
 var supportedOAuthGrantTypes = []string{
 	models.GrantAuthorizationCode,
+	models.GrantDeviceCode,
 	models.GrantRefreshToken,
 	models.GrantClientCredentials,
 }
@@ -368,14 +369,15 @@ func NormalizeOAuthPolicy(value OAuthPolicy) (OAuthPolicy, error) {
 	if value.MaxPostLogoutRedirectURIs < MinPostLogoutRedirectURILimit || value.MaxPostLogoutRedirectURIs > MaxPostLogoutRedirectURILimit {
 		return OAuthPolicy{}, fmt.Errorf("max_post_logout_redirect_uris must be between %d and %d", MinPostLogoutRedirectURILimit, MaxPostLogoutRedirectURILimit)
 	}
-	if slices.Contains(grants, models.GrantRefreshToken) && !slices.Contains(grants, models.GrantAuthorizationCode) {
-		return OAuthPolicy{}, errors.New("allowing refresh_token requires authorization_code")
+	interactiveGrantEnabled := slices.Contains(grants, models.GrantAuthorizationCode) || slices.Contains(grants, models.GrantDeviceCode)
+	if slices.Contains(grants, models.GrantRefreshToken) && !interactiveGrantEnabled {
+		return OAuthPolicy{}, errors.New("allowing refresh_token requires authorization_code or device_code")
 	}
 	if slices.Contains(scopes, "offline_access") && !slices.Contains(grants, models.GrantRefreshToken) {
 		return OAuthPolicy{}, errors.New("allowing offline_access requires refresh_token")
 	}
-	if value.PublicClientsEnabled && !slices.Contains(grants, models.GrantAuthorizationCode) {
-		return OAuthPolicy{}, errors.New("allowing public clients requires authorization_code")
+	if value.PublicClientsEnabled && !interactiveGrantEnabled {
+		return OAuthPolicy{}, errors.New("allowing public clients requires authorization_code or device_code")
 	}
 	return value, nil
 }

@@ -156,7 +156,7 @@ func sensitiveAuditDetailKey(key string) bool {
 		}
 	}
 	switch normalized {
-	case "passphrase", "credential", "credential_id", "recovery_code", "private_key", "api_key", "ciphertext", "totp_seed", "totp_secret":
+	case "passphrase", "credential", "credential_id", "recovery_code", "device_code", "user_code", "private_key", "api_key", "ciphertext", "totp_seed", "totp_secret":
 		return true
 	default:
 		return false

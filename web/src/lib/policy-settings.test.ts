@@ -118,6 +118,10 @@ describe('runtime policy validation', () => {
       max_post_logout_redirect_uris: DEFAULT_OAUTH_SETTINGS.max_post_logout_redirect_uris,
     };
     expect(oauthPolicyValidationError(valid)).toBeNull();
+    expect(oauthPolicyValidationError({
+      ...valid,
+      allowed_grant_types: ['urn:ietf:params:oauth:grant-type:device_code', 'refresh_token'],
+    })).toBeNull();
     const customScope = {
       ...valid,
       allowed_scopes: ['openid', 'tenant.read'],

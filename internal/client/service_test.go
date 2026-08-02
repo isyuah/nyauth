@@ -181,6 +181,22 @@ func TestClientCredentialsDoesNotRequireRedirectURI(t *testing.T) {
 	}
 }
 
+func TestDeviceAuthorizationSupportsPublicClientsWithoutRedirectURI(t *testing.T) {
+	service := NewService(nil)
+	device, secret, err := service.buildClient(models.CreateClientRequest{
+		Name: "Television", IsPublic: true,
+		Grants: []string{models.GrantDeviceCode, models.GrantRefreshToken},
+		Scopes: []string{"openid", "profile", "offline_access"}, OptionalScopes: []string{"profile", "offline_access"},
+		AllowedClaims: []string{"sub", "preferred_username", "name", "picture"},
+	})
+	if err != nil {
+		t.Fatalf("device client without redirect URI rejected: %v", err)
+	}
+	if secret != "" || !device.IsPublic || len(device.RedirectURIs) != 0 {
+		t.Fatalf("device client = %#v secret=%q", device, secret)
+	}
+}
+
 func TestApplicationURIsRequireHTTPSExceptLoopback(t *testing.T) {
 	for _, test := range []struct {
 		name    string
@@ -285,7 +301,7 @@ func TestSelfServiceCannotAssignAdministratorOnlyScopesOrClaims(t *testing.T) {
 	}
 }
 
-func TestOptionalScopesMustBeAValidAuthorizationCodeSubset(t *testing.T) {
+func TestOptionalScopesMustBeAValidInteractiveGrantSubset(t *testing.T) {
 	t.Parallel()
 	service := NewService(nil)
 	base := models.CreateClientRequest{

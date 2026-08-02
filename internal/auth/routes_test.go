@@ -17,13 +17,15 @@ func TestIssuanceMiddlewareOnlyWrapsIssuanceEndpoints(t *testing.T) {
 		})
 	})
 	wantControlled := map[string]bool{
-		http.MethodGet + " /authorize": true,
-		http.MethodPost + " /token":    true,
+		http.MethodGet + " /authorize":             true,
+		http.MethodPost + " /device_authorization": true,
+		http.MethodPost + " /token":                true,
 	}
 	wantRoutes := map[string]bool{
 		http.MethodGet + " /.well-known/openid-configuration": true,
 		http.MethodGet + " /.well-known/jwks.json":            true,
 		http.MethodGet + " /authorize":                        true,
+		http.MethodPost + " /device_authorization":            true,
 		http.MethodPost + " /token":                           true,
 		http.MethodPost + " /revoke":                          true,
 		http.MethodPost + " /introspect":                      true,

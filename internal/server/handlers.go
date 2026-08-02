@@ -20,6 +20,7 @@ import (
 	"github.com/nyasharp/nyauth/internal/client"
 	"github.com/nyasharp/nyauth/internal/humanverification"
 	"github.com/nyasharp/nyauth/internal/identity"
+	"github.com/nyasharp/nyauth/internal/securityaction"
 	"github.com/nyasharp/nyauth/internal/session"
 	"github.com/nyasharp/nyauth/internal/settings"
 	"github.com/nyasharp/nyauth/internal/user"
@@ -98,20 +99,20 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 	ip := requestIP(r)
 	allowed, retry, err := s.loginLimiter.Reserve(r.Context(), ip, strings.ToLower(request.Username))
 	if err != nil {
-		s.telemetry.RecordRateLimit(r.Context(), "login", "login", "error")
+		s.telemetry.RecordRateLimit(r.Context(), securityaction.CoreLogin, "error")
 		s.telemetry.RecordAuthEvent(r.Context(), "login", "unavailable")
 		writeAPIError(w, http.StatusServiceUnavailable, "login temporarily unavailable")
 		return
 	}
 	if !allowed {
-		s.telemetry.RecordRateLimit(r.Context(), "login", "login", "rejected")
+		s.telemetry.RecordRateLimit(r.Context(), securityaction.CoreLogin, "rejected")
 		s.telemetry.RecordAuthEvent(r.Context(), "login", "rate_limited")
 		seconds := int64((retry + time.Second - 1) / time.Second)
 		w.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
 		writeAPIError(w, http.StatusTooManyRequests, "too many login attempts")
 		return
 	}
-	s.telemetry.RecordRateLimit(r.Context(), "login", "login", "allowed")
+	s.telemetry.RecordRateLimit(r.Context(), securityaction.CoreLogin, "allowed")
 	normalizedUsername := strings.ToLower(request.Username)
 	failureCount, err := s.humanLoginFailures.FailureCount(r.Context(), ip, normalizedUsername)
 	if err != nil {

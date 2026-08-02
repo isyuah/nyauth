@@ -50,11 +50,11 @@ func TestLifecycleDefaultsUseDeploymentAuthenticationFallbacks(t *testing.T) {
 func TestOAuthPolicyDefaultsAndNormalization(t *testing.T) {
 	defaults := DefaultOAuthPolicy()
 	if !defaults.SelfServiceClientCreationEnabled || !defaults.PublicClientsEnabled ||
-		!defaults.AllowsGrant(models.GrantClientCredentials) || !defaults.AllowsScope("offline_access") {
+		!defaults.AllowsGrant(models.GrantClientCredentials) || !defaults.AllowsGrant(models.GrantDeviceCode) || !defaults.AllowsScope("offline_access") {
 		t.Fatalf("OAuth defaults = %#v", defaults)
 	}
 	shuffled := defaults
-	shuffled.AllowedGrantTypes = []string{models.GrantClientCredentials, models.GrantAuthorizationCode, models.GrantRefreshToken}
+	shuffled.AllowedGrantTypes = []string{models.GrantClientCredentials, models.GrantDeviceCode, models.GrantAuthorizationCode, models.GrantRefreshToken}
 	shuffled.AllowedScopes = []string{"email", "openid", "offline_access", "profile"}
 	normalized, err := NormalizeOAuthPolicy(shuffled)
 	if err != nil {
@@ -76,6 +76,19 @@ func TestOAuthPolicyDefaultsAndNormalization(t *testing.T) {
 	empty.AllowedScopes = []string{}
 	if _, err := NormalizeOAuthPolicy(empty); err != nil {
 		t.Fatalf("empty allowed scope set rejected: %v", err)
+	}
+}
+
+func TestOAuthPolicyAllowsDeviceAuthorizationAsTheInteractiveGrant(t *testing.T) {
+	value := DefaultOAuthPolicy()
+	value.AllowedGrantTypes = []string{models.GrantDeviceCode, models.GrantRefreshToken}
+	value.AllowedScopes = []string{"openid", "offline_access"}
+	normalized, err := NormalizeOAuthPolicy(value)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !normalized.PublicClientsEnabled || !normalized.AllowsGrant(models.GrantDeviceCode) || !normalized.AllowsGrant(models.GrantRefreshToken) {
+		t.Fatalf("device-only interactive policy = %#v", normalized)
 	}
 }
 

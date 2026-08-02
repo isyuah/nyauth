@@ -1,6 +1,6 @@
 # 能力路线图（0.4+ 展望）
 
-> 状态：更新于 2026-08-01。本文档记录"网站自身能力"的增强方向与取舍结论，按优先级排序。
+> 状态：更新于 2026-08-02。本文档记录"网站自身能力"的增强方向与取舍结论，按优先级排序。
 
 ## 结论摘要
 
@@ -15,6 +15,7 @@
 | TOTP + 恢复码 | Phase T 已完成：登录、reauth、管理员强制策略、恢复验证 | 已完成 |
 | Passkey/WebAuthn | Phase P 已完成：独立登录、Conditional UI、MFA、step-up 与安全中心管理 | 已完成 |
 | 登录历史与可信浏览器 | Phase B 已完成：受限审计投影、MFA 后信任、版本绑定和用户自助撤销 | 已完成 |
+| OAuth Device Authorization | Phase C 已完成：RFC 8628 端点、共享 Consent、轮询节奏与一次性 Redis 状态 | 已完成并验收 |
 | 自助注册 / 邀请制 | Phase R 已完成：关闭 / 邀请制 / 开放注册、验证与邀请预占生命周期 | 已完成 |
 | 人机验证 | Phase H 已完成：适配器、Turnstile 候选/测试/激活/回滚、公开入口策略与 CLI 紧急禁用 | 已完成 |
 | 事件 Webhook | 做——作为插件系统的替代品，复用审计 outbox | P2 |
@@ -89,7 +90,7 @@ OAuth 客户端已支持 `open`、`admins_only` 和 `allowlist`。策略在用�
 ## 实施顺序建议
 
 ```
-当前 0.6.0-dev: OAuth 应用身份与授权变化（Phase A）、登录历史与可信浏览器（Phase B）均已实现，schema 演进到 15
-下一步: 完成 0.6.0-dev 集中门禁与本地验收，再决定是否进入 OAuth Device Authorization Grant
+当前 0.6.0-dev: OAuth 应用身份与授权变化（Phase A）、登录历史与可信浏览器（Phase B）及 Device Authorization（Phase C）均已完成并验收，schema 保持 15
+下一步: Phase D 主题与品牌细节，包括运行时品牌配置、用户主题偏好及品牌化认证界面
 后续: 自动化管理 API、Webhook、自动更新和用户组继续推迟
 ```

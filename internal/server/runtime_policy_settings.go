@@ -5,6 +5,7 @@ import (
 	"net/http"
 
 	"github.com/nyasharp/nyauth/internal/audit"
+	"github.com/nyasharp/nyauth/internal/securityaction"
 	"github.com/nyasharp/nyauth/internal/settings"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
@@ -168,12 +169,12 @@ func (s *Server) authorizePolicySettingsMutation(
 	}
 	allowed, retry, err := s.policySettingsLimiter.Reserve(r.Context(), requestIP(r), current.ID.String())
 	if err != nil {
-		s.telemetry.RecordRateLimit(r.Context(), "settings", "update", "error")
+		s.telemetry.RecordRateLimit(r.Context(), securityaction.CoreSettingsUpdate, "error")
 		writeAPIError(w, http.StatusServiceUnavailable, "settings are temporarily unavailable")
 		return nil, audit.MutationAudit{}, false
 	}
 	if !allowed {
-		s.telemetry.RecordRateLimit(r.Context(), "settings", "update", "rejected")
+		s.telemetry.RecordRateLimit(r.Context(), securityaction.CoreSettingsUpdate, "rejected")
 		w.Header().Set("Retry-After", retryAfterSeconds(retry))
 		writeAPIError(w, http.StatusTooManyRequests, "too many settings operations")
 		return nil, audit.MutationAudit{}, false

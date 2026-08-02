@@ -6,6 +6,7 @@
 
   const grantOptions: Array<{ value: OAuthGrantType; label: string; description: string }> = [
     { value: 'authorization_code', label: 'Authorization Code', description: '由用户授权并使用 PKCE 换取 Token。' },
+    { value: 'urn:ietf:params:oauth:grant-type:device_code', label: 'Device Authorization', description: '用于电视、CLI 等输入受限设备，由用户在另一台设备完成授权。' },
     { value: 'refresh_token', label: 'Refresh Token', description: '允许客户端轮换凭据并延续用户授权。' },
     { value: 'client_credentials', label: 'Client Credentials', description: '用于没有用户参与的服务端机器身份。' },
   ];
@@ -22,7 +23,7 @@
     existingGrants = [],
     existingScopes = [],
     existingClaims = [],
-    onAuthorizationCodeDisabled,
+    onInteractiveGrantDisabled,
   }: {
     policy: OAuthClientPolicy;
     idPrefix: string;
@@ -35,7 +36,7 @@
     existingGrants?: string[];
     existingScopes?: OAuthScope[];
     existingClaims?: string[];
-    onAuthorizationCodeDisabled?: () => void;
+    onInteractiveGrantDisabled?: () => void;
   } = $props();
 
   let scopeOptions = $derived([...new Set([...policy.allowed_scopes, ...existingScopes])]);
@@ -44,7 +45,7 @@
     ...OAUTH_CLAIMS.filter((claim) => availableClaims.includes(claim) || existingClaims.includes(claim)),
     ...existingClaims.filter((claim) => !OAUTH_CLAIMS.includes(claim as typeof OAUTH_CLAIMS[number])),
   ]);
-  let authorizationCodeSelected = $derived(grants.includes('authorization_code'));
+  let interactiveGrantSelected = $derived(grants.includes('authorization_code') || grants.includes('urn:ietf:params:oauth:grant-type:device_code'));
 
   function grantCanBeAdded(grant: OAuthGrantType): boolean {
     return policy.allowed_grant_types.includes(grant);
@@ -54,12 +55,17 @@
     if (checked && !grantCanBeAdded(grant)) return;
     const selected = new Set(grants);
     if (checked) selected.add(grant); else selected.delete(grant);
-    if (grant === 'authorization_code' && !checked) {
+    const interactiveSelected = selected.has('authorization_code') || selected.has('urn:ietf:params:oauth:grant-type:device_code');
+    if ((grant === 'authorization_code' || grant === 'urn:ietf:params:oauth:grant-type:device_code') && !checked && !interactiveSelected) {
       selected.delete('refresh_token');
       optionalScopes = [];
-      onAuthorizationCodeDisabled?.();
+      onInteractiveGrantDisabled?.();
     }
-    if (grant === 'refresh_token' && checked) selected.add('authorization_code');
+    if (grant === 'refresh_token' && checked && !interactiveSelected) {
+      if (grantCanBeAdded('authorization_code')) selected.add('authorization_code');
+      else if (grantCanBeAdded('urn:ietf:params:oauth:grant-type:device_code')) selected.add('urn:ietf:params:oauth:grant-type:device_code');
+      else selected.delete('refresh_token');
+    }
     if (grant === 'refresh_token' && !checked) {
       scopes = scopes.filter((scope) => scope !== 'offline_access');
       optionalScopes = optionalScopes.filter((scope) => scope !== 'offline_access');
@@ -99,7 +105,7 @@
   }
 
   function toggleOptionalScope(scope: OAuthScope, checked: boolean) {
-    if (scope === 'openid' || !scopes.includes(scope) || !authorizationCodeSelected) return;
+    if (scope === 'openid' || !scopes.includes(scope) || !interactiveGrantSelected) return;
     const selected = new Set(optionalScopes);
     if (checked) selected.add(scope); else selected.delete(scope);
     optionalScopes = scopes.filter((value) => value !== 'openid' && selected.has(value));
@@ -120,7 +126,7 @@
 
 <fieldset class="rounded-nya-sm border border-nya-border p-3">
   <legend class="px-1 text-body-medium text-nya-text-primary">Grant</legend>
-  <div class="grid gap-2 sm:grid-cols-3">
+  <div class="grid gap-2 sm:grid-cols-2">
     {#each grantOptions.filter((option) => policy.allowed_grant_types.includes(option.value) || existingGrants.includes(option.value)) as option}
       {@const selected = grants.includes(option.value)}
       {@const policyDisabled = !grantCanBeAdded(option.value)}
@@ -183,7 +189,7 @@
               type="checkbox"
               aria-label={`${scope} 允许用户拒绝`}
               checked={optionalScopes.includes(scope)}
-              disabled={!selected || !authorizationCodeSelected}
+              disabled={!selected || !interactiveGrantSelected}
               onchange={(event) => toggleOptionalScope(scope, event.currentTarget.checked)}
             />
             允许用户拒绝

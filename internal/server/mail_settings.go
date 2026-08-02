@@ -15,6 +15,7 @@ import (
 	"github.com/nyasharp/nyauth/internal/account"
 	"github.com/nyasharp/nyauth/internal/audit"
 	"github.com/nyasharp/nyauth/internal/mailruntime"
+	"github.com/nyasharp/nyauth/internal/securityaction"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
 
@@ -178,7 +179,7 @@ func (s *Server) currentMailSettings(r *http.Request) (mailSettingsResponse, err
 }
 
 func (s *Server) handleSaveMailCandidate(w http.ResponseWriter, r *http.Request) {
-	mutation, ok := s.authorizeMailMutation(w, r, mailSettingsActionCandidateSave)
+	mutation, ok := s.authorizeMailMutation(w, r, securityaction.MailCandidateSave)
 	if !ok {
 		return
 	}
@@ -247,7 +248,7 @@ func sameHTTPOrigin(left, right string) bool {
 }
 
 func (s *Server) handleTestMailCandidate(w http.ResponseWriter, r *http.Request) {
-	mutation, ok := s.authorizeMailMutation(w, r, mailSettingsActionCandidateTest)
+	mutation, ok := s.authorizeMailMutation(w, r, securityaction.MailCandidateTest)
 	if !ok {
 		return
 	}
@@ -307,7 +308,7 @@ func (s *Server) handleTestMailCandidate(w http.ResponseWriter, r *http.Request)
 }
 
 func (s *Server) handleActivateMailCandidate(w http.ResponseWriter, r *http.Request) {
-	mutation, ok := s.authorizeMailMutation(w, r, mailSettingsActionActivate)
+	mutation, ok := s.authorizeMailMutation(w, r, securityaction.MailActivate)
 	if !ok {
 		return
 	}
@@ -333,7 +334,7 @@ func (s *Server) handleActivateMailCandidate(w http.ResponseWriter, r *http.Requ
 }
 
 func (s *Server) handleRollbackMailSettings(w http.ResponseWriter, r *http.Request) {
-	mutation, ok := s.authorizeMailMutation(w, r, mailSettingsActionRollback)
+	mutation, ok := s.authorizeMailMutation(w, r, securityaction.MailRollback)
 	if !ok {
 		return
 	}
@@ -354,7 +355,7 @@ func (s *Server) handleRollbackMailSettings(w http.ResponseWriter, r *http.Reque
 }
 
 func (s *Server) handleDisableMail(w http.ResponseWriter, r *http.Request) {
-	mutation, ok := s.authorizeMailMutation(w, r, mailSettingsActionDisable)
+	mutation, ok := s.authorizeMailMutation(w, r, securityaction.MailDisable)
 	if !ok {
 		return
 	}
@@ -374,7 +375,7 @@ func (s *Server) handleDisableMail(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, mailMutationResponse{Status: "disabled", StateRevision: state.Revision})
 }
 
-func (s *Server) authorizeMailMutation(w http.ResponseWriter, r *http.Request, action string) (audit.MutationAudit, bool) {
+func (s *Server) authorizeMailMutation(w http.ResponseWriter, r *http.Request, operation securityaction.MailOperation) (audit.MutationAudit, bool) {
 	current := currentUserFromContext(r)
 	if current == nil {
 		writeAPIError(w, http.StatusUnauthorized, "authentication required")
@@ -387,16 +388,19 @@ func (s *Server) authorizeMailMutation(w http.ResponseWriter, r *http.Request, a
 		writeAPIError(w, http.StatusServiceUnavailable, "mail settings are temporarily unavailable")
 		return audit.MutationAudit{}, false
 	}
-	allowed, retry, err := s.mailSettingsLimiter.Reserve(r.Context(), action, requestIP(r), current.ID.String())
+	allowed, retry, err := s.mailSettingsLimiter.Reserve(r.Context(), operation, requestIP(r), current.ID.String())
 	if err != nil {
+		s.telemetry.RecordRateLimit(r.Context(), operation, "error")
 		writeAPIError(w, http.StatusServiceUnavailable, "mail settings are temporarily unavailable")
 		return audit.MutationAudit{}, false
 	}
 	if !allowed {
+		s.telemetry.RecordRateLimit(r.Context(), operation, "rejected")
 		w.Header().Set("Retry-After", retryAfterSeconds(retry))
 		writeAPIError(w, http.StatusTooManyRequests, "too many mail settings operations")
 		return audit.MutationAudit{}, false
 	}
+	s.telemetry.RecordRateLimit(r.Context(), operation, "allowed")
 	mutation, ok := audit.MutationAuditFromContext(r.Context())
 	if !ok {
 		writeAPIError(w, http.StatusInternalServerError, "audit context unavailable")

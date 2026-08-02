@@ -54,6 +54,7 @@ const (
 	AuditUserPasswordSet             = "user.password_configured"
 	AuditConsentAccepted             = "consent.accepted"
 	AuditConsentDenied               = "consent.denied"
+	AuditDeviceAuthorizationStarted  = "device_authorization.started"
 	AuditClientCreated               = "client.created"
 	AuditClientUpdated               = "client.updated"
 	AuditClientOwnerChanged          = "client.owner_changed"

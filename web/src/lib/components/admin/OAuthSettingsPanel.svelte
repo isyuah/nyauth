@@ -42,6 +42,7 @@
   const pendingStorageKey = 'nyauth:reauth:oauth-settings';
   const grantLabels: Record<OAuthGrantType, string> = {
     authorization_code: 'Authorization Code',
+    'urn:ietf:params:oauth:grant-type:device_code': 'Device Authorization',
     refresh_token: 'Refresh Token',
     client_credentials: 'Client Credentials',
   };
@@ -156,12 +157,13 @@
   function toggleGrant(grant: OAuthGrantType, checked: boolean) {
     const selected = new Set(draft.allowed_grant_types);
     if (checked) selected.add(grant); else selected.delete(grant);
-    if (grant === 'authorization_code' && !checked) {
+    const interactiveSelected = selected.has('authorization_code') || selected.has('urn:ietf:params:oauth:grant-type:device_code');
+    if ((grant === 'authorization_code' || grant === 'urn:ietf:params:oauth:grant-type:device_code') && !checked && !interactiveSelected) {
       selected.delete('refresh_token');
       draft.public_clients_enabled = false;
       draft.allowed_scopes = draft.allowed_scopes.filter((scope) => scope !== 'offline_access');
     }
-    if (grant === 'refresh_token' && checked) selected.add('authorization_code');
+    if (grant === 'refresh_token' && checked && !interactiveSelected) selected.add('authorization_code');
     if (grant === 'refresh_token' && !checked) {
       draft.allowed_scopes = draft.allowed_scopes.filter((scope) => scope !== 'offline_access');
     }
@@ -238,7 +240,7 @@
 
   function togglePublicClients(checked: boolean) {
     draft.public_clients_enabled = checked;
-    if (checked) toggleGrant('authorization_code', true);
+    if (checked && !hasGrant('authorization_code') && !hasGrant('urn:ietf:params:oauth:grant-type:device_code')) toggleGrant('authorization_code', true);
   }
 
   function buildInput(): UpdateOAuthSettingsInput | null {
@@ -353,7 +355,7 @@
 
       <fieldset id="oauth-grants" tabindex="-1" class="rounded-nya-sm border border-nya-border p-4">
         <legend class="flex items-center gap-2 px-1 font-semibold text-nya-text-primary"><ShieldCheck size={16} class="text-nya-primary" /> 允许的 Grant</legend>
-        <div class="mt-2 grid gap-3 sm:grid-cols-3">{#each OAUTH_GRANT_TYPES as grant}<label class="flex items-center gap-2 text-body text-nya-text-primary"><input type="checkbox" checked={hasGrant(grant)} onchange={(event) => toggleGrant(grant, event.currentTarget.checked)} /> {grantLabels[grant]}</label>{/each}</div>
+        <div class="mt-2 grid gap-3 sm:grid-cols-2">{#each OAUTH_GRANT_TYPES as grant}<label class="flex items-center gap-2 text-body text-nya-text-primary"><input type="checkbox" checked={hasGrant(grant)} onchange={(event) => toggleGrant(grant, event.currentTarget.checked)} /> {grantLabels[grant]}</label>{/each}</div>
         {#if fieldErrors['oauth-grants']}<p class="mt-2 text-small text-nya-danger">{fieldErrors['oauth-grants']}</p>{/if}
       </fieldset>
 

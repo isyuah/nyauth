@@ -3,9 +3,11 @@
   import { goto } from '$app/navigation';
   import { api, type OAuthScopeDefinition } from '$lib/api';
   import FieldHelp from '$lib/components/ui/FieldHelp.svelte';
+  import DeviceAuthorizationTest from '$lib/components/oauth/DeviceAuthorizationTest.svelte';
   import { scopeHelp } from '$lib/oauth-catalog';
 
   let { adminMode = false }: { adminMode?: boolean } = $props();
+  let flowMode = $state<'authorization_code' | 'device_authorization'>('authorization_code');
 
   interface TokenResponse {
     access_token?: string;
@@ -87,6 +89,7 @@
     }
     // Check if we have a callback (code + state in URL)
     const url = new URL(window.location.href);
+    flowMode = url.searchParams.get('flow') === 'device' ? 'device_authorization' : 'authorization_code';
     const code = url.searchParams.get('code');
     const returnedSt = url.searchParams.get('state');
     const err = url.searchParams.get('error');
@@ -292,13 +295,30 @@
     if (scopes.includes(s)) scopes = scopes.filter(x => x !== s);
     else scopes = [...scopes, s];
   }
+
+  function setFlowMode(value: 'authorization_code' | 'device_authorization') {
+    flowMode = value;
+    const current = new URL(window.location.href);
+    if (value === 'device_authorization') current.searchParams.set('flow', 'device');
+    else current.searchParams.delete('flow');
+    window.history.replaceState(window.history.state, '', `${current.pathname}${current.search}${current.hash}`);
+  }
 </script>
 
 <svelte:head><title>OAuth 流程测试 - Nya</title></svelte:head>
 
 <div class="min-h-screen bg-[var(--nya-bg)] p-6" style="max-width: 800px; margin: 0 auto;">
   <h1 style="font-size: 24px; font-weight: 700; color: var(--nya-text-primary); margin-bottom: 4px;">OAuth 2.0 流程测试</h1>
-  <p style="font-size: 14px; color: var(--nya-text-secondary); margin-bottom: 24px;">使用真实 Authorization Code + PKCE 流程检查 Consent、Token 和 UserInfo</p>
+  <p style="font-size: 14px; color: var(--nya-text-secondary); margin-bottom: 16px;">使用真实协议端点检查 Consent、Token 和 UserInfo</p>
+
+  <div class="mb-6 inline-flex rounded-nya-sm border border-nya-border bg-nya-surface p-1" role="group" aria-label="OAuth 测试流程">
+    <button type="button" onclick={() => setFlowMode('authorization_code')} class="h-8 rounded-nya-xs px-3 text-small font-semibold {flowMode === 'authorization_code' ? 'bg-nya-primary-soft text-nya-primary' : 'text-nya-text-secondary hover:bg-nya-surface-soft'}">Authorization Code + PKCE</button>
+    <button type="button" onclick={() => setFlowMode('device_authorization')} class="h-8 rounded-nya-xs px-3 text-small font-semibold {flowMode === 'device_authorization' ? 'bg-nya-primary-soft text-nya-primary' : 'text-nya-text-secondary hover:bg-nya-surface-soft'}">Device Authorization</button>
+  </div>
+
+  {#if flowMode === 'device_authorization'}
+    <DeviceAuthorizationTest {adminMode} />
+  {:else}
 
   {#if error}
     <div class="mb-4 px-4 py-3 rounded-lg" style="background: var(--nya-danger-soft); color: var(--nya-danger); font-size: 14px;">
@@ -416,5 +436,6 @@
         {/each}
       </div>
     </div>
+  {/if}
   {/if}
 </div>

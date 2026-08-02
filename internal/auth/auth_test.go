@@ -521,6 +521,19 @@ func TestDiscoveryAdvertisesOnlySupportedFlows(t *testing.T) {
 	if len(methods) != 1 || methods[0] != "S256" {
 		t.Fatalf("unexpected PKCE methods: %v", methods)
 	}
+	if body["device_authorization_endpoint"] != "https://issuer.example/device_authorization" {
+		t.Fatalf("device authorization endpoint = %v", body["device_authorization_endpoint"])
+	}
+	grants := body["grant_types_supported"].([]interface{})
+	foundDeviceGrant := false
+	for _, grant := range grants {
+		if grant == models.GrantDeviceCode {
+			foundDeviceGrant = true
+		}
+	}
+	if !foundDeviceGrant {
+		t.Fatalf("device authorization grant missing from discovery: %v", grants)
+	}
 	scopes := body["scopes_supported"].([]interface{})
 	if scopes[len(scopes)-1] != "tenant.read" {
 		t.Fatalf("discovery scopes = %v", scopes)

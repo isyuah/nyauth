@@ -23,6 +23,7 @@ import (
 	"github.com/nyasharp/nyauth/internal/client"
 	"github.com/nyasharp/nyauth/internal/config"
 	internalcrypto "github.com/nyasharp/nyauth/internal/crypto"
+	"github.com/nyasharp/nyauth/internal/deviceauthorization"
 	"github.com/nyasharp/nyauth/internal/session"
 	"github.com/nyasharp/nyauth/internal/settings"
 	"github.com/nyasharp/nyauth/internal/user"
@@ -54,6 +55,7 @@ type SecurityAuditEvent struct {
 type SecurityAuditSink func(context.Context, SecurityAuditEvent) error
 type GrantMetricSink func(context.Context, string, string, string)
 type BrowserSessionResolver func(http.ResponseWriter, *http.Request) (*session.SessionData, error)
+type ClientAddressResolver func(*http.Request) string
 
 type Handler struct {
 	tokenService       *TokenService
@@ -67,6 +69,8 @@ type Handler struct {
 	issuanceMiddleware func(http.Handler) http.Handler
 	sessionResolver    BrowserSessionResolver
 	oauthPolicySource  func() settings.Versioned[settings.OAuthPolicy]
+	deviceStore        *deviceauthorization.Store
+	clientAddress      ClientAddressResolver
 }
 
 func NewHandler(tokenService *TokenService, jwkManager *JWKManager, userService *user.Service, clientStore *client.Store, sessionStore *session.Store, cfg *config.Config, maximumAccessTTLs ...time.Duration) *Handler {
@@ -92,6 +96,13 @@ func (h *Handler) SetIssuanceMiddleware(middleware func(http.Handler) http.Handl
 }
 func (h *Handler) SetBrowserSessionResolver(resolver BrowserSessionResolver) {
 	h.sessionResolver = resolver
+}
+
+func (h *Handler) SetDeviceAuthorizationStore(store *deviceauthorization.Store) {
+	h.deviceStore = store
+}
+func (h *Handler) SetClientAddressResolver(resolver ClientAddressResolver) {
+	h.clientAddress = resolver
 }
 
 func (h *Handler) SetOAuthPolicySource(source func() settings.Versioned[settings.OAuthPolicy]) {
@@ -224,6 +235,8 @@ func normalizedGrantType(value string) string {
 		return models.GrantClientCredentials
 	case models.GrantRefreshToken:
 		return models.GrantRefreshToken
+	case models.GrantDeviceCode:
+		return models.GrantDeviceCode
 	default:
 		return "unsupported"
 	}
@@ -238,6 +251,7 @@ func (h *Handler) Routes() chi.Router {
 	r.Get("/.well-known/openid-configuration", h.Discovery)
 	r.Get("/.well-known/jwks.json", h.JWKS)
 	r.With(issuance).Get("/authorize", h.Authorize)
+	r.With(issuance).Post("/device_authorization", h.DeviceAuthorization)
 	r.With(issuance).Post("/token", h.Token)
 	r.Post("/revoke", h.Revoke)
 	r.Post("/introspect", h.Introspect)
@@ -251,10 +265,11 @@ func (h *Handler) Discovery(w http.ResponseWriter, _ *http.Request) {
 	issuer := strings.TrimRight(h.config.Auth.Issuer, "/")
 	writeJSON(w, http.StatusOK, map[string]interface{}{
 		"issuer": issuer, "authorization_endpoint": issuer + "/authorize", "token_endpoint": issuer + "/token",
-		"userinfo_endpoint": issuer + "/userinfo", "jwks_uri": issuer + "/.well-known/jwks.json",
+		"device_authorization_endpoint": issuer + "/device_authorization",
+		"userinfo_endpoint":             issuer + "/userinfo", "jwks_uri": issuer + "/.well-known/jwks.json",
 		"revocation_endpoint": issuer + "/revoke", "introspection_endpoint": issuer + "/introspect", "end_session_endpoint": issuer + "/end_session",
 		"response_types_supported": []string{"code"},
-		"grant_types_supported":    []string{"authorization_code", "client_credentials", "refresh_token"},
+		"grant_types_supported":    []string{models.GrantAuthorizationCode, models.GrantDeviceCode, models.GrantClientCredentials, models.GrantRefreshToken},
 		"subject_types_supported":  []string{"public"}, "id_token_signing_alg_values_supported": []string{"RS256"},
 		"scopes_supported":                      h.oauthPolicy().AllowedScopes,
 		"token_endpoint_auth_methods_supported": []string{"client_secret_basic", "client_secret_post", "none"},
@@ -410,6 +425,8 @@ func (h *Handler) Token(w http.ResponseWriter, r *http.Request) {
 		h.handleClientCredentialsGrant(w, r)
 	case models.GrantRefreshToken:
 		h.handleRefreshTokenGrant(w, r)
+	case models.GrantDeviceCode:
+		h.handleDeviceCodeGrant(w, r)
 	default:
 		h.recordGrantAudit(r.Context(), models.AuditTokenGrantFailed, r.Form.Get("grant_type"), "", "failure", "medium", "unsupported_grant_type")
 		writeTokenError(w, http.StatusBadRequest, "unsupported_grant_type", "grant type is not supported")

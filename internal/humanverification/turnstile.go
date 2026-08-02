@@ -118,7 +118,7 @@ func (v *TurnstileVerifier) Verify(ctx context.Context, input VerifyInput) (Veri
 		}
 		return result, ErrVerificationRejected
 	}
-	if result.Hostname != v.expectedHostname || result.Action != input.Action {
+	if result.Hostname != v.expectedHostname || result.Action != input.Action.String() {
 		return result, ErrVerificationRejected
 	}
 	return result, nil

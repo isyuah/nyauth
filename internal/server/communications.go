@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/nyasharp/nyauth/internal/account"
+	"github.com/nyasharp/nyauth/internal/securityaction"
 	"github.com/nyasharp/nyauth/internal/settings"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
@@ -147,7 +148,7 @@ func (s *Server) handlePreviewSiteBannerMarkdown(w http.ResponseWriter, r *http.
 }
 
 func (s *Server) handleTestEmailTemplate(w http.ResponseWriter, r *http.Request) {
-	mutation, ok := s.authorizeMailMutation(w, r, mailSettingsActionCandidateTest)
+	mutation, ok := s.authorizeMailMutation(w, r, securityaction.MailCandidateTest)
 	if !ok {
 		return
 	}

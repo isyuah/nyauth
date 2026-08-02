@@ -19,6 +19,7 @@
 
   let requiredPermissions = $derived(consentData?.permissions.filter((permission) => permission.required) || []);
   let optionalPermissions = $derived(consentData?.permissions.filter((permission) => !permission.required) || []);
+  let deviceFlow = $derived(consentData?.flow === 'device_authorization');
 
   function permissionTitle(permission: ConsentPermission): string {
     return permission.display_name || permission.scope;
@@ -73,7 +74,7 @@
   }
 </script>
 
-<svelte:head><title>授权确认 - Nya</title></svelte:head>
+<svelte:head><title>{deviceFlow ? '设备授权' : '授权确认'} - Nya</title></svelte:head>
 
 <div class="min-h-screen flex items-center justify-center px-4 bg-nya-page">
   <div class="w-full max-w-[440px]">
@@ -81,7 +82,7 @@
       <div class="inline-flex items-center justify-center w-12 h-12 rounded-nya-lg bg-nya-primary-soft mb-3">
         <Shield size={24} class="text-nya-primary" />
       </div>
-      <h1 class="text-section-title text-nya-text-primary">授权确认</h1>
+      <h1 class="text-section-title text-nya-text-primary">{deviceFlow ? '设备授权' : '授权确认'}</h1>
     </div>
 
     {#if error}
@@ -98,7 +99,7 @@
         <div class="space-y-5">
           <div class="flex flex-col items-center text-center">
             <OAuthClientLogo name={consentData.client_name} url={consentData.logo_url} size="lg" />
-            <p class="mt-3 text-body text-nya-text-secondary"><strong class="text-nya-text-primary">{consentData.client_name}</strong> 请求访问您的账户</p>
+            <p class="mt-3 text-body text-nya-text-secondary"><strong class="text-nya-text-primary">{consentData.client_name}</strong> {deviceFlow ? '请求在另一台设备上访问您的账户' : '请求访问您的账户'}</p>
             {#if consentData.previously_authorized}<p class="mt-1 text-micro text-nya-text-tertiary">您之前已授权过此应用，请检查本次变化。</p>{/if}
           </div>
 
@@ -107,7 +108,11 @@
               <div class="grid grid-cols-[88px_1fr] gap-3"><dt class="text-nya-text-tertiary">Client ID</dt><dd class="break-all font-mono text-nya-text-primary">{consentData.client_id}</dd></div>
               <div class="grid grid-cols-[88px_1fr] gap-3"><dt class="text-nya-text-tertiary">注册来源</dt><dd class="text-nya-text-primary">{consentData.publisher_type === 'system_managed' ? '系统管理员配置' : '用户注册应用'}</dd></div>
               <div class="grid grid-cols-[88px_1fr] gap-3"><dt class="text-nya-text-tertiary">发布者状态</dt><dd class="text-nya-text-primary">{consentData.verification_status === 'verified' ? '已由管理员审核' : consentData.verification_status === 'not_applicable' ? '系统管理' : '尚未验证'}</dd></div>
-              <div class="grid grid-cols-[88px_1fr] gap-3"><dt class="text-nya-text-tertiary">回调来源</dt><dd class="break-all font-mono text-nya-text-primary">{consentData.redirect_origin || '不可用'}</dd></div>
+              {#if deviceFlow}
+                <div class="grid grid-cols-[88px_1fr] gap-3"><dt class="text-nya-text-tertiary">授权方式</dt><dd class="text-nya-text-primary">设备代码授权，不会跳转到第三方回调地址</dd></div>
+              {:else}
+                <div class="grid grid-cols-[88px_1fr] gap-3"><dt class="text-nya-text-tertiary">回调来源</dt><dd class="break-all font-mono text-nya-text-primary">{consentData.redirect_origin || '不可用'}</dd></div>
+              {/if}
             </dl>
             {#if consentData.homepage_uri || consentData.privacy_policy_uri || consentData.terms_of_service_uri}
               <nav aria-label="应用信息链接" class="mt-3 flex flex-wrap gap-x-4 gap-y-2 text-small">
@@ -124,12 +129,12 @@
             {#if consentData.verification_status === 'unverified'}
               <div class="mt-3 flex items-start gap-2 rounded-nya-sm bg-nya-warning-soft px-3 py-2 text-small text-nya-warning" role="status">
                 <TriangleAlert size={15} class="mt-0.5 shrink-0" />
-                <span>Nyauth 尚未验证此应用的发布者，请仅在确认应用身份和回调来源后授权。</span>
+                <span>Nyauth 尚未验证此应用的发布者，请仅在确认应用身份{deviceFlow ? '以及发起请求的设备' : '和回调来源'}后授权。</span>
               </div>
             {:else if consentData.verification_status === 'verified'}
               <div class="mt-3 flex items-start gap-2 rounded-nya-sm bg-nya-success-soft px-3 py-2 text-small text-nya-success" role="status">
                 <CheckCircle size={15} class="mt-0.5 shrink-0" />
-                <span>此用户注册应用已经由 Nyauth 管理员审核；仍请确认回调来源属于预期应用。</span>
+                <span>此用户注册应用已经由 Nyauth 管理员审核；仍请确认{deviceFlow ? '正在授权的是您刚才使用的设备' : '回调来源属于预期应用'}。</span>
               </div>
             {:else}
               <div class="mt-3 flex items-start gap-2 rounded-nya-sm bg-nya-info-soft px-3 py-2 text-small text-nya-info" role="status">
@@ -184,7 +189,7 @@
 
           <div class="flex gap-3 pt-2">
             <Button variant="secondary" size="md" onclick={handleDeny} loading={action === 'deny'} disabled={action !== ''}>拒绝</Button>
-            <Button variant="primary" size="md" requiredCapability="auth_issuance" onclick={handleAccept} loading={action === 'accept'} disabled={action !== ''}>授权所选权限</Button>
+            <Button variant="primary" size="md" requiredCapability="auth_issuance" onclick={handleAccept} loading={action === 'accept'} disabled={action !== ''}>{deviceFlow ? '允许设备访问' : '授权所选权限'}</Button>
           </div>
         </div>
       </Card>

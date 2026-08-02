@@ -13,6 +13,7 @@ import (
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/nyasharp/nyauth/internal/avatar"
+	"github.com/nyasharp/nyauth/internal/securityaction"
 )
 
 const avatarMultipartOverhead = 1 << 20
@@ -37,7 +38,7 @@ func (s *Server) handleUploadUserAvatar(w http.ResponseWriter, r *http.Request) 
 
 func (s *Server) handleAvatarUpload(w http.ResponseWriter, r *http.Request, userID uuid.UUID, admin bool) {
 	started := time.Now()
-	if !s.reserveAvatarOperation(w, r, "upload", userID) {
+	if !s.reserveMediaOperation(w, r, securityaction.MediaAvatarUpload, userID) {
 		return
 	}
 	releaseProcessing, ok := s.reserveAvatarProcessing(w, r)
@@ -92,7 +93,7 @@ func (s *Server) reserveAvatarProcessing(w http.ResponseWriter, r *http.Request)
 	default:
 		w.Header().Set("Retry-After", "2")
 		s.telemetry.RecordAvatarOperation(r.Context(), "upload", "rejected", "processor_busy", -1)
-		writeAPIError(w, http.StatusServiceUnavailable, "avatar operation is temporarily unavailable")
+		writeAPIError(w, http.StatusServiceUnavailable, "media processing is temporarily unavailable")
 		return nil, false
 	}
 }
@@ -229,7 +230,7 @@ func (s *Server) handleDeleteUserAvatar(w http.ResponseWriter, r *http.Request) 
 
 func (s *Server) handleAvatarDelete(w http.ResponseWriter, r *http.Request, userID uuid.UUID) {
 	started := time.Now()
-	if !s.reserveAvatarOperation(w, r, "delete", userID) {
+	if !s.reserveMediaOperation(w, r, securityaction.MediaAvatarDelete, userID) {
 		return
 	}
 	cleanupDeferred, err := s.avatarService.DeleteUserAvatar(r.Context(), userID, time.Now().UTC())
@@ -255,23 +256,21 @@ func (s *Server) handleAvatarDelete(w http.ResponseWriter, r *http.Request, user
 	writeJSON(w, http.StatusOK, updated)
 }
 
-func (s *Server) reserveAvatarOperation(w http.ResponseWriter, r *http.Request, action string, userID uuid.UUID) bool {
-	allowed, retry, err := s.avatarLimiter.Reserve(r.Context(), action, requestIP(r), userID.String())
+func (s *Server) reserveMediaOperation(w http.ResponseWriter, r *http.Request, operation securityaction.MediaOperation, userID uuid.UUID) bool {
+	allowed, retry, err := s.mediaMutationLimiter.Reserve(r.Context(), operation, requestIP(r), userID.String())
 	if err != nil {
-		s.telemetry.RecordRateLimit(r.Context(), "avatar", action, "error")
-		s.telemetry.RecordAvatarOperation(r.Context(), action, "failure", "dependency_unavailable", -1)
-		writeAPIError(w, http.StatusServiceUnavailable, "avatar operation is temporarily unavailable")
+		s.telemetry.RecordRateLimit(r.Context(), operation, "error")
+		writeAPIError(w, http.StatusServiceUnavailable, "media operation is temporarily unavailable")
 		return false
 	}
 	if !allowed {
-		s.telemetry.RecordRateLimit(r.Context(), "avatar", action, "rejected")
-		s.telemetry.RecordAvatarOperation(r.Context(), action, "rejected", "rate_limited", -1)
+		s.telemetry.RecordRateLimit(r.Context(), operation, "rejected")
 		seconds := int64((retry + time.Second - 1) / time.Second)
 		w.Header().Set("Retry-After", strconv.FormatInt(seconds, 10))
-		writeAPIError(w, http.StatusTooManyRequests, "too many avatar operations")
+		writeAPIError(w, http.StatusTooManyRequests, "too many media operations")
 		return false
 	}
-	s.telemetry.RecordRateLimit(r.Context(), "avatar", action, "allowed")
+	s.telemetry.RecordRateLimit(r.Context(), operation, "allowed")
 	return true
 }
 

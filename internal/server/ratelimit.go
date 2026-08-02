@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/nyasharp/nyauth/internal/securityaction"
 	"github.com/nyasharp/nyauth/internal/settings"
 	"github.com/redis/go-redis/v9"
 )
@@ -55,7 +56,7 @@ type MailSettingsLimiter struct {
 	settings *settings.Manager
 }
 
-type AvatarLimiter struct {
+type MediaMutationLimiter struct {
 	rdb      *redis.Client
 	settings *settings.Manager
 }
@@ -79,14 +80,6 @@ type PolicySettingsLimiter struct {
 	ipLimit      int
 }
 
-const (
-	mailSettingsActionCandidateSave = "candidate-save"
-	mailSettingsActionCandidateTest = "candidate-test"
-	mailSettingsActionActivate      = "activate"
-	mailSettingsActionRollback      = "rollback"
-	mailSettingsActionDisable       = "disable"
-)
-
 func NewLoginLimiter(rdb *redis.Client, managers ...*settings.Manager) *LoginLimiter {
 	return &LoginLimiter{rdb: rdb, settings: firstSettingsManager(managers)}
 }
@@ -99,8 +92,8 @@ func NewMailSettingsLimiter(rdb *redis.Client, managers ...*settings.Manager) *M
 	return &MailSettingsLimiter{rdb: rdb, settings: firstSettingsManager(managers)}
 }
 
-func NewAvatarLimiter(rdb *redis.Client, managers ...*settings.Manager) *AvatarLimiter {
-	return &AvatarLimiter{rdb: rdb, settings: firstSettingsManager(managers)}
+func NewMediaMutationLimiter(rdb *redis.Client, managers ...*settings.Manager) *MediaMutationLimiter {
+	return &MediaMutationLimiter{rdb: rdb, settings: firstSettingsManager(managers)}
 }
 
 func NewOperationsSettingsLimiter(rdb *redis.Client) *OperationsSettingsLimiter {
@@ -226,44 +219,57 @@ func reserveSingleLimit(
 	return allowed == 1, time.Duration(millis) * time.Millisecond, nil
 }
 
-func (l *AccountActionLimiter) Reserve(ctx context.Context, action, ip, subject string) (bool, time.Duration, error) {
+func (l *AccountActionLimiter) Reserve(ctx context.Context, operation securityaction.AccountOperation, ip, subject string) (bool, time.Duration, error) {
+	bucket, ok := securityaction.Bucket(operation)
+	if !ok {
+		return false, 0, fmt.Errorf("invalid account rate limit operation")
+	}
 	snapshot := protectionSnapshot(l.settings)
 	policy := snapshot.Value.Account
 	if !policy.Enabled {
 		return true, 0, nil
 	}
 	return reserveSubjectIPLimit(
-		ctx, l.rdb, rateLimitNamespace("account", snapshot.Revision), action, ip, subject,
+		ctx, l.rdb, rateLimitNamespace("account", snapshot.Revision), bucket, ip, subject,
 		policy.SubjectLimit, policy.IPLimit, snapshot.Value.AccountWindow(),
 	)
 }
 
-func (l *MailSettingsLimiter) Reserve(ctx context.Context, action, ip, subject string) (bool, time.Duration, error) {
+func (l *MailSettingsLimiter) Reserve(ctx context.Context, operation securityaction.MailOperation, ip, subject string) (bool, time.Duration, error) {
+	bucket, ok := securityaction.Bucket(operation)
+	if !ok {
+		return false, 0, fmt.Errorf("invalid mail settings rate limit operation")
+	}
 	snapshot := protectionSnapshot(l.settings)
 	policy := snapshot.Value.Mail
 	if !policy.Enabled {
 		return true, 0, nil
 	}
-	limits := map[string]int{
-		mailSettingsActionCandidateSave: policy.SaveLimit,
-		mailSettingsActionCandidateTest: policy.TestLimit,
-		mailSettingsActionActivate:      policy.ActivateLimit,
-		mailSettingsActionRollback:      policy.RollbackLimit,
-		mailSettingsActionDisable:       policy.DisableLimit,
-	}
-	subjectLimit, ok := limits[action]
-	if !ok {
-		return false, 0, fmt.Errorf("unsupported mail settings rate limit action %q", action)
+	var subjectLimit int
+	switch operation.LimitProfile() {
+	case securityaction.MailLimitSave:
+		subjectLimit = policy.SaveLimit
+	case securityaction.MailLimitTest:
+		subjectLimit = policy.TestLimit
+	case securityaction.MailLimitActivate:
+		subjectLimit = policy.ActivateLimit
+	case securityaction.MailLimitRollback:
+		subjectLimit = policy.RollbackLimit
+	case securityaction.MailLimitDisable:
+		subjectLimit = policy.DisableLimit
+	default:
+		return false, 0, fmt.Errorf("invalid mail settings rate limit profile")
 	}
 	return reserveSubjectIPLimit(
-		ctx, l.rdb, rateLimitNamespace("mail-settings", snapshot.Revision), action, ip, subject,
+		ctx, l.rdb, rateLimitNamespace("mail-settings", snapshot.Revision), bucket, ip, subject,
 		subjectLimit, policy.IPLimit, snapshot.Value.MailWindow(),
 	)
 }
 
-func (l *AvatarLimiter) Reserve(ctx context.Context, action, ip, subject string) (bool, time.Duration, error) {
-	if action != "upload" && action != "delete" {
-		return false, 0, fmt.Errorf("unsupported avatar rate limit action %q", action)
+func (l *MediaMutationLimiter) Reserve(ctx context.Context, operation securityaction.MediaOperation, ip, subject string) (bool, time.Duration, error) {
+	bucket, ok := securityaction.Bucket(operation)
+	if !ok {
+		return false, 0, fmt.Errorf("invalid media rate limit operation")
 	}
 	snapshot := protectionSnapshot(l.settings)
 	policy := snapshot.Value.Avatar
@@ -271,7 +277,7 @@ func (l *AvatarLimiter) Reserve(ctx context.Context, action, ip, subject string)
 		return true, 0, nil
 	}
 	return reserveSubjectIPLimit(
-		ctx, l.rdb, rateLimitNamespace("avatar", snapshot.Revision), action, ip, subject,
+		ctx, l.rdb, rateLimitNamespace("avatar", snapshot.Revision), bucket, ip, subject,
 		policy.UserLimit, policy.IPLimit, snapshot.Value.AvatarWindow(),
 	)
 }

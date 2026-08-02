@@ -30,6 +30,7 @@ func TestDescribeMutation(t *testing.T) {
 		{http.MethodPost, "/api/me/reauth/github", "/api/me/reauth/{provider}", "", models.AuditUserReauthenticated, "user", true},
 		{http.MethodPost, "/api/me/email/verification", "/api/me/email/verification", "", models.AuditEmailVerifyRequested, "user", false},
 		{http.MethodPost, "/api/me/email/change", "/api/me/email/change", "", models.AuditEmailChangeRequested, "user", false},
+		{http.MethodPost, "/api/device-authorization/prepare", "/api/device-authorization/prepare", "", models.AuditDeviceAuthorizationStarted, "oauth_device_authorization", false},
 		{http.MethodPost, "/api/admin/users", "/api/admin/users", "", models.AuditUserCreated, "user", true},
 		{http.MethodPost, "/api/admin/users/target/suspend", "/api/admin/users/{id}/suspend", "target", models.AuditUserSuspended, "user", true},
 		{http.MethodPost, "/api/admin/users/target/reset-password", "/api/admin/users/{id}/reset-password", "target", models.AuditUserPasswordReset, "user", true},

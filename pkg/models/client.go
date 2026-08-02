@@ -167,6 +167,7 @@ type RotateClientSecretResponse struct {
 // Grant types
 const (
 	GrantAuthorizationCode = "authorization_code"
+	GrantDeviceCode        = "urn:ietf:params:oauth:grant-type:device_code"
 	GrantClientCredentials = "client_credentials"
 	GrantRefreshToken      = "refresh_token"
 )

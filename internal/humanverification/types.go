@@ -25,13 +25,6 @@ const (
 	LoginAdaptive = "adaptive"
 	LoginAlways   = "always"
 
-	ActionRegistration            = "register"
-	ActionLogin                   = "login"
-	ActionPasswordReset           = "password_reset"
-	ActionEmailVerificationResend = "email_verification_resend"
-	ActionProviderLogin           = "provider_login"
-	ActionAdminTest               = "admin_test"
-
 	TestSuccess = "success"
 	TestFailure = "failure"
 
@@ -49,6 +42,20 @@ const (
 	AuditSettingsDisabled   = models.AuditHumanVerificationDisabled
 	AuditSettingsRolledBack = models.AuditHumanVerificationRolledBack
 	AuditCLIDisabled        = models.AuditHumanVerificationCLIDisabled
+)
+
+// Action is the closed vocabulary shared by policy evaluation, provider
+// verification and telemetry. Its external string is defined once in the
+// action catalog in validation.go.
+type Action uint8
+
+const (
+	ActionRegistration Action = iota + 1
+	ActionLogin
+	ActionPasswordReset
+	ActionEmailVerificationResend
+	ActionProviderLogin
+	ActionAdminTest
 )
 
 var (
@@ -181,7 +188,7 @@ type PolicyMutationInput struct {
 type VerifyInput struct {
 	Token          string
 	RemoteIP       string
-	Action         string
+	Action         Action
 	IdempotencyKey string
 }
 

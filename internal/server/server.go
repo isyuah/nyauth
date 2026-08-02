@@ -31,6 +31,7 @@ import (
 	"github.com/nyasharp/nyauth/internal/client"
 	"github.com/nyasharp/nyauth/internal/config"
 	"github.com/nyasharp/nyauth/internal/crypto"
+	"github.com/nyasharp/nyauth/internal/deviceauthorization"
 	"github.com/nyasharp/nyauth/internal/humanverification"
 	"github.com/nyasharp/nyauth/internal/identity"
 	"github.com/nyasharp/nyauth/internal/invite"
@@ -68,6 +69,7 @@ type Server struct {
 	jwkManager                *auth.JWKManager
 	authHandler               *auth.Handler
 	consentHandler            *auth.ConsentHandler
+	deviceAuthorizationStore  *deviceauthorization.Store
 	sessionMiddleware         *SessionMiddleware
 	loginLimiter              *LoginLimiter
 	auditStore                *audit.Store
@@ -83,7 +85,7 @@ type Server struct {
 	mailSettingsLimiter       *MailSettingsLimiter
 	operationsSettingsLimiter *OperationsSettingsLimiter
 	policySettingsLimiter     *PolicySettingsLimiter
-	avatarLimiter             *AvatarLimiter
+	mediaMutationLimiter      *MediaMutationLimiter
 	mailManager               *mailruntime.Manager
 	humanVerification         humanVerificationRuntime
 	humanLoginFailures        *HumanVerificationLoginLimiter
@@ -131,6 +133,7 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 	authorizationStore := authorization.NewStore(db)
 	identityStore := identity.NewStoreForRP(db, passkeyRPID)
 	sessionStore := session.NewStore(rdb)
+	deviceAuthorizationStore := deviceauthorization.NewStore(rdb)
 	userService := user.NewService(userStore)
 	clientService := client.NewService(clientStore)
 	clientService.SetOAuthPolicySource(settingsMgr.OAuthPolicySnapshot)
@@ -190,7 +193,10 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 	}
 	authHandler := auth.NewHandler(tokenService, jwkManager, userService, clientStore, sessionStore, cfg, settings.MaxAccessTokenTTL)
 	authHandler.SetOAuthPolicySource(settingsMgr.OAuthPolicySnapshot)
+	authHandler.SetDeviceAuthorizationStore(deviceAuthorizationStore)
+	authHandler.SetClientAddressResolver(requestIP)
 	consentHandler := auth.NewConsentHandler(sessionStore, tokenService, clientStore, authorizationStore, cfg)
+	consentHandler.SetDeviceAuthorizationStore(deviceAuthorizationStore)
 	mfaService, err := mfa.NewService(db, mfa.Options{
 		ActiveKeyID: "primary", MasterKeys: map[string][]byte{"primary": cfg.Auth.MasterKey},
 		Passkeys: &mfa.PasskeyConfig{
@@ -226,13 +232,14 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 		userService:    userService, clientService: clientService, providerMgr: providerMgr,
 		identityStore: identityStore, sessionStore: sessionStore, tokenService: tokenService,
 		jwkManager: jwkManager, authHandler: authHandler, consentHandler: consentHandler,
+		deviceAuthorizationStore:  deviceAuthorizationStore,
 		sessionMiddleware:         NewSessionMiddleware(sessionStore, cfg.Server.SecureCookie, settingsMgr),
 		loginLimiter:              NewLoginLimiter(rdb, settingsMgr),
 		accountLimiter:            NewAccountActionLimiter(rdb, settingsMgr),
 		mailSettingsLimiter:       NewMailSettingsLimiter(rdb, settingsMgr),
 		operationsSettingsLimiter: NewOperationsSettingsLimiter(rdb),
 		policySettingsLimiter:     NewPolicySettingsLimiter(rdb),
-		avatarLimiter:             NewAvatarLimiter(rdb, settingsMgr), auditStore: audit.NewStore(db),
+		mediaMutationLimiter:      NewMediaMutationLimiter(rdb, settingsMgr), auditStore: audit.NewStore(db),
 		authorizationStore: authorizationStore, statsHandler: stats.NewHandler(db, rdb),
 		settingsMgr: settingsMgr, inviteStore: invite.NewStore(db),
 		registrationStore: registration.NewStore(db), telemetry: telemetryRuntime,
@@ -574,6 +581,7 @@ func (s *Server) buildRouter() *chi.Mux {
 			r.With(accountMutations).Post("/me/identities/{provider}/bind", s.handleProviderBind)
 			r.With(accountMutations).Delete("/me/identities/{id}", s.handleDeleteMyIdentity)
 			r.Get("/consent", s.consentHandler.GetConsent)
+			r.With(authIssuance).Post("/device-authorization/prepare", s.authHandler.PrepareDeviceAuthorization)
 			r.With(authIssuance).Post("/consent/accept", s.consentHandler.AcceptConsent)
 			r.Post("/consent/deny", s.consentHandler.DenyConsent)
 			r.Get("/my/clients", s.handleListMyClients)

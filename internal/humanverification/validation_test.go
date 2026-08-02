@@ -29,6 +29,38 @@ func TestNormalizePolicyAndRequirements(t *testing.T) {
 	}
 }
 
+func TestActionCatalogIsCompleteAndPublicParsingExcludesAdminTest(t *testing.T) {
+	want := map[Action]string{
+		ActionRegistration: "register", ActionLogin: "login", ActionPasswordReset: "password_reset",
+		ActionEmailVerificationResend: "email_verification_resend", ActionProviderLogin: "provider_login",
+		ActionAdminTest: "admin_test",
+	}
+	seen := make(map[string]bool, len(want))
+	for _, action := range AllActions() {
+		external, exists := want[action]
+		if !exists || action.String() != external || seen[external] || !ValidAction(action) {
+			t.Fatalf("invalid catalog entry: action=%d external=%q", action, action.String())
+		}
+		seen[external] = true
+		parsed, ok := ParseAction(external)
+		if !ok || parsed != action {
+			t.Fatalf("ParseAction(%q) = %d, %v", external, parsed, ok)
+		}
+	}
+	if len(seen) != len(want) {
+		t.Fatalf("catalog has %d entries; want %d", len(seen), len(want))
+	}
+	if _, ok := ParsePublicAction(ActionAdminTest.String()); ok {
+		t.Fatal("admin test action was exposed through the public parser")
+	}
+	if action, ok := ParsePublicAction(ActionRegistration.String()); !ok || action != ActionRegistration {
+		t.Fatalf("public registration parse = %d, %v", action, ok)
+	}
+	if ValidAction(0) || ValidAction(Action(255)) || PolicyRequires(DefaultPolicy(), Action(255), 100) {
+		t.Fatal("unknown action did not fail closed")
+	}
+}
+
 func TestNormalizeSettingsRejectsUnsafeValues(t *testing.T) {
 	settings, err := NormalizeSettings(Settings{Provider: " TURNSTILE ", SiteKey: "site-key", WidgetMode: "managed"})
 	if err != nil || settings.Provider != ProviderTurnstile {

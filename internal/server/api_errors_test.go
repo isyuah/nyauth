@@ -58,6 +58,9 @@ func TestMediaSettingsErrorsHaveSpecificStableCodes(t *testing.T) {
 		"local media fallback migration requires a single active instance":     "media.fallback_requires_single_instance",
 		"local media fallback is unavailable":                                  "media.fallback_unavailable",
 		"clear the current maintenance expiry before starting media migration": "media.maintenance_expiry",
+		"media operation is temporarily unavailable":                           "media.operation_unavailable",
+		"media processing is temporarily unavailable":                          "media.processing_unavailable",
+		"too many media operations":                                            "media.operation_rate_limited",
 	}
 	for message, expected := range tests {
 		if got := apiErrorCodeForMessage(message); got != expected {

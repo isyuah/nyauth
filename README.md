@@ -20,7 +20,7 @@
 
 ## 功能
 
-- OAuth 2.0：Authorization Code + S256、Client Credentials、Refresh Token
+- OAuth 2.0：Authorization Code + S256、Device Authorization、Client Credentials、Refresh Token
 - OpenID Connect：Discovery、JWKS、ID Token、UserInfo、RP-Initiated Logout
 - OIDC 授权体验：运行时 Scope Catalog、客户端级 Scope/Claim 上限、可选权限声明、详细 Consent 和实际授权收敛
 - OAuth 发布者可信状态：区分系统管理、用户注册未验证和管理员已审核；Consent 展示可信状态与实际回调来源
@@ -284,15 +284,18 @@ await fetch('/api/me', {
 | GET | `/.well-known/openid-configuration` | OIDC Discovery |
 | GET | `/.well-known/jwks.json` | 当前及仍处于验证生命周期内的公钥 |
 | GET | `/authorize` | Authorization Code + S256 授权 |
-| POST | `/token` | code、client credentials、refresh grant |
+| POST | `/device_authorization` | 创建 Device Authorization 的设备码与用户码 |
+| POST | `/token` | authorization code、device code、client credentials、refresh grant |
 | GET/POST | `/userinfo` | OIDC UserInfo |
 | POST | `/revoke` | 撤销属于调用客户端的 token |
 | POST | `/introspect` | confidential client 查询自身 token |
 | GET | `/end_session` | 清理会话并校验 post-logout redirect URI |
 
-只有 authorization-code 请求显式申请并获准 `offline_access` 时才会签发 refresh token。Client Credentials 不会获得 refresh token。
+只有 Authorization Code 或 Device Authorization 请求显式申请并获准 `offline_access` 时才会签发 refresh token。Client Credentials 不会获得 refresh token。
 
-每个客户端的 `scopes` 是可请求权限上限；`optional_scopes` 必须是其中的子集，并只作用于 Authorization Code 用户授权；`allowed_claims` 再限制 ID Token 与 UserInfo 可以返回的用户字段。`openid` 始终是必需权限，且客户端至少保留一个必需 Scope。授权页从运行时 Scope Catalog 展示名称、说明、风险等级和实际 Claim，将请求分成必需和可选两组；用户可以逐项关闭可选权限，授权记录、授权码、Access/Refresh Token 都只保存实际获准集合与 Claim 白名单。若实际集合比请求集合更小，授权回调和 Token 响应都会返回实际 `scope`。现有客户端升级后 `optional_scopes` 默认为空，`allowed_claims` 按旧版本真实返回过的标准字段回填；例如旧 `email` 授权不会在升级后自动增加 `email_verified`。
+每个客户端的 `scopes` 是可请求权限上限；`optional_scopes` 必须是其中的子集，并只作用于 Authorization Code 或 Device Authorization 的用户授权；`allowed_claims` 再限制 ID Token 与 UserInfo 可以返回的用户字段。`openid` 始终是必需权限，且客户端至少保留一个必需 Scope。授权页从运行时 Scope Catalog 展示名称、说明、风险等级和实际 Claim，将请求分成必需和可选两组；用户可以逐项关闭可选权限，授权记录、授权码、设备授权状态、Access/Refresh Token 都只保存实际获准集合与 Claim 白名单。若实际集合比请求集合更小，授权回调和 Token 响应都会返回实际 `scope`。现有客户端升级后 `optional_scopes` 默认为空，`allowed_claims` 按旧版本真实返回过的标准字段回填；例如旧 `email` 授权不会在升级后自动增加 `email_verified`。
+
+Device Authorization 面向电视、CLI 和其他输入受限设备，遵循 RFC 8628：客户端从 `/device_authorization` 获取 10 分钟有效的高熵 `device_code` 与便于人工输入的 `user_code`，用户在同源 `/device` 页面登录并复用完整 Consent 审批，客户端按返回的 `interval` 轮询 `/token`。轮询过快会收到 `slow_down` 并增加后续间隔；批准、拒绝与 Token 兑换均为一次性状态。原始代码只作为 bearer secret 在调用方内存中存在，Redis 键使用 SHA-256 摘要，多实例共享同一状态。现有部署不会因升级自动放宽 OAuth 策略：需先在“OAuth 客户端策略”中启用 Device Authorization，再为目标客户端启用该 Grant。
 
 客户端可保存 HTTPS 主页、隐私政策和服务条款，并上传与头像相同安全管线处理的方形 Logo；不接受任意外部图片 URL。每次同意会保存当时的应用名称、政策链接和客户端 revision，授权记录的 `last_used_at` 只在客户端真实换取 Access Token 或轮换 Refresh Token 后更新。后续新增 Scope/Claim 只在下一次 Consent 中标为新增请求，新增可选 Scope 默认不勾选，也不会被静默加入既有 Token；Redirect URI 变化、Grant/Scope/Claim 移除或访问策略变化会推进授权 revision，使 Nyauth 的授权码兑换、Access Token 校验和 Refresh Token 轮换拒绝旧版本，并要求用户重新授权。自包含 JWT 若由第三方资源服务器完全离线验签，仍只能在其原始短期 `exp` 到达后自然失效；需要即时状态的集成应调用 introspection 或使用 Nyauth 的 UserInfo。
 
@@ -361,7 +364,7 @@ Provider 不再从 YAML 或环境变量静态加载，只能由管理员写入�
 - `protection` 动态控制登录、账户操作、头像和 SMTP 管理限流，以及自助客户端全局默认配额。关闭限流组需要精确危险确认；每次 revision 都使用新的 Redis key namespace，旧计数自然过期。
 - `lifecycle` 动态控制浏览器会话绝对/空闲期限、每用户并发会话上限、近期认证期限、Access/Refresh Token、授权码和审计保留天数。缩短会话期限会在下一次请求时淘汰超龄会话；并发上限在下一次登录时原子淘汰最旧会话；延长不会恢复 Redis 中已经过期的会话。Token 与授权码策略只影响之后新签发或轮换的凭据，已签发凭据保持原到期时间。
 - `oauth` 动态控制用户自助创建、Public Client、可新增 Grant/Scope、Scope Catalog、Claim 分配权限与回调地址数量。标准 Scope 的 Claim 语义固定；自定义 Scope 可映射受支持的内置 Claim。Scope 或 Claim 可设为仅管理员分配，普通用户的客户端目录与创建接口不会暴露这些项目，但最终 Consent 仍会如实显示。每个客户端再以 `scopes`、`optional_scopes` 和 `allowed_claims` 限制请求、用户可拒绝项与字段上限。收紧全局策略不修改或停用既有客户端；既有超限或已禁用项可以原样保留、等量替换或逐步减少，但不能继续扩大。
-- `/admin/oauth/test`：管理员可在生产构建中使用真实 Authorization Code + S256 PKCE 流程检查 Scope Catalog、Consent、Token 与 UserInfo；Confidential Client Secret 只保存在当前页面内存中。测试前必须把页面显示的回调地址登记到目标客户端。
+- `/admin/oauth/test`：管理员可在生产构建中切换真实 Authorization Code + S256 PKCE 与 Device Authorization 流程，检查 Scope Catalog、Consent、轮询错误、Token 与 UserInfo；Confidential Client Secret 只保存在当前页面内存中。Authorization Code 测试前必须把页面显示的回调地址登记到目标客户端，Device Authorization 不需要 Redirect URI。
 - `GET /api/admin/stats`：快照化的用户、会话、注册、邮件 backlog、24 小时失败尝试和 SMTP 熔断摘要。
 - `GET /api/admin/stats/login-trend`、`registration-trend`、`mail-trend`：按 UTC 返回 7–90 天的补零趋势；注册趋势含邀请预占/消费/释放，邮件趋势区分其他失败尝试（不含永久拒收）、永久拒收与过期。
 - `GET /api/admin/audit-logs/options`：返回有界、静态的事件、结果、风险和目标类型筛选目录，不扫描审计分区。

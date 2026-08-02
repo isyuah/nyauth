@@ -65,6 +65,8 @@ describe('localizeAPIErrorMessage', () => {
     expect(localizeAPIErrorMessage('wording changed', 'service_control.registration_conflict')).toBe('当前运行控制状态不允许启用该注册策略，请先调整注册或邮件投递能力');
     expect(localizeAPIErrorMessage('wording changed', 'settings.revision_conflict')).toBe('设置已被其他管理员修改，请加载最新设置后重试');
     expect(localizeAPIErrorMessage('wording changed', 'media.instances_not_ready')).toBe('仍有运行实例尚未加载候选配置，请稍后重试');
+    expect(localizeAPIErrorMessage('wording changed', 'media.operation_unavailable')).toBe('图片操作暂时不可用，请稍后重试');
+    expect(localizeAPIErrorMessage('wording changed', 'media.operation_rate_limited')).toBe('图片操作过于频繁，请稍后重试');
     expect(localizeAPIErrorMessage('wording changed', 'client.policy_changed')).toBe('OAuth 客户端策略已更新，请重新加载后再试');
     expect(localizeAPIErrorMessage('wording changed', 'telemetry.revision_conflict')).toBe('OTLP 设置已被其他管理员修改，请加载最新设置后重试');
   });
@@ -183,6 +185,31 @@ describe('human verification API contract', () => {
     for (const index of [4, 5, 6, 7, 8, 9, 10]) {
       expect(new Headers(calls[index][1].headers).get('X-CSRF-Token')).toBe('human-csrf');
     }
+  });
+});
+
+describe('device authorization API contract', () => {
+  afterEach(() => {
+    setCsrfToken('');
+    vi.unstubAllGlobals();
+  });
+
+  it('prepares a user code through the authenticated CSRF-protected endpoint', async () => {
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify({
+      consent_url: '/consent?challenge=device-consent',
+    }), { status: 200, headers: { 'Content-Type': 'application/json' } }));
+    vi.stubGlobal('fetch', fetchMock);
+    setCsrfToken('device-csrf');
+
+    await expect(api.deviceAuthorization.prepare('ABCD-EFGH')).resolves.toEqual({
+      consent_url: '/consent?challenge=device-consent',
+    });
+
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe('/api/device-authorization/prepare');
+    expect(init.method).toBe('POST');
+    expect(new Headers(init.headers).get('X-CSRF-Token')).toBe('device-csrf');
+    expect(JSON.parse(String(init.body))).toEqual({ user_code: 'ABCD-EFGH' });
   });
 });
 

@@ -16,7 +16,9 @@ import (
 	"github.com/nyasharp/nyauth/internal/client"
 	"github.com/nyasharp/nyauth/internal/config"
 	internalcrypto "github.com/nyasharp/nyauth/internal/crypto"
+	"github.com/nyasharp/nyauth/internal/deviceauthorization"
 	"github.com/nyasharp/nyauth/internal/session"
+	"github.com/nyasharp/nyauth/pkg/models"
 )
 
 type ConsentHandler struct {
@@ -26,6 +28,7 @@ type ConsentHandler struct {
 	authorizationStore *authorization.Store
 	config             *config.Config
 	sessionResolver    BrowserSessionResolver
+	deviceStore        *deviceauthorization.Store
 }
 
 type consentPermission struct {
@@ -50,6 +53,10 @@ func (h *ConsentHandler) SetBrowserSessionResolver(resolver BrowserSessionResolv
 	h.sessionResolver = resolver
 }
 
+func (h *ConsentHandler) SetDeviceAuthorizationStore(store *deviceauthorization.Store) {
+	h.deviceStore = store
+}
+
 func NewConsentHandler(sessionStore *session.Store, tokenService *TokenService, clientStore *client.Store, authorizationStore *authorization.Store, cfg *config.Config) *ConsentHandler {
 	return &ConsentHandler{sessionStore: sessionStore, tokenService: tokenService, clientStore: clientStore, authorizationStore: authorizationStore, config: cfg}
 }
@@ -66,6 +73,16 @@ func (h *ConsentHandler) GetConsent(w http.ResponseWriter, r *http.Request) {
 	if err != nil || data.UserID != sess.UserID {
 		writeError(w, http.StatusBadRequest, "invalid_or_expired_challenge")
 		return
+	}
+	if data.Flow == models.GrantDeviceCode {
+		if h.deviceStore == nil {
+			writeError(w, http.StatusServiceUnavailable, "device_authorization_unavailable")
+			return
+		}
+		if _, err := h.deviceStore.GetPending(r.Context(), data.DeviceID, data.DeviceRecordVersion); err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_or_expired_challenge")
+			return
+		}
 	}
 	cl, err := h.clientStore.GetByID(r.Context(), data.ClientID)
 	if err != nil {
@@ -99,7 +116,7 @@ func (h *ConsentHandler) GetConsent(w http.ResponseWriter, r *http.Request) {
 		redirectOrigin = parsed.Scheme + "://" + parsed.Host
 	}
 	writeJSON(w, http.StatusOK, map[string]interface{}{
-		"challenge": challenge, "client_name": cl.Name, "client_id": cl.ID,
+		"challenge": challenge, "flow": consentFlow(data), "client_name": cl.Name, "client_id": cl.ID,
 		"scopes": data.Scopes, "redirect_uri": data.RedirectURI,
 		"permissions":     consentPermissionsWithHistory(data.Scopes, data.OptionalScopes, data.ScopeClaims, data.ScopeDetails, previousScopes),
 		"redirect_origin": redirectOrigin, "publisher_type": cl.PublisherType,
@@ -128,6 +145,18 @@ func (h *ConsentHandler) AcceptConsent(w http.ResponseWriter, r *http.Request) {
 	if err != nil || data.AuthVersion != sess.AuthVersion {
 		writeError(w, http.StatusBadRequest, "invalid_or_expired_challenge")
 		return
+	}
+	var pendingDevice *deviceauthorization.Record
+	if data.Flow == models.GrantDeviceCode {
+		if h.deviceStore == nil {
+			writeError(w, http.StatusServiceUnavailable, "device_authorization_unavailable")
+			return
+		}
+		pendingDevice, err = h.deviceStore.GetPending(r.Context(), data.DeviceID, data.DeviceRecordVersion)
+		if err != nil {
+			writeError(w, http.StatusBadRequest, "invalid_or_expired_challenge")
+			return
+		}
 	}
 	cl, err := h.clientStore.GetByID(r.Context(), data.ClientID)
 	if err != nil || normalizedClientRevision(data.ClientAuthorizationRevision) != cl.AuthorizationRevision || normalizedClientRevision(data.ClientIdentityRevision) != cl.IdentityRevision {
@@ -160,6 +189,18 @@ func (h *ConsentHandler) AcceptConsent(w http.ResponseWriter, r *http.Request) {
 		} else {
 			writeError(w, http.StatusInternalServerError, "server_error")
 		}
+		return
+	}
+	if pendingDevice != nil {
+		if err := h.deviceStore.Approve(r.Context(), pendingDevice, data.UserID, data.AuthVersion, grantedScopes, grantedClaims, authorizationIssuedAt); err != nil {
+			if errors.Is(err, deviceauthorization.ErrNotFound) || errors.Is(err, deviceauthorization.ErrValueMismatch) {
+				writeError(w, http.StatusBadRequest, "invalid_or_expired_challenge")
+			} else {
+				writeError(w, http.StatusServiceUnavailable, "device_authorization_unavailable")
+			}
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"redirect_url": "/device?status=approved"})
 		return
 	}
 	code, err := internalcrypto.GenerateRandomString(32)
@@ -246,12 +287,40 @@ func (h *ConsentHandler) DenyConsent(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "invalid_or_expired_challenge")
 		return
 	}
+	if data.Flow == models.GrantDeviceCode {
+		if h.deviceStore == nil {
+			writeError(w, http.StatusServiceUnavailable, "device_authorization_unavailable")
+			return
+		}
+		pending, getErr := h.deviceStore.GetPending(r.Context(), data.DeviceID, data.DeviceRecordVersion)
+		if getErr != nil {
+			writeError(w, http.StatusBadRequest, "invalid_or_expired_challenge")
+			return
+		}
+		if err := h.deviceStore.Deny(r.Context(), pending); err != nil {
+			if errors.Is(err, deviceauthorization.ErrNotFound) || errors.Is(err, deviceauthorization.ErrValueMismatch) {
+				writeError(w, http.StatusBadRequest, "invalid_or_expired_challenge")
+			} else {
+				writeError(w, http.StatusServiceUnavailable, "device_authorization_unavailable")
+			}
+			return
+		}
+		writeJSON(w, http.StatusOK, map[string]string{"redirect_url": "/device?status=denied"})
+		return
+	}
 	target, err := addQuery(data.RedirectURI, map[string]string{"error": "access_denied", "state": data.State})
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "server_error")
 		return
 	}
 	writeJSON(w, http.StatusOK, map[string]string{"redirect_url": target})
+}
+
+func consentFlow(data *session.ConsentData) string {
+	if data != nil && data.Flow == models.GrantDeviceCode {
+		return "device_authorization"
+	}
+	return "authorization_code"
 }
 
 func (h *ConsentHandler) authenticatedSession(w http.ResponseWriter, r *http.Request) (*session.SessionData, bool) {

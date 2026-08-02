@@ -195,6 +195,8 @@ func describeMutation(r *http.Request, actor *models.User) (mutationAuditDescrip
 		return mutationAuditDescriptor{event: models.AuditConsentAccepted, targetType: "oauth_consent"}, true
 	case r.Method == http.MethodPost && path == "/api/consent/deny":
 		return mutationAuditDescriptor{event: models.AuditConsentDenied, targetType: "oauth_consent"}, true
+	case r.Method == http.MethodPost && path == "/api/device-authorization/prepare":
+		return mutationAuditDescriptor{event: models.AuditDeviceAuthorizationStarted, targetType: "oauth_device_authorization", riskLevel: "medium"}, true
 	case r.Method == http.MethodPost && path == "/api/my/clients":
 		return mutationAuditDescriptor{event: models.AuditClientCreated, targetType: "client", successAlreadyAudited: true}, true
 	case r.Method == http.MethodPost && strings.HasSuffix(path, "/rotate-secret") && strings.HasPrefix(path, "/api/my/clients/"):

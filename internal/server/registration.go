@@ -14,6 +14,7 @@ import (
 	"github.com/nyasharp/nyauth/internal/mailruntime"
 	"github.com/nyasharp/nyauth/internal/registration"
 	"github.com/nyasharp/nyauth/internal/runtimecoord"
+	"github.com/nyasharp/nyauth/internal/securityaction"
 	"github.com/nyasharp/nyauth/internal/servicecontrol"
 	"github.com/nyasharp/nyauth/internal/settings"
 	"github.com/nyasharp/nyauth/internal/user"
@@ -125,21 +126,22 @@ func (s *Server) handleRegister(w http.ResponseWriter, r *http.Request) {
 	request.Email = strings.TrimSpace(request.Email)
 
 	ip := requestIP(r)
-	allowed, retry, err := s.accountLimiter.Reserve(r.Context(), "register", ip, strings.ToLower(request.Username))
+	operation := securityaction.AccountRegister
+	allowed, retry, err := s.accountLimiter.Reserve(r.Context(), operation, ip, strings.ToLower(request.Username))
 	if err != nil {
-		s.telemetry.RecordRateLimit(r.Context(), "account_action", "register", "error")
+		s.telemetry.RecordRateLimit(r.Context(), operation, "error")
 		s.telemetry.RecordRegistrationOutcome(r.Context(), "failure", "dependency_unavailable")
 		writeAPIError(w, http.StatusServiceUnavailable, "registration temporarily unavailable")
 		return
 	}
 	if !allowed {
-		s.telemetry.RecordRateLimit(r.Context(), "account_action", "register", "rejected")
+		s.telemetry.RecordRateLimit(r.Context(), operation, "rejected")
 		s.telemetry.RecordRegistrationOutcome(r.Context(), "rejected", "rate_limited")
 		w.Header().Set("Retry-After", retryAfterSeconds(retry))
 		writeAPIError(w, http.StatusTooManyRequests, "too many registration attempts")
 		return
 	}
-	s.telemetry.RecordRateLimit(r.Context(), "account_action", "register", "allowed")
+	s.telemetry.RecordRateLimit(r.Context(), operation, "allowed")
 	if !s.requireHumanVerification(w, r, humanverification.ActionRegistration, 0, request.HumanVerification) {
 		return
 	}

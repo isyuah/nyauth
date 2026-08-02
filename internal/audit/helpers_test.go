@@ -36,7 +36,7 @@ func TestOutboxEventFromAuditLogUsesTargetAndSafeDetails(t *testing.T) {
 func TestOutboxEventFromAuditLogRejectsSensitiveDetails(t *testing.T) {
 	for _, key := range []string{
 		"refresh_token", "authorization_code", "provider_secret", "csrf_value", "nonce",
-		"passphrase", "credential", "credential_id", "recovery_code", "private_key", "api_key",
+		"passphrase", "credential", "credential_id", "recovery_code", "device_code", "user_code", "private_key", "api_key",
 		"ciphertext", "totp_seed", "totp_secret",
 	} {
 		t.Run(key, func(t *testing.T) {

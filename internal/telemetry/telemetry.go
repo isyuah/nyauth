@@ -15,6 +15,8 @@ import (
 	"github.com/go-chi/chi/v5"
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/jackc/pgx/v5/pgxpool"
+	"github.com/nyasharp/nyauth/internal/humanverification"
+	"github.com/nyasharp/nyauth/internal/securityaction"
 	"github.com/nyasharp/nyauth/internal/settings"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/redis/go-redis/v9"
@@ -679,7 +681,7 @@ func (r *Runtime) RecordOAuthGrant(ctx context.Context, grantType, result, reaso
 	if r == nil {
 		return
 	}
-	grantType = boundedValue(grantType, "unsupported", "authorization_code", "client_credentials", "refresh_token", "unsupported")
+	grantType = boundedValue(grantType, "unsupported", "authorization_code", "urn:ietf:params:oauth:grant-type:device_code", "client_credentials", "refresh_token", "unsupported")
 	result = boundedValue(result, "failure", "success", "failure")
 	reason = boundedValue(reason, "other",
 		"none", "invalid_form", "unsupported_grant_type", "invalid_request", "invalid_or_expired_code",
@@ -729,17 +731,20 @@ func (r *Runtime) RecordProviderEvent(ctx context.Context, operation, intent, re
 	}
 }
 
-func (r *Runtime) RecordHumanVerification(ctx context.Context, provider, action, result, reason string, duration time.Duration) {
+func (r *Runtime) RecordHumanVerification(ctx context.Context, provider string, action humanverification.Action, result, reason string, duration time.Duration) {
 	if r == nil {
 		return
 	}
 	provider = boundedValue(provider, "none", "none", "turnstile")
-	action = boundedValue(action, "other", "register", "login", "password_reset", "email_verification_resend", "provider_login", "admin_test")
+	actionLabel := action.String()
+	if !humanverification.ValidAction(action) {
+		actionLabel = "other"
+	}
 	result = boundedValue(result, "unavailable", "success", "rejected", "required", "unavailable")
 	reason = boundedValue(reason, "other", "none", "missing_proof", "provider_rejected", "provider_unavailable")
 	attributes := []attribute.KeyValue{
 		attribute.String("human_verification.provider", provider),
-		attribute.String("human_verification.action", action),
+		attribute.String("human_verification.action", actionLabel),
 		attribute.String("human_verification.result", result),
 		attribute.String("human_verification.reason", reason),
 	}
@@ -747,7 +752,7 @@ func (r *Runtime) RecordHumanVerification(ctx context.Context, provider, action,
 	if duration >= 0 {
 		r.dependencyDuration.Record(ctx, duration.Seconds(), metric.WithAttributes(
 			attribute.String("dependency.name", "human_verification"),
-			attribute.String("dependency.operation", action),
+			attribute.String("dependency.operation", actionLabel),
 			attribute.String("dependency.result", result),
 		))
 	}
@@ -774,12 +779,11 @@ func (r *Runtime) RecordJWKRotation(ctx context.Context, trigger, result, reason
 	}
 }
 
-func (r *Runtime) RecordRateLimit(ctx context.Context, limiter, action, result string) {
+func (r *Runtime) RecordRateLimit(ctx context.Context, operation securityaction.RateLimitOperation, result string) {
 	if r == nil {
 		return
 	}
-	limiter = boundedValue(limiter, "other", "login", "account_action", "avatar", "mail_settings", "settings")
-	action = boundedValue(action, "other", "login", "register", "password_reset", "email_verification", "pending_email_verification", "email_change", "upload", "delete", "update")
+	limiter, action, _ := securityaction.RateLimitLabels(operation)
 	result = boundedValue(result, "error", "allowed", "rejected", "error")
 	r.rateLimitEvents.Add(ctx, 1, metric.WithAttributes(
 		attribute.String("rate_limit.limiter", limiter),

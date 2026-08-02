@@ -8,6 +8,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/nyasharp/nyauth/internal/audit"
+	"github.com/nyasharp/nyauth/internal/securityaction"
 	"github.com/nyasharp/nyauth/internal/settings"
 	"github.com/nyasharp/nyauth/pkg/models"
 	"github.com/redis/go-redis/v9"
@@ -50,17 +51,17 @@ func TestRateLimitPolicyUsesRuntimeProtection(t *testing.T) {
 		policy.Account.IPLimit = 100
 		firstRevision := setProtection(t, policy)
 
-		allowed, _, err := testApp.app.accountLimiter.Reserve(ctx, "verification", "192.0.2.80", "user-1")
+		allowed, _, err := testApp.app.accountLimiter.Reserve(ctx, securityaction.AccountEmailVerification, "192.0.2.80", "user-1")
 		if err != nil || !allowed {
 			t.Fatalf("first reservation: allowed=%v err=%v", allowed, err)
 		}
-		allowed, retry, err := testApp.app.accountLimiter.Reserve(ctx, "verification", "192.0.2.80", "user-1")
+		allowed, retry, err := testApp.app.accountLimiter.Reserve(ctx, securityaction.AccountEmailVerification, "192.0.2.80", "user-1")
 		if err != nil || allowed || retry <= 0 {
 			t.Fatalf("limited reservation: allowed=%v retry=%v err=%v", allowed, retry, err)
 		}
 
 		secondRevision := setProtection(t, policy)
-		allowed, _, err = testApp.app.accountLimiter.Reserve(ctx, "verification", "192.0.2.80", "user-1")
+		allowed, _, err = testApp.app.accountLimiter.Reserve(ctx, securityaction.AccountEmailVerification, "192.0.2.80", "user-1")
 		if err != nil || !allowed {
 			t.Fatalf("reservation after revision change: allowed=%v err=%v", allowed, err)
 		}
@@ -92,7 +93,7 @@ func TestRateLimitPolicyUsesRuntimeProtection(t *testing.T) {
 		setProtection(t, policy)
 		limiter := NewAccountActionLimiter(unavailableRedis, testApp.app.settingsMgr)
 
-		allowed, retry, err := limiter.Reserve(ctx, "verification", "192.0.2.81", "user-2")
+		allowed, retry, err := limiter.Reserve(ctx, securityaction.AccountEmailVerification, "192.0.2.81", "user-2")
 		if err != nil || !allowed || retry != 0 {
 			t.Fatalf("disabled limiter: allowed=%v retry=%v err=%v", allowed, retry, err)
 		}
@@ -104,7 +105,7 @@ func TestRateLimitPolicyUsesRuntimeProtection(t *testing.T) {
 		setProtection(t, policy)
 		limiter := NewAccountActionLimiter(unavailableRedis, testApp.app.settingsMgr)
 
-		allowed, retry, err := limiter.Reserve(ctx, "verification", "192.0.2.82", "user-3")
+		allowed, retry, err := limiter.Reserve(ctx, securityaction.AccountEmailVerification, "192.0.2.82", "user-3")
 		if err == nil || allowed || retry != 0 {
 			t.Fatalf("enabled limiter with unavailable Redis: allowed=%v retry=%v err=%v", allowed, retry, err)
 		}

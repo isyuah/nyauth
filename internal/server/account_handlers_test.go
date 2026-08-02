@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/nyasharp/nyauth/internal/account"
 	"github.com/nyasharp/nyauth/internal/config"
+	"github.com/nyasharp/nyauth/internal/securityaction"
 	"github.com/nyasharp/nyauth/internal/session"
 	"github.com/nyasharp/nyauth/pkg/models"
 	"github.com/redis/go-redis/v9"
@@ -135,12 +136,12 @@ func TestAccountActionLimiterUsesHashedKeysAndEnforcesSubjectLimit(t *testing.T)
 	limiter := NewAccountActionLimiter(rdb)
 	ctx := context.Background()
 	for attempt := 0; attempt < 5; attempt++ {
-		allowed, _, err := limiter.Reserve(ctx, "password-reset", "192.0.2.20", "private@example.test")
+		allowed, _, err := limiter.Reserve(ctx, securityaction.AccountPasswordReset, "192.0.2.20", "private@example.test")
 		if err != nil || !allowed {
 			t.Fatalf("attempt %d: allowed=%v err=%v", attempt+1, allowed, err)
 		}
 	}
-	allowed, retry, err := limiter.Reserve(ctx, "password-reset", "192.0.2.20", "private@example.test")
+	allowed, retry, err := limiter.Reserve(ctx, securityaction.AccountPasswordReset, "192.0.2.20", "private@example.test")
 	if err != nil {
 		t.Fatalf("limited Reserve: %v", err)
 	}

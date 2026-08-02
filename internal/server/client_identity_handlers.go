@@ -11,6 +11,7 @@ import (
 	"github.com/nyasharp/nyauth/internal/audit"
 	"github.com/nyasharp/nyauth/internal/avatar"
 	"github.com/nyasharp/nyauth/internal/client"
+	"github.com/nyasharp/nyauth/internal/securityaction"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
 
@@ -65,7 +66,11 @@ func (s *Server) handleClientLogoUpload(w http.ResponseWriter, r *http.Request, 
 		return
 	}
 	current := currentUserFromContext(r)
-	if current == nil || !s.reserveAvatarOperation(w, r, "client_logo_upload", current.ID) {
+	if current == nil {
+		writeAPIError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	if !s.reserveMediaOperation(w, r, securityaction.MediaClientLogoUpload, current.ID) {
 		return
 	}
 	release, ok := s.reserveAvatarProcessing(w, r)
@@ -106,6 +111,14 @@ func (s *Server) handleDeleteAdminClientLogo(w http.ResponseWriter, r *http.Requ
 func (s *Server) handleClientLogoDelete(w http.ResponseWriter, r *http.Request, administrator bool) {
 	clientID := chi.URLParam(r, "id")
 	if !s.clientLogoAccessAllowed(w, r, clientID, administrator) {
+		return
+	}
+	current := currentUserFromContext(r)
+	if current == nil {
+		writeAPIError(w, http.StatusUnauthorized, "authentication required")
+		return
+	}
+	if !s.reserveMediaOperation(w, r, securityaction.MediaClientLogoDelete, current.ID) {
 		return
 	}
 	if _, err := s.avatarService.DeleteClientLogo(r.Context(), clientID, time.Now().UTC()); err != nil {

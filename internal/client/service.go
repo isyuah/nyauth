@@ -115,7 +115,7 @@ func validateRequest(req models.CreateClientRequest) error {
 		}
 		seen[grant] = true
 		switch grant {
-		case models.GrantAuthorizationCode, models.GrantClientCredentials, models.GrantRefreshToken:
+		case models.GrantAuthorizationCode, models.GrantDeviceCode, models.GrantClientCredentials, models.GrantRefreshToken:
 		default:
 			return fmt.Errorf("%w: unsupported grant %q", ErrInvalidClient, grant)
 		}
@@ -123,8 +123,9 @@ func validateRequest(req models.CreateClientRequest) error {
 	if req.IsPublic && seen[models.GrantClientCredentials] {
 		return fmt.Errorf("%w: public clients cannot use client_credentials", ErrInvalidClient)
 	}
-	if seen[models.GrantRefreshToken] && !seen[models.GrantAuthorizationCode] {
-		return fmt.Errorf("%w: refresh_token requires authorization_code", ErrInvalidClient)
+	interactiveGrantEnabled := seen[models.GrantAuthorizationCode] || seen[models.GrantDeviceCode]
+	if seen[models.GrantRefreshToken] && !interactiveGrantEnabled {
+		return fmt.Errorf("%w: refresh_token requires authorization_code or device_code", ErrInvalidClient)
 	}
 	if seen[models.GrantAuthorizationCode] && len(req.RedirectURIs) == 0 {
 		return fmt.Errorf("%w: authorization_code requires at least one redirect URI", ErrInvalidClient)
@@ -157,8 +158,8 @@ func validateRequest(req models.CreateClientRequest) error {
 		}
 		optionalSeen[scope] = true
 	}
-	if len(req.OptionalScopes) > 0 && !seen[models.GrantAuthorizationCode] {
-		return fmt.Errorf("%w: optional scopes require authorization_code", ErrInvalidClient)
+	if len(req.OptionalScopes) > 0 && !interactiveGrantEnabled {
+		return fmt.Errorf("%w: optional scopes require authorization_code or device_code", ErrInvalidClient)
 	}
 	if len(req.Scopes) > 0 && len(req.OptionalScopes) == len(req.Scopes) {
 		return fmt.Errorf("%w: at least one client scope must remain required", ErrInvalidClient)

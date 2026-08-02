@@ -42,3 +42,15 @@ func TestRedactedRequestURIHidesUnmatchedPaths(t *testing.T) {
 		t.Fatalf("unmatched request target = %q", got)
 	}
 }
+
+func TestRedactedRequestURIHidesDeviceUserCode(t *testing.T) {
+	t.Parallel()
+	target, err := url.Parse("/device?user_code=ABCD-EFGH")
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := redactedRequestURI(target, "/device")
+	if strings.Contains(got, "ABCD") || !strings.Contains(got, "%5BREDACTED%5D") {
+		t.Fatalf("device user code was not redacted: %s", got)
+	}
+}

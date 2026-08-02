@@ -80,11 +80,12 @@
   let creationDisabled = $derived(!clientPolicy.self_service_client_creation_enabled);
   let createAuthorizationCodeSelected = $derived(newApp.grants.includes('authorization_code'));
   let editAuthorizationCodeSelected = $derived(editForm.grants.includes('authorization_code'));
+  let createInteractiveGrantSelected = $derived(createAuthorizationCodeSelected || newApp.grants.includes('urn:ietf:params:oauth:grant-type:device_code'));
 
   function defaultForm(policy: OAuthClientPolicy): ClientForm {
     const grants: OAuthGrantType[] = [];
     if (policy.allowed_grant_types.includes('authorization_code')) grants.push('authorization_code');
-    if (policy.allowed_grant_types.includes('refresh_token') && grants.includes('authorization_code')) grants.push('refresh_token');
+    if (policy.allowed_grant_types.includes('refresh_token') && (grants.includes('authorization_code') || grants.includes('urn:ietf:params:oauth:grant-type:device_code'))) grants.push('refresh_token');
     if (grants.length === 0 && policy.allowed_grant_types[0]) grants.push(policy.allowed_grant_types[0]);
     const scopes = policy.allowed_scopes.filter((scope) => OAUTH_SCOPES.some((standard) => standard === scope)
       && (scope !== 'offline_access' || grants.includes('refresh_token')));
@@ -112,7 +113,7 @@
   }
 
   function knownGrant(grant: string): grant is OAuthGrantType {
-    return grant === 'authorization_code' || grant === 'refresh_token' || grant === 'client_credentials';
+    return grant === 'authorization_code' || grant === 'urn:ietf:params:oauth:grant-type:device_code' || grant === 'refresh_token' || grant === 'client_credentials';
   }
 
   function applyClientPage(result: Awaited<ReturnType<typeof api.my.getClients>>) {
@@ -134,7 +135,7 @@
     const scopes = [...new Set(form.scopes)];
     if (!name) throw new Error('应用名称不能为空。');
     if (grants.length === 0) throw new Error('至少选择一种 Grant。');
-    if (grants.includes('refresh_token') && !grants.includes('authorization_code')) throw new Error('Refresh Token 必须与 Authorization Code 同时启用。');
+    if (grants.includes('refresh_token') && !grants.includes('authorization_code') && !grants.includes('urn:ietf:params:oauth:grant-type:device_code')) throw new Error('Refresh Token 必须与 Authorization Code 或 Device Authorization 同时启用。');
     if (grants.includes('authorization_code') && redirectURIs.length === 0) throw new Error('Authorization Code 客户端至少需要一个 Redirect URI。');
     if (redirectURIs.length > clientPolicy.max_redirect_uris && (!existing || redirectURIs.length > existing.redirect_uris.length)) {
       throw new Error(`Redirect URI 不能超过 ${clientPolicy.max_redirect_uris} 个。`);
@@ -306,10 +307,10 @@
   <form onsubmit={handleCreate} class="space-y-4">
     {#if createError}<p class="rounded-nya-sm bg-nya-danger-soft px-3 py-2 text-small text-nya-danger" role="alert">{createError}</p>{/if}
     <OAuthClientIdentityFields idPrefix="my-client-create" bind:name={newApp.name} bind:homepageURI={newApp.homepage_uri} bind:privacyPolicyURI={newApp.privacy_policy_uri} bind:termsOfServiceURI={newApp.terms_of_service_uri} />
-    <OAuthClientAuthorizationEditor policy={clientPolicy} idPrefix="my-client-create" administrator={false} isPublic={newApp.is_public} bind:grants={newApp.grants} bind:scopes={newApp.scopes} bind:optionalScopes={newApp.optional_scopes} bind:allowedClaims={newApp.allowed_claims} onAuthorizationCodeDisabled={() => (newApp.is_public = false)} />
+    <OAuthClientAuthorizationEditor policy={clientPolicy} idPrefix="my-client-create" administrator={false} isPublic={newApp.is_public} bind:grants={newApp.grants} bind:scopes={newApp.scopes} bind:optionalScopes={newApp.optional_scopes} bind:allowedClaims={newApp.allowed_claims} onInteractiveGrantDisabled={() => (newApp.is_public = false)} />
     <div><label for="my-client-create-redirects" class="mb-1.5 block text-body-medium text-nya-text-primary">Redirect URI <span class="text-small text-nya-text-tertiary">（每行一个，最多 {clientPolicy.max_redirect_uris} 个）</span></label><textarea id="my-client-create-redirects" bind:value={newApp.redirect_uris} required={createAuthorizationCodeSelected} rows="3" placeholder="https://app.example.com/callback" class="w-full rounded-nya-sm border border-nya-border bg-nya-surface px-3 py-2 font-mono text-small focus:border-nya-primary focus:outline-none focus:ring-2 focus:ring-nya-primary/24"></textarea></div>
     <div><label for="my-client-create-logouts" class="mb-1.5 block text-body-medium text-nya-text-primary">Post-logout Redirect URI <span class="text-small text-nya-text-tertiary">（每行一个，最多 {clientPolicy.max_post_logout_redirect_uris} 个）</span></label><textarea id="my-client-create-logouts" bind:value={newApp.post_logout_redirect_uris} rows="2" placeholder="https://app.example.com/signed-out" disabled={clientPolicy.max_post_logout_redirect_uris === 0} class="w-full rounded-nya-sm border border-nya-border bg-nya-surface px-3 py-2 font-mono text-small focus:border-nya-primary focus:outline-none focus:ring-2 focus:ring-nya-primary/24 disabled:opacity-50"></textarea></div>
-    <label class="flex cursor-pointer items-start gap-2 {clientPolicy.public_clients_enabled && createAuthorizationCodeSelected ? '' : 'opacity-50'}"><input type="checkbox" bind:checked={newApp.is_public} disabled={!clientPolicy.public_clients_enabled || !createAuthorizationCodeSelected} class="mt-0.5 rounded" /><span><span class="block text-body text-nya-text-primary">公共客户端</span><span class="block text-small text-nya-text-tertiary">仅用于无法安全保存 Secret 的原生应用。</span></span></label>
+    <label class="flex cursor-pointer items-start gap-2 {clientPolicy.public_clients_enabled && createInteractiveGrantSelected ? '' : 'opacity-50'}"><input type="checkbox" bind:checked={newApp.is_public} disabled={!clientPolicy.public_clients_enabled || !createInteractiveGrantSelected} class="mt-0.5 rounded" /><span><span class="block text-body text-nya-text-primary">公共客户端</span><span class="block text-small text-nya-text-tertiary">用于无法安全保存 Secret 的原生应用、CLI 或输入受限设备。</span></span></label>
     <div class="flex justify-end gap-2 pt-2"><Button variant="secondary" onclick={() => (showCreate = false)} disabled={creating}>取消</Button><Button type="submit" variant="primary" requiredCapability="account_mutations" loading={creating} disabled={quotaReached || creationDisabled}>创建</Button></div>
   </form>
 </Modal>

@@ -44,7 +44,7 @@ func TestManagerPublicChallengeUsesActivePolicyAndAvailability(t *testing.T) {
 	if login := manager.PublicChallenge(ActionLogin, 3); !login.Required || !login.Available {
 		t.Fatalf("login challenge at threshold = %#v", login)
 	}
-	if unsupported := manager.PublicChallenge("private_action", 0); unsupported.Enabled || unsupported.Required || unsupported.SiteKey != "" {
+	if unsupported := manager.PublicChallenge(Action(255), 0); unsupported.Enabled || unsupported.Required || unsupported.SiteKey != "" {
 		t.Fatalf("unsupported action exposed challenge = %#v", unsupported)
 	}
 
@@ -59,7 +59,7 @@ func TestManagerPublicChallengeUsesActivePolicyAndAvailability(t *testing.T) {
 }
 
 func TestManagerVerifyOnlyCallsProviderWhenPolicyRequiresIt(t *testing.T) {
-	stub := &verifierStub{result: VerifyResult{Hostname: "auth.example.test", Action: ActionLogin}}
+	stub := &verifierStub{result: VerifyResult{Hostname: "auth.example.test", Action: ActionLogin.String()}}
 	manager := &Manager{}
 	manager.snapshot.Store(&managerSnapshot{
 		effective: EffectiveConfig{

@@ -42,7 +42,7 @@
   const groupLabels: Record<ProtectionGroup, string> = {
     login: '登录',
     account: '账户操作',
-    avatar: '头像',
+    avatar: '图片写入',
     mail: 'SMTP 管理',
   };
   const protectionGroups: ProtectionGroup[] = ['login', 'account', 'avatar', 'mail'];
@@ -308,11 +308,11 @@
           </fieldset>
 
           <fieldset>
-            <legend class="text-body-medium font-semibold text-nya-text-primary">头像限流</legend>
+            <legend class="text-body-medium font-semibold text-nya-text-primary">图片写入限流</legend>
             <div class="mt-3 grid gap-4 sm:grid-cols-3">
-              <Input id="protection-avatar-window" label="窗口" bind:value={draft.avatar.window} placeholder="15m" error={fieldErrors['protection-avatar-window']} help="头像上传和删除的计数范围。读取头像及后台对象清理不计入此额度。" />
-              <FormField id="protection-avatar-user" label="用户次数" error={fieldErrors['protection-avatar-user']} help="单个登录用户在窗口内允许的头像写操作次数，跨 IP 共享额度。"><input id="protection-avatar-user" class={numberClass('protection-avatar-user')} type="number" min="1" max="100000" step="1" bind:value={draft.avatar.user_limit} aria-invalid={fieldErrors['protection-avatar-user'] ? 'true' : undefined} aria-describedby={fieldErrors['protection-avatar-user'] ? 'protection-avatar-user-error' : undefined} /></FormField>
-              <FormField id="protection-avatar-ip" label="IP 次数" error={fieldErrors['protection-avatar-ip']} help="同一来源 IP 在窗口内对所有用户合计允许的头像写操作次数。"><input id="protection-avatar-ip" class={numberClass('protection-avatar-ip')} type="number" min="1" max="100000" step="1" bind:value={draft.avatar.ip_limit} aria-invalid={fieldErrors['protection-avatar-ip'] ? 'true' : undefined} aria-describedby={fieldErrors['protection-avatar-ip'] ? 'protection-avatar-ip-error' : undefined} /></FormField>
+              <Input id="protection-avatar-window" label="窗口" bind:value={draft.avatar.window} placeholder="15m" error={fieldErrors['protection-avatar-window']} help="用户头像和应用 Logo 上传、删除的计数范围。图片读取及后台对象清理不计入此额度。" />
+              <FormField id="protection-avatar-user" label="用户次数" error={fieldErrors['protection-avatar-user']} help="单个登录用户在窗口内允许的图片写操作次数，跨 IP 共享额度。"><input id="protection-avatar-user" class={numberClass('protection-avatar-user')} type="number" min="1" max="100000" step="1" bind:value={draft.avatar.user_limit} aria-invalid={fieldErrors['protection-avatar-user'] ? 'true' : undefined} aria-describedby={fieldErrors['protection-avatar-user'] ? 'protection-avatar-user-error' : undefined} /></FormField>
+              <FormField id="protection-avatar-ip" label="IP 次数" error={fieldErrors['protection-avatar-ip']} help="同一来源 IP 在窗口内对所有用户合计允许的图片写操作次数。"><input id="protection-avatar-ip" class={numberClass('protection-avatar-ip')} type="number" min="1" max="100000" step="1" bind:value={draft.avatar.ip_limit} aria-invalid={fieldErrors['protection-avatar-ip'] ? 'true' : undefined} aria-describedby={fieldErrors['protection-avatar-ip'] ? 'protection-avatar-ip-error' : undefined} /></FormField>
             </div>
           </fieldset>
 

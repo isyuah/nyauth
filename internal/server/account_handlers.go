@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/nyasharp/nyauth/internal/account"
 	"github.com/nyasharp/nyauth/internal/humanverification"
+	"github.com/nyasharp/nyauth/internal/securityaction"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
 
@@ -65,21 +66,22 @@ func (s *Server) handleRequestPasswordReset(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	subject := strings.ToLower(strings.TrimSpace(request.Email))
-	allowed, retry, err := s.accountLimiter.Reserve(r.Context(), "password-reset", requestIP(r), subject)
+	operation := securityaction.AccountPasswordReset
+	allowed, retry, err := s.accountLimiter.Reserve(r.Context(), operation, requestIP(r), subject)
 	if err != nil {
-		s.telemetry.RecordRateLimit(r.Context(), "account_action", "password_reset", "error")
+		s.telemetry.RecordRateLimit(r.Context(), operation, "error")
 		s.telemetry.RecordAuthEvent(r.Context(), "password_reset_request", "unavailable")
 		writeAPIError(w, http.StatusServiceUnavailable, "account recovery is temporarily unavailable")
 		return
 	}
 	if !allowed {
-		s.telemetry.RecordRateLimit(r.Context(), "account_action", "password_reset", "rejected")
+		s.telemetry.RecordRateLimit(r.Context(), operation, "rejected")
 		s.telemetry.RecordAuthEvent(r.Context(), "password_reset_request", "rate_limited")
 		w.Header().Set("Retry-After", retryAfterSeconds(retry))
 		writeAPIError(w, http.StatusTooManyRequests, "too many account recovery requests")
 		return
 	}
-	s.telemetry.RecordRateLimit(r.Context(), "account_action", "password_reset", "allowed")
+	s.telemetry.RecordRateLimit(r.Context(), operation, "allowed")
 	if !s.requireHumanVerification(w, r, humanverification.ActionPasswordReset, 0, request.HumanVerification) {
 		return
 	}
@@ -126,19 +128,20 @@ func (s *Server) handleRequestEmailVerification(w http.ResponseWriter, r *http.R
 		return
 	}
 	current := currentUserFromContext(r)
-	allowed, retry, err := s.accountLimiter.Reserve(r.Context(), "email-verification", requestIP(r), current.ID.String())
+	operation := securityaction.AccountEmailVerification
+	allowed, retry, err := s.accountLimiter.Reserve(r.Context(), operation, requestIP(r), current.ID.String())
 	if err != nil {
-		s.telemetry.RecordRateLimit(r.Context(), "account_action", "email_verification", "error")
+		s.telemetry.RecordRateLimit(r.Context(), operation, "error")
 		writeAPIError(w, http.StatusServiceUnavailable, "email verification is temporarily unavailable")
 		return
 	}
 	if !allowed {
-		s.telemetry.RecordRateLimit(r.Context(), "account_action", "email_verification", "rejected")
+		s.telemetry.RecordRateLimit(r.Context(), operation, "rejected")
 		w.Header().Set("Retry-After", retryAfterSeconds(retry))
 		writeAPIError(w, http.StatusTooManyRequests, "too many email verification requests")
 		return
 	}
-	s.telemetry.RecordRateLimit(r.Context(), "account_action", "email_verification", "allowed")
+	s.telemetry.RecordRateLimit(r.Context(), operation, "allowed")
 	if err := s.accountService.RequestEmailVerification(r.Context(), current.ID, accountRequestMetadata(r)); err != nil {
 		s.writeAccountActionError(w, r, "email_verification_request", err)
 		return
@@ -162,21 +165,22 @@ func (s *Server) handleResendPendingEmailVerification(w http.ResponseWriter, r *
 		return
 	}
 	subject := strings.ToLower(strings.TrimSpace(request.Email))
+	operation := securityaction.AccountPendingEmailVerification
 	allowed, retry, err := s.accountLimiter.Reserve(
-		r.Context(), "pending-email-verification", requestIP(r), subject,
+		r.Context(), operation, requestIP(r), subject,
 	)
 	if err != nil {
-		s.telemetry.RecordRateLimit(r.Context(), "account_action", "pending_email_verification", "error")
+		s.telemetry.RecordRateLimit(r.Context(), operation, "error")
 		writeAPIError(w, http.StatusServiceUnavailable, "email verification is temporarily unavailable")
 		return
 	}
 	if !allowed {
-		s.telemetry.RecordRateLimit(r.Context(), "account_action", "pending_email_verification", "rejected")
+		s.telemetry.RecordRateLimit(r.Context(), operation, "rejected")
 		w.Header().Set("Retry-After", retryAfterSeconds(retry))
 		writeAPIError(w, http.StatusTooManyRequests, "too many email verification requests")
 		return
 	}
-	s.telemetry.RecordRateLimit(r.Context(), "account_action", "pending_email_verification", "allowed")
+	s.telemetry.RecordRateLimit(r.Context(), operation, "allowed")
 	if !s.requireHumanVerification(w, r, humanverification.ActionEmailVerificationResend, 0, request.HumanVerification) {
 		return
 	}
@@ -226,19 +230,20 @@ func (s *Server) handleRequestEmailChange(w http.ResponseWriter, r *http.Request
 	}
 	current := currentUserFromContext(r)
 	authenticated := sessionFromContext(r.Context())
-	allowed, retry, err := s.accountLimiter.Reserve(r.Context(), "email-change", requestIP(r), current.ID.String())
+	operation := securityaction.AccountEmailChange
+	allowed, retry, err := s.accountLimiter.Reserve(r.Context(), operation, requestIP(r), current.ID.String())
 	if err != nil {
-		s.telemetry.RecordRateLimit(r.Context(), "account_action", "email_change", "error")
+		s.telemetry.RecordRateLimit(r.Context(), operation, "error")
 		writeAPIError(w, http.StatusServiceUnavailable, "email change is temporarily unavailable")
 		return
 	}
 	if !allowed {
-		s.telemetry.RecordRateLimit(r.Context(), "account_action", "email_change", "rejected")
+		s.telemetry.RecordRateLimit(r.Context(), operation, "rejected")
 		w.Header().Set("Retry-After", retryAfterSeconds(retry))
 		writeAPIError(w, http.StatusTooManyRequests, "too many email change requests")
 		return
 	}
-	s.telemetry.RecordRateLimit(r.Context(), "account_action", "email_change", "allowed")
+	s.telemetry.RecordRateLimit(r.Context(), operation, "allowed")
 	if err := s.accountService.RequestEmailChange(r.Context(), current.ID, request.Email, authenticated.Data.AuthenticatedAt, accountRequestMetadata(r)); err != nil {
 		s.writeAccountActionError(w, r, "email_change_request", err)
 		return

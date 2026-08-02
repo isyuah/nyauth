@@ -104,6 +104,7 @@ type ConsentScopeDetails struct {
 	RiskLevel   string `json:"risk_level"`
 }
 type ConsentData struct {
+	Flow                        string                         `json:"flow,omitempty"`
 	ClientID                    string                         `json:"client_id"`
 	UserID                      string                         `json:"user_id"`
 	RedirectURI                 string                         `json:"redirect_uri"`
@@ -118,6 +119,8 @@ type ConsentData struct {
 	AuthVersion                 int64                          `json:"auth_version,omitempty"`
 	ClientIdentityRevision      int64                          `json:"client_identity_revision,omitempty"`
 	ClientAuthorizationRevision int64                          `json:"client_authorization_revision,omitempty"`
+	DeviceID                    string                         `json:"device_id,omitempty"`
+	DeviceRecordVersion         string                         `json:"device_record_version,omitempty"`
 }
 
 var consumeMatchingScript = redis.NewScript(`

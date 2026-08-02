@@ -404,7 +404,7 @@ export interface ClientQuota {
 
 export interface ClientQuotaPage<T> extends PaginatedResponse<T>, ClientQuota {}
 
-export type OAuthGrantType = 'authorization_code' | 'refresh_token' | 'client_credentials';
+export type OAuthGrantType = 'authorization_code' | 'urn:ietf:params:oauth:grant-type:device_code' | 'refresh_token' | 'client_credentials';
 export type OAuthScope = string;
 export type OAuthAssignmentPolicy = 'self_service' | 'admin_only';
 export type OAuthRiskLevel = 'low' | 'personal_data' | 'sensitive';
@@ -503,6 +503,7 @@ export interface RecentLogin {
 
 export interface ConsentRequest {
   challenge: string;
+  flow: 'authorization_code' | 'device_authorization';
   client_name: string;
   client_id: string;
   scopes: string[];
@@ -1310,6 +1311,7 @@ export interface SystemStatus {
 export interface OIDCDiscoveryDocument {
   issuer: string;
   authorization_endpoint: string;
+  device_authorization_endpoint?: string;
   token_endpoint: string;
   jwks_uri: string;
   userinfo_endpoint?: string;
@@ -1472,6 +1474,9 @@ const API_ERROR_TRANSLATIONS: Record<string, string> = {
   'too many avatar operations': '头像操作过于频繁，请稍后重试',
   'avatar operation is temporarily unavailable': '头像操作暂时不可用，请稍后重试',
   'avatar storage is temporarily unavailable': '头像存储暂时不可用，请稍后重试',
+  'media operation is temporarily unavailable': '图片操作暂时不可用，请稍后重试',
+  'media processing is temporarily unavailable': '图片处理当前繁忙，请稍后重试',
+  'too many media operations': '图片操作过于频繁，请稍后重试',
   'media settings are temporarily unavailable': '媒体存储设置暂时不可用，请稍后重试',
   'media storage configuration is invalid': '对象存储配置无效，请检查 endpoint、区域、bucket 和凭据',
   'media settings changed; reload and try again': '媒体存储设置已被其他管理员修改，请重新加载',
@@ -1497,6 +1502,10 @@ const API_ERROR_TRANSLATIONS: Record<string, string> = {
   'failed to update publisher verification': '发布者可信状态更新失败，请稍后重试',
   'invalid_scope_selection': '可选权限选择无效，请重新发起授权',
   'invalid_or_expired_challenge': '授权请求无效或已过期，请重新发起登录',
+  'invalid_or_expired_user_code': '设备代码无效或已过期，请核对后重试',
+  'too_many_device_verification_attempts': '设备代码尝试过于频繁，请稍后重试',
+  'device_authorization_unavailable': '设备授权暂时不可用，请稍后重试',
+  'client_access_denied': '当前账户无权使用此应用',
   'service capability is paused': '该操作因服务维护而暂时停用',
   'service control revision conflict': '运行状态已被其他管理员修改，请重新加载后再试',
   'registration settings conflict with service control': '当前运行控制状态不允许启用该注册策略，请先调整注册或邮件投递能力',
@@ -1616,6 +1625,9 @@ const API_ERROR_MESSAGES_BY_CODE: Record<string, string> = {
   'avatar.rate_limited': 'too many avatar operations',
   'avatar.operation_unavailable': 'avatar operation is temporarily unavailable',
   'avatar.storage_unavailable': 'avatar storage is temporarily unavailable',
+  'media.operation_unavailable': 'media operation is temporarily unavailable',
+  'media.processing_unavailable': 'media processing is temporarily unavailable',
+  'media.operation_rate_limited': 'too many media operations',
   'media.settings_unavailable': 'media settings are temporarily unavailable',
   'media.configuration_invalid': 'media storage configuration is invalid',
   'media.revision_conflict': 'media settings changed; reload and try again',
@@ -1821,6 +1833,7 @@ export function normalizeOAuthAuthorization(authorization: OAuthAuthorization): 
 export function normalizeConsentRequest(consent: ConsentRequest): ConsentRequest {
   return {
     ...consent,
+    flow: consent.flow === 'device_authorization' ? 'device_authorization' : 'authorization_code',
     scopes: normalizedStringArray(consent.scopes),
     permissions: Array.isArray(consent.permissions) ? consent.permissions.map((permission) => ({
       ...permission,
@@ -2011,6 +2024,12 @@ export const api = {
     get: async (challenge: string) => normalizeConsentRequest(await req<ConsentRequest>(`/api/consent?challenge=${encodeURIComponent(challenge)}`)),
     accept: (challenge: string, grantedOptionalScopes: string[]) => req<{ redirect_url: string }>('/api/consent/accept', { method: 'POST', body: JSON.stringify({ challenge, granted_optional_scopes: grantedOptionalScopes }) }),
     deny: (challenge: string) => req<{ redirect_url: string }>('/api/consent/deny', { method: 'POST', body: JSON.stringify({ challenge }) }),
+  },
+
+  deviceAuthorization: {
+    prepare: (userCode: string) => req<{ consent_url: string }>('/api/device-authorization/prepare', {
+      method: 'POST', body: JSON.stringify({ user_code: userCode }),
+    }),
   },
 
   my: {

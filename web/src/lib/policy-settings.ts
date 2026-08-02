@@ -20,7 +20,7 @@ import {
 
 export const DISABLE_RATE_LIMITS_CONFIRMATION = 'DISABLE RATE LIMITS';
 
-export const OAUTH_GRANT_TYPES = ['authorization_code', 'refresh_token', 'client_credentials'] as const;
+export const OAUTH_GRANT_TYPES = ['authorization_code', 'urn:ietf:params:oauth:grant-type:device_code', 'refresh_token', 'client_credentials'] as const;
 export const OAUTH_SCOPES = ['openid', 'profile', 'email', 'offline_access'] as const;
 
 export const DEFAULT_OAUTH_SETTINGS: OAuthSettings = {
@@ -220,7 +220,7 @@ export function protectionValidationError(input: UpdateProtectionSettingsInput):
   for (const [field, label, window] of [
     ['protection-login-window', '登录', input.login.window],
     ['protection-account-window', '账户操作', input.account.window],
-    ['protection-avatar-window', '头像', input.avatar.window],
+    ['protection-avatar-window', '图片写入', input.avatar.window],
     ['protection-mail-window', 'SMTP 管理', input.mail.window],
   ] as const) {
     if (!validWindow(window)) return { field, message: `${label}限流窗口须在 10 秒至 24 小时之间。` };
@@ -232,8 +232,8 @@ export function protectionValidationError(input: UpdateProtectionSettingsInput):
     ['protection-login-passkey', 'Passkey ceremony IP 次数', input.login.passkey_ceremony_ip_limit],
     ['protection-account-subject', '账户操作主体次数', input.account.subject_limit],
     ['protection-account-ip', '账户操作 IP 次数', input.account.ip_limit],
-    ['protection-avatar-user', '头像用户次数', input.avatar.user_limit],
-    ['protection-avatar-ip', '头像 IP 次数', input.avatar.ip_limit],
+    ['protection-avatar-user', '图片写入用户次数', input.avatar.user_limit],
+    ['protection-avatar-ip', '图片写入 IP 次数', input.avatar.ip_limit],
     ['protection-mail-save', 'SMTP 保存次数', input.mail.save_limit],
     ['protection-mail-test', 'SMTP 测试次数', input.mail.test_limit],
     ['protection-mail-activate', 'SMTP 激活次数', input.mail.activate_limit],
@@ -335,14 +335,15 @@ export function oauthPolicyValidationError(input: UpdateOAuthSettingsInput): Fie
       return { field: 'oauth-scopes', message: `Claim ${claim} 缺少有效的分配策略。` };
     }
   }
-  if (grants.has('refresh_token') && !grants.has('authorization_code')) {
-    return { field: 'oauth-grants', message: '允许 Refresh Token 时必须同时允许 Authorization Code。' };
+  const interactiveGrantEnabled = grants.has('authorization_code') || grants.has('urn:ietf:params:oauth:grant-type:device_code');
+  if (grants.has('refresh_token') && !interactiveGrantEnabled) {
+    return { field: 'oauth-grants', message: '允许 Refresh Token 时必须同时允许 Authorization Code 或 Device Authorization。' };
   }
   if (scopes.has('offline_access') && !grants.has('refresh_token')) {
     return { field: 'oauth-scopes', message: '允许 offline_access 时必须同时允许 Refresh Token。' };
   }
-  if (input.public_clients_enabled && !grants.has('authorization_code')) {
-    return { field: 'oauth-public-clients', message: '允许 Public Client 时必须同时允许 Authorization Code。' };
+  if (input.public_clients_enabled && !interactiveGrantEnabled) {
+    return { field: 'oauth-public-clients', message: '允许 Public Client 时必须同时允许 Authorization Code 或 Device Authorization。' };
   }
   if (!Number.isSafeInteger(input.max_redirect_uris)
     || input.max_redirect_uris < 1 || input.max_redirect_uris > 100) {
