@@ -4,6 +4,8 @@
 
 ## [Unreleased]
 
+## [0.6.0] — 2026-08-02
+
 ### 新增
 
 - OAuth 应用身份资料：客户端可配置主页、隐私政策、服务条款与受控 Logo；Logo 复用现有图片重编码、本地/S3 存储迁移和 HA 安全清理管线
@@ -26,7 +28,7 @@
 
 ### 变更
 
-- 开发版本进入 `0.6.0-dev`；新增兼容迁移 `000014_oauth_application_identity` 至 `000017_theme_branding`，schema version 从 13 提升到 17；`000016` 使 Device Authorization 与客户端服务层一致地支持可选 Scope
+- 正式发布 `0.6.0`；新增兼容迁移 `000014_oauth_application_identity` 至 `000017_theme_branding`，schema version 从 13 提升到 17，可从正式 `0.5.0` 的 schema version 13 依次迁移；`000016` 使 Device Authorization 与客户端服务层一致地支持可选 Scope
 
 ## [0.5.0] — 2026-07-31
 

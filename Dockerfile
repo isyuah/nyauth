@@ -13,7 +13,7 @@ FROM --platform=$BUILDPLATFORM ${GO_IMAGE} AS go-builder
 WORKDIR /app
 ARG TARGETOS
 ARG TARGETARCH
-ARG VERSION=0.6.0-dev
+ARG VERSION=0.6.0
 ARG VCS_REF=unknown
 COPY go.mod go.sum ./
 RUN go mod download
@@ -24,7 +24,7 @@ RUN CGO_ENABLED=0 GOOS=$TARGETOS GOARCH=$TARGETARCH go build -tags=nodynamic -tr
     -o /nyauth ./cmd/nyauth
 
 FROM ${RUNTIME_IMAGE}
-ARG VERSION=0.6.0-dev
+ARG VERSION=0.6.0
 ARG VCS_REF=unknown
 RUN apt-get update \
     && apt-get install -y --no-install-recommends ca-certificates \
