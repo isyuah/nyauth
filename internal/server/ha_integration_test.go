@@ -37,6 +37,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/nyasharp/nyauth/internal/auth"
+	"github.com/nyasharp/nyauth/internal/authorization"
 	"github.com/nyasharp/nyauth/internal/config"
 	nyacrypto "github.com/nyasharp/nyauth/internal/crypto"
 	"github.com/nyasharp/nyauth/internal/database"
@@ -493,6 +494,9 @@ func TestHAHTTPServersConsumeAuthorizationCodeOnce(t *testing.T) {
 	revoked, err := cluster.apps[0].sessionStore.IsUserClientAuthorizationRevoked(ctx, current.ID.String(), registered.ID, stored.AuthorizationIssuedAt)
 	if err != nil || !revoked {
 		t.Fatalf("authorization code replay did not revoke issued grant: revoked=%v err=%v", revoked, err)
+	}
+	if _, err := cluster.apps[0].authorizationStore.GetActive(ctx, current.ID, registered.ID); !authorization.IsNotFound(err) {
+		t.Fatalf("authorization code replay did not persist the grant revocation: %v", err)
 	}
 	cluster.trackRedisKey("nyauth:authorization-revoked:" + haDigest(current.ID.String()+"\x00"+registered.ID))
 	if _, err := cluster.apps[0].tokenService.ValidateAccessToken(ctx, tokenPair.AccessToken); !errors.Is(err, auth.ErrInvalidToken) {

@@ -18,7 +18,7 @@ import (
 const maxHandlerBody = 1 << 20
 
 type handlerService interface {
-	List(ctx context.Context, page, pageSize int) (*models.PaginatedResponse[models.OAuthClient], error)
+	ListFiltered(ctx context.Context, filter ListFilter) (*models.PaginatedResponse[models.OAuthClient], error)
 	CreateAdmin(ctx context.Context, req models.CreateClientRequest, mutation audit.MutationAudit) (*models.CreateClientResponse, error)
 	GetByID(ctx context.Context, id string) (*models.OAuthClient, error)
 	Update(ctx context.Context, id string, req models.UpdateClientRequest, mutation audit.MutationAudit) (*models.OAuthClient, error)
@@ -113,8 +113,17 @@ func (h *Handler) updatePublisherVerification(w http.ResponseWriter, r *http.Req
 func (h *Handler) List(w http.ResponseWriter, r *http.Request) {
 	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
 	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
-
-	result, err := h.service.List(r.Context(), page, pageSize)
+	filter := ListFilter{
+		Pagination: models.NewPagination(page, pageSize), Query: r.URL.Query().Get("q"),
+		ClientType: r.URL.Query().Get("type"), Grant: r.URL.Query().Get("grant"),
+		AccessPolicy: r.URL.Query().Get("access_policy"), PublisherVerification: r.URL.Query().Get("publisher_status"),
+		Ownership: r.URL.Query().Get("ownership"), Sort: r.URL.Query().Get("sort"),
+	}
+	if err := filter.normalize(); err != nil {
+		writeError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+	result, err := h.service.ListFiltered(r.Context(), filter)
 	if err != nil {
 		writeError(w, http.StatusInternalServerError, "failed to list clients")
 		return

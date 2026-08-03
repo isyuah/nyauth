@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 
 	"github.com/jackc/pgx/v5"
@@ -48,20 +49,28 @@ type clientExecer interface {
 
 func scanClient(row rowScanner) (*models.OAuthClient, error) {
 	c := &models.OAuthClient{}
-	if err := row.Scan(
+	if err := row.Scan(clientScanDestinations(c)...); err != nil {
+		return nil, err
+	}
+	setClientLogoURL(c)
+	return c, nil
+}
+
+func clientScanDestinations(c *models.OAuthClient) []any {
+	return []any{
 		&c.ID, &c.SecretHash, &c.SecretHint, &c.SecretVersion, &c.SecretRotatedAt,
 		&c.SecretLastUsedAt, &c.Name, &c.HomepageURI, &c.PrivacyPolicyURI, &c.TermsOfServiceURI,
 		&c.CurrentLogoID, &c.IdentityRevision, &c.AuthorizationRevision, &c.RedirectURIs, &c.PostLogoutRedirectURIs,
 		&c.Grants, &c.Scopes, &c.OptionalScopes, &c.AllowedClaims, &c.IsPublic, &c.AccessPolicy, &c.OwnerID,
 		&c.PublisherType, &c.PublisherVerification, &c.PublisherVerifiedAt, &c.PublisherVerifiedBy,
 		&c.Metadata, &c.CreatedAt, &c.UpdatedAt,
-	); err != nil {
-		return nil, err
 	}
+}
+
+func setClientLogoURL(c *models.OAuthClient) {
 	if c.CurrentLogoID != nil {
 		c.LogoURL = "/media/client-logos/" + *c.CurrentLogoID + "/128.webp"
 	}
-	return c, nil
 }
 
 func (s *Store) Create(ctx context.Context, c *models.OAuthClient) error {
@@ -446,51 +455,146 @@ func (s *Store) DeleteForOwner(ctx context.Context, id, ownerID string) error {
 	return nil
 }
 
+type ListFilter struct {
+	Pagination            models.Pagination
+	Query                 string
+	ClientType            string
+	Grant                 string
+	AccessPolicy          string
+	PublisherVerification string
+	Ownership             string
+	Sort                  string
+}
+
+func (filter *ListFilter) normalize() error {
+	filter.Query = strings.TrimSpace(filter.Query)
+	if len(filter.Query) > 128 {
+		return errors.New("client search query is too long")
+	}
+	if filter.ClientType != "" && filter.ClientType != "public" && filter.ClientType != "confidential" {
+		return errors.New("invalid client type filter")
+	}
+	if filter.Grant != "" && !slices.Contains([]string{models.GrantAuthorizationCode, models.GrantClientCredentials, models.GrantRefreshToken, models.GrantDeviceCode}, filter.Grant) {
+		return errors.New("invalid grant filter")
+	}
+	if filter.AccessPolicy != "" && !models.ValidClientAccessPolicy(filter.AccessPolicy) {
+		return errors.New("invalid access policy filter")
+	}
+	if filter.PublisherVerification != "" && !slices.Contains([]string{models.PublisherVerificationNotApplicable, models.PublisherVerificationUnverified, models.PublisherVerificationVerified}, filter.PublisherVerification) {
+		return errors.New("invalid publisher verification filter")
+	}
+	if filter.Ownership != "" && filter.Ownership != "owned" && filter.Ownership != "unowned" {
+		return errors.New("invalid ownership filter")
+	}
+	if filter.Sort == "" {
+		filter.Sort = "created_desc"
+	}
+	if !slices.Contains([]string{"created_desc", "updated_desc", "name_asc", "activity_desc"}, filter.Sort) {
+		return errors.New("invalid client sort")
+	}
+	return nil
+}
+
 func (s *Store) List(ctx context.Context, p models.Pagination) (*models.PaginatedResponse[models.OAuthClient], error) {
-	return s.list(ctx, p, "", false)
+	return s.ListFiltered(ctx, ListFilter{Pagination: p})
 }
+
+func (s *Store) ListFiltered(ctx context.Context, filter ListFilter) (*models.PaginatedResponse[models.OAuthClient], error) {
+	if err := filter.normalize(); err != nil {
+		return nil, err
+	}
+	return s.list(ctx, filter, "")
+}
+
 func (s *Store) ListByOwner(ctx context.Context, ownerID string, p models.Pagination) (*models.PaginatedResponse[models.OAuthClient], error) {
-	return s.list(ctx, p, ownerID, true)
+	return s.list(ctx, ListFilter{Pagination: p, Sort: "created_desc"}, ownerID)
 }
-func (s *Store) list(ctx context.Context, p models.Pagination, ownerID string, owned bool) (*models.PaginatedResponse[models.OAuthClient], error) {
-	countQuery := `SELECT COUNT(*) FROM oauth_clients`
-	args := []any{}
-	if owned {
-		countQuery += ` WHERE owner_id=$1`
-		args = append(args, ownerID)
+
+const clientListSelectCols = `c.id,c.secret_hash,c.secret_hint,c.secret_version,c.secret_rotated_at,c.secret_last_used_at,c.name,c.homepage_uri,c.privacy_policy_uri,c.terms_of_service_uri,c.current_logo_id,c.identity_revision,c.authorization_revision,c.redirect_uris,c.post_logout_redirect_uris,c.grants,c.scopes,c.optional_scopes,c.allowed_claims,c.is_public,c.access_policy,c.owner_id,c.publisher_type,c.publisher_verification_status,c.publisher_verified_at,c.publisher_verified_by,c.metadata,c.created_at,c.updated_at`
+
+func (s *Store) list(ctx context.Context, filter ListFilter, ownerID string) (*models.PaginatedResponse[models.OAuthClient], error) {
+	where := make([]string, 0, 8)
+	args := make([]any, 0, 10)
+	add := func(clause string, value any) {
+		args = append(args, value)
+		where = append(where, fmt.Sprintf(clause, len(args)))
+	}
+	if ownerID != "" {
+		add("c.owner_id=$%d", ownerID)
+	} else {
+		if filter.Query != "" {
+			add("(c.name ILIKE '%%' || $%d || '%%' OR c.id ILIKE '%%' || $%[1]d || '%%' OR owner.username ILIKE '%%' || $%[1]d || '%%')", filter.Query)
+		}
+		switch filter.ClientType {
+		case "public":
+			where = append(where, "c.is_public=TRUE")
+		case "confidential":
+			where = append(where, "c.is_public=FALSE")
+		}
+		if filter.Grant != "" {
+			add("$%d=ANY(c.grants)", filter.Grant)
+		}
+		if filter.AccessPolicy != "" {
+			add("c.access_policy=$%d", filter.AccessPolicy)
+		}
+		if filter.PublisherVerification != "" {
+			add("c.publisher_verification_status=$%d", filter.PublisherVerification)
+		}
+		switch filter.Ownership {
+		case "owned":
+			where = append(where, "c.owner_id IS NOT NULL")
+		case "unowned":
+			where = append(where, "c.owner_id IS NULL")
+		}
+	}
+	clause := ""
+	if len(where) > 0 {
+		clause = " WHERE " + strings.Join(where, " AND ")
 	}
 	var total int64
-	if err := s.db.QueryRow(ctx, countQuery, args...).Scan(&total); err != nil {
+	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM oauth_clients c LEFT JOIN users owner ON owner.id=c.owner_id`+clause, args...).Scan(&total); err != nil {
 		return nil, fmt.Errorf("counting clients: %w", err)
 	}
-	query := `SELECT ` + clientSelectCols + ` FROM oauth_clients`
-	listArgs := []any{}
-	if owned {
-		query += ` WHERE owner_id=$1`
-		listArgs = append(listArgs, ownerID, p.PageSize, p.Offset())
-		query += ` ORDER BY created_at DESC,id DESC LIMIT $2 OFFSET $3`
-	} else {
-		listArgs = append(listArgs, p.PageSize, p.Offset())
-		query += ` ORDER BY created_at DESC,id DESC LIMIT $1 OFFSET $2`
-	}
-	rows, err := s.db.Query(ctx, query, listArgs...)
+	order := map[string]string{
+		"created_desc":  "c.created_at DESC,c.id DESC",
+		"updated_desc":  "c.updated_at DESC,c.id DESC",
+		"name_asc":      "LOWER(c.name),c.id",
+		"activity_desc": "activity.last_activity_at DESC NULLS LAST,c.updated_at DESC,c.id DESC",
+	}[filter.Sort]
+	args = append(args, filter.Pagination.PageSize, filter.Pagination.Offset())
+	query := `SELECT ` + clientListSelectCols + `,owner.username,
+		COALESCE(authorizations.authorization_count,0),COALESCE(activity.success_count,0),COALESCE(activity.failure_count,0),activity.last_activity_at
+		FROM oauth_clients c
+		LEFT JOIN users owner ON owner.id=c.owner_id
+		LEFT JOIN LATERAL (
+			SELECT COUNT(*) AS authorization_count FROM oauth_authorizations a
+			WHERE a.client_id=c.id AND a.revoked_at IS NULL AND a.client_authorization_revision=c.authorization_revision
+		) authorizations ON TRUE
+		LEFT JOIN LATERAL (
+			SELECT COALESCE(SUM(success_count),0) AS success_count,COALESCE(SUM(failure_count),0) AS failure_count,
+			       GREATEST(MAX(last_success_at),MAX(last_failure_at)) AS last_activity_at
+			FROM oauth_client_stats_daily s WHERE s.client_id=c.id AND s.day >= CURRENT_DATE-6
+		) activity ON TRUE` + clause + ` ORDER BY ` + order + ` LIMIT $` + fmt.Sprint(len(args)-1) + ` OFFSET $` + fmt.Sprint(len(args))
+	rows, err := s.db.Query(ctx, query, args...)
 	if err != nil {
 		return nil, fmt.Errorf("listing clients: %w", err)
 	}
 	defer rows.Close()
 	items := make([]models.OAuthClient, 0)
 	for rows.Next() {
-		c, err := scanClient(rows)
-		if err != nil {
+		c := &models.OAuthClient{}
+		destinations := append(clientScanDestinations(c), &c.OwnerUsername, &c.AuthorizationCount, &c.SuccessCount7d, &c.FailureCount7d, &c.LastActivityAt)
+		if err := rows.Scan(destinations...); err != nil {
 			return nil, fmt.Errorf("scanning client: %w", err)
 		}
+		setClientLogoURL(c)
 		items = append(items, *c)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterating clients: %w", err)
 	}
-	totalPages := (int(total) + p.PageSize - 1) / p.PageSize
-	return &models.PaginatedResponse[models.OAuthClient]{Items: items, Total: total, Page: p.Page, PageSize: p.PageSize, TotalPages: totalPages}, nil
+	totalPages := (int(total) + filter.Pagination.PageSize - 1) / filter.Pagination.PageSize
+	return &models.PaginatedResponse[models.OAuthClient]{Items: items, Total: total, Page: filter.Pagination.Page, PageSize: filter.Pagination.PageSize, TotalPages: totalPages}, nil
 }
 
 func (s *Store) AuthenticateClient(ctx context.Context, clientID, clientSecret string) (*models.OAuthClient, error) {

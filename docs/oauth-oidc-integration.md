@@ -91,6 +91,14 @@ Consent 会同时展示客户端注册来源、发布者可信状态和本次请
 
 测试台不会把 Client Secret、PKCE verifier 或 Token 写入 URL 或 `localStorage`；Secret 只保存在当前页面内存。它用于管理员人工诊断，不是业务 SPA 保存 Confidential Client Secret 的许可。
 
+## 应用运营与失败诊断
+
+客户端所有者可在“我的应用”进入应用数据页，管理员可从应用管理进入同一套管理视图。页面按 UTC 展示 7/30/90 天 OAuth 协议操作检查点、活动授权、流程趋势和失败原因，用于区分“回调地址错误”“Scope 未登记”“PKCE 无效”“Refresh Token 重用”“用户主动拒绝”等问题。
+
+统计中的成功率是所有已记录协议阶段操作的成功占比，不是用户转化率：一次完整 Authorization Code 流程会经过授权请求、Consent 和 Token 签发等多个检查点。Device Authorization 的正常 `authorization_pending` 与节流提示 `slow_down` 不作为故障计数。
+
+失败诊断只记录固定原因、流程、阶段、Request ID、规范化 Scope 和删除 query/fragment 后的回调来源；不会记录 Token、Client Secret、授权码、PKCE verifier、用户 ID、邮箱、上游 Claim 或原始内部错误。调用方仍应在自己的服务端日志中使用 Request ID 关联业务请求，但不得记录 Token 或 Secret。
+
 ## Device Authorization Grant
 
 Device Authorization 适用于电视、CLI 和其他不便直接打开完整登录页的设备。客户端必须登记 `urn:ietf:params:oauth:grant-type:device_code` Grant；纯设备客户端不需要 Redirect URI。Public Client 直接发送 `client_id`，Confidential Client 仍必须使用 HTTP Basic 或表单 Secret 完成客户端认证。

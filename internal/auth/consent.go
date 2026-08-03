@@ -2,10 +2,12 @@ package auth
 
 import (
 	"bytes"
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"io"
+	"log/slog"
 	"net/http"
 	"net/url"
 	"slices"
@@ -17,6 +19,7 @@ import (
 	"github.com/nyasharp/nyauth/internal/config"
 	internalcrypto "github.com/nyasharp/nyauth/internal/crypto"
 	"github.com/nyasharp/nyauth/internal/deviceauthorization"
+	"github.com/nyasharp/nyauth/internal/oauthops"
 	"github.com/nyasharp/nyauth/internal/session"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
@@ -29,6 +32,7 @@ type ConsentHandler struct {
 	config             *config.Config
 	sessionResolver    BrowserSessionResolver
 	deviceStore        *deviceauthorization.Store
+	operationSink      OAuthOperationSink
 }
 
 type consentPermission struct {
@@ -55,6 +59,27 @@ func (h *ConsentHandler) SetBrowserSessionResolver(resolver BrowserSessionResolv
 
 func (h *ConsentHandler) SetDeviceAuthorizationStore(store *deviceauthorization.Store) {
 	h.deviceStore = store
+}
+
+func (h *ConsentHandler) SetOAuthOperationSink(sink OAuthOperationSink) {
+	h.operationSink = sink
+}
+
+func (h *ConsentHandler) recordConsentOperation(ctx context.Context, data *session.ConsentData, outcome oauthops.Outcome, reason oauthops.Reason, scopes []string) {
+	if h.operationSink == nil || data == nil || data.ClientID == "" {
+		return
+	}
+	flow, stage := oauthops.FlowAuthorizationCode, oauthops.StageConsent
+	if data.Flow == models.GrantDeviceCode {
+		flow, stage = oauthops.FlowDeviceAuthorization, oauthops.StageDeviceVerification
+	}
+	if err := h.operationSink(ctx, oauthops.Event{
+		ClientID: data.ClientID, Flow: flow, Stage: stage, Outcome: outcome, Reason: reason,
+		RedirectURI: data.RedirectURI, Scopes: scopes,
+	}); err != nil {
+		slog.ErrorContext(ctx, "OAuth consent operation recording failed",
+			"client_id", data.ClientID, "flow", flow, "outcome", outcome, "error", err)
+	}
 }
 
 func NewConsentHandler(sessionStore *session.Store, tokenService *TokenService, clientStore *client.Store, authorizationStore *authorization.Store, cfg *config.Config) *ConsentHandler {
@@ -90,6 +115,7 @@ func (h *ConsentHandler) GetConsent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if normalizedClientRevision(data.ClientAuthorizationRevision) != cl.AuthorizationRevision || normalizedClientRevision(data.ClientIdentityRevision) != cl.IdentityRevision {
+		h.recordConsentOperation(r.Context(), data, oauthops.OutcomeFailure, oauthops.ReasonClientChanged, data.Scopes)
 		writeError(w, http.StatusConflict, "client_changed_restart_authorization")
 		return
 	}
@@ -160,6 +186,7 @@ func (h *ConsentHandler) AcceptConsent(w http.ResponseWriter, r *http.Request) {
 	}
 	cl, err := h.clientStore.GetByID(r.Context(), data.ClientID)
 	if err != nil || normalizedClientRevision(data.ClientAuthorizationRevision) != cl.AuthorizationRevision || normalizedClientRevision(data.ClientIdentityRevision) != cl.IdentityRevision {
+		h.recordConsentOperation(r.Context(), data, oauthops.OutcomeFailure, oauthops.ReasonClientChanged, data.Scopes)
 		writeError(w, http.StatusConflict, "client_changed_restart_authorization")
 		return
 	}
@@ -169,24 +196,29 @@ func (h *ConsentHandler) AcceptConsent(w http.ResponseWriter, r *http.Request) {
 	}
 	grantedScopes, err := resolveGrantedScopes(data.Scopes, data.OptionalScopes, grantedOptionalScopes)
 	if err != nil {
+		h.recordConsentOperation(r.Context(), data, oauthops.OutcomeFailure, oauthops.ReasonInvalidScopeSelection, data.Scopes)
 		writeError(w, http.StatusBadRequest, "invalid_scope_selection")
 		return
 	}
 	grantedClaims := claimsForGrantedScopes(grantedScopes, data.ScopeClaims)
 	userID, err := uuid.Parse(data.UserID)
 	if err != nil {
+		h.recordConsentOperation(r.Context(), data, oauthops.OutcomeFailure, oauthops.ReasonInvalidSubject, grantedScopes)
 		writeError(w, http.StatusInternalServerError, "server_error")
 		return
 	}
 	authorizationIssuedAt, err := h.sessionStore.AuthorizationIssueTime(r.Context(), data.UserID, data.ClientID, h.authorizationStateTTL())
 	if err != nil {
+		h.recordConsentOperation(r.Context(), data, oauthops.OutcomeFailure, oauthops.ReasonServerError, grantedScopes)
 		writeError(w, http.StatusInternalServerError, "server_error")
 		return
 	}
 	if err := h.authorizationStore.UpsertExpected(r.Context(), userID, data.ClientID, grantedScopes, grantedClaims, time.UnixMicro(authorizationIssuedAt).UTC(), cl.IdentityRevision, cl.AuthorizationRevision); err != nil {
 		if errors.Is(err, authorization.ErrClientChanged) {
+			h.recordConsentOperation(r.Context(), data, oauthops.OutcomeFailure, oauthops.ReasonClientChanged, grantedScopes)
 			writeError(w, http.StatusConflict, "client_changed_restart_authorization")
 		} else {
+			h.recordConsentOperation(r.Context(), data, oauthops.OutcomeFailure, oauthops.ReasonServerError, grantedScopes)
 			writeError(w, http.StatusInternalServerError, "server_error")
 		}
 		return
@@ -194,17 +226,21 @@ func (h *ConsentHandler) AcceptConsent(w http.ResponseWriter, r *http.Request) {
 	if pendingDevice != nil {
 		if err := h.deviceStore.Approve(r.Context(), pendingDevice, data.UserID, data.AuthVersion, grantedScopes, grantedClaims, authorizationIssuedAt); err != nil {
 			if errors.Is(err, deviceauthorization.ErrNotFound) || errors.Is(err, deviceauthorization.ErrValueMismatch) {
+				h.recordConsentOperation(r.Context(), data, oauthops.OutcomeFailure, oauthops.ReasonExpiredToken, grantedScopes)
 				writeError(w, http.StatusBadRequest, "invalid_or_expired_challenge")
 			} else {
+				h.recordConsentOperation(r.Context(), data, oauthops.OutcomeFailure, oauthops.ReasonServerError, grantedScopes)
 				writeError(w, http.StatusServiceUnavailable, "device_authorization_unavailable")
 			}
 			return
 		}
+		h.recordConsentOperation(r.Context(), data, oauthops.OutcomeSuccess, oauthops.ReasonNone, grantedScopes)
 		writeJSON(w, http.StatusOK, map[string]string{"redirect_url": "/device?status=approved"})
 		return
 	}
 	code, err := internalcrypto.GenerateRandomString(32)
 	if err != nil {
+		h.recordConsentOperation(r.Context(), data, oauthops.OutcomeFailure, oauthops.ReasonServerError, grantedScopes)
 		writeError(w, http.StatusInternalServerError, "server_error")
 		return
 	}
@@ -216,6 +252,7 @@ func (h *ConsentHandler) AcceptConsent(w http.ResponseWriter, r *http.Request) {
 		ClientAuthorizationRevision: cl.AuthorizationRevision,
 	}
 	if err := h.sessionStore.SaveAuthorizationCode(r.Context(), code, authorization, h.authorizationCodeTTL()); err != nil {
+		h.recordConsentOperation(r.Context(), data, oauthops.OutcomeFailure, oauthops.ReasonServerError, grantedScopes)
 		writeError(w, http.StatusInternalServerError, "server_error")
 		return
 	}
@@ -225,9 +262,11 @@ func (h *ConsentHandler) AcceptConsent(w http.ResponseWriter, r *http.Request) {
 	}
 	target, err := addQuery(data.RedirectURI, redirectValues)
 	if err != nil {
+		h.recordConsentOperation(r.Context(), data, oauthops.OutcomeFailure, oauthops.ReasonServerError, grantedScopes)
 		writeError(w, http.StatusInternalServerError, "server_error")
 		return
 	}
+	h.recordConsentOperation(r.Context(), data, oauthops.OutcomeSuccess, oauthops.ReasonNone, grantedScopes)
 	writeJSON(w, http.StatusOK, map[string]string{"redirect_url": target})
 }
 
@@ -305,14 +344,17 @@ func (h *ConsentHandler) DenyConsent(w http.ResponseWriter, r *http.Request) {
 			}
 			return
 		}
+		h.recordConsentOperation(r.Context(), data, oauthops.OutcomeFailure, oauthops.ReasonUserDenied, data.Scopes)
 		writeJSON(w, http.StatusOK, map[string]string{"redirect_url": "/device?status=denied"})
 		return
 	}
 	target, err := addQuery(data.RedirectURI, map[string]string{"error": "access_denied", "state": data.State})
 	if err != nil {
+		h.recordConsentOperation(r.Context(), data, oauthops.OutcomeFailure, oauthops.ReasonServerError, data.Scopes)
 		writeError(w, http.StatusInternalServerError, "server_error")
 		return
 	}
+	h.recordConsentOperation(r.Context(), data, oauthops.OutcomeFailure, oauthops.ReasonUserDenied, data.Scopes)
 	writeJSON(w, http.StatusOK, map[string]string{"redirect_url": target})
 }
 

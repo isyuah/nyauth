@@ -4,6 +4,7 @@
     api,
     type CreateProviderInput,
     type ExternalProvider,
+    type ProviderDiagnosticRun,
     type ProviderTestResult,
     type UpdateProviderInput,
   } from '$lib/api';
@@ -82,6 +83,12 @@
   let createError = $state('');
   let editError = $state('');
   let testResults = $state<Record<string, ProviderTestState>>({});
+  let diagnosticProvider = $state<ExternalProvider | null>(null);
+  let diagnosticsOpen = $state(false);
+  let diagnosticRuns = $state<ProviderDiagnosticRun[]>([]);
+  let diagnosticsLoading = $state(false);
+  let diagnosticsError = $state('');
+  let interactiveLoading = $state(false);
   let deleteTarget = $state<ExternalProvider | null>(null);
   let deleteOpen = $state(false);
   let deleteError = $state('');
@@ -177,11 +184,44 @@
       if (testResults[name]?.revision === revision) {
         testResults = { ...testResults, [name]: { revision, loading: false, result } };
       }
+	  if (diagnosticProvider?.name === name) await loadDiagnosticRuns(provider);
     } catch (cause) {
       if (testResults[name]?.revision === revision) {
         testResults = { ...testResults, [name]: { revision, loading: false, error: cause instanceof Error ? cause.message : '配置校验失败' } };
       }
     }
+  }
+
+  async function loadDiagnosticRuns(provider: ExternalProvider) {
+    diagnosticProvider = provider;
+    diagnosticsLoading = true;
+    diagnosticsError = '';
+    try { diagnosticRuns = await api.admin.getProviderDiagnostics(provider.name, 20); }
+    catch (cause) { diagnosticsError = cause instanceof Error ? cause.message : '诊断历史加载失败'; }
+    finally { diagnosticsLoading = false; }
+  }
+
+  async function openDiagnostics(provider: ExternalProvider) {
+    diagnosticsOpen = true;
+    diagnosticRuns = [];
+    await loadDiagnosticRuns(provider);
+  }
+
+  async function startInteractiveDiagnostic() {
+    if (!diagnosticProvider) return;
+    interactiveLoading = true;
+    diagnosticsError = '';
+    try {
+      const result = await api.admin.startProviderInteractiveDiagnostic(diagnosticProvider.name);
+      window.location.assign(result.redirect_url);
+    } catch (cause) {
+      diagnosticsError = cause instanceof Error ? cause.message : '交互诊断无法启动';
+      interactiveLoading = false;
+    }
+  }
+
+  function diagnosticCheckLabel(key: string): string {
+    return ({ configuration: '配置解析', discovery: 'Discovery', authorization_endpoint: '授权端点', token_endpoint: 'Token 端点', userinfo_endpoint: 'UserInfo 端点', jwks_endpoint: 'JWKS', credential_exchange: '凭据交换', stable_subject: '稳定用户标识', username_mapping: '用户名映射', email_mapping: '邮箱映射', email_verified: '邮箱验证状态', avatar_mapping: '头像映射' } as Record<string, string>)[key] || key;
   }
 
   function openEdit(provider: ExternalProvider) {
@@ -283,12 +323,18 @@
   }
 
   function validationPassed(result: ProviderTestResult): boolean {
-    return result.configuration_valid && result.authorization_endpoint_valid && result.discovery_reachable !== false;
+    return result.configuration_valid && result.authorization_endpoint_valid && result.discovery_reachable !== false
+      && (result.checks || []).every((check) => check.status !== 'failed');
   }
 
-  onMount(() => {
-    void loadProviders();
+  onMount(async () => {
+    await loadProviders();
     void loadIssuer();
+	const providerName = new URL(window.location.href).searchParams.get('provider');
+	if (providerName) {
+	  const configured = providers.find((item) => item.name === providerName);
+	  if (configured) void openDiagnostics(configured);
+	}
   });
 </script>
 
@@ -330,6 +376,7 @@
               <Button variant="ghost" size="sm" requiredCapability="admin_mutations" onclick={() => openEdit(provider)}>编辑配置</Button>
               <Button variant="ghost" size="sm" requiredCapability="admin_mutations" onclick={() => toggleProvider(provider)}>{provider.enabled ? '禁用' : '启用'}</Button>
               <Button variant="soft" size="sm" onclick={() => handleTest(provider)} loading={test?.loading ?? false}>配置校验</Button>
+              <Button variant="secondary" size="sm" onclick={() => openDiagnostics(provider)}>诊断历史</Button>
               <Button variant="ghost" size="sm" requiredCapability="admin_mutations" onclick={() => requestDelete(provider)}>删除</Button>
             </div>
           </div>
@@ -352,7 +399,10 @@
               {:else}
                 <div class="flex items-center gap-2 text-nya-danger"><XCircle size={15} /> {test.error || '配置校验失败'}</div>
               {/if}
-              <p class="mt-2 text-nya-text-tertiary">该检查不会验证 Client Secret；客户端凭据只会在真实登录时由上游验证。</p>
+              {#if test.result?.checks?.length}
+                <div class="mt-3 grid gap-2 sm:grid-cols-2">{#each test.result.checks as check}<div class="flex items-start gap-2 rounded-nya-sm bg-nya-surface/70 px-2 py-2"><Badge variant={check.status === 'passed' ? 'success' : check.status === 'failed' ? 'danger' : 'default'}>{check.status === 'passed' ? '通过' : check.status === 'failed' ? '失败' : '跳过'}</Badge><div><p class="text-small font-semibold text-nya-text-primary">{diagnosticCheckLabel(check.key)}</p><p class="text-micro text-nya-text-tertiary">{check.message}{check.latency_ms > 0 ? ` · ${check.latency_ms} ms` : ''}</p></div></div>{/each}</div>
+              {/if}
+              <p class="mt-2 text-nya-text-tertiary">预检不会发送 Client Secret；请使用交互诊断验证凭据、回调和字段映射。</p>
             </div>
           {/if}
 
@@ -369,6 +419,14 @@
     </div>
   {/snippet}
 </ResourceState>
+
+<Modal bind:open={diagnosticsOpen} title={`Provider 诊断 · ${diagnosticProvider?.display_name || ''}`} description="预检验证网络与协议端点；交互诊断验证凭据、回调和字段映射" size="lg">
+  <div class="flex flex-wrap items-center justify-between gap-3 border-b border-nya-divider pb-4"><p class="text-small text-nya-text-secondary">诊断结果不保存上游 Token、原始 Claim 或用户字段值。</p><div class="flex gap-2"><Button variant="secondary" loading={diagnosticsLoading} onclick={() => diagnosticProvider && loadDiagnosticRuns(diagnosticProvider)}>刷新</Button><Button variant="primary" loading={interactiveLoading} onclick={startInteractiveDiagnostic}>开始交互诊断</Button></div></div>
+  {#if diagnosticsError}<p class="mt-4 bg-nya-danger-soft px-3 py-2 text-small text-nya-danger" role="alert">{diagnosticsError}</p>{/if}
+  {#if diagnosticsLoading && diagnosticRuns.length === 0}<p class="py-8 text-center text-body text-nya-text-tertiary" role="status">正在加载诊断历史…</p>
+  {:else if diagnosticRuns.length === 0}<p class="py-8 text-center text-body text-nya-text-tertiary">尚无诊断记录。先运行配置预检或交互诊断。</p>
+  {:else}<div class="mt-4 space-y-4">{#each diagnosticRuns as run (run.id)}<section class="border-b border-nya-divider pb-4 last:border-b-0"><div class="flex flex-wrap items-center justify-between gap-2"><div class="flex items-center gap-2"><Badge variant={run.result === 'success' ? 'success' : 'danger'}>{run.result === 'success' ? '通过' : '失败'}</Badge><Badge variant="default">{run.mode === 'interactive' ? '交互诊断' : '配置预检'}</Badge><span class="text-micro text-nya-text-tertiary">修订 #{run.provider_revision}</span></div><time class="text-small text-nya-text-tertiary">{new Date(run.created_at).toLocaleString()}</time></div><div class="mt-3 grid gap-2 sm:grid-cols-2">{#each run.checks || [] as check}<div class="flex items-start gap-2 bg-nya-surface-muted px-3 py-2"><Badge variant={check.status === 'passed' ? 'success' : check.status === 'failed' ? 'danger' : 'default'}>{check.status === 'passed' ? '通过' : check.status === 'failed' ? '失败' : '跳过'}</Badge><div><p class="text-small font-semibold text-nya-text-primary">{diagnosticCheckLabel(check.key)}</p><p class="text-micro text-nya-text-tertiary">{check.message}{check.latency_ms > 0 ? ` · ${check.latency_ms} ms` : ''}</p></div></div>{/each}</div></section>{/each}</div>{/if}
+</Modal>
 
 <Modal bind:open={showCreate} title="添加身份提供者" description="凭据会在服务端加密保存" size="md">
   <form onsubmit={handleCreate} class="space-y-4">

@@ -234,6 +234,7 @@ func assertReleaseBaseline(t *testing.T, schema *postgresTestSchema) {
 		"media_storage_profiles", "media_storage_state", "media_storage_migrations",
 		"media_storage_migration_items", "media_storage_instances",
 		"otlp_config_versions", "otlp_config_tests", "otlp_runtime_state",
+		"oauth_client_stats_daily", "oauth_client_diagnostics", "provider_diagnostic_runs",
 	} {
 		var resolved *string
 		if err := schema.pool.QueryRow(ctx, `SELECT to_regclass($1)::text`, object).Scan(&resolved); err != nil {

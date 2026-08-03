@@ -518,6 +518,10 @@ func (s *Service) DeleteForOwner(ctx context.Context, id, ownerID string) error 
 func (s *Service) List(ctx context.Context, page, pageSize int) (*models.PaginatedResponse[models.OAuthClient], error) {
 	return s.store.List(ctx, models.NewPagination(page, pageSize))
 }
+func (s *Service) ListFiltered(ctx context.Context, filter ListFilter) (*models.PaginatedResponse[models.OAuthClient], error) {
+	filter.Pagination = models.NewPagination(filter.Pagination.Page, filter.Pagination.PageSize)
+	return s.store.ListFiltered(ctx, filter)
+}
 func (s *Service) AuthenticateClient(ctx context.Context, id, secret string) (*models.OAuthClient, error) {
 	return s.store.AuthenticateClient(ctx, id, secret)
 }

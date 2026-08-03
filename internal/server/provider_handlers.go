@@ -5,8 +5,10 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"errors"
+	"log/slog"
 	"net/http"
 	"net/url"
+	"strconv"
 	"strings"
 	"time"
 	"unicode"
@@ -76,6 +78,11 @@ func validProviderFlowCookie(value, expectedDigest string) bool {
 
 func (s *Server) beginProviderFlow(w http.ResponseWriter, r *http.Request, providerName, intent, userID, returnTo string, jsonResponse bool) {
 	configured, ok := s.providerMgr.Get(providerName)
+	if !ok && intent == "diagnostic" {
+		var err error
+		configured, err = s.providerMgr.StoredProvider(r.Context(), providerName)
+		ok = err == nil
+	}
 	if !ok {
 		writeAPIError(w, http.StatusNotFound, "provider not found")
 		return
@@ -100,7 +107,7 @@ func (s *Server) beginProviderFlow(w http.ResponseWriter, r *http.Request, provi
 		"return_to": safeReturnPath(returnTo, "/"), "nonce": nonce,
 		"flow_digest": providerSessionDigest(flowSecret),
 	}
-	if intent == "bind" || intent == "reauth" {
+	if intent == "bind" || intent == "reauth" || intent == "diagnostic" {
 		authenticated := sessionFromContext(r.Context())
 		if authenticated == nil {
 			writeAPIError(w, http.StatusUnauthorized, "authentication required")
@@ -181,6 +188,16 @@ func (s *Server) handleProviderReauthentication(w http.ResponseWriter, r *http.R
 	s.beginProviderFlow(w, r, chi.URLParam(r, "provider"), "reauth", current.ID.String(), safeReturnPath(request.ReturnTo, "/profile"), true)
 }
 
+func (s *Server) handleProviderInteractiveDiagnostic(w http.ResponseWriter, r *http.Request) {
+	current := currentUserFromContext(r)
+	if current == nil || current.Role != "admin" {
+		writeAPIError(w, http.StatusForbidden, "administrator access required")
+		return
+	}
+	name := chi.URLParam(r, "id")
+	s.beginProviderFlow(w, r, name, "diagnostic", current.ID.String(), "/admin/providers", true)
+}
+
 func (s *Server) providerCallbackFailure(w http.ResponseWriter, r *http.Request, intent, returnTo, code string, status int) {
 	s.telemetry.RecordProviderEvent(r.Context(), "callback", intent, "failure", code, -1)
 	event := "provider.callback_failed"
@@ -198,11 +215,17 @@ func (s *Server) providerCallbackFailure(w http.ResponseWriter, r *http.Request,
 	fallback := "/login"
 	if intent == "bind" || intent == "reauth" {
 		fallback = "/profile"
+	} else if intent == "diagnostic" {
+		fallback = "/admin/providers"
 	}
 	target := safeReturnPath(returnTo, fallback)
 	parsed, _ := url.Parse(target)
 	query := parsed.Query()
 	query.Set("auth_error", code)
+	if intent == "diagnostic" {
+		query.Set("diagnostic", "failure")
+		query.Set("provider", chi.URLParam(r, "provider"))
+	}
 	parsed.RawQuery = query.Encode()
 	http.Redirect(w, r, parsed.String(), http.StatusFound)
 }
@@ -235,6 +258,8 @@ func (s *Server) handleProviderCallback(w http.ResponseWriter, r *http.Request) 
 		release, err = s.acquireCapabilities(servicecontrol.CapabilityAccountMutations)
 	case "reauth":
 		release = func() {}
+	case "diagnostic":
+		release = func() {}
 	default:
 		s.providerCallbackFailure(w, r, intent, returnTo, "invalid_state", http.StatusBadRequest)
 		return
@@ -245,22 +270,30 @@ func (s *Server) handleProviderCallback(w http.ResponseWriter, r *http.Request) 
 	}
 	defer release()
 	if upstreamError := r.URL.Query().Get("error"); upstreamError != "" {
+		s.recordProviderInteractiveFailure(r, intent, providerName, stateData["user_id"], "authorization_denied", "上游拒绝了诊断授权请求")
 		s.providerCallbackFailure(w, r, intent, returnTo, "provider_denied", http.StatusBadRequest)
 		return
 	}
 	code := r.URL.Query().Get("code")
 	if code == "" {
+		s.recordProviderInteractiveFailure(r, intent, providerName, stateData["user_id"], "authorization_code", "上游回调未包含授权码")
 		s.providerCallbackFailure(w, r, intent, returnTo, "missing_code", http.StatusBadRequest)
 		return
 	}
 	configured, ok := s.providerMgr.Get(providerName)
+	if !ok && intent == "diagnostic" {
+		configured, err = s.providerMgr.StoredProvider(r.Context(), providerName)
+		ok = err == nil
+	}
 	if !ok {
+		s.recordProviderInteractiveFailure(r, intent, providerName, stateData["user_id"], "configuration", "Provider 配置在诊断期间不可用")
 		s.providerCallbackFailure(w, r, intent, returnTo, "provider_unavailable", http.StatusBadRequest)
 		return
 	}
 	authStarted := time.Now()
 	external, err := configured.Authenticate(r.Context(), code, s.providerCallbackURI(providerName), stateData["nonce"])
 	if err != nil {
+		s.recordProviderInteractiveFailure(r, intent, providerName, stateData["user_id"], "credential_exchange", "上游拒绝凭据、授权码或回调配置")
 		s.telemetry.RecordProviderEvent(r.Context(), "authentication", intent, "failure", "provider_authentication_failed", time.Since(authStarted))
 		s.providerCallbackFailure(w, r, intent, returnTo, "provider_authentication_failed", http.StatusBadGateway)
 		return
@@ -274,7 +307,102 @@ func (s *Server) handleProviderCallback(w http.ResponseWriter, r *http.Request) 
 		s.finishExternalReauthentication(w, r, providerName, stateData["user_id"], stateData["session_digest"], returnTo, external)
 		return
 	}
+	if intent == "diagnostic" {
+		s.finishProviderInteractiveDiagnostic(w, r, providerName, stateData["user_id"], stateData["session_digest"], returnTo, external)
+		return
+	}
 	s.finishExternalLogin(w, r, providerName, returnTo, external)
+}
+
+func (s *Server) recordProviderInteractiveFailure(r *http.Request, intent, providerName, actorIDValue, key, message string) {
+	if intent != "diagnostic" {
+		return
+	}
+	actorID, err := uuid.Parse(actorIDValue)
+	if err != nil {
+		return
+	}
+	if _, err := s.providerMgr.RecordInteractiveDiagnostic(r.Context(), providerName, actorID, []provider.DiagnosticCheck{{
+		Key: key, Status: "failed", Message: message,
+	}}); err != nil {
+		slog.WarnContext(r.Context(), "provider interactive diagnostic failure could not be recorded", "provider", providerName, "error", err)
+	}
+}
+
+func (s *Server) finishProviderInteractiveDiagnostic(w http.ResponseWriter, r *http.Request, providerName, expectedUserID, expectedSessionDigest, returnTo string, external *models.ExternalUser) {
+	authenticated, err := s.sessionMiddleware.GetSession(w, r)
+	actualSessionDigest := ""
+	if err == nil {
+		actualSessionDigest = providerSessionDigest(authenticated.ID)
+	}
+	if err != nil || authenticated.Data.UserID != expectedUserID || expectedSessionDigest == "" ||
+		len(actualSessionDigest) != len(expectedSessionDigest) || subtle.ConstantTimeCompare([]byte(actualSessionDigest), []byte(expectedSessionDigest)) != 1 {
+		s.providerCallbackFailure(w, r, "diagnostic", returnTo, "session_changed", http.StatusUnauthorized)
+		return
+	}
+	actorID, err := uuid.Parse(expectedUserID)
+	if err != nil {
+		s.providerCallbackFailure(w, r, "diagnostic", returnTo, "session_changed", http.StatusUnauthorized)
+		return
+	}
+	current, err := s.userService.GetByID(r.Context(), actorID)
+	if err != nil || current.Role != "admin" || current.Status != models.UserStatusActive ||
+		current.AuthVersion != authenticated.Data.AuthVersion || current.SessionVersion != authenticated.Data.SessionVersion {
+		s.providerCallbackFailure(w, r, "diagnostic", returnTo, "session_changed", http.StatusUnauthorized)
+		return
+	}
+	checks := []provider.DiagnosticCheck{
+		{Key: "credential_exchange", Status: "passed", Message: "上游接受 Client Secret、授权码和回调地址"},
+		{Key: "stable_subject", Status: diagnosticPresenceStatus(external.ID), Message: diagnosticPresenceMessage("稳定用户标识", external.ID)},
+		{Key: "username_mapping", Status: diagnosticPresenceStatus(external.Username), Message: diagnosticPresenceMessage("用户名", external.Username)},
+		{Key: "email_mapping", Status: diagnosticPresenceStatus(external.Email), Message: diagnosticPresenceMessage("邮箱", external.Email)},
+		{Key: "email_verified", Status: diagnosticBooleanStatus(external.Email != "", external.EmailVerified), Message: diagnosticBooleanMessage("邮箱验证状态", external.Email != "", external.EmailVerified)},
+		{Key: "avatar_mapping", Status: diagnosticPresenceStatus(external.AvatarURL), Message: diagnosticPresenceMessage("头像地址", external.AvatarURL)},
+	}
+	run, err := s.providerMgr.RecordInteractiveDiagnostic(r.Context(), providerName, actorID, checks)
+	if err != nil {
+		s.providerCallbackFailure(w, r, "diagnostic", returnTo, "diagnostic_store_failed", http.StatusInternalServerError)
+		return
+	}
+	s.enqueueAuditTargetResult(r.Context(), models.AuditProviderTested, &current.ID, current.Username, "provider", providerName, run.Result, "low", requestIP(r), truncateAuditValue(r.UserAgent(), maxAuditUserAgentLength), map[string]any{"mode": "interactive", "run_id": run.ID.String()})
+	target, _ := url.Parse(safeReturnPath(returnTo, "/admin/providers"))
+	query := target.Query()
+	query.Set("diagnostic", run.Result)
+	query.Set("provider", providerName)
+	query.Set("run_id", run.ID.String())
+	target.RawQuery = query.Encode()
+	http.Redirect(w, r, target.String(), http.StatusFound)
+}
+
+func diagnosticPresenceStatus(value string) string {
+	if strings.TrimSpace(value) == "" {
+		return "skipped"
+	}
+	return "passed"
+}
+
+func diagnosticPresenceMessage(label, value string) string {
+	if strings.TrimSpace(value) == "" {
+		return label + "未由上游返回"
+	}
+	return label + "已成功映射"
+}
+
+func diagnosticBooleanStatus(present, value bool) string {
+	if present && value {
+		return "passed"
+	}
+	return "skipped"
+}
+
+func diagnosticBooleanMessage(label string, present, value bool) string {
+	if !present {
+		return label + "不可用"
+	}
+	if value {
+		return label + "已确认"
+	}
+	return label + "未确认"
 }
 
 func providerSessionDigest(sessionID string) string {
@@ -660,7 +788,7 @@ func (s *Server) handleAdminDeleteProvider(w http.ResponseWriter, r *http.Reques
 func (s *Server) handleTestProvider(w http.ResponseWriter, r *http.Request) {
 	actor := currentUserFromContext(r)
 	name := chi.URLParam(r, "id")
-	result, err := s.providerMgr.ValidateStoredProvider(r.Context(), name)
+	result, err := s.providerMgr.ValidateStoredProviderForActor(r.Context(), name, &actor.ID)
 	if err != nil {
 		if errors.Is(err, provider.ErrProviderNotFound) {
 			writeAPIError(w, http.StatusNotFound, "provider not found")
@@ -670,6 +798,12 @@ func (s *Server) handleTestProvider(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	success := result.ConfigurationValid && result.AuthorizationEndpointValid
+	for _, check := range result.Checks {
+		if check.Status == "failed" {
+			success = false
+			break
+		}
+	}
 	auditResult := "failure"
 	if success {
 		auditResult = "success"
@@ -680,4 +814,19 @@ func (s *Server) handleTestProvider(w http.ResponseWriter, r *http.Request) {
 	}
 	s.enqueueAuditTargetResult(r.Context(), models.AuditProviderTested, &actor.ID, actor.Username, "provider", name, auditResult, riskLevel, requestIP(r), truncateAuditValue(r.UserAgent(), maxAuditUserAgentLength), nil)
 	writeJSON(w, http.StatusOK, result)
+}
+
+func (s *Server) handleListProviderDiagnostics(w http.ResponseWriter, r *http.Request) {
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	items, err := s.providerMgr.ListDiagnosticRuns(r.Context(), chi.URLParam(r, "id"), limit)
+	if err != nil {
+		if errors.Is(err, provider.ErrProviderNotFound) {
+			writeAPIError(w, http.StatusNotFound, "provider not found")
+		} else {
+			writeAPIError(w, http.StatusInternalServerError, "provider diagnostics could not be loaded")
+		}
+		return
+	}
+	setSessionNoStoreHeaders(w)
+	writeJSON(w, http.StatusOK, items)
 }

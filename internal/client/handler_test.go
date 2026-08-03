@@ -19,6 +19,7 @@ import (
 
 type fakeHandlerService struct {
 	listErr           error
+	listFilter        ListFilter
 	createErr         error
 	getErr            error
 	updateErr         error
@@ -36,7 +37,8 @@ type fakeHandlerService struct {
 	replaceAccessReq  models.ReplaceClientAccessUsersRequest
 }
 
-func (f *fakeHandlerService) List(context.Context, int, int) (*models.PaginatedResponse[models.OAuthClient], error) {
+func (f *fakeHandlerService) ListFiltered(_ context.Context, filter ListFilter) (*models.PaginatedResponse[models.OAuthClient], error) {
+	f.listFilter = filter
 	return nil, f.listErr
 }
 func (f *fakeHandlerService) CreateAdmin(context.Context, models.CreateClientRequest, audit.MutationAudit) (*models.CreateClientResponse, error) {

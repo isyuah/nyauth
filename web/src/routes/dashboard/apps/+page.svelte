@@ -1,4 +1,5 @@
 <script lang="ts">
+  import { goto } from '$app/navigation';
   import { onMount } from 'svelte';
   import {
     api,
@@ -24,7 +25,7 @@
   import ResourceState from '$lib/components/ui/ResourceState.svelte';
   import SecretReveal from '$lib/components/ui/SecretReveal.svelte';
   import { toast } from '$lib/toast';
-  import { ExternalLink, Pencil, Plus, RefreshCw } from 'lucide-svelte';
+  import { BarChart3, ExternalLink, Pencil, Plus, RefreshCw } from 'lucide-svelte';
 
   type ClientForm = {
     name: string;
@@ -291,7 +292,7 @@
         <section class="rounded-nya-card border border-nya-border bg-nya-surface p-5 shadow-nya-card">
           <div class="flex flex-col justify-between gap-4 md:flex-row md:items-start">
             <div class="flex min-w-0 items-center gap-3"><OAuthClientLogo name={client.name} url={client.logo_url} /><div class="min-w-0"><h2 class="truncate text-card-title text-nya-text-primary">{client.name}</h2><CopyField value={client.id} /></div></div>
-            <div class="flex flex-wrap items-center gap-2"><Button variant="secondary" size="sm" requiredCapability="account_mutations" loading={openingEditID === client.id} onclick={() => openEdit(client)}><Pencil size={14} /> 编辑</Button>{#if client.is_public}<Badge variant="warning">Public</Badge>{:else}<Button variant="secondary" size="sm" requiredCapability="account_mutations" onclick={() => requestRotation(client)}><RefreshCw size={14} /> 轮换 Secret</Button>{/if}<Button variant="ghost" size="sm" requiredCapability="account_mutations" onclick={() => requestDelete(client)}>删除</Button></div>
+            <div class="flex flex-wrap items-center gap-2"><Button variant="soft" size="sm" onclick={() => goto(`/dashboard/apps/${encodeURIComponent(client.id)}`)}><BarChart3 size={14} /> 数据与诊断</Button><Button variant="secondary" size="sm" requiredCapability="account_mutations" loading={openingEditID === client.id} onclick={() => openEdit(client)}><Pencil size={14} /> 编辑</Button>{#if client.is_public}<Badge variant="warning">Public</Badge>{:else}<Button variant="secondary" size="sm" requiredCapability="account_mutations" onclick={() => requestRotation(client)}><RefreshCw size={14} /> 轮换 Secret</Button>{/if}<Button variant="ghost" size="sm" requiredCapability="account_mutations" onclick={() => requestDelete(client)}>删除</Button></div>
           </div>
           {#if client.homepage_uri}<a href={client.homepage_uri} target="_blank" rel="noopener noreferrer" class="mt-3 inline-flex items-center gap-1 text-small text-nya-primary hover:underline"><ExternalLink size={13} /> 应用主页</a>{/if}
           {#if !client.is_public}<p class="mt-3 text-small text-nya-text-tertiary">Secret 版本 {client.secret_version}{#if client.secret_hint} · 尾号 {client.secret_hint}{/if}{#if client.secret_rotated_at} · 最近轮换 {new Date(client.secret_rotated_at).toLocaleString()}{/if}</p>{/if}

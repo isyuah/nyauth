@@ -38,6 +38,7 @@ import (
 	"github.com/nyasharp/nyauth/internal/mailruntime"
 	"github.com/nyasharp/nyauth/internal/mediaruntime"
 	"github.com/nyasharp/nyauth/internal/mfa"
+	"github.com/nyasharp/nyauth/internal/oauthops"
 	"github.com/nyasharp/nyauth/internal/observabilityruntime"
 	"github.com/nyasharp/nyauth/internal/provider"
 	"github.com/nyasharp/nyauth/internal/registration"
@@ -75,6 +76,7 @@ type Server struct {
 	auditStore                *audit.Store
 	auditDispatcher           *audit.Dispatcher
 	authorizationStore        *authorization.Store
+	oauthOperations           *oauthops.Store
 	statsHandler              *stats.Handler
 	settingsMgr               *settings.Manager
 	inviteStore               *invite.Store
@@ -134,6 +136,7 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 	userStore := user.NewStoreForRP(db, passkeyRPID)
 	clientStore := client.NewStore(db)
 	authorizationStore := authorization.NewStore(db)
+	oauthOperations := oauthops.NewStore(db)
 	identityStore := identity.NewStoreForRP(db, passkeyRPID)
 	sessionStore := session.NewStore(rdb)
 	deviceAuthorizationStore := deviceauthorization.NewStore(rdb)
@@ -194,7 +197,7 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 	if err != nil {
 		return nil, fmt.Errorf("configuring avatar media service: %w", err)
 	}
-	authHandler := auth.NewHandler(tokenService, jwkManager, userService, clientStore, sessionStore, cfg, settings.MaxAccessTokenTTL)
+	authHandler := auth.NewHandler(tokenService, jwkManager, userService, clientStore, authorizationStore, sessionStore, cfg, settings.MaxAccessTokenTTL)
 	authHandler.SetOAuthPolicySource(settingsMgr.OAuthPolicySnapshot)
 	authHandler.SetDeviceAuthorizationStore(deviceAuthorizationStore)
 	authHandler.SetClientAddressResolver(requestIP)
@@ -243,7 +246,7 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 		operationsSettingsLimiter: NewOperationsSettingsLimiter(rdb),
 		policySettingsLimiter:     NewPolicySettingsLimiter(rdb),
 		mediaMutationLimiter:      NewMediaMutationLimiter(rdb, settingsMgr), auditStore: audit.NewStore(db),
-		authorizationStore: authorizationStore, statsHandler: stats.NewHandler(db, rdb),
+		authorizationStore: authorizationStore, oauthOperations: oauthOperations, statsHandler: stats.NewHandler(db, rdb),
 		settingsMgr: settingsMgr, inviteStore: invite.NewStore(db),
 		registrationStore: registration.NewStore(db), telemetry: telemetryRuntime,
 		mfaService: mfaService, trustedDeviceStore: trusteddevice.NewStore(db),
@@ -330,6 +333,12 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 		return nil, fmt.Errorf("configuring runtime policy metrics: %w", err)
 	}
 	authHandler.SetGrantMetricSink(telemetryRuntime.RecordOAuthGrant)
+	operationSink := func(ctx context.Context, event oauthops.Event) error {
+		event.RequestID = middleware.GetReqID(ctx)
+		return oauthOperations.Record(ctx, event)
+	}
+	authHandler.SetOAuthOperationSink(operationSink)
+	consentHandler.SetOAuthOperationSink(operationSink)
 	providerMgr.SetTelemetrySink(telemetryRuntime.RecordProviderEvent)
 	authHandler.SetSecurityAuditSink(func(ctx context.Context, event auth.SecurityAuditEvent) error {
 		ipAddress, _ := ctx.Value(clientIPContextKey).(string)
@@ -592,6 +601,9 @@ func (s *Server) buildRouter() *chi.Mux {
 			r.Post("/consent/deny", s.consentHandler.DenyConsent)
 			r.Get("/my/clients", s.handleListMyClients)
 			r.With(accountMutations).Post("/my/clients", s.handleCreateMyClient)
+			r.Get("/my/clients/{id}", s.handleGetMyClient)
+			r.Get("/my/clients/{id}/insights", s.handleMyClientInsights)
+			r.Get("/my/clients/{id}/diagnostics", s.handleMyClientDiagnostics)
 			r.With(accountMutations).Put("/my/clients/{id}", s.handleUpdateMyClient)
 			r.With(accountMediaWrites).Post("/my/clients/{id}/logo", s.handleUploadMyClientLogo)
 			r.With(accountMediaWrites).Delete("/my/clients/{id}/logo", s.handleDeleteMyClientLogo)
@@ -688,6 +700,8 @@ func (s *Server) buildRouter() *chi.Mux {
 			r.Get("/admin/clients", clientHandler.List)
 			r.With(adminMutations).Post("/admin/clients", clientHandler.Create)
 			r.Get("/admin/clients/{id}", clientHandler.Get)
+			r.Get("/admin/clients/{id}/insights", s.handleAdminClientInsights)
+			r.Get("/admin/clients/{id}/diagnostics", s.handleAdminClientDiagnostics)
 			r.With(adminMutations).Put("/admin/clients/{id}", clientHandler.Update)
 			r.With(adminMediaWrites).Post("/admin/clients/{id}/logo", s.handleUploadAdminClientLogo)
 			r.With(adminMediaWrites).Delete("/admin/clients/{id}/logo", s.handleDeleteAdminClientLogo)
@@ -703,6 +717,8 @@ func (s *Server) buildRouter() *chi.Mux {
 			r.With(adminMutations).Put("/admin/providers/{id}", s.handleAdminUpdateProvider)
 			r.With(adminMutations).Delete("/admin/providers/{id}", s.handleAdminDeleteProvider)
 			r.Post("/admin/providers/{id}/test", s.handleTestProvider)
+			r.Get("/admin/providers/{id}/diagnostics", s.handleListProviderDiagnostics)
+			r.Post("/admin/providers/{id}/diagnostics/interactive", s.handleProviderInteractiveDiagnostic)
 		})
 	})
 	s.mountWeb(r)

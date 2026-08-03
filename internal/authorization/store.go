@@ -136,30 +136,122 @@ func (s *Store) ListByUser(ctx context.Context, userID uuid.UUID) ([]models.OAut
 	defer rows.Close()
 	items := make([]models.OAuthAuthorization, 0)
 	for rows.Next() {
-		var item models.OAuthAuthorization
-		var logoID *string
-		if err := rows.Scan(
-			&item.ID, &item.UserID, &item.ClientID, &item.ClientName, &item.ClientNameAtGrant, &logoID,
-			&item.HomepageURI, &item.PrivacyPolicyURI, &item.TermsOfServiceURI,
-			&item.HomepageURIAtGrant, &item.PrivacyPolicyURIAtGrant, &item.TermsOfServiceURIAtGrant,
-			&item.ClientIdentityRevision, &item.CurrentIdentityRevision,
-			&item.ClientAuthorizationRevision, &item.CurrentAuthorizationRevision,
-			&item.Scopes, &item.AllowedClaims,
-			&item.GrantedAt, &item.LastUsedAt, &item.RevokedAt, &item.CreatedAt, &item.UpdatedAt,
-		); err != nil {
-			return nil, fmt.Errorf("scanning OAuth authorization: %w", err)
+		item, err := scanAuthorization(rows)
+		if err != nil {
+			return nil, err
 		}
-		if logoID != nil {
-			item.LogoURL = "/media/client-logos/" + *logoID + "/128.webp"
-		}
-		item.ApplicationChanged = item.ClientIdentityRevision != item.CurrentIdentityRevision
-		item.ReauthorizationRequired = item.ClientAuthorizationRevision != item.CurrentAuthorizationRevision
 		items = append(items, item)
 	}
 	if err := rows.Err(); err != nil {
 		return nil, fmt.Errorf("iterating OAuth authorizations: %w", err)
 	}
 	return items, nil
+}
+
+type ListFilter struct {
+	UserID     uuid.UUID
+	Query      string
+	Status     string
+	Pagination models.Pagination
+}
+
+func (filter *ListFilter) normalize() error {
+	if filter.UserID == uuid.Nil {
+		return errors.New("user ID is required")
+	}
+	filter.Query = strings.TrimSpace(filter.Query)
+	if len(filter.Query) > 128 {
+		return errors.New("authorization search query is too long")
+	}
+	switch filter.Status {
+	case "", "valid", "changed", "reauthorization_required", "unused":
+	default:
+		return errors.New("invalid authorization status filter")
+	}
+	filter.Pagination = models.NewPagination(filter.Pagination.Page, filter.Pagination.PageSize)
+	return nil
+}
+
+func (s *Store) ListByUserFiltered(ctx context.Context, filter ListFilter) (*models.PaginatedResponse[models.OAuthAuthorization], error) {
+	if err := filter.normalize(); err != nil {
+		return nil, err
+	}
+	where := []string{"grant_record.user_id=$1", "grant_record.revoked_at IS NULL"}
+	args := []any{filter.UserID}
+	if filter.Query != "" {
+		args = append(args, filter.Query)
+		where = append(where, fmt.Sprintf("(client.name ILIKE '%%' || $%d || '%%' OR grant_record.client_name_snapshot ILIKE '%%' || $%[1]d || '%%' OR grant_record.client_id ILIKE '%%' || $%[1]d || '%%')", len(args)))
+	}
+	switch filter.Status {
+	case "valid":
+		where = append(where, "grant_record.client_identity_revision=client.identity_revision", "grant_record.client_authorization_revision=client.authorization_revision")
+	case "changed":
+		where = append(where, "grant_record.client_identity_revision<>client.identity_revision", "grant_record.client_authorization_revision=client.authorization_revision")
+	case "reauthorization_required":
+		where = append(where, "grant_record.client_authorization_revision<>client.authorization_revision")
+	case "unused":
+		where = append(where, "grant_record.last_used_at IS NULL")
+	}
+	clause := strings.Join(where, " AND ")
+	var total int64
+	if err := s.db.QueryRow(ctx, `SELECT COUNT(*) FROM oauth_authorizations grant_record JOIN oauth_clients client ON client.id=grant_record.client_id WHERE `+clause, args...).Scan(&total); err != nil {
+		return nil, fmt.Errorf("counting OAuth authorizations: %w", err)
+	}
+	args = append(args, filter.Pagination.PageSize, filter.Pagination.Offset())
+	rows, err := s.db.Query(ctx, `
+		SELECT grant_record.id,grant_record.user_id,grant_record.client_id,client.name,
+		       grant_record.client_name_snapshot,client.current_logo_id,
+		       client.homepage_uri,client.privacy_policy_uri,client.terms_of_service_uri,
+		       grant_record.homepage_uri_snapshot,grant_record.privacy_policy_uri_snapshot,grant_record.terms_of_service_uri_snapshot,
+		       grant_record.client_identity_revision,client.identity_revision,
+		       grant_record.client_authorization_revision,client.authorization_revision,
+		       grant_record.scopes,grant_record.allowed_claims,grant_record.granted_at,grant_record.last_used_at,
+		       grant_record.revoked_at,grant_record.created_at,grant_record.updated_at
+		FROM oauth_authorizations AS grant_record
+		JOIN oauth_clients AS client ON client.id=grant_record.client_id
+		WHERE `+clause+`
+		ORDER BY grant_record.last_used_at DESC NULLS LAST,grant_record.granted_at DESC,grant_record.id DESC
+		LIMIT $`+fmt.Sprint(len(args)-1)+` OFFSET $`+fmt.Sprint(len(args)), args...)
+	if err != nil {
+		return nil, fmt.Errorf("listing OAuth authorizations: %w", err)
+	}
+	defer rows.Close()
+	items := make([]models.OAuthAuthorization, 0, filter.Pagination.PageSize)
+	for rows.Next() {
+		item, err := scanAuthorization(rows)
+		if err != nil {
+			return nil, err
+		}
+		items = append(items, item)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterating OAuth authorizations: %w", err)
+	}
+	totalPages := (int(total) + filter.Pagination.PageSize - 1) / filter.Pagination.PageSize
+	return &models.PaginatedResponse[models.OAuthAuthorization]{
+		Items: items, Total: total, Page: filter.Pagination.Page, PageSize: filter.Pagination.PageSize, TotalPages: totalPages,
+	}, nil
+}
+
+func scanAuthorization(row interface{ Scan(...any) error }) (models.OAuthAuthorization, error) {
+	var item models.OAuthAuthorization
+	var logoID *string
+	if err := row.Scan(
+		&item.ID, &item.UserID, &item.ClientID, &item.ClientName, &item.ClientNameAtGrant, &logoID,
+		&item.HomepageURI, &item.PrivacyPolicyURI, &item.TermsOfServiceURI,
+		&item.HomepageURIAtGrant, &item.PrivacyPolicyURIAtGrant, &item.TermsOfServiceURIAtGrant,
+		&item.ClientIdentityRevision, &item.CurrentIdentityRevision,
+		&item.ClientAuthorizationRevision, &item.CurrentAuthorizationRevision,
+		&item.Scopes, &item.AllowedClaims, &item.GrantedAt, &item.LastUsedAt, &item.RevokedAt, &item.CreatedAt, &item.UpdatedAt,
+	); err != nil {
+		return models.OAuthAuthorization{}, fmt.Errorf("scanning OAuth authorization: %w", err)
+	}
+	if logoID != nil {
+		item.LogoURL = "/media/client-logos/" + *logoID + "/128.webp"
+	}
+	item.ApplicationChanged = item.ClientIdentityRevision != item.CurrentIdentityRevision
+	item.ReauthorizationRequired = item.ClientAuthorizationRevision != item.CurrentAuthorizationRevision
+	return item, nil
 }
 
 // GetActive returns the exact grant that can be compared with a new consent

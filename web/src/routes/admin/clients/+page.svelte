@@ -13,6 +13,8 @@
   import Card from '$lib/components/ui/Card.svelte';
   import ConfirmDialog from '$lib/components/ui/ConfirmDialog.svelte';
   import Input from '$lib/components/ui/Input.svelte';
+  import Select from '$lib/components/ui/Select.svelte';
+  import FilterBar from '$lib/components/ui/FilterBar.svelte';
   import Modal from '$lib/components/ui/Modal.svelte';
   import ResourceState from '$lib/components/ui/ResourceState.svelte';
   import AvatarCropper from '$lib/components/account/AvatarCropper.svelte';
@@ -22,7 +24,7 @@
   import ReauthenticationDialog from '$lib/components/account/ReauthenticationDialog.svelte';
   import SecretReveal from '$lib/components/ui/SecretReveal.svelte';
   import { toast } from '$lib/toast';
-  import { ChevronLeft, ChevronRight, ExternalLink, Pencil, Plus, RefreshCw, ShieldCheck, Users } from 'lucide-svelte';
+  import { BarChart3, ChevronLeft, ChevronRight, ExternalLink, Pencil, Plus, RefreshCw, Search, ShieldCheck, Users } from 'lucide-svelte';
   import { ASSIGNMENT_LABELS, claimsForScopes, cloneScopeDefinitions } from '$lib/oauth-catalog';
 
   type ClientForm = {
@@ -72,6 +74,12 @@
   let clients = $state<OAuthClient[]>([]);
   let currentPage = $state(Number.isSafeInteger(requestedPage) && requestedPage > 0 ? requestedPage : 1);
   let total = $state(0);
+  let listQuery = $state('');
+  let typeFilter = $state('');
+  let grantFilter = $state('');
+  let publisherFilter = $state('');
+  let ownershipFilter = $state('');
+  let sortFilter = $state('activity_desc');
   let loading = $state(true);
   let showCreate = $state(false);
   let openingCreate = $state(false);
@@ -359,7 +367,11 @@
     pageError = '';
     try {
       const [response, policy] = await Promise.all([
-        api.admin.getClients(currentPage, pageSize),
+        api.admin.getClients(currentPage, pageSize, {
+          q: listQuery.trim(), type: typeFilter as '' | 'public' | 'confidential', grant: grantFilter,
+          publisherStatus: publisherFilter, ownership: ownershipFilter as '' | 'owned' | 'unowned',
+          sort: sortFilter as 'created_desc' | 'updated_desc' | 'name_asc' | 'activity_desc',
+        }),
         api.admin.getOAuthSettings(),
       ]);
       if (requestVersion !== listRequestVersion) return;
@@ -388,6 +400,10 @@
     const url = new URL($pageStore.url);
     if (currentPage > 1) url.searchParams.set('page', String(currentPage));
     else url.searchParams.delete('page');
+    for (const [key, value] of Object.entries({ q: listQuery.trim(), type: typeFilter, grant: grantFilter, publisher: publisherFilter, ownership: ownershipFilter })) {
+      if (value) url.searchParams.set(key, value); else url.searchParams.delete(key);
+    }
+    if (sortFilter && sortFilter !== 'activity_desc') url.searchParams.set('sort', sortFilter); else url.searchParams.delete('sort');
     const target = `${url.pathname}${url.search}${url.hash}`;
     const current = `${$pageStore.url.pathname}${$pageStore.url.search}${$pageStore.url.hash}`;
     if (target === current) return false;
@@ -400,7 +416,23 @@
     if (key === currentURLKey) return;
     currentURLKey = key;
     currentPage = Math.max(1, Number(url.searchParams.get('page')) || 1);
+    listQuery = url.searchParams.get('q') || '';
+    typeFilter = url.searchParams.get('type') || '';
+    grantFilter = url.searchParams.get('grant') || '';
+    publisherFilter = url.searchParams.get('publisher') || '';
+    ownershipFilter = url.searchParams.get('ownership') || '';
+    sortFilter = url.searchParams.get('sort') || 'activity_desc';
     void loadClients();
+  }
+
+  async function applyListFilters() {
+    currentPage = 1;
+    if (!await syncListURL()) await loadClients();
+  }
+
+  async function clearListFilters() {
+    listQuery = ''; typeFilter = ''; grantFilter = ''; publisherFilter = ''; ownershipFilter = ''; sortFilter = 'activity_desc';
+    await applyListFilters();
   }
 
   async function changePage(nextPage: number) {
@@ -757,6 +789,18 @@
   </div>
 {/if}
 
+<FilterBar label="筛选 OAuth 应用">
+  <form class="grid gap-3 sm:grid-cols-2 xl:grid-cols-6" onsubmit={(event) => { event.preventDefault(); void applyListFilters(); }}>
+    <Input id="client-list-search" label="搜索" bind:value={listQuery} placeholder="名称、Client ID 或 Owner" autocomplete="off" />
+    <Select label="客户端类型" bind:value={typeFilter} options={[{ value: '', label: '全部类型' }, { value: 'public', label: 'Public' }, { value: 'confidential', label: 'Confidential' }]} />
+    <Select label="Grant" bind:value={grantFilter} options={[{ value: '', label: '全部 Grant' }, { value: 'authorization_code', label: '授权码' }, { value: 'urn:ietf:params:oauth:grant-type:device_code', label: '设备授权' }, { value: 'refresh_token', label: 'Refresh Token' }, { value: 'client_credentials', label: 'Client Credentials' }]} />
+    <Select label="发布者状态" bind:value={publisherFilter} options={[{ value: '', label: '全部状态' }, { value: 'verified', label: '已验证' }, { value: 'unverified', label: '未验证' }, { value: 'not_applicable', label: '系统管理' }]} />
+    <Select label="Owner" bind:value={ownershipFilter} options={[{ value: '', label: '全部归属' }, { value: 'owned', label: '已分配' }, { value: 'unowned', label: '未分配' }]} />
+    <Select label="排序" bind:value={sortFilter} options={[{ value: 'activity_desc', label: '最近活动' }, { value: 'updated_desc', label: '最近更新' }, { value: 'created_desc', label: '最近创建' }, { value: 'name_asc', label: '名称 A-Z' }]} />
+    <div class="flex gap-2 sm:col-span-2 xl:col-span-6 xl:justify-end"><Button type="button" variant="ghost" onclick={clearListFilters}>清除</Button><Button type="submit" variant="secondary" loading={loading}><Search size={14} /> 应用筛选</Button></div>
+  </form>
+</FilterBar>
+
 <ResourceState
   {loading}
   error={pageError}
@@ -772,7 +816,7 @@
         <Card>
           <div class="flex flex-col justify-between gap-4 md:flex-row md:items-start">
             <div class="flex min-w-0 items-center gap-3"><OAuthClientLogo name={client.name} url={client.logo_url} size="sm" /><div class="min-w-0"><h2 class="truncate text-card-title text-nya-text-primary">{client.name}</h2><CopyField value={client.id} /></div></div>
-            <div class="flex flex-wrap items-center gap-2">{#if client.is_public}<Badge variant="warning">Public</Badge>{:else}<Badge variant="default">Confidential</Badge><Button variant="secondary" size="sm" requiredCapability="admin_mutations" onclick={() => requestRotation(client)}><RefreshCw size={14} /> 轮换 Secret</Button>{/if}{#if client.access_policy && client.access_policy !== 'open'}<Badge variant="warning">访问：{accessPolicyLabel(client.access_policy)}</Badge>{/if}<Badge variant="primary">{client.grants.join(', ')}</Badge>{#if client.access_policy === 'allowlist'}<Button variant="secondary" size="sm" requiredCapability="admin_mutations" ariaLabel={`管理 ${client.name} 访问名单`} onclick={() => openAccessUsers(client)}><Users size={14} /> 访问名单</Button>{/if}<Button variant="ghost" size="sm" requiredCapability="admin_mutations" loading={openingEditID === client.id} disabled={openingEditID !== null && openingEditID !== client.id} onclick={() => openEdit(client)}><Pencil size={14} /> 编辑</Button><Button variant="ghost" size="sm" requiredCapability="admin_mutations" onclick={() => requestDelete(client)}>删除</Button></div>
+            <div class="flex flex-wrap items-center gap-2"><Button variant="soft" size="sm" onclick={() => goto(`/admin/clients/${encodeURIComponent(client.id)}`)}><BarChart3 size={14} /> 数据与诊断</Button>{#if client.is_public}<Badge variant="warning">Public</Badge>{:else}<Badge variant="default">Confidential</Badge><Button variant="secondary" size="sm" requiredCapability="admin_mutations" onclick={() => requestRotation(client)}><RefreshCw size={14} /> 轮换 Secret</Button>{/if}{#if client.access_policy && client.access_policy !== 'open'}<Badge variant="warning">访问：{accessPolicyLabel(client.access_policy)}</Badge>{/if}<Badge variant="primary">{client.grants.join(', ')}</Badge>{#if client.access_policy === 'allowlist'}<Button variant="secondary" size="sm" requiredCapability="admin_mutations" ariaLabel={`管理 ${client.name} 访问名单`} onclick={() => openAccessUsers(client)}><Users size={14} /> 访问名单</Button>{/if}<Button variant="ghost" size="sm" requiredCapability="admin_mutations" loading={openingEditID === client.id} disabled={openingEditID !== null && openingEditID !== client.id} onclick={() => openEdit(client)}><Pencil size={14} /> 编辑</Button><Button variant="ghost" size="sm" requiredCapability="admin_mutations" onclick={() => requestDelete(client)}>删除</Button></div>
           </div>
           {#if client.homepage_uri || client.privacy_policy_uri || client.terms_of_service_uri}
             <div class="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-small">
@@ -781,7 +825,7 @@
               {#if client.terms_of_service_uri}<a href={client.terms_of_service_uri} target="_blank" rel="noopener noreferrer" class="text-nya-primary hover:underline">服务条款</a>{/if}
             </div>
           {/if}
-          <div class="mt-3 flex flex-wrap items-center justify-between gap-2"><p class="min-w-0 text-small text-nya-text-tertiary">Owner：<code class="break-all font-mono">{client.owner_id || '未分配'}</code> · Client 类型为只读，创建后不可更改。</p><Button variant="secondary" size="sm" requiredCapability="admin_mutations" ariaLabel={`管理 ${client.name} Owner`} onclick={() => openOwnerManager(client)}><Users size={14} /> 管理 Owner</Button></div>
+          <div class="mt-3 grid gap-3 rounded-nya-sm bg-nya-surface-muted/60 px-3 py-2 sm:grid-cols-2 xl:grid-cols-5"><div><p class="text-micro text-nya-text-tertiary">Owner</p><p class="truncate text-small text-nya-text-primary">{client.owner_username ? `@${client.owner_username}` : '未分配'}</p></div><div><p class="text-micro text-nya-text-tertiary">活动授权</p><p class="text-small tabular-nums text-nya-text-primary">{client.authorization_count || 0}</p></div><div><p class="text-micro text-nya-text-tertiary">近 7 天成功</p><p class="text-small tabular-nums text-nya-success">{client.success_count_7d || 0}</p></div><div><p class="text-micro text-nya-text-tertiary">近 7 天失败</p><p class="text-small tabular-nums text-nya-danger">{client.failure_count_7d || 0}</p></div><div class="flex items-end justify-between gap-2"><p class="text-micro text-nya-text-tertiary">{client.last_activity_at ? `最近 ${new Date(client.last_activity_at).toLocaleString()}` : '暂无 OAuth 活动'}</p><Button variant="ghost" size="sm" requiredCapability="admin_mutations" ariaLabel={`管理 ${client.name} Owner`} onclick={() => openOwnerManager(client)}><Users size={14} /> Owner</Button></div></div>
           <div class="mt-3 flex flex-wrap items-center justify-between gap-3 rounded-nya-sm bg-nya-surface-soft px-3 py-2">
             <div class="min-w-0">
               <div class="flex flex-wrap items-center gap-2">

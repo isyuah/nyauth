@@ -80,9 +80,10 @@ func TestOAuthAuthorizeAndConsentSecuritySemantics(t *testing.T) {
 	userService := user.NewService(user.NewStore(schema.pool))
 	tokenService := auth.NewTokenService(jwkManager, sessionStore, cfg.Auth.Issuer, cfg.Auth.AccessTokenTTL, cfg.Auth.RefreshTokenTTL)
 	tokenService.SetUserService(userService)
+	authorizationStore := authorization.NewStore(schema.pool)
 	fixture := &oauthConsentSecurityFixture{
-		authorizeHandler: auth.NewHandler(tokenService, jwkManager, userService, clientStore, sessionStore, cfg),
-		consentHandler:   auth.NewConsentHandler(sessionStore, tokenService, clientStore, authorization.NewStore(schema.pool), cfg),
+		authorizeHandler: auth.NewHandler(tokenService, jwkManager, userService, clientStore, authorizationStore, sessionStore, cfg),
+		consentHandler:   auth.NewConsentHandler(sessionStore, tokenService, clientStore, authorizationStore, cfg),
 		tokenService:     tokenService,
 		sessions:         sessionStore,
 	}

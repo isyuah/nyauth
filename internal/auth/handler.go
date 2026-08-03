@@ -20,10 +20,12 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/nyasharp/nyauth/internal/authorization"
 	"github.com/nyasharp/nyauth/internal/client"
 	"github.com/nyasharp/nyauth/internal/config"
 	internalcrypto "github.com/nyasharp/nyauth/internal/crypto"
 	"github.com/nyasharp/nyauth/internal/deviceauthorization"
+	"github.com/nyasharp/nyauth/internal/oauthops"
 	"github.com/nyasharp/nyauth/internal/session"
 	"github.com/nyasharp/nyauth/internal/settings"
 	"github.com/nyasharp/nyauth/internal/user"
@@ -54,6 +56,7 @@ type SecurityAuditEvent struct {
 
 type SecurityAuditSink func(context.Context, SecurityAuditEvent) error
 type GrantMetricSink func(context.Context, string, string, string)
+type OAuthOperationSink func(context.Context, oauthops.Event) error
 type BrowserSessionResolver func(http.ResponseWriter, *http.Request) (*session.SessionData, error)
 type ClientAddressResolver func(*http.Request) string
 
@@ -62,10 +65,12 @@ type Handler struct {
 	jwkManager         *JWKManager
 	userService        *user.Service
 	clientStore        *client.Store
+	authorizationStore *authorization.Store
 	sessionStore       *session.Store
 	config             *config.Config
 	auditSink          SecurityAuditSink
 	metricSink         GrantMetricSink
+	operationSink      OAuthOperationSink
 	issuanceMiddleware func(http.Handler) http.Handler
 	sessionResolver    BrowserSessionResolver
 	oauthPolicySource  func() settings.Versioned[settings.OAuthPolicy]
@@ -73,7 +78,7 @@ type Handler struct {
 	clientAddress      ClientAddressResolver
 }
 
-func NewHandler(tokenService *TokenService, jwkManager *JWKManager, userService *user.Service, clientStore *client.Store, sessionStore *session.Store, cfg *config.Config, maximumAccessTTLs ...time.Duration) *Handler {
+func NewHandler(tokenService *TokenService, jwkManager *JWKManager, userService *user.Service, clientStore *client.Store, authorizationStore *authorization.Store, sessionStore *session.Store, cfg *config.Config, maximumAccessTTLs ...time.Duration) *Handler {
 	tokenService.SetUserService(userService)
 	tokenService.SetAccessPolicyChecker(clientStore)
 	tokenService.SetAuthorizationCodeFallback(cfg.Auth.AuthorizationCodeTTL)
@@ -86,11 +91,18 @@ func NewHandler(tokenService *TokenService, jwkManager *JWKManager, userService 
 	if err := jwkManager.Configure(cfg.Auth.MasterKey, verificationTTL); err != nil {
 		panic("invalid validated JWK configuration: " + err.Error())
 	}
-	return &Handler{tokenService: tokenService, jwkManager: jwkManager, userService: userService, clientStore: clientStore, sessionStore: sessionStore, config: cfg}
+	return &Handler{
+		tokenService: tokenService, jwkManager: jwkManager, userService: userService,
+		clientStore: clientStore, authorizationStore: authorizationStore,
+		sessionStore: sessionStore, config: cfg,
+	}
 }
 
 func (h *Handler) SetSecurityAuditSink(sink SecurityAuditSink) { h.auditSink = sink }
 func (h *Handler) SetGrantMetricSink(sink GrantMetricSink)     { h.metricSink = sink }
+func (h *Handler) SetOAuthOperationSink(sink OAuthOperationSink) {
+	h.operationSink = sink
+}
 func (h *Handler) SetIssuanceMiddleware(middleware func(http.Handler) http.Handler) {
 	h.issuanceMiddleware = middleware
 }
@@ -137,6 +149,28 @@ func (h *Handler) recordSecurityAudit(ctx context.Context, event SecurityAuditEv
 	}
 }
 
+func (h *Handler) recordOAuthOperation(ctx context.Context, event oauthops.Event) {
+	if h.operationSink == nil || strings.TrimSpace(event.ClientID) == "" {
+		return
+	}
+	if err := h.operationSink(ctx, event); err != nil {
+		slog.ErrorContext(ctx, "OAuth operation recording failed",
+			"client_id", event.ClientID,
+			"flow", event.Flow,
+			"stage", event.Stage,
+			"outcome", event.Outcome,
+			"error", err,
+		)
+	}
+}
+
+func (h *Handler) recordAuthorizationOperation(ctx context.Context, clientID string, outcome oauthops.Outcome, reason oauthops.Reason, redirectURI string, scopes []string) {
+	h.recordOAuthOperation(ctx, oauthops.Event{
+		ClientID: clientID, Flow: oauthops.FlowAuthorizationCode, Stage: oauthops.StageAuthorization,
+		Outcome: outcome, Reason: reason, RedirectURI: redirectURI, Scopes: scopes,
+	})
+}
+
 func (h *Handler) recordGrantAudit(ctx context.Context, event, grantType, clientID, result, riskLevel, reason string) {
 	grantType = normalizedGrantType(grantType)
 	reason = strings.TrimSpace(reason)
@@ -160,6 +194,14 @@ func (h *Handler) recordGrantAudit(ctx context.Context, event, grantType, client
 		Result: result, RiskLevel: riskLevel, Details: details,
 	}
 	h.recordSecurityAudit(ctx, securityEvent)
+	if flow, ok := oauthops.FlowForGrant(grantType); ok && clientID != "" {
+		operation := oauthops.Event{ClientID: clientID, Flow: flow, Stage: oauthops.StageToken, Outcome: oauthops.Outcome(result)}
+		if result != string(oauthops.OutcomeSuccess) {
+			operation.Outcome = oauthops.OutcomeFailure
+			operation.Reason = oauthops.ReasonForGrantFailure(reason)
+		}
+		h.recordOAuthOperation(ctx, operation)
+	}
 }
 
 func (h *Handler) recordTokenRevocationAudit(ctx context.Context, clientID string, authenticated bool, result, riskLevel, reason string) {
@@ -323,30 +365,40 @@ func (h *Handler) Authorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	cl, err := h.clientStore.GetByID(r.Context(), clientID)
-	if err != nil || !cl.HasRedirectURI(redirectURI) {
+	if err != nil {
+		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "invalid client or redirect_uri")
+		return
+	}
+	if !cl.HasRedirectURI(redirectURI) {
+		h.recordAuthorizationOperation(r.Context(), cl.ID, oauthops.OutcomeFailure, oauthops.ReasonRedirectURIMismatch, redirectURI, nil)
 		writeOAuthError(w, http.StatusBadRequest, "invalid_request", "invalid client or redirect_uri")
 		return
 	}
 	state := q.Get("state")
 	if !validOAuthOpaqueParameter(state, maxOAuthStateBytes, true) {
+		h.recordAuthorizationOperation(r.Context(), cl.ID, oauthops.OutcomeFailure, oauthops.ReasonInvalidState, redirectURI, nil)
 		h.redirectAuthorizeError(w, r, redirectURI, "", "invalid_request")
 		return
 	}
 	if !cl.HasGrant(models.GrantAuthorizationCode) {
+		h.recordAuthorizationOperation(r.Context(), cl.ID, oauthops.OutcomeFailure, oauthops.ReasonGrantNotAllowed, redirectURI, nil)
 		h.redirectAuthorizeError(w, r, redirectURI, state, "unauthorized_client")
 		return
 	}
 	scopes, err := parseAndValidateScopes(q.Get("scope"), cl.Scopes)
 	if err != nil {
+		h.recordAuthorizationOperation(r.Context(), cl.ID, oauthops.OutcomeFailure, oauthops.ReasonInvalidScope, redirectURI, nil)
 		h.redirectAuthorizeError(w, r, redirectURI, state, "invalid_scope")
 		return
 	}
 	if containsScope(scopes, "offline_access") && !cl.HasGrant(models.GrantRefreshToken) {
+		h.recordAuthorizationOperation(r.Context(), cl.ID, oauthops.OutcomeFailure, oauthops.ReasonInvalidScope, redirectURI, scopes)
 		h.redirectAuthorizeError(w, r, redirectURI, state, "invalid_scope")
 		return
 	}
 	optionalScopes := intersectScopes(scopes, cl.OptionalScopes)
 	if len(scopes) > 0 && len(optionalScopes) == len(scopes) {
+		h.recordAuthorizationOperation(r.Context(), cl.ID, oauthops.OutcomeFailure, oauthops.ReasonInvalidScope, redirectURI, scopes)
 		h.redirectAuthorizeError(w, r, redirectURI, state, "invalid_scope")
 		return
 	}
@@ -355,11 +407,13 @@ func (h *Handler) Authorize(w http.ResponseWriter, r *http.Request) {
 	scopeDetails := scopeDetailsForScopes(scopes, oauthPolicy)
 	challenge, method := q.Get("code_challenge"), q.Get("code_challenge_method")
 	if method != "S256" || !validPKCEChallenge(challenge) {
+		h.recordAuthorizationOperation(r.Context(), cl.ID, oauthops.OutcomeFailure, oauthops.ReasonInvalidPKCE, redirectURI, scopes)
 		h.redirectAuthorizeError(w, r, redirectURI, state, "invalid_request")
 		return
 	}
 	nonce := q.Get("nonce")
 	if !validOAuthOpaqueParameter(nonce, maxOIDCNonceBytes, !containsScope(scopes, "openid")) {
+		h.recordAuthorizationOperation(r.Context(), cl.ID, oauthops.OutcomeFailure, oauthops.ReasonInvalidNonce, redirectURI, scopes)
 		h.redirectAuthorizeError(w, r, redirectURI, state, "invalid_request")
 		return
 	}
@@ -376,6 +430,7 @@ func (h *Handler) Authorize(w http.ResponseWriter, r *http.Request) {
 	}
 	allowed, err := h.clientStore.UserMayAccess(r.Context(), cl.ID, currentUser.ID.String())
 	if err != nil {
+		h.recordAuthorizationOperation(r.Context(), cl.ID, oauthops.OutcomeFailure, oauthops.ReasonServerError, redirectURI, scopes)
 		writeOAuthError(w, http.StatusInternalServerError, "server_error", "failed to evaluate client access policy")
 		return
 	}
@@ -385,11 +440,13 @@ func (h *Handler) Authorize(w http.ResponseWriter, r *http.Request) {
 			AggregateType: "client", AggregateID: cl.ID, Result: "failure", RiskLevel: "medium",
 			Details: map[string]any{"access_policy": cl.AccessPolicy},
 		})
+		h.recordAuthorizationOperation(r.Context(), cl.ID, oauthops.OutcomeFailure, oauthops.ReasonAccessDenied, redirectURI, scopes)
 		h.redirectAuthorizeError(w, r, redirectURI, state, "access_denied")
 		return
 	}
 	consentChallenge, err := internalcrypto.GenerateRandomString(32)
 	if err != nil {
+		h.recordAuthorizationOperation(r.Context(), cl.ID, oauthops.OutcomeFailure, oauthops.ReasonServerError, redirectURI, scopes)
 		writeOAuthError(w, http.StatusInternalServerError, "server_error", "failed to create consent challenge")
 		return
 	}
@@ -398,9 +455,11 @@ func (h *Handler) Authorize(w http.ResponseWriter, r *http.Request) {
 		State: state, CodeChallenge: challenge, ChallengeMethod: "S256", Nonce: nonce, AuthVersion: currentUser.AuthVersion,
 		ClientIdentityRevision: cl.IdentityRevision, ClientAuthorizationRevision: cl.AuthorizationRevision}
 	if err := h.sessionStore.SaveConsent(r.Context(), consentChallenge, data, 10*time.Minute); err != nil {
+		h.recordAuthorizationOperation(r.Context(), cl.ID, oauthops.OutcomeFailure, oauthops.ReasonServerError, redirectURI, scopes)
 		writeOAuthError(w, http.StatusInternalServerError, "server_error", "failed to persist consent challenge")
 		return
 	}
+	h.recordAuthorizationOperation(r.Context(), cl.ID, oauthops.OutcomeSuccess, oauthops.ReasonNone, redirectURI, scopes)
 	http.Redirect(w, r, "/consent?challenge="+url.QueryEscape(consentChallenge), http.StatusFound)
 }
 
@@ -534,7 +593,19 @@ func normalizedClientRevision(revision int64) int64 {
 }
 
 func (h *Handler) rejectAuthorizationCodeReuse(w http.ResponseWriter, r *http.Request, stored *session.AuthorizationData) {
-	if _, err := h.sessionStore.RevokeUserClientAuthorization(r.Context(), stored.UserID, stored.ClientID, h.tokenService.RevocationTTL()+5*time.Minute); err != nil {
+	revokedAt, err := h.sessionStore.RevokeUserClientAuthorization(r.Context(), stored.UserID, stored.ClientID, h.tokenService.RevocationTTL()+5*time.Minute)
+	if err != nil {
+		h.recordGrantAudit(r.Context(), models.AuditTokenGrantFailed, models.GrantAuthorizationCode, stored.ClientID, "failure", "critical", "code_reuse_revocation_failed")
+		writeTokenError(w, http.StatusInternalServerError, "server_error", "authorization code reuse could not be contained")
+		return
+	}
+	userID, parseErr := uuid.Parse(stored.UserID)
+	if parseErr != nil {
+		h.recordGrantAudit(r.Context(), models.AuditTokenGrantFailed, models.GrantAuthorizationCode, stored.ClientID, "failure", "critical", "code_reuse_revocation_failed")
+		writeTokenError(w, http.StatusInternalServerError, "server_error", "authorization code reuse could not be contained")
+		return
+	}
+	if err := h.authorizationStore.Revoke(r.Context(), userID, stored.ClientID, time.UnixMicro(revokedAt).UTC()); err != nil && !authorization.IsNotFound(err) {
 		h.recordGrantAudit(r.Context(), models.AuditTokenGrantFailed, models.GrantAuthorizationCode, stored.ClientID, "failure", "critical", "code_reuse_revocation_failed")
 		writeTokenError(w, http.StatusInternalServerError, "server_error", "authorization code reuse could not be contained")
 		return

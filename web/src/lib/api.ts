@@ -234,6 +234,11 @@ export interface OAuthClient {
   secret_rotated_at?: string | null;
   secret_last_used_at?: string | null;
   owner_id?: string | null;
+  owner_username?: string | null;
+  authorization_count?: number;
+  success_count_7d?: number;
+  failure_count_7d?: number;
+  last_activity_at?: string | null;
   publisher_type: OAuthPublisherType;
   publisher_verification_status: OAuthPublisherVerificationStatus;
   publisher_verified_at?: string | null;
@@ -379,13 +384,77 @@ export interface UpdateProviderInput {
 }
 
 export interface ProviderTestResult {
+  run_id: string;
   provider: string;
+  provider_revision: number;
   type: string;
   configuration_valid: boolean;
   authorization_endpoint_valid: boolean;
   discovery_reachable?: boolean;
   latency_ms?: number;
   message: string;
+  checks: ProviderDiagnosticCheck[];
+  created_at: string;
+}
+
+export interface ProviderDiagnosticCheck {
+  key: string;
+  status: 'passed' | 'failed' | 'skipped';
+  message: string;
+  latency_ms: number;
+}
+
+export interface ProviderDiagnosticRun {
+  id: string;
+  provider_revision: number;
+  mode: 'preflight' | 'interactive';
+  result: 'success' | 'failure';
+  checks: ProviderDiagnosticCheck[];
+  created_at: string;
+}
+
+export type OAuthOperationFlow = 'authorization_code' | 'client_credentials' | 'refresh_token' | 'device_authorization';
+export type OAuthOperationStage = 'authorization' | 'consent' | 'token' | 'device_authorization' | 'device_verification';
+
+export interface OAuthClientInsights {
+  client_id: string;
+  days: number;
+  timezone: 'UTC';
+  totals: { success: number; failure: number; total: number; success_rate: number | null };
+  active_authorizations: number;
+  last_success_at?: string | null;
+  last_failure_at?: string | null;
+  trend: Array<{ day: string; success: number; failure: number }>;
+  breakdown: Array<{ flow: OAuthOperationFlow; stage: OAuthOperationStage; success: number; failure: number }>;
+}
+
+export interface OAuthClientDiagnostic {
+  id: string;
+  occurred_at: string;
+  request_id?: string | null;
+  flow: OAuthOperationFlow;
+  stage: OAuthOperationStage;
+  reason: string;
+  redirect_uri?: string | null;
+  scopes: string[];
+}
+
+export interface OAuthClientListFilters {
+  q?: string;
+  type?: '' | 'public' | 'confidential';
+  grant?: string;
+  accessPolicy?: string;
+  publisherStatus?: string;
+  ownership?: '' | 'owned' | 'unowned';
+  sort?: 'created_desc' | 'updated_desc' | 'name_asc' | 'activity_desc';
+}
+
+export interface OAuthDiagnosticFilters {
+  flow?: string;
+  stage?: string;
+  reason?: string;
+  page?: number;
+  pageSize?: number;
 }
 
 export interface PaginatedResponse<T> {
@@ -1814,6 +1883,9 @@ export function normalizeOAuthClient<T extends OAuthClient>(client: T): T {
     scopes: normalizedStringArray(client.scopes),
     optional_scopes: normalizedStringArray(client.optional_scopes),
     allowed_claims: normalizedStringArray(client.allowed_claims),
+    authorization_count: Number.isFinite(client.authorization_count) ? Number(client.authorization_count) : 0,
+    success_count_7d: Number.isFinite(client.success_count_7d) ? Number(client.success_count_7d) : 0,
+    failure_count_7d: Number.isFinite(client.failure_count_7d) ? Number(client.failure_count_7d) : 0,
   };
 }
 
@@ -1997,9 +2069,12 @@ export const api = {
     body: JSON.stringify({ new_password: newPassword }),
   }),
   deleteMyIdentity: (identityID: string) => req<SessionInfo>(`/api/me/identities/${encodeURIComponent(identityID)}`, { method: 'DELETE' }),
-  getMyAuthorizations: async () => {
-    const authorizations = await req<OAuthAuthorization[]>('/api/me/authorizations');
-    return (Array.isArray(authorizations) ? authorizations : []).map(normalizeOAuthAuthorization);
+  getMyAuthorizations: async (filters: { q?: string; status?: string; page?: number; pageSize?: number } = {}) => {
+    const params = new URLSearchParams({ page: String(filters.page || 1), page_size: String(filters.pageSize || 20) });
+    if (filters.q) params.set('q', filters.q);
+    if (filters.status) params.set('status', filters.status);
+    const result = await req<PaginatedResponse<OAuthAuthorization>>(`/api/me/authorizations?${params}`);
+    return { ...result, items: (Array.isArray(result.items) ? result.items : []).map(normalizeOAuthAuthorization) };
   },
   revokeMyAuthorization: (clientID: string) => req<void>(`/api/me/authorizations/${encodeURIComponent(clientID)}`, { method: 'DELETE' }),
   discovery: () => req<OIDCDiscoveryDocument>('/.well-known/openid-configuration', {}, false),
@@ -2044,6 +2119,15 @@ export const api = {
     getClients: async () => {
       const result = await req<MyClientPage>('/api/my/clients', { cache: 'no-store' });
       return { ...result, items: (Array.isArray(result.items) ? result.items : []).map(normalizeOAuthClient) };
+    },
+    getClient: async (id: string) => normalizeOAuthClient(await req<OAuthClient>(`/api/my/clients/${encodeURIComponent(id)}`, { cache: 'no-store' })),
+    getClientInsights: (id: string, days = 30) => req<OAuthClientInsights>(`/api/my/clients/${encodeURIComponent(id)}/insights?days=${days}`, { cache: 'no-store' }),
+    getClientDiagnostics: (id: string, filters: OAuthDiagnosticFilters = {}) => {
+      const params = new URLSearchParams({ page: String(filters.page || 1), page_size: String(filters.pageSize || 20) });
+      if (filters.flow) params.set('flow', filters.flow);
+      if (filters.stage) params.set('stage', filters.stage);
+      if (filters.reason) params.set('reason', filters.reason);
+      return req<PaginatedResponse<OAuthClientDiagnostic>>(`/api/my/clients/${encodeURIComponent(id)}/diagnostics?${params}`, { cache: 'no-store' });
     },
     createClient: async (data: CreateClientInput) => normalizeOAuthClient(await req<CreateClientResult>('/api/my/clients', { method: 'POST', body: JSON.stringify(data) })),
     updateClient: async (id: string, data: UpdateClientInput) => normalizeOAuthClient(await req<OAuthClient>(`/api/my/clients/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(data) })),
@@ -2225,11 +2309,27 @@ export const api = {
     revokeUserSession: (id: string, sessionID: string) =>
       req<void>(`/api/admin/users/${encodeURIComponent(id)}/sessions/${encodeURIComponent(sessionID)}`, { method: 'DELETE' }),
     revokeUserSessions: (id: string) => req<{ revoked: number }>(`/api/admin/users/${encodeURIComponent(id)}/sessions`, { method: 'DELETE' }),
-    getClients: async (page = 1, pageSize = 20) => {
-      const result = await req<PaginatedResponse<OAuthClient>>(`/api/admin/clients?page=${page}&page_size=${pageSize}`);
+    getClients: async (page = 1, pageSize = 20, filters: OAuthClientListFilters = {}) => {
+      const params = new URLSearchParams({ page: String(page), page_size: String(pageSize) });
+      if (filters.q) params.set('q', filters.q);
+      if (filters.type) params.set('type', filters.type);
+      if (filters.grant) params.set('grant', filters.grant);
+      if (filters.accessPolicy) params.set('access_policy', filters.accessPolicy);
+      if (filters.publisherStatus) params.set('publisher_status', filters.publisherStatus);
+      if (filters.ownership) params.set('ownership', filters.ownership);
+      if (filters.sort) params.set('sort', filters.sort);
+      const result = await req<PaginatedResponse<OAuthClient>>(`/api/admin/clients?${params}`);
       return { ...result, items: (Array.isArray(result.items) ? result.items : []).map(normalizeOAuthClient) };
     },
     getClient: async (id: string) => normalizeOAuthClient(await req<OAuthClient>(`/api/admin/clients/${encodeURIComponent(id)}`, { cache: 'no-store' })),
+    getClientInsights: (id: string, days = 30) => req<OAuthClientInsights>(`/api/admin/clients/${encodeURIComponent(id)}/insights?days=${days}`, { cache: 'no-store' }),
+    getClientDiagnostics: (id: string, filters: OAuthDiagnosticFilters = {}) => {
+      const params = new URLSearchParams({ page: String(filters.page || 1), page_size: String(filters.pageSize || 20) });
+      if (filters.flow) params.set('flow', filters.flow);
+      if (filters.stage) params.set('stage', filters.stage);
+      if (filters.reason) params.set('reason', filters.reason);
+      return req<PaginatedResponse<OAuthClientDiagnostic>>(`/api/admin/clients/${encodeURIComponent(id)}/diagnostics?${params}`, { cache: 'no-store' });
+    },
     createClient: async (data: CreateClientInput) => normalizeOAuthClient(await req<CreateClientResult>('/api/admin/clients', { method: 'POST', body: JSON.stringify(data) })),
     updateClient: async (id: string, data: UpdateClientInput) => normalizeOAuthClient(await req<OAuthClient>(`/api/admin/clients/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(data) })),
     uploadClientLogo: async (id: string, blob: Blob) => {
@@ -2253,6 +2353,8 @@ export const api = {
     createProvider: (data: CreateProviderInput) => req<ExternalProvider>('/api/admin/providers', { method: 'POST', body: JSON.stringify(data) }),
     updateProvider: (id: string, data: UpdateProviderInput) => req<ExternalProvider>(`/api/admin/providers/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify(data) }),
     testProvider: (id: string) => req<ProviderTestResult>(`/api/admin/providers/${encodeURIComponent(id)}/test`, { method: 'POST' }),
+    getProviderDiagnostics: (id: string, limit = 10) => req<ProviderDiagnosticRun[]>(`/api/admin/providers/${encodeURIComponent(id)}/diagnostics?limit=${limit}`, { cache: 'no-store' }),
+    startProviderInteractiveDiagnostic: (id: string) => req<{ redirect_url: string }>(`/api/admin/providers/${encodeURIComponent(id)}/diagnostics/interactive`, { method: 'POST' }),
     deleteProvider: (id: string) => req<void>(`/api/admin/providers/${encodeURIComponent(id)}`, { method: 'DELETE' }),
     getAuditLogs: (filters: AuditLogFilters = {}) => {
       const params = buildAuditLogSearchParams(filters);

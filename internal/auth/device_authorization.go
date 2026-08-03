@@ -14,11 +14,19 @@ import (
 	"github.com/google/uuid"
 	internalcrypto "github.com/nyasharp/nyauth/internal/crypto"
 	"github.com/nyasharp/nyauth/internal/deviceauthorization"
+	"github.com/nyasharp/nyauth/internal/oauthops"
 	"github.com/nyasharp/nyauth/internal/session"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
 
 const deviceConsentTTL = 10 * time.Minute
+
+func (h *Handler) recordDeviceAuthorizationOperation(r *http.Request, clientID string, outcome oauthops.Outcome, reason oauthops.Reason, scopes []string) {
+	h.recordOAuthOperation(r.Context(), oauthops.Event{
+		ClientID: clientID, Flow: oauthops.FlowDeviceAuthorization, Stage: oauthops.StageDeviceAuthorization,
+		Outcome: outcome, Reason: reason, Scopes: scopes,
+	})
+}
 
 func (h *Handler) DeviceAuthorization(w http.ResponseWriter, r *http.Request) {
 	setOAuthNoStoreHeaders(w)
@@ -36,11 +44,13 @@ func (h *Handler) DeviceAuthorization(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if !cl.HasGrant(models.GrantDeviceCode) {
+		h.recordDeviceAuthorizationOperation(r, cl.ID, oauthops.OutcomeFailure, oauthops.ReasonGrantNotAllowed, nil)
 		writeOAuthError(w, http.StatusBadRequest, "unauthorized_client", "device authorization grant is not allowed")
 		return
 	}
 	scopes, err := parseAndValidateScopes(r.Form.Get("scope"), cl.Scopes)
 	if err != nil {
+		h.recordDeviceAuthorizationOperation(r, cl.ID, oauthops.OutcomeFailure, oauthops.ReasonInvalidScope, nil)
 		writeOAuthError(w, http.StatusBadRequest, "invalid_scope", "requested scope is not allowed")
 		return
 	}
@@ -48,21 +58,26 @@ func (h *Handler) DeviceAuthorization(w http.ResponseWriter, r *http.Request) {
 		scopes = append([]string(nil), cl.Scopes...)
 	}
 	if containsScope(scopes, "offline_access") && !cl.HasGrant(models.GrantRefreshToken) {
+		h.recordDeviceAuthorizationOperation(r, cl.ID, oauthops.OutcomeFailure, oauthops.ReasonInvalidScope, scopes)
 		writeOAuthError(w, http.StatusBadRequest, "invalid_scope", "offline_access requires refresh_token")
 		return
 	}
 	optionalScopes := intersectScopes(scopes, cl.OptionalScopes)
 	if len(scopes) > 0 && len(optionalScopes) == len(scopes) {
+		h.recordDeviceAuthorizationOperation(r, cl.ID, oauthops.OutcomeFailure, oauthops.ReasonInvalidScope, scopes)
 		writeOAuthError(w, http.StatusBadRequest, "invalid_scope", "at least one requested scope must be required")
 		return
 	}
 	if retry, err := h.deviceStore.ReserveInitiation(r.Context(), clientID, h.requestClientAddress(r)); err != nil {
+		reason := oauthops.ReasonTemporarilyUnavailable
 		if errors.Is(err, deviceauthorization.ErrRateLimited) {
+			reason = oauthops.ReasonRateLimited
 			writeRetryAfter(w, retry)
 			writeOAuthError(w, http.StatusTooManyRequests, "temporarily_unavailable", "too many device authorization requests")
 		} else {
 			writeOAuthError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "device authorization is temporarily unavailable")
 		}
+		h.recordDeviceAuthorizationOperation(r, cl.ID, oauthops.OutcomeFailure, reason, scopes)
 		return
 	}
 	created, err := h.deviceStore.Create(r.Context(), deviceauthorization.CreateInput{
@@ -71,11 +86,13 @@ func (h *Handler) DeviceAuthorization(w http.ResponseWriter, r *http.Request) {
 		ClientIdentityRevision: cl.IdentityRevision, ClientAuthorizationRevision: cl.AuthorizationRevision,
 	})
 	if err != nil {
+		h.recordDeviceAuthorizationOperation(r, cl.ID, oauthops.OutcomeFailure, oauthops.ReasonTemporarilyUnavailable, scopes)
 		writeOAuthError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "device authorization is temporarily unavailable")
 		return
 	}
 	issuer := strings.TrimRight(h.config.Auth.Issuer, "/")
 	verificationURI := issuer + "/device"
+	h.recordDeviceAuthorizationOperation(r, cl.ID, oauthops.OutcomeSuccess, oauthops.ReasonNone, scopes)
 	writeJSON(w, http.StatusOK, map[string]any{
 		"device_code":               created.DeviceCode,
 		"user_code":                 created.UserCode,
@@ -185,6 +202,7 @@ func (h *Handler) handleDeviceCodeGrant(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if !cl.HasGrant(models.GrantDeviceCode) {
+		h.recordGrantAudit(r.Context(), models.AuditTokenGrantFailed, models.GrantDeviceCode, cl.ID, "failure", "medium", "grant_not_allowed")
 		writeTokenError(w, http.StatusBadRequest, "unauthorized_client", "device authorization grant is not allowed")
 		return
 	}
@@ -198,39 +216,48 @@ func (h *Handler) handleDeviceCodeGrant(w http.ResponseWriter, r *http.Request) 
 			writeRetryAfter(w, retry)
 			writeTokenError(w, http.StatusBadRequest, "slow_down", "polling is too frequent")
 		case errors.Is(err, deviceauthorization.ErrAccessDenied):
+			h.recordGrantAudit(r.Context(), models.AuditTokenGrantFailed, models.GrantDeviceCode, cl.ID, "failure", "medium", "access_denied")
 			writeTokenError(w, http.StatusBadRequest, "access_denied", "the user denied the authorization request")
 		case errors.Is(err, deviceauthorization.ErrNotFound):
+			h.recordGrantAudit(r.Context(), models.AuditTokenGrantFailed, models.GrantDeviceCode, cl.ID, "failure", "medium", "expired_token")
 			writeTokenError(w, http.StatusBadRequest, "expired_token", "device code is invalid or expired")
 		default:
+			h.recordGrantAudit(r.Context(), models.AuditTokenGrantFailed, models.GrantDeviceCode, cl.ID, "failure", "high", "temporarily_unavailable")
 			writeTokenError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "device authorization is temporarily unavailable")
 		}
 		return
 	}
 	if normalizedClientRevision(approved.ClientIdentityRevision) != cl.IdentityRevision ||
 		normalizedClientRevision(approved.ClientAuthorizationRevision) != cl.AuthorizationRevision {
+		h.recordGrantAudit(r.Context(), models.AuditTokenGrantFailed, models.GrantDeviceCode, cl.ID, "failure", "high", "expired_token")
 		writeTokenError(w, http.StatusBadRequest, "expired_token", "device authorization is no longer valid")
 		return
 	}
 	if _, err := parseAndValidateScopes(joinScopes(approved.GrantedScopes), cl.Scopes); err != nil {
+		h.recordGrantAudit(r.Context(), models.AuditTokenGrantFailed, models.GrantDeviceCode, cl.ID, "failure", "high", "scope_no_longer_allowed")
 		writeTokenError(w, http.StatusBadRequest, "expired_token", "device authorization scope is no longer allowed")
 		return
 	}
 	currentClaims := claimsForGrantedScopes(approved.GrantedScopes, scopeClaimsForClient(approved.GrantedScopes, cl, h.oauthPolicy()))
 	if !scopesAreSubset(approved.AllowedClaims, currentClaims) {
+		h.recordGrantAudit(r.Context(), models.AuditTokenGrantFailed, models.GrantDeviceCode, cl.ID, "failure", "high", "claim_no_longer_allowed")
 		writeTokenError(w, http.StatusBadRequest, "expired_token", "device authorization claims are no longer allowed")
 		return
 	}
 	userID, err := uuid.Parse(approved.UserID)
 	if err != nil {
+		h.recordGrantAudit(r.Context(), models.AuditTokenGrantFailed, models.GrantDeviceCode, cl.ID, "failure", "high", "invalid_subject")
 		writeTokenError(w, http.StatusBadRequest, "expired_token", "device authorization subject is invalid")
 		return
 	}
 	currentUser, err := h.userService.GetByID(r.Context(), userID)
 	if err != nil || currentUser.Status != models.UserStatusActive || currentUser.AuthVersion != approved.AuthVersion {
+		h.recordGrantAudit(r.Context(), models.AuditTokenGrantFailed, models.GrantDeviceCode, cl.ID, "failure", "high", "inactive_subject")
 		writeTokenError(w, http.StatusBadRequest, "expired_token", "device authorization subject is no longer active")
 		return
 	}
 	if err := h.deviceStore.ConsumeApproved(r.Context(), approved); err != nil {
+		h.recordGrantAudit(r.Context(), models.AuditTokenGrantFailed, models.GrantDeviceCode, cl.ID, "failure", "high", "expired_token")
 		writeTokenError(w, http.StatusBadRequest, "expired_token", "device authorization is invalid or expired")
 		return
 	}
@@ -241,8 +268,10 @@ func (h *Handler) handleDeviceCodeGrant(w http.ResponseWriter, r *http.Request) 
 	)
 	if err != nil {
 		if errors.Is(err, ErrInvalidToken) {
+			h.recordGrantAudit(r.Context(), models.AuditTokenGrantFailed, models.GrantDeviceCode, cl.ID, "failure", "high", "authorization_inactive")
 			writeTokenError(w, http.StatusBadRequest, "expired_token", "authorization is no longer active")
 		} else {
+			h.recordGrantAudit(r.Context(), models.AuditTokenGrantFailed, models.GrantDeviceCode, cl.ID, "failure", "high", "token_issuance_failed")
 			writeTokenError(w, http.StatusInternalServerError, "server_error", "failed to issue token")
 		}
 		return
@@ -253,6 +282,7 @@ func (h *Handler) handleDeviceCodeGrant(w http.ResponseWriter, r *http.Request) 
 			h.userClaimsForAllowed(currentUser, approved.AllowedClaims),
 		)
 		if err != nil {
+			h.recordGrantAudit(r.Context(), models.AuditTokenGrantFailed, models.GrantDeviceCode, cl.ID, "failure", "high", "id_token_issuance_failed")
 			writeTokenError(w, http.StatusInternalServerError, "server_error", "failed to issue ID token")
 			return
 		}

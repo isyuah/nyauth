@@ -22,6 +22,8 @@ import (
 	"github.com/nyasharp/nyauth/internal/database"
 	"github.com/nyasharp/nyauth/internal/humanverification"
 	"github.com/nyasharp/nyauth/internal/mfa"
+	"github.com/nyasharp/nyauth/internal/oauthops"
+	"github.com/nyasharp/nyauth/internal/provider"
 	"github.com/nyasharp/nyauth/internal/recovery"
 	"github.com/nyasharp/nyauth/internal/registration"
 	"github.com/nyasharp/nyauth/internal/server"
@@ -42,7 +44,7 @@ const (
 )
 
 var (
-	version = "0.6.0"
+	version = "0.7.0-dev"
 	commit  = "unknown"
 )
 
@@ -229,6 +231,14 @@ func runAuditMaintenance(cfg *config.Config, includeAvatarMedia bool) error {
 	if err != nil {
 		return err
 	}
+	oauthDiagnostics, oauthDaily, err := oauthops.NewStore(db).Cleanup(ctx, now)
+	if err != nil {
+		return err
+	}
+	providerDiagnostics, err := provider.CleanupDiagnosticRuns(ctx, db, now.Add(-90*24*time.Hour))
+	if err != nil {
+		return err
+	}
 	var cleanedAvatarRows int64
 	if includeAvatarMedia {
 		var mediaStore avatar.BlobStore
@@ -261,6 +271,9 @@ func runAuditMaintenance(cfg *config.Config, includeAvatarMedia bool) error {
 		"deleted_processed_outbox_rows", cleanedOutbox,
 		"released_pending_registrations", registrationCleanup.Released,
 		"deleted_pending_users", registrationCleanup.DeletedUsers,
+		"deleted_oauth_diagnostics", oauthDiagnostics,
+		"deleted_oauth_daily_statistics", oauthDaily,
+		"deleted_provider_diagnostics", providerDiagnostics,
 		"cleaned_avatar_rows", cleanedAvatarRows,
 	)
 	return nil

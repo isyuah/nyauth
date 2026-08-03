@@ -1,15 +1,15 @@
-# nyauth 0.6.0
+# nyauth 0.7.0-dev
 
 统一认证与用户系统，提供 OAuth 2.0 Authorization Server、OpenID Connect Provider 和第一方管理后台。
 
-## 0.3.0 基线与 0.6.0 兼容演进
+## 0.3.0 基线与 0.7.0 开发演进
 
 `0.3.0` 是全新的破坏性开发基线，不提供旧数据库、配置、接口或 SDK 的兼容层：
 
 - 第一方后台仅使用 `HttpOnly + SameSite=Lax` 会话 Cookie，并对修改请求强制校验 CSRF。
 - OAuth 授权码客户端强制使用 PKCE S256；不支持 plain、implicit 或 hybrid 流程。
 - JWT 固定使用 RS256，refresh token 采用 family 轮换与重复使用检测。
-- 数据库以嵌入二进制的 `000001_baseline` 建立破坏性发布基线，并通过兼容的 `000002` 至 `000017_theme_branding` 加法迁移演进；当前 `0.6.0` 要求 schema version 17，可从正式 `0.5.0` 的 schema version 13 依次迁移。服务启动只校验 schema，不再隐式迁移。
+- 数据库以嵌入二进制的 `000001_baseline` 建立破坏性发布基线，并通过兼容的加法迁移演进；当前 `0.7.0-dev` 新增 `000018_oauth_operations`，要求 schema version 18，可从正式 `0.6.0` 的 schema version 17 升级。服务启动只校验 schema，不再隐式迁移。
 - 旧数据库、session、token、JWK、Provider 凭据和 OAuth 客户端注册均不兼容。
 - 旧 Go/TypeScript SDK 已删除；OAuth/OIDC 集成以标准协议和成熟语言库为准。
 
@@ -26,10 +26,11 @@
 - OAuth 发布者可信状态：区分系统管理、用户注册未验证和管理员已审核；Consent 展示可信状态与实际回调来源
 - OAuth 应用身份：受控应用 Logo、主页、隐私政策与服务条款，授权时保存身份快照并提示后续变化
 - OAuth 授权变化：Consent 区分既有与新增 Scope/Claim；Redirect URI、Grant、访问策略或权限收紧会要求用户重新授权
+- OAuth 应用运营：应用级 7/30/90 天成功率与流程趋势、受限失败诊断、所有者隔离，以及管理员应用搜索、类型/Grant/发布者/归属筛选和活动排序
 - 控制面认证：HttpOnly 会话、CSRF、强制首次改密、会话与令牌即时失效
-- 外部身份：GitHub、Google、通用 HTTPS OIDC Provider；不按邮箱自动合并账户
+- 外部身份：GitHub、Google、通用 HTTPS OIDC Provider；不按邮箱自动合并账户；管理员可执行不发送凭据的端点预检和不写入身份/会话的交互诊断
 - 管理后台：用户、客户端、Provider、审计与统计
-- 账户安全中心：设备会话、可信浏览器、受限登录历史、OAuth 授权、近期重新认证、TOTP、Passkey/WebAuthn、一次性恢复码、邮箱验证与密码恢复
+- 账户安全中心：设备会话、可信浏览器、受限登录历史、可搜索和分页的 OAuth 授权详情、近期重新认证、TOTP、Passkey/WebAuthn、一次性恢复码、邮箱验证与密码恢复
 - 自助注册：关闭 / 邀请制 / 开放三种模式，域名白名单与邀请码均为运行时设置
 - 动态邮件：数据库版本化 SMTP 配置、结构化事务邮件模板、真实预览/测试、免重启激活/回滚与共享熔断
 - 全站横幅：信息/警告/严重三级横幅，开始与结束时间可独立省略，浏览器按版本关闭，以及 SSE 实时同步
@@ -346,7 +347,7 @@ OAuth 客户端支持 `post_logout_redirect_uris`。`/end_session` 仅允许跳�
 
 首次使用未绑定的外部身份登录时会创建外部账号，但不会根据 email 自动合并到已有账号。通用 OIDC Provider 的 discovery URL 必须使用 HTTPS。
 
-Provider 不再从 YAML 或环境变量静态加载，只能由管理员写入数据库。Client secret 使用 master key envelope 加密；禁用或删除通过 PostgreSQL `LISTEN/NOTIFY` 刷新其他实例，并由 60 秒 reconciliation 修复丢失通知。Provider 配置检查只表示“配置有效”或“Discovery 可访问”，不伪称上游登录已经成功。
+Provider 不再从 YAML 或环境变量静态加载，只能由管理员写入数据库。Client secret 使用 master key envelope 加密；禁用或删除通过 PostgreSQL `LISTEN/NOTIFY` 刷新其他实例，并由 60 秒 reconciliation 修复丢失通知。Provider 预检会分别报告配置解密、Discovery、授权地址、Token、UserInfo 与 JWKS 的可达性；预检不会向上游发送 Client Secret。只有管理员主动发起交互诊断并在上游完成授权后，系统才会确认凭据交换和字段映射链路；该流程不创建账号、不绑定身份、不建立登录会话，也不保存上游 Token、原始 Claim 或字段值。预检与交互结果保留 90 天。
 
 管理员可为 Provider 启用默认关闭的 `import_avatar`。它只在外部身份首次创建本地用户时异步导入一次，不阻塞登录、后续不持续同步，也绝不覆盖用户主动上传的头像。GitHub 和 Google 使用代码内置的严格图片主机；通用 OIDC 必须配置精确公共 DNS 主机 allowlist。远程获取只允许 HTTPS/443，对每次重定向重新检查主机和全部解析地址，并阻断私网、loopback、link-local、云元数据与 DNS rebinding。上游 URL 使用 master key 加密，完成或最终失败后清空；浏览器只会看到 Nyauth 生成的媒体地址。
 
@@ -368,6 +369,8 @@ Provider 不再从 YAML 或环境变量静态加载，只能由管理员写入�
 - `/admin/oauth/test`：管理员可在生产构建中切换真实 Authorization Code + S256 PKCE 与 Device Authorization 流程，检查 Scope Catalog、Consent、轮询错误、Token 与 UserInfo；Confidential Client Secret 只保存在当前页面内存中。Authorization Code 测试前必须把页面显示的回调地址登记到目标客户端，Device Authorization 不需要 Redirect URI。
 - `GET /api/admin/stats`：快照化的用户、会话、注册、邮件 backlog、24 小时失败尝试和 SMTP 熔断摘要。
 - `GET /api/admin/stats/login-trend`、`registration-trend`、`mail-trend`：按 UTC 返回 7–90 天的补零趋势；注册趋势含邀请预占/消费/释放，邮件趋势区分其他失败尝试（不含永久拒收）、永久拒收与过期。
+- `GET /api/admin/clients/{id}/insights`、`diagnostics`：管理员查看应用级 7–90 天 OAuth 操作统计和最近 90 天的受限失败诊断；应用所有者使用对应的 `/api/my/clients/{id}/...` 接口且不能探测他人应用。
+- `GET /api/admin/providers/{id}/diagnostics`、`POST /api/admin/providers/{id}/test`、`diagnostics/interactive`：查看 Provider 诊断历史、执行无凭据端点预检或启动不改变账号状态的真实交互诊断。
 - `GET /api/admin/audit-logs/options`：返回有界、静态的事件、结果、风险和目标类型筛选目录，不扫描审计分区。
 - `GET /api/admin/audit-logs`：按事件、结果、风险、Actor、模糊 Target、精确 subject user/target、IP 和时间筛选；管理员 DTO 包含 User-Agent，details 会在服务端递归脱敏。
 - `GET /api/admin/audit-logs/export`：复用列表的全部筛选语义，按最多 31 天、50,000 条流式导出 NDJSON 或 CEF；CEF 可导入常见 SIEM。
@@ -387,6 +390,8 @@ Provider 不再从 YAML 或环境变量静态加载，只能由管理员写入�
 主题按当前浏览器保存的“浅色 / 深色 / 跟随系统”偏好解析，不写入账号，也不存在管理员指定的站点默认主题。主题修改无需重启或刷新即可应用；主色、文字模式、Logo 与 favicon 作为运行时品牌设置，通过多实例通知与定时对账同步。服务端根据管理员选择的单一主色生成完整交互色阶，自动模式选择可读文字色，管理员也可强制白色或黑色；管理界面同时预览浅/深主题和 WCAG 对比度。事务邮件使用固定可信 HTML 外壳、当前品牌名称、浅色 Logo、主色及同一文字模式；已经入队的加密邮件不会被后续品牌变更改写。
 
 注册与邮件趋势使用业务事务内的低基数日聚合，后台快照每分钟在 PostgreSQL advisory lock 下刷新。30 日注册完成率按“最近 30 天创建的注册 cohort 中已完成的比例”计算，分母为空时返回 `null`。全新 baseline 会把 `mail_stats_available_from` / `available_from` 初始化为该数据库开始观测邮件投递的时间，不能把此前不存在的数据解释为零。邮件成功投递不会逐封写审计日志；配置、熔断和现有注册/邀请生命周期事件仍按既定审计契约记录。
+
+应用级 OAuth 统计按 UTC 日期、流程和阶段保存低基数聚合，保留 400 天；“成功率”是已记录协议操作检查点的成功占比，不等同于独立用户转化率。失败明细保留 90 天，只使用代码内固定原因目录，回调地址会删除 query 和 fragment，Scope 会去重并限制格式；不会保存 Token、Secret、授权码、PKCE verifier、用户 ID、邮箱或原始错误文本。Device Authorization 正常轮询中的 `authorization_pending` 和 `slow_down` 不计为失败。
 
 未来只有版本化 `/api/v1` 会作为自动化管理契约；在 Service Account、细粒度 scope、audience、幂等键和 OpenAPI 稳定前不发布专有 Management SDK。
 

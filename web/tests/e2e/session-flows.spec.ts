@@ -94,6 +94,8 @@ interface MockState {
   loginHistoryRequests?: number;
   trustedDeviceDeleteCSRF?: string | null;
   authorizationListRequests?: number;
+  authorizationQueries?: string[];
+  authorizations?: Array<typeof oauthAuthorization>;
   adminUserOverviewRequests?: Record<string, number>;
   adminUserSecurityRequests?: Record<string, number>;
   adminUserSessionRequests?: Record<string, number>;
@@ -730,12 +732,34 @@ async function installAPIMocks(page: Page, state: MockState) {
 
     if (path === '/api/me/authorizations' && request.method() === 'GET') {
       state.authorizationListRequests = (state.authorizationListRequests || 0) + 1;
-      await fulfillJSON(route, 200, [oauthAuthorization]);
+      state.authorizationQueries ||= [];
+      state.authorizationQueries.push(requestURL.search);
+      const search = (requestURL.searchParams.get('q') || '').toLowerCase();
+      const status = requestURL.searchParams.get('status') || '';
+      const pageNumber = Math.max(1, Number(requestURL.searchParams.get('page')) || 1);
+      const pageSize = Math.max(1, Number(requestURL.searchParams.get('page_size')) || 20);
+      const filtered = (state.authorizations ?? [oauthAuthorization]).filter((authorization) => {
+        const matchesSearch = !search || authorization.client_name.toLowerCase().includes(search)
+          || authorization.client_id.toLowerCase().includes(search);
+        const currentStatus = authorization.reauthorization_required
+          ? 'reauthorization_required'
+          : authorization.application_changed ? 'changed' : authorization.last_used_at ? 'valid' : 'unused';
+        return matchesSearch && (!status || currentStatus === status);
+      });
+      const start = (pageNumber - 1) * pageSize;
+      await fulfillJSON(route, 200, {
+        items: filtered.slice(start, start + pageSize),
+        total: filtered.length,
+        page: pageNumber,
+        page_size: pageSize,
+        total_pages: Math.ceil(filtered.length / pageSize),
+      });
       return;
     }
 
     if (path === `/api/me/authorizations/${oauthAuthorization.client_id}` && request.method() === 'DELETE') {
       state.authorizationRevokeCSRF = await request.headerValue('x-csrf-token');
+      state.authorizations = [];
       await route.fulfill({ status: 204 });
       return;
     }
@@ -935,7 +959,12 @@ async function installAPIMocks(page: Page, state: MockState) {
       state.adminClientOwnerUpdateBodies.push(body);
       state.adminClientOwnerUpdateCSRFs ||= [];
       state.adminClientOwnerUpdateCSRFs.push(await request.headerValue('x-csrf-token'));
-      await fulfillJSON(route, 200, { ...oauthClient, owner_id: body.owner_id, updated_at: '2026-01-05T00:00:00Z' });
+      await fulfillJSON(route, 200, {
+        ...oauthClient,
+        owner_id: body.owner_id,
+        owner_username: body.owner_id === ownerUser.id ? ownerUser.username : null,
+        updated_at: '2026-01-05T00:00:00Z',
+      });
       return;
     }
 
@@ -1440,6 +1469,7 @@ test('all profile deep links load only their own account data', async ({ page })
   await page.goto('/profile/authorizations');
   await expect(page.getByRole('heading', { name: 'OAuth 应用授权', exact: true, level: 1 })).toBeVisible();
   await expect(page.getByRole('link', { name: '应用授权', exact: true })).toHaveAttribute('aria-current', 'page');
+  await page.getByRole('button', { name: '查看详情' }).click();
   await expect(page.getByText('允许返回的 Claim', { exact: true })).toBeVisible();
   await expect(page.getByText('稳定用户 ID', { exact: false })).toBeVisible();
   await expect.poll(() => state.authorizationListRequests || 0).toBeGreaterThan(0);
@@ -1663,15 +1693,55 @@ test('revoking an OAuth authorization sends CSRF and removes the grant', async (
 
   await page.goto('/profile/authorizations');
   await expect(page.getByText('授权有效', { exact: true })).toBeVisible();
+  await page.getByRole('button', { name: '查看详情' }).click();
   await expect(page.getByRole('link', { name: '应用主页' })).toHaveAttribute('href', 'https://app.example');
   await expect(page.getByText('尚无使用记录')).toHaveCount(0);
-  await page.getByRole('button', { name: '撤销授权' }).click();
-  const dialog = page.getByRole('dialog');
+  await page.getByRole('button', { name: '撤销此应用授权' }).click();
+  const dialog = page.getByRole('dialog', { name: '撤销 OAuth 应用授权' });
   await dialog.getByRole('button', { name: '撤销授权' }).click();
 
   await expect(dialog).toBeHidden();
-  await expect(page.getByText('当前没有活动的 OAuth 应用授权。')).toBeVisible();
+  await expect(page.getByText('没有符合条件的 OAuth 应用授权。')).toBeVisible();
   expect(state.authorizationRevokeCSRF).toBe('csrf-user');
+});
+
+test('OAuth authorizations remain searchable and paginated as the list grows', async ({ page }) => {
+  const authorizations = Array.from({ length: 17 }, (_, index) => ({
+    ...oauthAuthorization,
+    id: `authorization-${index + 1}`,
+    client_id: `application-${index + 1}`,
+    client_name: `Application ${index + 1}`,
+    application_changed: index === 3,
+    reauthorization_required: index === 3,
+  }));
+  const state: MockState = {
+    authenticated: true,
+    mustChangePassword: false,
+    role: 'user',
+    csrfToken: 'csrf-user',
+    authorizations,
+  };
+  await installAPIMocks(page, state);
+
+  await page.goto('/profile/authorizations');
+  await expect(page.getByText('显示 1-15，共 17 条')).toBeVisible();
+  await page.getByRole('button', { name: '下一页' }).click();
+  await expect(page.getByText('Application 16', { exact: true })).toBeVisible();
+  await expect(page).toHaveURL(/page=2/);
+
+  await page.getByLabel('搜索应用').fill('Application 17');
+  await page.getByRole('button', { name: '筛选' }).click();
+  await expect(page.getByText('Application 17', { exact: true })).toBeVisible();
+  await expect(page.getByText('Application 16', { exact: true })).toHaveCount(0);
+  await expect(page).toHaveURL(/q=Application(?:\+|%20)17/);
+
+  await page.getByRole('button', { name: '清除' }).click();
+  await page.getByLabel('授权状态').click();
+  await page.getByRole('option', { name: '需要重新授权' }).click();
+  await page.getByRole('button', { name: '筛选' }).click();
+  await expect(page.getByText('Application 4', { exact: true })).toBeVisible();
+  await expect(page.getByText('Application 1', { exact: true })).toHaveCount(0);
+  expect(state.authorizationQueries?.some((query) => query.includes('status=reauthorization_required'))).toBe(true);
 });
 
 test('client secret rotation requires name confirmation and reveals the new secret once', async ({ page }) => {
@@ -2740,13 +2810,13 @@ test('administrator client pagination is server-backed and preserved in the URL'
   await expect(page.getByRole('heading', { name: 'Client 21' })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Client 1', exact: true })).toHaveCount(0);
   await expect(page.getByText('2 / 2')).toBeVisible();
-  expect(state.adminClientQueries).toContain('?page=2&page_size=20');
+  expect(state.adminClientQueries).toContain('?page=2&page_size=20&sort=activity_desc');
 
   await page.getByRole('button', { name: '上一页' }).click();
   await expect(page).toHaveURL(/\/admin\/clients$/);
   await expect(page.getByRole('heading', { name: 'Client 1', exact: true })).toBeVisible();
   await expect(page.getByRole('heading', { name: 'Client 21' })).toHaveCount(0);
-  expect(state.adminClientQueries).toContain('?page=1&page_size=20');
+  expect(state.adminClientQueries).toContain('?page=1&page_size=20&sort=activity_desc');
 });
 
 test('administrators can select an active owner while creating a client', async ({ page }) => {
@@ -2818,7 +2888,7 @@ test('client owner transfer and removal require exact client-name confirmation',
   await confirmButton.click();
 
   await expect(confirmation).toBeHidden();
-  await expect(page.getByText(ownerUser.id)).toBeVisible();
+  await expect(page.getByText(`@${ownerUser.username}`, { exact: true })).toBeVisible();
   expect(state.adminClientOwnerUpdateBodies).toEqual([{ owner_id: ownerUser.id }]);
 
   await page.getByRole('button', { name: '管理 Example App Owner' }).click();
@@ -2831,7 +2901,7 @@ test('client owner transfer and removal require exact client-name confirmation',
   await confirmButton.click();
 
   await expect(confirmation).toBeHidden();
-  await expect(page.getByText(/Owner：/)).toContainText('未分配');
+  await expect(page.getByText('未分配', { exact: true })).toBeVisible();
   expect(state.adminClientOwnerUpdateBodies).toEqual([{ owner_id: ownerUser.id }, { owner_id: null }]);
   expect(state.adminClientOwnerUpdateCSRFs).toEqual(['csrf-admin', 'csrf-admin']);
 });

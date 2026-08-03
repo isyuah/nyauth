@@ -33,6 +33,11 @@ type OAuthClient struct {
 	IsPublic               bool              `json:"is_public" db:"is_public"`
 	AccessPolicy           string            `json:"access_policy" db:"access_policy"`
 	OwnerID                *string           `json:"owner_id,omitempty" db:"owner_id"`
+	OwnerUsername          *string           `json:"owner_username,omitempty" db:"-"`
+	AuthorizationCount     int64             `json:"authorization_count" db:"-"`
+	SuccessCount7d         int64             `json:"success_count_7d" db:"-"`
+	FailureCount7d         int64             `json:"failure_count_7d" db:"-"`
+	LastActivityAt         *time.Time        `json:"last_activity_at,omitempty" db:"-"`
 	PublisherType          string            `json:"publisher_type" db:"publisher_type"`
 	PublisherVerification  string            `json:"publisher_verification_status" db:"publisher_verification_status"`
 	PublisherVerifiedAt    *time.Time        `json:"publisher_verified_at,omitempty" db:"publisher_verified_at"`

@@ -1130,10 +1130,10 @@ describe('OAuth application identity API contract', () => {
         publisher_type: 'system_managed', verification_status: 'not_applicable',
         new_scopes: null, new_claims: null,
       },
-      [{
+      { items: [{
         id: 'grant', client_id: 'client', client_name: 'Example', scopes: null, allowed_claims: null,
         granted_at: '2026-08-01T00:00:00Z', created_at: '2026-08-01T00:00:00Z', updated_at: '2026-08-01T00:00:00Z',
-      }],
+      }], total: 1, page: 1, page_size: 20, total_pages: 1 },
     ];
     vi.stubGlobal('fetch', vi.fn(async () => new Response(JSON.stringify(responses.shift()), {
       status: 200,
@@ -1145,7 +1145,7 @@ describe('OAuth application identity API contract', () => {
     expect(consent.permissions[0].claims).toEqual([]);
     expect(consent.new_scopes).toEqual([]);
     expect(consent.permissions[0].newly_requested).toBe(false);
-    expect(authorizations[0].scopes).toEqual([]);
-    expect(authorizations[0].client_name_at_grant).toBe('Example');
+    expect(authorizations.items[0].scopes).toEqual([]);
+    expect(authorizations.items[0].client_name_at_grant).toBe('Example');
   });
 });

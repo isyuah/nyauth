@@ -8,6 +8,7 @@ import (
 	"io"
 	"log/slog"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -558,25 +559,22 @@ func (s *Server) handleListMyAuthorizations(w http.ResponseWriter, r *http.Reque
 		writeAPIError(w, http.StatusUnauthorized, "authentication required")
 		return
 	}
-	items, err := s.authorizationStore.ListByUser(r.Context(), current.ID)
+	query := strings.TrimSpace(r.URL.Query().Get("q"))
+	status := strings.TrimSpace(r.URL.Query().Get("status"))
+	if len(query) > 128 || !slices.Contains([]string{"", "valid", "changed", "reauthorization_required", "unused"}, status) {
+		writeAPIError(w, http.StatusBadRequest, "invalid OAuth authorization filter")
+		return
+	}
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	pageSize, _ := strconv.Atoi(r.URL.Query().Get("page_size"))
+	result, err := s.authorizationStore.ListByUserFiltered(r.Context(), authorization.ListFilter{
+		UserID: current.ID, Query: query, Status: status, Pagination: models.NewPagination(page, pageSize),
+	})
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "failed to list OAuth authorizations")
 		return
 	}
-	active := items[:0]
-	for index := range items {
-		revoked, checkErr := s.sessionStore.IsUserClientAuthorizationRevoked(
-			r.Context(), current.ID.String(), items[index].ClientID, items[index].GrantedAt.UnixMicro(),
-		)
-		if checkErr != nil {
-			writeAPIError(w, http.StatusServiceUnavailable, "OAuth authorizations temporarily unavailable")
-			return
-		}
-		if !revoked {
-			active = append(active, items[index])
-		}
-	}
-	writeJSON(w, http.StatusOK, active)
+	writeJSON(w, http.StatusOK, result)
 }
 
 func (s *Server) handleRevokeMyAuthorization(w http.ResponseWriter, r *http.Request) {

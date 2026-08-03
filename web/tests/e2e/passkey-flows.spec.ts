@@ -284,7 +284,13 @@ async function installPasskeyMocks(page: Page, state: PasskeyMockState) {
       return;
     }
     if (path === '/api/me/authorizations' && method === 'GET') {
-      await fulfillJSON(route, 200, []);
+      await fulfillJSON(route, 200, {
+        items: [],
+        total: 0,
+        page: 1,
+        page_size: 20,
+        total_pages: 0,
+      });
       return;
     }
     if (path === '/api/me/mfa' && method === 'GET') {
