@@ -14,6 +14,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/nyasharp/nyauth/internal/crypto"
 	"github.com/nyasharp/nyauth/internal/mfa"
+	"github.com/nyasharp/nyauth/internal/notification"
 	"github.com/nyasharp/nyauth/internal/session"
 	"github.com/nyasharp/nyauth/internal/user"
 	"github.com/nyasharp/nyauth/pkg/models"
@@ -475,6 +476,7 @@ func (s *Server) handleFinishPasskeyRegistration(w http.ResponseWriter, r *http.
 		}
 		return
 	}
+	s.notifySecurityChange(r.Context(), current.ID, notification.TypePasskeyChanged, "Passkey 已添加", "您的账户添加了一个新的 Passkey。", "/profile/security")
 	s.revokeUserSecurityState(r.Context(), current.ID, "passkey_registered")
 	updated, err := s.userService.GetByID(r.Context(), current.ID)
 	if err != nil {
@@ -562,6 +564,7 @@ func (s *Server) handleDeletePasskey(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	s.notifySecurityChange(r.Context(), current.ID, notification.TypePasskeyChanged, "Passkey 已移除", "您的账户移除了一个 Passkey。如果这不是您本人操作，请立即检查账户安全。", "/profile/security")
 	s.revokeUserSecurityState(r.Context(), current.ID, "passkey_removed")
 	updated, err := s.userService.GetByID(r.Context(), current.ID)
 	if err != nil {

@@ -6,6 +6,7 @@
   import BrandLogo from './BrandLogo.svelte';
   import {
     AppWindow,
+    BellRing,
     FlaskConical,
     Gauge,
     KeyRound,
@@ -18,6 +19,7 @@
     Ticket,
     UserRound,
     Users,
+    Megaphone,
   } from 'lucide-svelte';
 
   let {
@@ -42,6 +44,7 @@
     { href: '/admin/providers', icon: KeyRound, label: '身份提供者' },
     { href: '/admin/invites', icon: Ticket, label: '邀请管理' },
     { href: '/admin/audit', icon: ScrollText, label: '审计日志' },
+    { href: '/admin/announcements', icon: Megaphone, label: '公告管理' },
     { href: '/admin/settings/branding', activePrefix: '/admin/settings', icon: Settings, label: '系统设置' },
     { href: '/admin/system', icon: Server, label: '系统状态' },
   ];
@@ -49,6 +52,7 @@
   const userItems = [
     { href: '/dashboard', icon: Gauge, label: '概览' },
     { href: '/dashboard/apps', icon: AppWindow, label: '我的应用' },
+    { href: '/dashboard/messages', icon: BellRing, label: '消息中心' },
     { href: '/profile', icon: UserRound, label: '个人资料' },
   ];
 

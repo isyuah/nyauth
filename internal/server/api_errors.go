@@ -164,6 +164,9 @@ var apiErrorCodesByMessage = map[string]string{
 	"human verification is already disabled":                                             "human_verification.already_disabled",
 	"human verification is already enabled":                                              "human_verification.already_enabled",
 	"human verification settings operation failed":                                       "human_verification.operation_failed",
+	"announcement revision conflict":                                                     "announcement.revision_conflict",
+	"announcement state does not allow this operation":                                   "announcement.invalid_transition",
+	"announcement not found":                                                             "announcement.not_found",
 }
 
 func apiErrorCodeForMessage(message string) string {

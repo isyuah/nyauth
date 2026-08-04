@@ -1,15 +1,15 @@
-# nyauth 0.7.0
+# nyauth 0.8.0-dev
 
 统一认证与用户系统，提供 OAuth 2.0 Authorization Server、OpenID Connect Provider 和第一方管理后台。
 
-## 0.3.0 基线与 0.7.0 开发演进
+## 0.3.0 基线与 0.8.0 开发演进
 
 `0.3.0` 是全新的破坏性开发基线，不提供旧数据库、配置、接口或 SDK 的兼容层：
 
 - 第一方后台仅使用 `HttpOnly + SameSite=Lax` 会话 Cookie，并对修改请求强制校验 CSRF。
 - OAuth 授权码客户端强制使用 PKCE S256；不支持 plain、implicit 或 hybrid 流程。
 - JWT 固定使用 RS256，refresh token 采用 family 轮换与重复使用检测。
-- 数据库以嵌入二进制的 `000001_baseline` 建立破坏性发布基线，并通过兼容的加法迁移演进；正式 `0.7.0` 新增 `000018_oauth_operations`，要求 schema version 18，可从正式 `0.6.0` 的 schema version 17 升级。服务启动只校验 schema，不再隐式迁移。
+- 数据库以嵌入二进制的 `000001_baseline` 建立破坏性发布基线，并通过兼容的加法迁移演进；开发中的 `0.8.0` 新增 `000019_communications_center`，要求 schema version 19，可从正式 `0.7.0` 的 schema version 18 升级。服务启动只校验 schema，不再隐式迁移。
 - 旧数据库、session、token、JWK、Provider 凭据和 OAuth 客户端注册均不兼容。
 - 旧 Go/TypeScript SDK 已删除；OAuth/OIDC 集成以标准协议和成熟语言库为准。
 
@@ -34,6 +34,7 @@
 - 自助注册：关闭 / 邀请制 / 开放三种模式，域名白名单与邀请码均为运行时设置
 - 动态邮件：数据库版本化 SMTP 配置、结构化事务邮件模板、真实预览/测试、免重启激活/回滚与共享熔断
 - 全站横幅：信息/警告/严重三级横幅，开始与结束时间可独立省略，浏览器按版本关闭，以及 SSE 实时同步
+- 公告与站内消息：持久公告支持草稿、计划发布、受众、置顶和 revision 已读回执；账户安全与 OAuth 事件进入个人收件箱，统一消息中心支持分类、搜索、已读、级别和时间筛选，顶部未读数通过 SSE 更新并在断线时轮询恢复
 - 主题与品牌：访问者浏览器本地的浅色、深色、跟随系统偏好，受控主色色阶与文字模式、浅/深 Logo、favicon、认证界面与事务邮件统一品牌；服务端 `/branding.css` 在 SPA 首次绘制前提供当前色阶，避免先显示内置紫色再切换
 - 安全头像：浏览器 1:1 裁剪、服务端重编码、本地持久化或私有 S3、Provider 首次异步导入，以及版本化运行时 S3 配置与可续跑迁移
 - 运行时服务控制：六类能力独立暂停、常用维护预设、多实例排空确认、定时恢复与 CLI 紧急解锁
@@ -216,6 +217,16 @@ Nyauth 只通过 SMTP 发送邮件，不读取邮箱，也不需要 IMAP。生�
 | POST | `/api/logout` | 销毁当前会话 |
 | GET | `/api/me` | 当前用户资料 |
 | PUT | `/api/me` | 修改 display name；界面主题只保存在访问者当前浏览器，不属于账号资料 |
+| GET | `/api/messages` | 统一分页查询可见公告与个人消息，支持类型、已读、级别、文本和时间筛选 |
+| POST | `/api/messages/read-all` | 将全部、仅站内消息或仅公告标为已读 |
+| GET | `/api/announcements` | 分页查看当前用户可见且处于展示窗口内的持久公告 |
+| GET | `/api/announcements/{id}` | 读取公告详情；公开 DTO 不返回 Markdown 源文或编辑者 ID |
+| POST | `/api/announcements/{id}/read` | 按当前公告 revision 保存已读回执 |
+| GET | `/api/notifications` | 分页查看本人的账户安全与 OAuth 站内消息 |
+| GET | `/api/notifications/unread-count` | 返回公告、个人消息及总未读数 |
+| GET | `/api/notifications/events` | 通过 SSE 接收未读数变化；断线时前端回退到轮询 |
+| POST | `/api/notifications/{id}/read` | 将本人指定消息标为已读 |
+| POST | `/api/notifications/read-all` | 将本人全部消息标为已读 |
 | POST | `/api/me/avatar` | 上传浏览器裁剪后的受控头像，返回更新后的用户资料 |
 | DELETE | `/api/me/avatar` | 删除当前头像，返回更新后的用户资料 |
 | GET | `/media/avatars/{avatar_id}/{size}.webp` | 读取 active 头像的 64/128/256/512 WebP 变体 |
@@ -361,6 +372,7 @@ Provider 不再从 YAML 或环境变量静态加载，只能由管理员写入�
 - `GET/PUT /api/admin/settings/branding`、`registration`、`security`、`protection`、`lifecycle`、`oauth`：六组运行时设置统一使用 revision CAS；写入要求近期重新认证、固定保护限流，并与 `settings.updated` 审计同事务提交。品牌设置包含主色、主色文字自动/白色/黑色模式、浅/深 Logo 和 favicon；主色只接受 `#RRGGBB`，资源只接受同源路径或无凭据 HTTPS URL，不允许任意 CSS、HTML、字体或脚本。浅色、深色与跟随系统属于访问者当前浏览器的本地偏好，不由管理员替访问者指定，也不写入用户账号。
 - `GET /api/site-banner`、`GET /api/site-banner/events`：读取全站横幅并通过 SSE 接收实时状态；公开响应不包含设置 revision 或邮件模板。
 - `GET/PUT /api/admin/settings/communications`、邮件模板 `preview/test`、横幅 Markdown `site-banner/preview`：动态管理结构化事务邮件模板和全站横幅。模板只接受受限纯文本字段与按字段授权的变量，动作链接和安全提示由服务端生成；测试邮件只能发往当前管理员已验证邮箱。
+- `GET/POST/PUT /api/admin/announcements` 及 `publish/archive/preview`：管理持久公告草稿、受众、展示窗口和发布状态；修改使用 CAS revision，创建、更新、发布和归档与审计事件同事务提交。
 - `GET/PUT /api/admin/settings/observability` 及其 `otlp/candidate`、`test`、`activate`、`rollback`、`disable` 接口：动态日志级别、最长 24 小时的临时 Debug、五项固定低基数告警阈值和加密的 OTLP 版本状态机；修改要求近期重新认证、CSRF、固定限流与审计。
 - `GET/PUT /api/admin/settings/human-verification` 及其 `candidate`、`candidate/test`、`activate`、`rollback`、`disable`、`enable` 接口：管理 Turnstile 不可变候选版本和注册、登录、密码恢复、验证邮件重发、Provider 登录策略；Secret 加密保存且永不回显，激活要求同一候选版本在最近十分钟内真实验证成功，禁用只关闭运行开关并保留当前配置。
 - `protection` 动态控制登录、账户操作、头像和 SMTP 管理限流，以及自助客户端全局默认配额。关闭限流组需要精确危险确认；每次 revision 都使用新的 Redis key namespace，旧计数自然过期。
@@ -394,6 +406,8 @@ Provider 不再从 YAML 或环境变量静态加载，只能由管理员写入�
 应用级 OAuth 统计按 UTC 日期、流程和阶段保存低基数聚合，保留 400 天；“成功率”是已记录协议操作检查点的成功占比，不等同于独立用户转化率。失败明细保留 90 天，只使用代码内固定原因目录，回调地址会删除 query 和 fragment，Scope 会去重并限制格式；不会保存 Token、Secret、授权码、PKCE verifier、用户 ID、邮箱或原始错误文本。Device Authorization 正常轮询中的 `authorization_pending` 和 `slow_down` 不计为失败。
 
 未来只有版本化 `/api/v1` 会作为自动化管理契约；在 Service Account、细粒度 scope、audience、幂等键和 OpenAPI 稳定前不发布专有 Management SDK。
+
+公告与站内消息的数据模型、Markdown 边界、已读语义和故障行为见 [公告与站内消息运维说明](docs/operations/communications-center.md)。
 
 ## 应用集成
 

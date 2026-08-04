@@ -38,6 +38,7 @@ import (
 	"github.com/nyasharp/nyauth/internal/mailruntime"
 	"github.com/nyasharp/nyauth/internal/mediaruntime"
 	"github.com/nyasharp/nyauth/internal/mfa"
+	"github.com/nyasharp/nyauth/internal/notification"
 	"github.com/nyasharp/nyauth/internal/oauthops"
 	"github.com/nyasharp/nyauth/internal/observabilityruntime"
 	"github.com/nyasharp/nyauth/internal/provider"
@@ -106,6 +107,8 @@ type Server struct {
 	serviceControl            serviceControlRuntime
 	serviceStatusStreams      atomic.Int64
 	siteBannerStreams         atomic.Int64
+	notificationStreams       atomic.Int64
+	notificationStore         *notification.Store
 	securityVersions          func(context.Context, uuid.UUID) (int64, int64, error)
 	readiness                 readinessState
 }
@@ -249,7 +252,8 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 		authorizationStore: authorizationStore, oauthOperations: oauthOperations, statsHandler: stats.NewHandler(db, rdb),
 		settingsMgr: settingsMgr, inviteStore: invite.NewStore(db),
 		registrationStore: registration.NewStore(db), telemetry: telemetryRuntime,
-		mfaService: mfaService, trustedDeviceStore: trusteddevice.NewStore(db),
+		notificationStore: notification.NewStore(db),
+		mfaService:        mfaService, trustedDeviceStore: trusteddevice.NewStore(db),
 		avatarService: avatarService, avatarRepository: avatarRepository,
 		humanVerification:  humanVerificationManager,
 		humanLoginFailures: NewHumanVerificationLoginLimiter(rdb, humanVerificationManager, settingsMgr),
@@ -305,6 +309,7 @@ func New(cfg *config.Config, db *pgxpool.Pool, rdb *redis.Client, webFS embed.FS
 	}
 	authHandler.SetBrowserSessionResolver(browserSessionResolver)
 	consentHandler.SetBrowserSessionResolver(browserSessionResolver)
+	consentHandler.SetDeviceAuthorizedHook(s.notifyDeviceAuthorized)
 	serviceControlStore, err := servicecontrol.NewStore(db)
 	if err != nil {
 		return nil, fmt.Errorf("configuring runtime service control storage: %w", err)
@@ -513,7 +518,7 @@ func (s *Server) buildRouter() *chi.Mux {
 	}
 	r.Use(redactedRequestLogger)
 	r.Use(structuredRecoverer)
-	r.Use(timeoutExcept(30*time.Second, serviceStatusEventsPath, siteBannerEventsPath))
+	r.Use(timeoutExcept(30*time.Second, serviceStatusEventsPath, siteBannerEventsPath, notificationEventsPath))
 	issuer, _ := url.Parse(s.cfg.Auth.Issuer)
 	allowedOrigin := issuer.Scheme + "://" + issuer.Host
 	r.Use(cors.Handler(cors.Options{AllowedOrigins: []string{allowedOrigin}, AllowedMethods: []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"}, AllowedHeaders: []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token", "X-WebAuthn-Ceremony"}, ExposedHeaders: []string{"Retry-After"}, AllowCredentials: true, MaxAge: 300}))
@@ -562,6 +567,16 @@ func (s *Server) buildRouter() *chi.Mux {
 			r.Get("/session", s.handleSession)
 			r.Post("/logout", s.handleLogout)
 			r.Get("/me", s.handleMe)
+			r.Get("/messages", s.handleListMessageCenter)
+			r.Post("/messages/read-all", s.handleMarkAllMessagesRead)
+			r.Get("/announcements", s.handleListAnnouncements)
+			r.Get("/announcements/{id}", s.handleGetAnnouncement)
+			r.Post("/announcements/{id}/read", s.handleMarkAnnouncementRead)
+			r.Get("/notifications", s.handleListNotifications)
+			r.Get("/notifications/unread-count", s.handleNotificationUnreadCount)
+			r.Get("/notifications/events", s.handleNotificationEvents)
+			r.Post("/notifications/{id}/read", s.handleMarkNotificationRead)
+			r.Post("/notifications/read-all", s.handleMarkAllNotificationsRead)
 			r.With(accountMutations).Put("/me", s.handleUpdateMe)
 			r.With(accountMediaWrites).Post("/me/avatar", s.handleUploadMyAvatar)
 			r.With(accountMediaWrites).Delete("/me/avatar", s.handleDeleteMyAvatar)
@@ -631,6 +646,13 @@ func (s *Server) buildRouter() *chi.Mux {
 			r.Get("/admin/settings/oauth", s.handleGetOAuthSettings)
 			r.With(adminMutations).Put("/admin/settings/oauth", s.handleUpdateOAuthSettings)
 			r.Get("/admin/settings/communications", s.handleGetCommunicationsSettings)
+			r.Get("/admin/announcements", s.handleAdminListAnnouncements)
+			r.Get("/admin/announcements/{id}", s.handleAdminGetAnnouncement)
+			r.With(adminMutations, s.recentAuthenticationMiddleware).Post("/admin/announcements", s.handleAdminCreateAnnouncement)
+			r.With(adminMutations, s.recentAuthenticationMiddleware).Put("/admin/announcements/{id}", s.handleAdminUpdateAnnouncement)
+			r.With(adminMutations, s.recentAuthenticationMiddleware).Post("/admin/announcements/{id}/publish", s.handleAdminPublishAnnouncement)
+			r.With(adminMutations, s.recentAuthenticationMiddleware).Post("/admin/announcements/{id}/archive", s.handleAdminArchiveAnnouncement)
+			r.Post("/admin/announcements/preview", s.handleAdminPreviewAnnouncement)
 			r.Post("/admin/settings/communications/site-banner/preview", s.handlePreviewSiteBannerMarkdown)
 			r.Post("/admin/settings/communications/email/preview", s.handlePreviewEmailTemplate)
 			r.With(adminMutations).Post("/admin/settings/communications/email/test", s.handleTestEmailTemplate)
@@ -697,6 +719,7 @@ func (s *Server) buildRouter() *chi.Mux {
 			r.With(adminMutations).Post("/admin/users/{id}/activate", s.handleActivateUser)
 			r.With(adminMutations).Put("/admin/users/{id}/role", s.handleUpdateUserRole)
 			clientHandler := client.NewHandler(s.clientService)
+			clientHandler.SetPublisherStatusChangedHook(s.notifyPublisherChange)
 			r.Get("/admin/clients", clientHandler.List)
 			r.With(adminMutations).Post("/admin/clients", clientHandler.Create)
 			r.Get("/admin/clients/{id}", clientHandler.Get)

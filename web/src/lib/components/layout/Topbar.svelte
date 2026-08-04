@@ -1,6 +1,7 @@
 <script lang="ts">
   import { sessionStore } from '$lib/stores';
   import ThemeSelector from './ThemeSelector.svelte';
+  import NotificationCenterPopover from './NotificationCenterPopover.svelte';
   import { Menu, PanelLeft, PanelLeftClose } from 'lucide-svelte';
 
   let {
@@ -44,6 +45,7 @@
 
   <div class="flex items-center gap-2">
     <ThemeSelector />
+    <NotificationCenterPopover />
     <a href="/profile" class="flex items-center gap-2 rounded-nya-md px-1.5 py-1 hover:bg-nya-surface-muted" aria-label="打开个人资料">
       <span class="hidden max-w-48 truncate text-body-medium text-nya-text-secondary sm:block">{user?.display_name || user?.username || '当前用户'}</span>
       <span class="flex h-8 w-8 items-center justify-center overflow-hidden rounded-full bg-nya-primary-soft text-small font-semibold text-nya-primary">

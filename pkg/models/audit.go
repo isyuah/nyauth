@@ -120,6 +120,10 @@ const (
 	AuditServiceControlUpdated       = "service_control.updated"
 	AuditServiceControlExpired       = "service_control.expired"
 	AuditServiceControlCLIReset      = "service_control.cli_reset"
+	AuditAnnouncementCreated         = "announcement.created"
+	AuditAnnouncementUpdated         = "announcement.updated"
+	AuditAnnouncementPublished       = "announcement.published"
+	AuditAnnouncementArchived        = "announcement.archived"
 )
 
 const (

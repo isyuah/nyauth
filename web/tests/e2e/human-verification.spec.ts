@@ -63,9 +63,21 @@ async function installTurnstileStub(page: Page) {
 }
 
 async function installCommonMocks(page: Page) {
+  await page.addInitScript(() => {
+    class QuietEventSource {
+      addEventListener() {}
+      close() {}
+    }
+    Object.defineProperty(window, 'EventSource', { configurable: true, value: QuietEventSource });
+  });
   await page.route('**/api/service-status', (route) => json(route, 200, normalStatus));
   await page.route('**/api/branding', (route) => json(route, 200, { title: 'Nya', primary_color: '#704DE8', primary_text_color: 'auto', light_logo_url: '', dark_logo_url: '', favicon_url: '' }));
   await page.route('**/api/site-banner', (route) => json(route, 200, { site_banner: null }));
+  await page.route('**/api/notifications/unread-count', (route) => json(route, 200, {
+    unread_count: 0,
+    notification_count: 0,
+    announcement_count: 0,
+  }));
   await page.route('**/api/site-banner/events', (route) => route.fulfill({
     status: 200, contentType: 'text/event-stream', body: 'event: site_banner\ndata: {"site_banner":null}\n\n',
   }));

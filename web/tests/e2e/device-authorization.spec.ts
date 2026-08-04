@@ -6,9 +6,21 @@ async function json(route: Route, status: number, body: unknown, headers: Record
 }
 
 async function installShellMocks(page: Page) {
+  await page.addInitScript(() => {
+    class QuietEventSource {
+      addEventListener() {}
+      close() {}
+    }
+    Object.defineProperty(window, 'EventSource', { configurable: true, value: QuietEventSource });
+  });
   await page.route('**/api/branding', (route) => json(route, 200, { title: 'Nya', primary_color: '#704DE8', primary_text_color: 'auto', light_logo_url: '', dark_logo_url: '', favicon_url: '' }));
   await page.route('**/api/service-status', (route) => json(route, 200, { state: 'normal', paused_capabilities: [], public_message: '', retry_after_seconds: 0 }));
   await page.route('**/api/site-banner', (route) => json(route, 200, { active: false, version: 0 }));
+  await page.route('**/api/notifications/unread-count', (route) => json(route, 200, {
+    unread_count: 0,
+    notification_count: 0,
+    announcement_count: 0,
+  }));
   await page.route('**/api/session', (route) => json(route, 200, {
 	user: { id: '11111111-1111-1111-1111-111111111111', username: 'alice', role: 'admin', status: 'active', created_at: '2026-01-01T00:00:00Z' },
     csrf_token: 'device-csrf', must_change_password: false, has_password: true, email_verified: true,

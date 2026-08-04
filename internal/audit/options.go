@@ -19,6 +19,10 @@ type FilterOptions struct {
 func KnownFilterOptions() FilterOptions {
 	events := []string{
 		"account.action_requested",
+		models.AuditAnnouncementArchived,
+		models.AuditAnnouncementCreated,
+		models.AuditAnnouncementPublished,
+		models.AuditAnnouncementUpdated,
 		models.AuditAuthorizationRevoked,
 		models.AuditAuthorizeDenied,
 		models.AuditClientAccessChanged,
@@ -125,7 +129,7 @@ func KnownFilterOptions() FilterOptions {
 		Results: []string{"failure", "success"},
 		Risks:   []string{"critical", "high", "low", "medium"},
 		TargetTypes: []string{
-			"client", "human_verification_config", "human_verification_runtime", "identity", "invite", "mail_config", "mail_runtime", "media_config", "media_migration", "oauth_consent",
+			"announcement", "client", "human_verification_config", "human_verification_runtime", "identity", "invite", "mail_config", "mail_runtime", "media_config", "media_migration", "oauth_consent",
 			"oauth_endpoint", "oauth_grant", "passkey", "provider", "registration",
 			"session", "settings", "telemetry_config", "telemetry_runtime", "user",
 		},

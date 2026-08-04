@@ -20,6 +20,7 @@ import (
 	"github.com/nyasharp/nyauth/internal/crypto"
 	"github.com/nyasharp/nyauth/internal/humanverification"
 	"github.com/nyasharp/nyauth/internal/identity"
+	"github.com/nyasharp/nyauth/internal/notification"
 	"github.com/nyasharp/nyauth/internal/provider"
 	"github.com/nyasharp/nyauth/internal/servicecontrol"
 	"github.com/nyasharp/nyauth/internal/user"
@@ -457,6 +458,7 @@ func (s *Server) finishIdentityBind(w http.ResponseWriter, r *http.Request, prov
 		s.providerCallbackFailure(w, r, "bind", returnTo, "binding_failed", http.StatusConflict)
 		return
 	}
+	s.notifySecurityChange(r.Context(), current.ID, notification.TypeIdentityChanged, "外部身份已绑定", "您的账户已绑定 **"+escapeNotificationMarkdown(providerName)+"** 身份提供商。", "/profile/identities")
 	s.telemetry.RecordProviderEvent(r.Context(), "callback", "bind", "success", "none", -1)
 	http.Redirect(w, r, safeReturnPath(returnTo, "/profile"), http.StatusFound)
 }

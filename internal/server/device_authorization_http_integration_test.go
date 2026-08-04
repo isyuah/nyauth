@@ -110,6 +110,10 @@ func TestDeviceAuthorizationHTTPApprovalAndSingleUse(t *testing.T) {
 	if accepted.Code != http.StatusOK || !strings.Contains(accepted.Body.String(), `"redirect_url":"/device?status=approved"`) {
 		t.Fatalf("accept status=%d body=%s", accepted.Code, accepted.Body.String())
 	}
+	var notificationCount int
+	if err := testApp.pool.QueryRow(ctx, `SELECT COUNT(*) FROM user_notifications WHERE user_id=$1 AND notification_type='oauth.device_authorized' AND source_id=$2`, current.ID, clientID).Scan(&notificationCount); err != nil || notificationCount != 1 {
+		t.Fatalf("device authorization notification count=%d err=%v", notificationCount, err)
+	}
 
 	token := deviceFormRequest(testApp.app, "/token", url.Values{
 		"grant_type": {models.GrantDeviceCode}, "device_code": {device.DeviceCode}, "client_id": {clientID},

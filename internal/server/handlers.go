@@ -21,6 +21,7 @@ import (
 	"github.com/nyasharp/nyauth/internal/client"
 	"github.com/nyasharp/nyauth/internal/humanverification"
 	"github.com/nyasharp/nyauth/internal/identity"
+	"github.com/nyasharp/nyauth/internal/notification"
 	"github.com/nyasharp/nyauth/internal/securityaction"
 	"github.com/nyasharp/nyauth/internal/session"
 	"github.com/nyasharp/nyauth/internal/settings"
@@ -261,6 +262,7 @@ func (s *Server) handleChangePassword(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	s.notifySecurityChange(r.Context(), current.ID, notification.TypePasswordChanged, "账户密码已修改", "您的账户密码刚刚发生了变化。如果这不是您本人操作，请立即检查设备会话并重置密码。", "/profile/security")
 	s.revokeUserSecurityState(r.Context(), current.ID, "password_change")
 	authenticated, err := s.sessionMiddleware.RotateSession(w, r, updated)
 	if err != nil {
@@ -607,6 +609,7 @@ func (s *Server) handleRevokeMyAuthorization(w http.ResponseWriter, r *http.Requ
 		return
 	}
 	s.enqueueAuditTargetResult(r.Context(), models.AuditAuthorizationRevoked, &current.ID, current.Username, "client", clientID, "success", "medium", requestIP(r), truncateAuditValue(r.UserAgent(), maxAuditUserAgentLength), nil)
+	s.notifyUser(r.Context(), notification.NotificationInput{UserID: current.ID, Type: notification.TypeAuthorizationRevoked, Severity: notification.SeverityInfo, Title: "应用授权已撤销", BodyMarkdown: "您已撤销一个 OAuth 应用的账户访问权限。", LinkURL: "/profile/authorizations", SourceType: "client", SourceID: clientID})
 	w.WriteHeader(http.StatusNoContent)
 }
 

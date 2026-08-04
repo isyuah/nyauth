@@ -12,6 +12,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/nyasharp/nyauth/internal/account"
 	"github.com/nyasharp/nyauth/internal/humanverification"
+	"github.com/nyasharp/nyauth/internal/notification"
 	"github.com/nyasharp/nyauth/internal/securityaction"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
@@ -117,6 +118,7 @@ func (s *Server) handleConfirmPasswordReset(w http.ResponseWriter, r *http.Reque
 		return
 	}
 	s.revokeSessionsAfterAccountChange(w, r, updated.ID, "password_reset")
+	s.notifySecurityChange(r.Context(), updated.ID, notification.TypePasswordChanged, "账户密码已重置", "您的账户密码刚刚通过恢复流程完成重置。如果这不是您本人操作，请立即联系管理员。", "/profile/security")
 	s.telemetry.RecordAuthEvent(r.Context(), "password_reset", "success")
 	writeJSON(w, http.StatusOK, map[string]string{"status": "password_reset"})
 }
@@ -272,6 +274,7 @@ func (s *Server) handleConfirmEmailChange(w http.ResponseWriter, r *http.Request
 		return
 	}
 	s.revokeSessionsAfterAccountChange(w, r, updated.ID, "email_change")
+	s.notifySecurityChange(r.Context(), updated.ID, notification.TypeEmailChanged, "账户邮箱已修改", "您的账户登录邮箱刚刚发生了变化。如果这不是您本人操作，请立即联系管理员。", "/profile")
 	writeJSON(w, http.StatusOK, map[string]string{"status": "email_changed"})
 }
 

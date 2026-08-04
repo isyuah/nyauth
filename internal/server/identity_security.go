@@ -9,6 +9,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/nyasharp/nyauth/internal/audit"
 	"github.com/nyasharp/nyauth/internal/identity"
+	"github.com/nyasharp/nyauth/internal/notification"
 )
 
 func (s *Server) handleDeleteMyIdentity(w http.ResponseWriter, r *http.Request) {
@@ -44,6 +45,7 @@ func (s *Server) handleDeleteMyIdentity(w http.ResponseWriter, r *http.Request) 
 		}
 		return
 	}
+	s.notifySecurityChange(r.Context(), current.ID, notification.TypeIdentityChanged, "外部身份已解绑", "您的账户已解绑一个外部身份提供商。", "/profile/identities")
 	updated, err := s.userService.GetByID(r.Context(), current.ID)
 	if err != nil {
 		writeAPIError(w, http.StatusInternalServerError, "identity removed; please sign in again")

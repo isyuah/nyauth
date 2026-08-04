@@ -465,6 +465,91 @@ export interface PaginatedResponse<T> {
   total_pages: number;
 }
 
+export type AnnouncementStatus = 'draft' | 'published' | 'archived';
+export type CommunicationSeverity = 'info' | 'warning' | 'critical';
+export type AnnouncementAudience = 'authenticated' | 'admins';
+
+export interface Announcement {
+  id: string;
+  status: AnnouncementStatus;
+  severity: CommunicationSeverity;
+  audience: AnnouncementAudience;
+  title: string;
+  summary: string;
+  body_markdown?: string;
+  body_html?: string;
+  link_url?: string;
+  pinned: boolean;
+  starts_at?: string;
+  ends_at?: string;
+  published_at?: string;
+  archived_at?: string;
+  revision: number;
+  created_at: string;
+  updated_at: string;
+  read?: boolean;
+}
+
+export interface AnnouncementInput {
+  severity: CommunicationSeverity;
+  audience: AnnouncementAudience;
+  title: string;
+  summary: string;
+  body_markdown: string;
+  link_url: string;
+  pinned: boolean;
+  starts_at: string | null;
+  ends_at: string | null;
+}
+
+export interface UserNotification {
+  id: string;
+  type: string;
+  severity: CommunicationSeverity;
+  title: string;
+  body_html: string;
+  link_url?: string;
+  source_type?: string;
+  source_id?: string;
+  created_at: string;
+  read_at?: string;
+  expires_at?: string;
+}
+
+export interface NotificationUnreadCount {
+  unread_count: number;
+  notification_count: number;
+  announcement_count: number;
+}
+
+export type MessageCenterKind = 'all' | 'notification' | 'announcement';
+export type MessageCenterReadState = 'all' | 'read' | 'unread';
+
+export interface MessageCenterItem {
+  kind: Exclude<MessageCenterKind, 'all'>;
+  id: string;
+  type?: string;
+  severity: CommunicationSeverity;
+  title: string;
+  summary?: string;
+  body_html?: string;
+  link_url?: string;
+  occurred_at: string;
+  read: boolean;
+  pinned?: boolean;
+}
+
+export interface MessageCenterFilters {
+  page?: number;
+  pageSize?: number;
+  kind?: MessageCenterKind;
+  read?: MessageCenterReadState;
+  severity?: '' | CommunicationSeverity;
+  query?: string;
+  from?: string;
+  to?: string;
+}
+
 export interface ClientQuota {
   quota_used: number;
   quota_limit: number;
@@ -1591,6 +1676,16 @@ const API_ERROR_TRANSLATIONS: Record<string, string> = {
   'service control is temporarily unavailable': '运行控制暂时不可用，请稍后重试',
   'too many service control operations': '运行控制操作过于频繁，请稍后重试',
   'settings revision conflict': '设置已被其他管理员修改，请加载最新设置后重试',
+  'announcement revision conflict': '公告已被其他管理员修改，请重新加载后再试',
+  'announcement state does not allow this operation': '公告状态已发生变化，请重新加载后再试',
+  'announcement not found': '公告不存在、尚未开始展示或您无权查看',
+  'failed to create announcement': '公告草稿创建失败，请稍后重试',
+  'failed to update announcement': '公告保存失败，请重新加载后重试',
+  'failed to publish announcement': '公告发布失败，请稍后重试',
+  'failed to archive announcement': '公告归档失败，请稍后重试',
+  'failed to load announcements': '公告列表暂时无法加载，请稍后重试',
+  'failed to load notifications': '站内消息暂时无法加载，请稍后重试',
+  'failed to load notification count': '消息未读状态暂时无法加载',
   'invalid security settings': '登录安全策略无效，请检查可信浏览器有效期',
   'failed to list login history': '登录历史暂时无法加载，请稍后重试',
   'failed to list trusted devices': '可信浏览器暂时无法加载，请稍后重试',
@@ -1725,6 +1820,9 @@ const API_ERROR_MESSAGES_BY_CODE: Record<string, string> = {
   'service_control.unavailable': 'service control is temporarily unavailable',
   'service_control.rate_limited': 'too many service control operations',
   'settings.revision_conflict': 'settings revision conflict',
+	'announcement.revision_conflict': 'announcement revision conflict',
+	'announcement.invalid_transition': 'announcement state does not allow this operation',
+	'announcement.not_found': 'announcement not found',
   'settings.configuration_invalid': 'invalid security settings',
   'login_history.unavailable': 'failed to list login history',
   'trusted_device.list_unavailable': 'failed to list trusted devices',
@@ -1971,6 +2069,27 @@ export const api = {
   getBranding: () => req<Branding>('/api/branding', {}, false),
   getServiceStatus: () => req<ServiceStatus>('/api/service-status', { cache: 'no-store' }, false),
   getSiteBanner: () => req<PublicSiteBannerResponse>('/api/site-banner', { cache: 'no-store' }, false),
+  getMessages: (filters: MessageCenterFilters = {}) => {
+    const params = new URLSearchParams({
+      page: String(filters.page || 1),
+      page_size: String(filters.pageSize || 20),
+      kind: filters.kind || 'all',
+      read: filters.read || 'all',
+    });
+    if (filters.severity) params.set('severity', filters.severity);
+    if (filters.query) params.set('q', filters.query);
+    if (filters.from) params.set('from', filters.from);
+    if (filters.to) params.set('to', filters.to);
+    return req<PaginatedResponse<MessageCenterItem>>(`/api/messages?${params}`, { cache: 'no-store' });
+  },
+  markAllMessagesRead: (kind: MessageCenterKind = 'all') => req<void>(`/api/messages/read-all?kind=${encodeURIComponent(kind)}`, { method: 'POST' }),
+  getAnnouncements: (page = 1, pageSize = 20) => req<PaginatedResponse<Announcement>>(`/api/announcements?page=${page}&page_size=${pageSize}`, { cache: 'no-store' }),
+  getAnnouncement: (id: string) => req<Announcement>(`/api/announcements/${encodeURIComponent(id)}`, { cache: 'no-store' }),
+  markAnnouncementRead: (id: string) => req<void>(`/api/announcements/${encodeURIComponent(id)}/read`, { method: 'POST' }),
+  getNotifications: (page = 1, pageSize = 20, unread = false) => req<PaginatedResponse<UserNotification>>(`/api/notifications?page=${page}&page_size=${pageSize}&unread=${unread}`, { cache: 'no-store' }),
+  getNotificationUnreadCount: () => req<NotificationUnreadCount>('/api/notifications/unread-count', { cache: 'no-store' }),
+  markNotificationRead: (id: string) => req<void>(`/api/notifications/${encodeURIComponent(id)}/read`, { method: 'POST' }),
+  markAllNotificationsRead: () => req<void>('/api/notifications/read-all', { method: 'POST' }),
   getRegistrationOptions: () => req<RegistrationOptions>('/api/registration', {}, false),
   getHumanVerification: (action: HumanVerificationAction) =>
     req<HumanVerificationChallenge>(`/api/human-verification?action=${encodeURIComponent(action)}`, { cache: 'no-store' }, false),
@@ -2190,6 +2309,20 @@ export const api = {
     updateOAuthSettings: (settings: UpdateOAuthSettingsInput) =>
       req<OAuthSettings>('/api/admin/settings/oauth', { method: 'PUT', body: JSON.stringify(settings) }),
     getCommunicationsSettings: () => req<CommunicationsSettings>('/api/admin/settings/communications', { cache: 'no-store' }),
+    getAnnouncements: (filters: { page?: number; pageSize?: number; q?: string; status?: string; audience?: string; severity?: string } = {}) => {
+      const params = new URLSearchParams({ page: String(filters.page || 1), page_size: String(filters.pageSize || 20) });
+      if (filters.q) params.set('q', filters.q);
+      if (filters.status) params.set('status', filters.status);
+      if (filters.audience) params.set('audience', filters.audience);
+      if (filters.severity) params.set('severity', filters.severity);
+      return req<PaginatedResponse<Announcement>>(`/api/admin/announcements?${params}`, { cache: 'no-store' });
+    },
+    getAnnouncement: (id: string) => req<Announcement>(`/api/admin/announcements/${encodeURIComponent(id)}`, { cache: 'no-store' }),
+    createAnnouncement: (input: AnnouncementInput) => req<Announcement>('/api/admin/announcements', { method: 'POST', body: JSON.stringify(input) }),
+    updateAnnouncement: (id: string, expectedRevision: number, input: AnnouncementInput) => req<Announcement>(`/api/admin/announcements/${encodeURIComponent(id)}`, { method: 'PUT', body: JSON.stringify({ expected_revision: expectedRevision, ...input }) }),
+    publishAnnouncement: (id: string, expectedRevision: number) => req<Announcement>(`/api/admin/announcements/${encodeURIComponent(id)}/publish`, { method: 'POST', body: JSON.stringify({ expected_revision: expectedRevision }) }),
+    archiveAnnouncement: (id: string, expectedRevision: number) => req<Announcement>(`/api/admin/announcements/${encodeURIComponent(id)}/archive`, { method: 'POST', body: JSON.stringify({ expected_revision: expectedRevision }) }),
+    previewAnnouncement: (bodyMarkdown: string) => req<{ body_html: string }>('/api/admin/announcements/preview', { method: 'POST', body: JSON.stringify({ body_markdown: bodyMarkdown }) }),
     updateCommunicationsSettings: (settings: UpdateCommunicationsSettingsInput) =>
       req<CommunicationsSettings>('/api/admin/settings/communications', { method: 'PUT', body: JSON.stringify(settings) }),
     getObservabilitySettings: () =>

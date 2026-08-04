@@ -33,7 +33,12 @@ type handlerService interface {
 
 // Handler handles HTTP requests for client operations.
 type Handler struct {
-	service handlerService
+	service                  handlerService
+	onPublisherStatusChanged func(context.Context, *models.OAuthClient, bool)
+}
+
+func (h *Handler) SetPublisherStatusChangedHook(hook func(context.Context, *models.OAuthClient, bool)) {
+	h.onPublisherStatusChanged = hook
 }
 
 // NewHandler creates a new client handler.
@@ -106,6 +111,9 @@ func (h *Handler) updatePublisherVerification(w http.ResponseWriter, r *http.Req
 			writeError(w, http.StatusInternalServerError, "failed to update publisher verification")
 		}
 		return
+	}
+	if h.onPublisherStatusChanged != nil {
+		h.onPublisherStatusChanged(r.Context(), updated, verified)
 	}
 	writeJSON(w, http.StatusOK, updated)
 }

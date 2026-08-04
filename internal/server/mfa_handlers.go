@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/nyasharp/nyauth/internal/mfa"
+	"github.com/nyasharp/nyauth/internal/notification"
 	"github.com/nyasharp/nyauth/internal/session"
 	"github.com/nyasharp/nyauth/internal/settings"
 	"github.com/nyasharp/nyauth/internal/user"
@@ -488,6 +489,7 @@ func (s *Server) handleConfirmTOTPEnrollment(w http.ResponseWriter, r *http.Requ
 		}
 		return
 	}
+	s.notifySecurityChange(r.Context(), current.ID, notification.TypeMFAChanged, "两步验证已启用", "您的账户已启用 TOTP 两步验证。请妥善保存恢复码。", "/profile/security")
 	s.revokeUserSecurityState(r.Context(), current.ID, "totp_enrolled")
 	updated, err := s.userService.GetByID(r.Context(), current.ID)
 	if err != nil || updated.Status != models.UserStatusActive ||
@@ -558,6 +560,7 @@ func (s *Server) handleDisableTOTP(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
+	s.notifySecurityChange(r.Context(), current.ID, notification.TypeMFAChanged, "两步验证已关闭", "您的账户已关闭 TOTP 两步验证。如果这不是您本人操作，请立即检查账户安全。", "/profile/security")
 	s.revokeUserSecurityState(r.Context(), current.ID, "totp_disabled")
 	updated, err := s.userService.GetByID(r.Context(), current.ID)
 	if err != nil || updated.Status != models.UserStatusActive ||

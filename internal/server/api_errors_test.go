@@ -123,6 +123,19 @@ func TestHumanVerificationErrorsHaveSpecificStableCodes(t *testing.T) {
 	}
 }
 
+func TestAnnouncementErrorsHaveSpecificStableCodes(t *testing.T) {
+	tests := map[string]string{
+		"announcement revision conflict":                   "announcement.revision_conflict",
+		"announcement state does not allow this operation": "announcement.invalid_transition",
+		"announcement not found":                           "announcement.not_found",
+	}
+	for message, expected := range tests {
+		if got := apiErrorCodeForMessage(message); got != expected {
+			t.Fatalf("error code for %q = %q, want %q", message, got, expected)
+		}
+	}
+}
+
 func TestAPIErrorMappingKeysAreNormalized(t *testing.T) {
 	for message := range apiErrorCodesByMessage {
 		if normalized := strings.ToLower(strings.TrimSpace(message)); message != normalized {

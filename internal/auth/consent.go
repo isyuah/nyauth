@@ -33,6 +33,7 @@ type ConsentHandler struct {
 	sessionResolver    BrowserSessionResolver
 	deviceStore        *deviceauthorization.Store
 	operationSink      OAuthOperationSink
+	deviceAuthorized   func(context.Context, string, *models.OAuthClient)
 }
 
 type consentPermission struct {
@@ -63,6 +64,10 @@ func (h *ConsentHandler) SetDeviceAuthorizationStore(store *deviceauthorization.
 
 func (h *ConsentHandler) SetOAuthOperationSink(sink OAuthOperationSink) {
 	h.operationSink = sink
+}
+
+func (h *ConsentHandler) SetDeviceAuthorizedHook(hook func(context.Context, string, *models.OAuthClient)) {
+	h.deviceAuthorized = hook
 }
 
 func (h *ConsentHandler) recordConsentOperation(ctx context.Context, data *session.ConsentData, outcome oauthops.Outcome, reason oauthops.Reason, scopes []string) {
@@ -235,6 +240,9 @@ func (h *ConsentHandler) AcceptConsent(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		h.recordConsentOperation(r.Context(), data, oauthops.OutcomeSuccess, oauthops.ReasonNone, grantedScopes)
+		if h.deviceAuthorized != nil {
+			h.deviceAuthorized(r.Context(), data.UserID, cl)
+		}
 		writeJSON(w, http.StatusOK, map[string]string{"redirect_url": "/device?status=approved"})
 		return
 	}

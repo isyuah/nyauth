@@ -52,6 +52,10 @@ func (s *Server) mutationAuditMiddleware(next http.Handler) http.Handler {
 			next.ServeHTTP(w, r)
 			return
 		}
+		if isCommunicationReadStateMutation(r) || isCommunicationPreviewRequest(r) {
+			next.ServeHTTP(w, r)
+			return
+		}
 
 		actor := currentUserFromContext(r)
 		descriptor, ok := describeMutation(r, actor)
@@ -139,6 +143,14 @@ func describeMutation(r *http.Request, actor *models.User) (mutationAuditDescrip
 	param := func(name string) string { return chi.URLParam(r, name) }
 
 	switch {
+	case r.Method == http.MethodPost && path == "/api/admin/announcements":
+		return mutationAuditDescriptor{event: models.AuditAnnouncementCreated, targetType: "announcement", successAlreadyAudited: true}, true
+	case r.Method == http.MethodPut && strings.HasPrefix(path, "/api/admin/announcements/"):
+		return mutationAuditDescriptor{event: models.AuditAnnouncementUpdated, targetType: "announcement", targetID: param("id"), successAlreadyAudited: true}, true
+	case r.Method == http.MethodPost && strings.HasSuffix(path, "/publish") && strings.HasPrefix(path, "/api/admin/announcements/"):
+		return mutationAuditDescriptor{event: models.AuditAnnouncementPublished, targetType: "announcement", targetID: param("id"), riskLevel: "medium", successAlreadyAudited: true}, true
+	case r.Method == http.MethodPost && strings.HasSuffix(path, "/archive") && strings.HasPrefix(path, "/api/admin/announcements/"):
+		return mutationAuditDescriptor{event: models.AuditAnnouncementArchived, targetType: "announcement", targetID: param("id"), riskLevel: "medium", successAlreadyAudited: true}, true
 	case r.Method == http.MethodPost && path == "/api/logout":
 		return userMutation(models.AuditUserLogout, actor, false), true
 	case r.Method == http.MethodPut && path == "/api/me":
@@ -336,6 +348,27 @@ func describeMutation(r *http.Request, actor *models.User) (mutationAuditDescrip
 	default:
 		return mutationAuditDescriptor{}, false
 	}
+}
+
+func isCommunicationReadStateMutation(r *http.Request) bool {
+	path := strings.TrimSuffix(r.URL.Path, "/")
+	if r.Method != http.MethodPost {
+		return false
+	}
+	return path == "/api/messages/read-all" ||
+		path == "/api/notifications/read-all" ||
+		(strings.HasPrefix(path, "/api/notifications/") && strings.HasSuffix(path, "/read")) ||
+		(strings.HasPrefix(path, "/api/announcements/") && strings.HasSuffix(path, "/read"))
+}
+
+func isCommunicationPreviewRequest(r *http.Request) bool {
+	if r.Method != http.MethodPost {
+		return false
+	}
+	path := strings.TrimSuffix(r.URL.Path, "/")
+	return path == "/api/admin/announcements/preview" ||
+		path == "/api/admin/settings/communications/site-banner/preview" ||
+		path == "/api/admin/settings/communications/email/preview"
 }
 
 func userMutation(event string, actor *models.User, successAlreadyAudited bool) mutationAuditDescriptor {

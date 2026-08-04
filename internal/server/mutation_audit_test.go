@@ -51,6 +51,10 @@ func TestDescribeMutation(t *testing.T) {
 		{http.MethodDelete, "/api/my/clients/client-1/logo", "/api/my/clients/{id}/logo", "client-1", models.AuditClientUpdated, "client", false},
 		{http.MethodPost, "/api/my/clients/client-1/rotate-secret", "/api/my/clients/{id}/rotate-secret", "client-1", models.AuditClientSecretRotated, "client", true},
 		{http.MethodPost, "/api/admin/providers/github/test", "/api/admin/providers/{id}/test", "github", models.AuditProviderTested, "provider", true},
+		{http.MethodPost, "/api/admin/announcements", "/api/admin/announcements", "", models.AuditAnnouncementCreated, "announcement", true},
+		{http.MethodPut, "/api/admin/announcements/announcement-1", "/api/admin/announcements/{id}", "announcement-1", models.AuditAnnouncementUpdated, "announcement", true},
+		{http.MethodPost, "/api/admin/announcements/announcement-1/publish", "/api/admin/announcements/{id}/publish", "announcement-1", models.AuditAnnouncementPublished, "announcement", true},
+		{http.MethodPost, "/api/admin/announcements/announcement-1/archive", "/api/admin/announcements/{id}/archive", "announcement-1", models.AuditAnnouncementArchived, "announcement", true},
 	}
 	for _, test := range tests {
 		t.Run(test.method+" "+test.path, func(t *testing.T) {
@@ -75,6 +79,38 @@ func TestDescribeMutation(t *testing.T) {
 				t.Fatalf("target ID = %q, want %q", descriptor.targetID, test.id)
 			}
 		})
+	}
+}
+
+func TestCommunicationReadStateMutationsAreNotAudited(t *testing.T) {
+	for _, path := range []string{
+		"/api/messages/read-all?kind=all",
+		"/api/announcements/announcement-1/read",
+		"/api/notifications/notification-1/read",
+		"/api/notifications/read-all",
+	} {
+		request := httptest.NewRequest(http.MethodPost, path, nil)
+		if !isCommunicationReadStateMutation(request) {
+			t.Fatalf("read state mutation %q was not recognized", path)
+		}
+	}
+	if isCommunicationReadStateMutation(httptest.NewRequest(http.MethodPost, "/api/admin/announcements/announcement-1/publish", nil)) {
+		t.Fatal("announcement publication was classified as read state")
+	}
+}
+
+func TestCommunicationPreviewsAreNotAuditedAsMutations(t *testing.T) {
+	for _, path := range []string{
+		"/api/admin/announcements/preview",
+		"/api/admin/settings/communications/site-banner/preview",
+		"/api/admin/settings/communications/email/preview",
+	} {
+		if !isCommunicationPreviewRequest(httptest.NewRequest(http.MethodPost, path, nil)) {
+			t.Fatalf("communication preview %q was not recognized", path)
+		}
+	}
+	if isCommunicationPreviewRequest(httptest.NewRequest(http.MethodPost, "/api/admin/settings/communications/email/test", nil)) {
+		t.Fatal("test email was classified as a preview")
 	}
 }
 
