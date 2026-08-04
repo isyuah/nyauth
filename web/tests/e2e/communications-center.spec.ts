@@ -86,6 +86,12 @@ test('user reads persistent announcements and security notifications', async ({ 
   await expect(page.getByText('账户密码已修改', { exact: true })).toBeVisible();
   await expect(page.getByText('账户安全更新', { exact: true })).toBeVisible();
   await expect(page.getByLabel('消息中心，2 条未读')).toBeVisible();
+  const notificationRow = page.locator('article').filter({ hasText: '账户密码已修改' });
+  const announcementRow = page.locator('article').filter({ hasText: '账户安全更新' });
+  await expect(notificationRow.getByText('站内消息', { exact: true })).toBeVisible();
+  await expect(notificationRow.getByRole('button', { name: '查看详情' })).toBeVisible();
+  await expect(announcementRow.getByText('公告', { exact: true })).toBeVisible();
+  await expect(announcementRow.getByRole('button', { name: '查看详情' })).toBeVisible();
 
   await page.getByRole('tab', { name: /站内消息 1/ }).click();
   await expect(page).toHaveURL(/tab=notifications/);

@@ -24,6 +24,7 @@
     Bell,
     Check,
     CheckCheck,
+    ChevronRight,
     ExternalLink,
     Info,
     Megaphone,
@@ -305,17 +306,22 @@
             {:else}
               <p class="mt-1 line-clamp-3 text-body text-nya-text-secondary">{item.summary || '查看完整公告内容'}</p>
             {/if}
-            <div class="mt-3 flex flex-wrap items-center gap-3">
-              <span class="text-[11px] text-nya-text-tertiary">{item.kind === 'announcement' ? '公告' : '站内消息'}</span>
-              {#if item.kind === 'announcement' || item.link_url}
-                <button type="button" onclick={() => void openItem(item)} class="inline-flex items-center gap-1 text-small font-medium text-nya-primary hover:underline">
-                  查看详情 <ExternalLink size={13} />
-                </button>
-              {/if}
+            <div class="mt-3 flex min-h-8 flex-wrap items-center gap-2">
+              <span class="inline-flex h-6 items-center gap-1.5 rounded-full bg-nya-surface-muted px-2 text-small font-medium text-nya-text-secondary">
+                {#if item.kind === 'announcement'}<Megaphone size={12} />公告{:else}<Bell size={12} />站内消息{/if}
+              </span>
               {#if !item.read}
                 <button type="button" onclick={() => void markRead(item)} class="inline-flex items-center gap-1 text-small text-nya-text-tertiary transition-colors hover:text-nya-primary">
                   <Check size={13} />标为已读
                 </button>
+              {/if}
+              {#if item.kind === 'announcement' || item.link_url}
+                <span class="ml-auto">
+                  <Button variant="secondary" size="sm" onclick={() => void openItem(item)}>
+                    查看详情
+                    {#if item.kind === 'announcement' || item.link_url?.startsWith('/')}<ChevronRight size={14} />{:else}<ExternalLink size={13} />{/if}
+                  </Button>
+                </span>
               {/if}
             </div>
           </div>
