@@ -1,8 +1,9 @@
 <script lang="ts">
   import { goto } from '$app/navigation';
+  import { page } from '$app/stores';
   import { onMount } from 'svelte';
   import { api, isRecentAuthenticationError, type ExternalIdentity, type SessionInfo } from '$lib/api';
-  import { consumeProviderAuthError, sessionStore } from '$lib/stores';
+  import { consumeProviderAuthError, safeReturnPath, sessionStore } from '$lib/stores';
   import { PASSWORD_REQUIREMENT, passwordPolicyError } from '$lib/password-policy';
   import PasskeySettingsCard from '$lib/components/account/PasskeySettingsCard.svelte';
   import ReauthenticationDialog from '$lib/components/account/ReauthenticationDialog.svelte';
@@ -14,7 +15,10 @@
   import Modal from '$lib/components/ui/Modal.svelte';
   import { KeyRound } from 'lucide-svelte';
 
-  const returnTo = '/profile/security';
+  let completionReturnTo = $derived(safeReturnPath($page.url.searchParams.get('return_to'), '/profile/security'));
+  let returnTo = $derived(completionReturnTo === '/profile/security'
+    ? '/profile/security'
+    : `/profile/security?return_to=${encodeURIComponent(completionReturnTo)}`);
   const initialProviderAuthError = consumeProviderAuthError();
   let session = $derived($sessionStore.session);
   let identities = $state<ExternalIdentity[]>([]);
@@ -49,6 +53,10 @@
   function applyPasskeySession(next: SessionInfo) {
     applySession(next);
     mfaFactorsRevision += 1;
+  }
+
+  async function continueAfterFactorEnrollment() {
+    if (completionReturnTo !== '/profile/security') await goto(completionReturnTo);
   }
 
   async function loadIdentities() {
@@ -152,6 +160,7 @@
     <TOTPSettingsCard
       {returnTo}
       onsessionupdated={applySession}
+      onfactorready={continueAfterFactorEnrollment}
       providerReauthenticationFailed={initialProviderAuthError !== null}
     />
   {/key}
@@ -159,6 +168,7 @@
   <PasskeySettingsCard
     {returnTo}
     onsessionupdated={applyPasskeySession}
+    onfactorready={continueAfterFactorEnrollment}
     providerReauthenticationFailed={initialProviderAuthError !== null}
   />
 

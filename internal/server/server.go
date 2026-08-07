@@ -612,6 +612,7 @@ func (s *Server) buildRouter() *chi.Mux {
 			r.With(accountMutations).Delete("/me/identities/{id}", s.handleDeleteMyIdentity)
 			r.Get("/consent", s.consentHandler.GetConsent)
 			r.With(authIssuance).Post("/device-authorization/prepare", s.authHandler.PrepareDeviceAuthorization)
+			r.With(authIssuance).Post("/consent/step-up", s.handleConsentStepUp)
 			r.With(authIssuance).Post("/consent/accept", s.consentHandler.AcceptConsent)
 			r.Post("/consent/deny", s.consentHandler.DenyConsent)
 			r.Get("/my/clients", s.handleListMyClients)

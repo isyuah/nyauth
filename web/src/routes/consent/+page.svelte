@@ -2,15 +2,16 @@
   import { page } from '$app/stores';
   import { goto } from '$app/navigation';
   import { onMount } from 'svelte';
-  import { api, type ConsentPermission, type ConsentRequest } from '$lib/api';
+  import { api, isAPIErrorCode, isMFARequiredResponse, type ConsentPermission, type ConsentRequest } from '$lib/api';
   import { brandingStore, sessionStore } from '$lib/stores';
   import AuthorizationActions from '$lib/components/oauth/AuthorizationActions.svelte';
   import AuthorizationBrandHeader from '$lib/components/oauth/AuthorizationBrandHeader.svelte';
   import AuthorizationShell from '$lib/components/oauth/AuthorizationShell.svelte';
   import AuthorizationTechnicalInfo from '$lib/components/oauth/AuthorizationTechnicalInfo.svelte';
   import Badge from '$lib/components/ui/Badge.svelte';
+  import Button from '$lib/components/ui/Button.svelte';
   import OAuthClientLogo from '$lib/components/oauth/OAuthClientLogo.svelte';
-  import { Check, CircleCheck, Info, ShieldCheck, TriangleAlert, X, XCircle } from 'lucide-svelte';
+  import { Check, CircleCheck, Info, KeyRound, ShieldCheck, TriangleAlert, X, XCircle } from 'lucide-svelte';
   import { CLAIM_HELP, RISK_LABELS } from '$lib/oauth-catalog';
 
   const deviceResultStorageKey = 'nyauth:device-authorization-result';
@@ -19,6 +20,9 @@
   let error = $state('');
   let action = $state<'accept' | 'deny' | ''>('');
   let grantedOptionalScopes = $state<string[]>([]);
+  let stepUpLoading = $state(false);
+  let stepUpError = $state('');
+  let enrollmentRequired = $state(false);
 
   let requiredPermissions = $derived(consentData?.permissions.filter((permission) => permission.required) || []);
   let optionalPermissions = $derived(consentData?.permissions.filter((permission) => !permission.required) || []);
@@ -78,9 +82,41 @@
       rememberDeviceResult(true);
       window.location.href = response.redirect_url;
     } catch (cause) {
+      if (isAPIErrorCode(cause, 'oauth.unmet_authentication_requirements') && consentData) {
+        consentData = { ...consentData, step_up_required: true };
+        stepUpError = cause.message;
+        action = '';
+        return;
+      }
       error = cause instanceof Error ? cause.message : '授权失败';
       action = '';
     }
+  }
+
+  async function handleStepUp() {
+    if (stepUpLoading) return;
+    stepUpLoading = true;
+    stepUpError = '';
+    enrollmentRequired = false;
+    const returnTo = `/consent?challenge=${encodeURIComponent(challenge)}`;
+    try {
+      const response = await api.consent.stepUp(challenge);
+      if (isMFARequiredResponse(response)) {
+        await goto(`/login/mfa?purpose=oauth_step_up&return_to=${encodeURIComponent(returnTo)}`);
+        return;
+      }
+      window.location.href = response.redirect_url;
+    } catch (cause) {
+      enrollmentRequired = isAPIErrorCode(cause, 'oauth.unmet_authentication_requirements');
+      stepUpError = cause instanceof Error ? cause.message : '无法发起额外身份验证';
+    } finally {
+      stepUpLoading = false;
+    }
+  }
+
+  async function openSecurityCenter() {
+    const returnTo = `/consent?challenge=${encodeURIComponent(challenge)}`;
+    await goto(`/profile/security?return_to=${encodeURIComponent(returnTo)}`);
   }
 
   async function handleDeny() {
@@ -153,6 +189,31 @@
 
       <AuthorizationTechnicalInfo consent={consentData} {deviceFlow} />
 
+      {#if consentData.step_up_required}
+        <section class="mt-6 rounded-nya-md border border-nya-primary/25 bg-nya-primary-soft px-5 py-5" aria-labelledby="step-up-title">
+          <div class="flex items-start gap-3">
+            <span class="grid h-10 w-10 shrink-0 place-items-center rounded-full bg-nya-surface text-nya-primary"><KeyRound size={20} /></span>
+            <div class="min-w-0 flex-1">
+              <h2 id="step-up-title" class="text-card-title text-nya-text-primary">此应用要求更高等级的身份验证</h2>
+              <p class="mt-1 text-small text-nya-text-secondary">继续授权前，请使用已绑定的动态验证码、恢复码或 Passkey 完成额外验证。验证成功后会回到当前应用与权限列表。</p>
+              {#if consentData.max_age !== null && consentData.max_age !== undefined}
+                <p class="mt-2 text-micro text-nya-text-tertiary">应用还要求认证时间不超过 {consentData.max_age === 0 ? '当前时刻' : `${consentData.max_age} 秒`}。</p>
+              {/if}
+            </div>
+          </div>
+          {#if stepUpError}
+            <p class="mt-4 rounded-nya-sm bg-nya-danger-soft px-3 py-2 text-small text-nya-danger" role="alert">{stepUpError}</p>
+          {/if}
+          <div class="mt-4 flex flex-wrap gap-2">
+            {#if enrollmentRequired}
+              <Button variant="primary" onclick={openSecurityCenter}><ShieldCheck size={16} /> 前往安全中心绑定验证方式</Button>
+            {:else}
+              <Button variant="primary" loading={stepUpLoading} onclick={handleStepUp}><KeyRound size={16} /> 开始额外验证</Button>
+            {/if}
+            <Button variant="secondary" loading={action === 'deny'} disabled={stepUpLoading} onclick={handleDeny}>拒绝请求</Button>
+          </div>
+        </section>
+      {:else}
       {#if requiredPermissions.length > 0}
         <section class="mt-6" aria-labelledby="required-permissions-title">
           <div class="mb-2 flex items-baseline justify-between gap-3"><h2 id="required-permissions-title" class="text-body font-semibold text-nya-text-primary">必需权限</h2><span class="text-micro text-nya-text-tertiary">不同意时只能拒绝整个请求</span></div>
@@ -196,6 +257,7 @@
       {/if}
 
       <AuthorizationActions acceptLabel={deviceFlow ? '允许设备访问' : '授权所选权限'} {action} onaccept={handleAccept} ondeny={handleDeny} />
+      {/if}
     </div>
   {/if}
 </AuthorizationShell>

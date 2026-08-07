@@ -44,6 +44,40 @@ GET /authorize
 
 回调出现 `error` 参数时必须终止流程并消费对应 transaction，不得继续交换授权码。
 
+## RFC 9470 Step-Up Authentication
+
+Nyauth 授权服务器支持 [RFC 9470 OAuth 2.0 Step Up Authentication Challenge Protocol](https://www.rfc-editor.org/rfc/rfc9470.html) 在授权请求侧使用的标准认证上下文参数。Discovery 会公布：
+
+- `urn:nyauth:loa:1`：完成一个主认证因素，例如密码、外部身份或 Passkey 独立登录；
+- `urn:nyauth:loa:2`：完成多因素验证或使用 Passkey 达到更高认证等级。
+
+客户端可以在授权请求中加入 `acr_values` 和 `max_age`：
+
+```text
+GET /authorize
+  ?response_type=code
+  &client_id=...
+  &redirect_uri=...
+  &scope=openid%20profile
+  &state=...
+  &nonce=...
+  &code_challenge=...
+  &code_challenge_method=S256
+  &acr_values=urn%3Anyauth%3Aloa%3A2
+  &max_age=300
+```
+
+当当前会话不满足要求时，Nyauth 会保留原授权 challenge，先完成登录、TOTP、恢复码或 Passkey 验证，再回到同一个 Consent 页面。未绑定任何可用 MFA 因子时不会降级授权，也不会消费请求；第一方页面会引导用户进入安全中心绑定验证方式。`max_age=0` 使用一次性、Redis 保存的重新认证续接令牌，避免用客户端可伪造的查询参数绕过强制重新认证。
+
+成功签发的用户 Access Token 和 ID Token 会携带实际认证上下文 `acr`、认证方法 `amr` 和认证时间 `auth_time`；Refresh Token 轮换会保留这组认证上下文。资源服务器应验证这些 Claim，并在认证等级不足时按 RFC 9470 返回挑战，例如：
+
+```http
+HTTP/1.1 401 Unauthorized
+WWW-Authenticate: Bearer error="insufficient_user_authentication", acr_values="urn:nyauth:loa:2"
+```
+
+RFC 9470 规定挑战和续接参数的协议语义，不规定 MFA 的具体实现；上面的 ACR 等级是本 Nyauth 部署公开的固定词汇。资源服务器收到挑战后，应让客户端重新发起带有 `acr_values` 或 `max_age` 的授权请求，并在收到新 Token 后再次验证 Claim。当前 Step-Up 参数接入 Authorization Code 授权请求；Device Authorization 仍使用浏览器 Consent 的当前会话认证等级，不接受设备端自定义 `acr_values`。
+
 ## 客户端 Scope 与可选权限
 
 客户端注册中的 `scopes` 是该客户端可请求的权限上限，授权请求出现未登记 Scope 时会返回 `invalid_scope`。管理员或客户端创建者可以把其中一部分非 `openid` Scope 声明为 `optional_scopes`：

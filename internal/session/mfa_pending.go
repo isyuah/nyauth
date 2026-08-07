@@ -13,18 +13,20 @@ import (
 const mfaPendingPrefix = keyPrefix + "mfa-pending:"
 
 type MFAPendingData struct {
-	UserID         string    `json:"user_id"`
-	Username       string    `json:"username"`
-	AuthVersion    int64     `json:"auth_version"`
-	SessionVersion int64     `json:"session_version"`
-	Purpose        string    `json:"purpose"`
-	PrimaryMethod  string    `json:"primary_method"`
-	Provider       string    `json:"provider,omitempty"`
-	SessionDigest  string    `json:"session_digest,omitempty"`
-	ReturnTo       string    `json:"return_to"`
-	CSRFToken      string    `json:"csrf_token"`
-	CreatedAt      time.Time `json:"created_at"`
-	ExpiresAt      time.Time `json:"expires_at"`
+	UserID                string    `json:"user_id"`
+	Username              string    `json:"username"`
+	AuthVersion           int64     `json:"auth_version"`
+	SessionVersion        int64     `json:"session_version"`
+	Purpose               string    `json:"purpose"`
+	RequiredAuthContext   string    `json:"required_auth_context,omitempty"`
+	AuthenticationMethods []string  `json:"authentication_methods,omitempty"`
+	PrimaryMethod         string    `json:"primary_method"`
+	Provider              string    `json:"provider,omitempty"`
+	SessionDigest         string    `json:"session_digest,omitempty"`
+	ReturnTo              string    `json:"return_to"`
+	CSRFToken             string    `json:"csrf_token"`
+	CreatedAt             time.Time `json:"created_at"`
+	ExpiresAt             time.Time `json:"expires_at"`
 }
 
 func (s *Store) SaveMFAPending(ctx context.Context, token string, data *MFAPendingData, ttl time.Duration) error {

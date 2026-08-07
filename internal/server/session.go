@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/nyasharp/nyauth/internal/crypto"
+	"github.com/nyasharp/nyauth/internal/oauthstepup"
 	"github.com/nyasharp/nyauth/internal/session"
 	"github.com/nyasharp/nyauth/internal/settings"
 	"github.com/nyasharp/nyauth/pkg/models"
@@ -42,6 +43,10 @@ type MFAPendingSession struct {
 }
 
 func (m *SessionMiddleware) CreateSession(w http.ResponseWriter, r *http.Request, user *models.User) (*AuthenticatedSession, error) {
+	return m.CreateSessionWithAuthentication(w, r, user, oauthstepup.ACRLevel1, nil)
+}
+
+func (m *SessionMiddleware) CreateSessionWithAuthentication(w http.ResponseWriter, r *http.Request, user *models.User, authenticationContext string, authenticationMethods []string) (*AuthenticatedSession, error) {
 	sessionID, err := crypto.GenerateRandomString(32)
 	if err != nil {
 		return nil, err
@@ -52,6 +57,8 @@ func (m *SessionMiddleware) CreateSession(w http.ResponseWriter, r *http.Request
 		UserID: user.ID.String(), Username: user.Username, AuthVersion: user.AuthVersion, SessionVersion: user.SessionVersion,
 		IPAddress: requestIP(r), UserAgent: truncateAuditValue(r.UserAgent(), maxAuditUserAgentLength),
 		CreatedAt: now, LastSeenAt: now, AuthenticatedAt: now, PolicyRevision: policy.Revision,
+		AuthenticationContext: oauthstepup.NormalizeContext(authenticationContext).String(),
+		AuthenticationMethods: append([]string(nil), authenticationMethods...),
 	}
 	m.applyDeadlines(data, policy.Value)
 	expiresAt := effectiveSessionExpiry(data)
@@ -78,6 +85,10 @@ func (m *SessionMiddleware) RotateSession(w http.ResponseWriter, r *http.Request
 }
 
 func (m *SessionMiddleware) MarkReauthenticated(w http.ResponseWriter, r *http.Request, user *models.User) (*AuthenticatedSession, error) {
+	return m.MarkReauthenticatedWithAuthentication(w, r, user, "", nil)
+}
+
+func (m *SessionMiddleware) MarkReauthenticatedWithAuthentication(w http.ResponseWriter, r *http.Request, user *models.User, authenticationContext string, authenticationMethods []string) (*AuthenticatedSession, error) {
 	authenticated := sessionFromContext(r.Context())
 	if authenticated == nil || authenticated.Data == nil {
 		return nil, errors.New("authenticated session is unavailable")
@@ -93,6 +104,10 @@ func (m *SessionMiddleware) MarkReauthenticated(w http.ResponseWriter, r *http.R
 	updatedData.AuthVersion = user.AuthVersion
 	updatedData.SessionVersion = user.SessionVersion
 	updatedData.PolicyRevision = policy.Revision
+	if authenticationContext != "" {
+		updatedData.AuthenticationContext = oauthstepup.NormalizeContext(authenticationContext).String()
+		updatedData.AuthenticationMethods = append([]string(nil), authenticationMethods...)
+	}
 	m.applyDeadlines(&updatedData, policy.Value)
 	expiresAt := effectiveSessionExpiry(&updatedData)
 	remaining := expiresAt.Sub(now)
@@ -129,6 +144,10 @@ func (m *SessionMiddleware) GetSession(w http.ResponseWriter, r *http.Request) (
 	}
 	now := time.Now().UTC()
 	policy := m.lifecycleSnapshot()
+	metadataUpgrade := data.AuthenticationContext == ""
+	if metadataUpgrade {
+		data.AuthenticationContext = oauthstepup.ACRLevel1
+	}
 	m.applyDeadlines(data, policy.Value)
 	expiresAt := effectiveSessionExpiry(data)
 	remaining := expiresAt.Sub(now)
@@ -138,7 +157,7 @@ func (m *SessionMiddleware) GetSession(w http.ResponseWriter, r *http.Request) (
 		return nil, session.ErrNotFound
 	}
 	shouldTouch := data.LastSeenAt.IsZero() || now.Sub(data.LastSeenAt) >= sessionTouchInterval(policy.Value)
-	if data.PolicyRevision != policy.Revision {
+	if data.PolicyRevision != policy.Revision || metadataUpgrade {
 		expectedAuthVersion, expectedSessionVersion := data.AuthVersion, data.SessionVersion
 		data.PolicyRevision = policy.Revision
 		if shouldTouch {

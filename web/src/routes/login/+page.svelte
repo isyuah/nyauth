@@ -31,6 +31,7 @@
   let providersError = $state('');
   let cleanedReturnTo = $state<string | null>(null);
   let returnTo = $derived(cleanedReturnTo ?? safeReturnPath($page.url.searchParams.get('return_to'), '/dashboard'));
+  let forceAuthentication = $derived($page.url.searchParams.get('force') === '1');
   let authPaused = $derived(isCapabilityPaused($serviceStatusStore.value, 'auth_issuance'));
 
   let registrationOpen = $state(false);
@@ -92,7 +93,7 @@
     }
     try {
       const existing = await sessionStore.initialize(true);
-      if (existing) {
+      if (existing && !forceAuthentication) {
         goto(existing.must_change_password
           ? `/change-password?return_to=${encodeURIComponent(returnTo)}`
           : returnTo);

@@ -22,6 +22,7 @@
 
 - OAuth 2.0：Authorization Code + S256、Device Authorization、Client Credentials、Refresh Token
 - OpenID Connect：Discovery、JWKS、ID Token、UserInfo、RP-Initiated Logout
+- OAuth Step-Up：RFC 9470 `acr_values` / `max_age`，以及 `acr` / `amr` / `auth_time` 认证上下文
 - OIDC 授权体验：运行时 Scope Catalog、客户端级 Scope/Claim 上限、可选权限声明、详细 Consent 和实际授权收敛
 - OAuth 发布者可信状态：区分系统管理、用户注册未验证和管理员已审核；Consent 展示可信状态与实际回调来源
 - OAuth 应用身份：受控应用 Logo、主页、隐私政策与服务条款，授权时保存身份快照并提示后续变化
@@ -309,6 +310,8 @@ await fetch('/api/me', {
 每个客户端的 `scopes` 是可请求权限上限；`optional_scopes` 必须是其中的子集，并只作用于 Authorization Code 或 Device Authorization 的用户授权；`allowed_claims` 再限制 ID Token 与 UserInfo 可以返回的用户字段。`openid` 始终是必需权限，且客户端至少保留一个必需 Scope。授权页从运行时 Scope Catalog 展示名称、说明、风险等级和实际 Claim，将请求分成必需和可选两组；用户可以逐项关闭可选权限，授权记录、授权码、设备授权状态、Access/Refresh Token 都只保存实际获准集合与 Claim 白名单。若实际集合比请求集合更小，授权回调和 Token 响应都会返回实际 `scope`。现有客户端升级后 `optional_scopes` 默认为空，`allowed_claims` 按旧版本真实返回过的标准字段回填；例如旧 `email` 授权不会在升级后自动增加 `email_verified`。
 
 Device Authorization 面向电视、CLI 和其他输入受限设备，遵循 RFC 8628：客户端从 `/device_authorization` 获取 10 分钟有效的高熵 `device_code` 与便于人工输入的 `user_code`，用户在同源 `/device` 页面登录并复用完整 Consent 审批，客户端按返回的 `interval` 轮询 `/token`。轮询过快会收到 `slow_down` 并增加后续间隔；批准、拒绝与 Token 兑换均为一次性状态。原始代码只作为 bearer secret 在调用方内存中存在，Redis 键使用 SHA-256 摘要，多实例共享同一状态。现有部署不会因升级自动放宽 OAuth 策略：需先在“OAuth 客户端策略”中启用 Device Authorization，再为目标客户端启用该 Grant。
+
+OAuth Step-Up 遵循 [RFC 9470](https://www.rfc-editor.org/rfc/rfc9470.html) 的授权请求语义：Authorization Code 请求可以使用 `acr_values=urn:nyauth:loa:2` 要求 MFA/Passkey 等更高认证等级，也可以使用 `max_age` 要求认证时间足够新。Discovery 公布 `urn:nyauth:loa:1` 与 `urn:nyauth:loa:2`，用户 Token 和 ID Token 返回实际 `acr`、`amr`、`auth_time`。已有会话不满足条件时，Nyauth 保留 Consent challenge，完成第二因素后回到原授权页面；未绑定 MFA 时引导用户进入安全中心，不会降级授权。资源服务器仍需按 RFC 9470 返回 `WWW-Authenticate: Bearer error="insufficient_user_authentication"` 挑战，并让客户端重新发起带有这些参数的授权请求。完整示例见 [标准 OAuth/OIDC 集成指南](docs/oauth-oidc-integration.md)。
 
 客户端可保存 HTTPS 主页、隐私政策和服务条款，并上传与头像相同安全管线处理的方形 Logo；不接受任意外部图片 URL。每次同意会保存当时的应用名称、政策链接和客户端 revision，授权记录的 `last_used_at` 只在客户端真实换取 Access Token 或轮换 Refresh Token 后更新。后续新增 Scope/Claim 只在下一次 Consent 中标为新增请求，新增可选 Scope 默认不勾选，也不会被静默加入既有 Token；Redirect URI 变化、Grant/Scope/Claim 移除或访问策略变化会推进授权 revision，使 Nyauth 的授权码兑换、Access Token 校验和 Refresh Token 轮换拒绝旧版本，并要求用户重新授权。自包含 JWT 若由第三方资源服务器完全离线验签，仍只能在其原始短期 `exp` 到达后自然失效；需要即时状态的集成应调用 introspection 或使用 Nyauth 的 UserInfo。
 

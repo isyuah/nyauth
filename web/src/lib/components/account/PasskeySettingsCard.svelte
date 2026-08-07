@@ -29,10 +29,12 @@
 
   let {
     onsessionupdated,
+    onfactorready,
     providerReauthenticationFailed = false,
     returnTo = '/profile',
   }: {
     onsessionupdated?: (session: SessionInfo) => void;
+    onfactorready?: () => void | Promise<void>;
     providerReauthenticationFailed?: boolean;
     returnTo?: string;
   } = $props();
@@ -160,6 +162,7 @@
     registrationOpen = false;
     registrationName = '';
     notice = `Passkey“${passkey.name}”已注册，当前会话已安全轮换。`;
+    await onfactorready?.();
   }
 
   async function removePasskey(id: string) {

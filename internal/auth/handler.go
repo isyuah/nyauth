@@ -26,6 +26,7 @@ import (
 	internalcrypto "github.com/nyasharp/nyauth/internal/crypto"
 	"github.com/nyasharp/nyauth/internal/deviceauthorization"
 	"github.com/nyasharp/nyauth/internal/oauthops"
+	"github.com/nyasharp/nyauth/internal/oauthstepup"
 	"github.com/nyasharp/nyauth/internal/session"
 	"github.com/nyasharp/nyauth/internal/settings"
 	"github.com/nyasharp/nyauth/internal/user"
@@ -35,10 +36,12 @@ import (
 const oauthSessionCookie = "nyauth_session"
 
 const (
-	maxOAuthFormBodyBytes      int64 = 1 << 20
-	maxAuthorizationQueryBytes       = 16 << 10
-	maxOAuthStateBytes               = 512
-	maxOIDCNonceBytes                = 512
+	maxOAuthFormBodyBytes          int64 = 1 << 20
+	maxAuthorizationQueryBytes           = 16 << 10
+	maxOAuthStateBytes                   = 512
+	maxOIDCNonceBytes                    = 512
+	oauthReauthenticationParameter       = "_nyauth_reauthentication"
+	oauthReauthenticationTTL             = 10 * time.Minute
 )
 
 var errEndSessionSubjectMismatch = errors.New("ID token subject does not match session subject")
@@ -314,8 +317,9 @@ func (h *Handler) Discovery(w http.ResponseWriter, _ *http.Request) {
 		"grant_types_supported":    []string{models.GrantAuthorizationCode, models.GrantDeviceCode, models.GrantClientCredentials, models.GrantRefreshToken},
 		"subject_types_supported":  []string{"public"}, "id_token_signing_alg_values_supported": []string{"RS256"},
 		"scopes_supported":                      h.oauthPolicy().AllowedScopes,
+		"acr_values_supported":                  []string{oauthstepup.ACRLevel1, oauthstepup.ACRLevel2},
 		"token_endpoint_auth_methods_supported": []string{"client_secret_basic", "client_secret_post", "none"},
-		"claims_supported":                      []string{"sub", "iss", "aud", "exp", "iat", "jti", "nonce", "name", "email", "email_verified", "preferred_username", "picture", "role"},
+		"claims_supported":                      []string{"sub", "iss", "aud", "exp", "iat", "jti", "nonce", "acr", "amr", "auth_time", "name", "email", "email_verified", "preferred_username", "picture", "role"},
 		"code_challenge_methods_supported":      []string{"S256"},
 	})
 }
@@ -417,15 +421,58 @@ func (h *Handler) Authorize(w http.ResponseWriter, r *http.Request) {
 		h.redirectAuthorizeError(w, r, redirectURI, state, "invalid_request")
 		return
 	}
+	requestedACR, err := oauthstepup.ParseACRValues(q.Get("acr_values"))
+	if err != nil {
+		h.recordAuthorizationOperation(r.Context(), cl.ID, oauthops.OutcomeFailure, oauthops.ReasonInvalidRequest, redirectURI, scopes)
+		h.redirectAuthorizeError(w, r, redirectURI, state, "invalid_request")
+		return
+	}
+	maxAge, err := oauthstepup.ParseMaxAge(q.Get("max_age"))
+	if err != nil {
+		h.recordAuthorizationOperation(r.Context(), cl.ID, oauthops.OutcomeFailure, oauthops.ReasonInvalidRequest, redirectURI, scopes)
+		h.redirectAuthorizeError(w, r, redirectURI, state, "invalid_request")
+		return
+	}
 
 	sess, currentUser := h.currentSessionUser(w, r)
 	if sess == nil || currentUser == nil {
-		loginURL := "/login?return_to=" + url.QueryEscape(r.URL.RequestURI())
+		returnTo := r.URL.RequestURI()
+		forceAuthentication := false
+		if maxAge != nil {
+			returnTo, err = h.createOAuthReauthenticationContinuation(r)
+			if err != nil {
+				h.recordAuthorizationOperation(r.Context(), cl.ID, oauthops.OutcomeFailure, oauthops.ReasonServerError, redirectURI, scopes)
+				writeOAuthError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "authentication continuation could not be created")
+				return
+			}
+			forceAuthentication = true
+		}
+		loginURL := "/login?return_to=" + url.QueryEscape(returnTo)
+		if forceAuthentication {
+			loginURL = "/login?force=1&return_to=" + url.QueryEscape(returnTo)
+		}
 		http.Redirect(w, r, loginURL, http.StatusFound)
 		return
 	}
 	if currentUser.MustChangePassword {
 		http.Redirect(w, r, "/change-password", http.StatusFound)
+		return
+	}
+	maxAgeSatisfied, err := h.oauthReauthenticationSatisfied(r, sess, maxAge)
+	if err != nil {
+		h.recordAuthorizationOperation(r.Context(), cl.ID, oauthops.OutcomeFailure, oauthops.ReasonServerError, redirectURI, scopes)
+		writeOAuthError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "authentication continuation could not be verified")
+		return
+	}
+	if !maxAgeSatisfied {
+		returnTo, continuationErr := h.createOAuthReauthenticationContinuation(r)
+		if continuationErr != nil {
+			h.recordAuthorizationOperation(r.Context(), cl.ID, oauthops.OutcomeFailure, oauthops.ReasonServerError, redirectURI, scopes)
+			writeOAuthError(w, http.StatusServiceUnavailable, "temporarily_unavailable", "authentication continuation could not be created")
+			return
+		}
+		loginURL := "/login?force=1&return_to=" + url.QueryEscape(returnTo)
+		http.Redirect(w, r, loginURL, http.StatusFound)
 		return
 	}
 	allowed, err := h.clientStore.UserMayAccess(r.Context(), cl.ID, currentUser.ID.String())
@@ -450,10 +497,12 @@ func (h *Handler) Authorize(w http.ResponseWriter, r *http.Request) {
 		writeOAuthError(w, http.StatusInternalServerError, "server_error", "failed to create consent challenge")
 		return
 	}
+	requiredAuthContext := oauthstepup.RequiredContext(requestedACR)
 	data := &session.ConsentData{ClientID: clientID, UserID: currentUser.ID.String(), RedirectURI: redirectURI, Scopes: scopes,
 		OptionalScopes: optionalScopes, ScopeClaims: scopeClaims, ScopeDetails: scopeDetails,
 		State: state, CodeChallenge: challenge, ChallengeMethod: "S256", Nonce: nonce, AuthVersion: currentUser.AuthVersion,
-		ClientIdentityRevision: cl.IdentityRevision, ClientAuthorizationRevision: cl.AuthorizationRevision}
+		ClientIdentityRevision: cl.IdentityRevision, ClientAuthorizationRevision: cl.AuthorizationRevision,
+		RequiredAuthContext: requiredAuthContext, MaxAgeSeconds: durationSeconds(maxAge), MaxAgeSatisfied: maxAgeSatisfied}
 	if err := h.sessionStore.SaveConsent(r.Context(), consentChallenge, data, 10*time.Minute); err != nil {
 		h.recordAuthorizationOperation(r.Context(), cl.ID, oauthops.OutcomeFailure, oauthops.ReasonServerError, redirectURI, scopes)
 		writeOAuthError(w, http.StatusInternalServerError, "server_error", "failed to persist consent challenge")
@@ -468,6 +517,63 @@ func validOAuthOpaqueParameter(value string, maxBytes int, allowEmpty bool) bool
 		return allowEmpty
 	}
 	return len(value) <= maxBytes && utf8.ValidString(value)
+}
+
+func durationSeconds(value *time.Duration) *int64 {
+	if value == nil {
+		return nil
+	}
+	seconds := int64(*value / time.Second)
+	return &seconds
+}
+
+func (h *Handler) oauthReauthenticationSatisfied(r *http.Request, sess *session.SessionData, maxAge *time.Duration) (bool, error) {
+	if maxAge == nil {
+		return true, nil
+	}
+	token := r.URL.Query().Get(oauthReauthenticationParameter)
+	if token != "" {
+		state, err := h.sessionStore.ConsumeOAuthReauthentication(r.Context(), token)
+		switch {
+		case err == nil:
+			if state.RequestURI == oauthAuthorizationRequestURI(r) && !sess.AuthenticatedAt.Before(state.CreatedAt) {
+				return true, nil
+			}
+		case !errors.Is(err, session.ErrNotFound):
+			return false, err
+		}
+	}
+	return oauthstepup.Fresh(sess.AuthenticatedAt, time.Now().UTC(), maxAge), nil
+}
+
+func (h *Handler) createOAuthReauthenticationContinuation(r *http.Request) (string, error) {
+	token, err := internalcrypto.GenerateRandomString(32)
+	if err != nil {
+		return "", err
+	}
+	requestURI := oauthAuthorizationRequestURI(r)
+	if err := h.sessionStore.SaveOAuthReauthentication(r.Context(), token, &session.OAuthReauthenticationData{
+		RequestURI: requestURI,
+		CreatedAt:  time.Now().UTC(),
+	}, oauthReauthenticationTTL); err != nil {
+		return "", err
+	}
+	target, err := url.Parse(requestURI)
+	if err != nil {
+		return "", err
+	}
+	query := target.Query()
+	query.Set(oauthReauthenticationParameter, token)
+	target.RawQuery = query.Encode()
+	return target.RequestURI(), nil
+}
+
+func oauthAuthorizationRequestURI(r *http.Request) string {
+	target := *r.URL
+	query := target.Query()
+	query.Del(oauthReauthenticationParameter)
+	target.RawQuery = query.Encode()
+	return target.RequestURI()
 }
 
 func (h *Handler) Token(w http.ResponseWriter, r *http.Request) {
@@ -561,7 +667,10 @@ func (h *Handler) handleAuthorizationCodeGrant(w http.ResponseWriter, r *http.Re
 		return
 	}
 	issueRefresh := containsScope(stored.Scopes, "offline_access") && cl.HasGrant(models.GrantRefreshToken)
-	pair, err := h.tokenService.GenerateAuthorizationCodeTokenPairAtRevisionWithClaims(r.Context(), cl.ID, stored.UserID, stored.Scopes, allowedClaims, stored.AuthVersion, stored.AuthorizationIssuedAt, stored.ClientAuthorizationRevision, issueRefresh)
+	authentication := IssuanceAuthentication{
+		Context: stored.AuthenticationContext, Methods: stored.AuthenticationMethods, AuthTime: stored.AuthenticationTime,
+	}
+	pair, err := h.tokenService.GenerateAuthorizationCodeTokenPairAtRevisionWithClaimsAndAuthentication(r.Context(), cl.ID, stored.UserID, stored.Scopes, allowedClaims, stored.AuthVersion, stored.AuthorizationIssuedAt, stored.ClientAuthorizationRevision, authentication, issueRefresh)
 	if err != nil {
 		if errors.Is(err, ErrInvalidToken) {
 			h.recordGrantAudit(r.Context(), models.AuditTokenGrantFailed, models.GrantAuthorizationCode, cl.ID, "failure", "high", "authorization_inactive")
@@ -574,7 +683,7 @@ func (h *Handler) handleAuthorizationCodeGrant(w http.ResponseWriter, r *http.Re
 	}
 	if containsScope(stored.Scopes, "openid") {
 		info := h.userClaimsForAllowed(u, allowedClaims)
-		pair.IDToken, err = h.tokenService.GenerateIDTokenWithClaims(r.Context(), cl.ID, stored.UserID, stored.Scopes, allowedClaims, stored.Nonce, info)
+		pair.IDToken, err = h.tokenService.GenerateIDTokenWithClaimsAndAuthentication(r.Context(), cl.ID, stored.UserID, stored.Scopes, allowedClaims, stored.Nonce, info, authentication)
 		if err != nil {
 			h.recordGrantAudit(r.Context(), models.AuditTokenGrantFailed, models.GrantAuthorizationCode, cl.ID, "failure", "high", "id_token_issuance_failed")
 			writeTokenError(w, http.StatusInternalServerError, "server_error", "failed to issue ID token")

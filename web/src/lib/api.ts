@@ -101,7 +101,7 @@ export interface SessionInfo {
 
 export type MFAMethod = 'totp' | 'recovery_code' | 'passkey';
 export type CodeMFAMethod = Exclude<MFAMethod, 'passkey'>;
-export type MFAPurpose = 'login' | 'reauthentication';
+export type MFAPurpose = 'login' | 'reauthentication' | 'oauth_step_up';
 
 export interface MFARequiredResponse {
   status: 'mfa_required';
@@ -112,10 +112,12 @@ export interface MFARequiredResponse {
   expires_at: string;
   trusted_device_available?: boolean;
   trusted_device_ttl_seconds?: number;
+  required_acr?: string;
 }
 
 export type LoginResponse = SessionInfo | MFARequiredResponse;
 export type ReauthenticationResponse = SessionInfo | MFARequiredResponse;
+export type ConsentStepUpResponse = MFARequiredResponse | { redirect_url: string };
 
 export interface MFAStatus {
   totp_available: boolean;
@@ -186,8 +188,9 @@ export interface PasskeyRegistrationResult extends SessionInfo {
   passkey: PasskeyCredential;
 }
 
-export function isMFARequiredResponse(response: LoginResponse): response is MFARequiredResponse {
-  return 'status' in response && response.status === 'mfa_required';
+export function isMFARequiredResponse(response: unknown): response is MFARequiredResponse {
+  return typeof response === 'object' && response !== null && 'status' in response
+    && response.status === 'mfa_required';
 }
 
 export interface ExternalIdentity {
@@ -675,6 +678,9 @@ export interface ConsentRequest {
   reauthorization_required: boolean;
   new_scopes: string[];
   new_claims: string[];
+  step_up_required: boolean;
+  required_acr?: string;
+  max_age?: number | null;
 }
 
 export interface ConsentPermission {
@@ -1664,6 +1670,8 @@ const API_ERROR_TRANSLATIONS: Record<string, string> = {
   'failed to update publisher verification': '发布者可信状态更新失败，请稍后重试',
   'invalid_scope_selection': '可选权限选择无效，请重新发起授权',
   'invalid_or_expired_challenge': '授权请求无效或已过期，请重新发起登录',
+  'unmet authentication requirements': '当前账户尚未配置本次授权所需的额外验证方式',
+  'invalid or expired authorization request': '授权请求无效或已过期，请重新发起登录',
   'invalid_or_expired_user_code': '设备代码无效或已过期，请核对后重试',
   'too_many_device_verification_attempts': '设备代码尝试过于频繁，请稍后重试',
   'device_authorization_unavailable': '设备授权暂时不可用，请稍后重试',
@@ -1854,6 +1862,8 @@ const API_ERROR_MESSAGES_BY_CODE: Record<string, string> = {
   'client.configuration_invalid': 'invalid oauth client',
   'client.publisher_verification_not_applicable': 'publisher verification is not applicable to system-managed clients',
   'client.publisher_verification_unchanged': 'publisher verification status is unchanged',
+  'oauth.unmet_authentication_requirements': 'unmet authentication requirements',
+  'oauth.authorization_request_invalid': 'invalid or expired authorization request',
 };
 
 export function localizeAPIErrorMessage(message: string, code = ''): string {
@@ -2024,6 +2034,9 @@ export function normalizeConsentRequest(consent: ConsentRequest): ConsentRequest
     previously_authorized: consent.previously_authorized === true,
     application_changed: consent.application_changed === true,
     reauthorization_required: consent.reauthorization_required === true,
+    step_up_required: consent.step_up_required === true,
+    required_acr: typeof consent.required_acr === 'string' ? consent.required_acr : '',
+    max_age: Number.isSafeInteger(consent.max_age) && Number(consent.max_age) >= 0 ? Number(consent.max_age) : null,
   };
 }
 
@@ -2224,6 +2237,7 @@ export const api = {
 
   consent: {
     get: async (challenge: string) => normalizeConsentRequest(await req<ConsentRequest>(`/api/consent?challenge=${encodeURIComponent(challenge)}`)),
+    stepUp: (challenge: string) => req<ConsentStepUpResponse>('/api/consent/step-up', { method: 'POST', body: JSON.stringify({ challenge }) }),
     accept: (challenge: string, grantedOptionalScopes: string[]) => req<{ redirect_url: string }>('/api/consent/accept', { method: 'POST', body: JSON.stringify({ challenge, granted_optional_scopes: grantedOptionalScopes }) }),
     deny: (challenge: string) => req<{ redirect_url: string }>('/api/consent/deny', { method: 'POST', body: JSON.stringify({ challenge }) }),
   },

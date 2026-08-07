@@ -5,6 +5,7 @@ import (
 	"crypto/subtle"
 	"errors"
 	"net/http"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/nyasharp/nyauth/internal/mfa"
 	"github.com/nyasharp/nyauth/internal/notification"
+	"github.com/nyasharp/nyauth/internal/oauthstepup"
 	"github.com/nyasharp/nyauth/internal/session"
 	"github.com/nyasharp/nyauth/internal/settings"
 	"github.com/nyasharp/nyauth/internal/user"
@@ -23,6 +25,7 @@ var errMFAEnrollmentRequired = errors.New("MFA enrollment is required by policy"
 const (
 	mfaPurposeLogin            = "login"
 	mfaPurposeReauthentication = "reauthentication"
+	mfaPurposeOAuthStepUp      = "oauth_step_up"
 )
 
 type myMFAResponse struct {
@@ -125,6 +128,46 @@ func (s *Server) beginReauthenticationMFAPending(
 	}, true, nil
 }
 
+func (s *Server) beginOAuthStepUpMFAPending(
+	w http.ResponseWriter,
+	r *http.Request,
+	current *models.User,
+	requiredAuthContext, returnTo string,
+) (*models.MFARequiredResponse, error) {
+	if s.mfaService == nil || requiredAuthContext != oauthstepup.ACRLevel2 {
+		return nil, errMFAEnrollmentRequired
+	}
+	methods, err := s.mfaService.LoginMethods(r.Context(), current.ID)
+	if err != nil {
+		return nil, err
+	}
+	if len(methods) == 0 {
+		return nil, errMFAEnrollmentRequired
+	}
+	authenticated := sessionFromContext(r.Context())
+	if authenticated == nil || authenticated.Data == nil {
+		return nil, session.ErrNotFound
+	}
+	pending, err := s.sessionMiddleware.CreateMFAPending(w, r, &session.MFAPendingData{
+		UserID: current.ID.String(), Username: current.Username,
+		AuthVersion: current.AuthVersion, SessionVersion: current.SessionVersion,
+		Purpose: mfaPurposeOAuthStepUp, PrimaryMethod: "session",
+		RequiredAuthContext:   requiredAuthContext,
+		AuthenticationMethods: append([]string(nil), authenticated.Data.AuthenticationMethods...),
+		SessionDigest:         providerSessionDigest(authenticated.ID),
+		ReturnTo:              safeReturnPath(returnTo, "/dashboard"), CreatedAt: time.Now().UTC(),
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &models.MFARequiredResponse{
+		Status: "mfa_required", Purpose: mfaPurposeOAuthStepUp,
+		Username: current.Username, Methods: methods,
+		CSRFToken: pending.Data.CSRFToken, ExpiresAt: pending.Data.ExpiresAt,
+		RequiredACR: requiredAuthContext,
+	}, nil
+}
+
 func (s *Server) loadMFAPendingUser(w http.ResponseWriter, r *http.Request) (*MFAPendingSession, *models.User, []string, *AuthenticatedSession, error) {
 	pending, err := s.sessionMiddleware.GetMFAPending(r)
 	if err != nil {
@@ -153,12 +196,15 @@ func (s *Server) loadMFAPendingUser(w http.ResponseWriter, r *http.Request) (*MF
 	var authenticated *AuthenticatedSession
 	switch pending.Data.Purpose {
 	case mfaPurposeLogin:
-	case mfaPurposeReauthentication:
+	case mfaPurposeReauthentication, mfaPurposeOAuthStepUp:
 		authenticated, err = s.sessionMiddleware.GetSession(w, r)
 		if err != nil || authenticated.Data.UserID != current.ID.String() ||
 			authenticated.Data.AuthVersion != current.AuthVersion ||
 			authenticated.Data.SessionVersion != current.SessionVersion ||
 			!sameSessionDigest(providerSessionDigest(authenticated.ID), pending.Data.SessionDigest) {
+			return nil, nil, nil, nil, session.ErrValueMismatch
+		}
+		if pending.Data.Purpose == mfaPurposeOAuthStepUp && pending.Data.RequiredAuthContext != oauthstepup.ACRLevel2 {
 			return nil, nil, nil, nil, session.ErrValueMismatch
 		}
 	default:
@@ -193,6 +239,7 @@ func (s *Server) handleGetMFAChallenge(w http.ResponseWriter, r *http.Request) {
 		Username: pending.Data.Username, Methods: methods,
 		CSRFToken: pending.Data.CSRFToken, ExpiresAt: pending.Data.ExpiresAt,
 	}
+	response.RequiredACR = pending.Data.RequiredAuthContext
 	security := s.settingsMgr.Security()
 	if pending.Data.Purpose == mfaPurposeLogin && security.TrustedDevicesEnabled {
 		response.TrustedDeviceAvailable = true
@@ -219,6 +266,8 @@ func sameMFAPendingChallenge(expected, consumed *MFAPendingSession) bool {
 		expected.Data.AuthVersion == consumed.Data.AuthVersion &&
 		expected.Data.SessionVersion == consumed.Data.SessionVersion &&
 		expected.Data.Purpose == consumed.Data.Purpose &&
+		expected.Data.RequiredAuthContext == consumed.Data.RequiredAuthContext &&
+		slices.Equal(expected.Data.AuthenticationMethods, consumed.Data.AuthenticationMethods) &&
 		expected.Data.PrimaryMethod == consumed.Data.PrimaryMethod &&
 		expected.Data.Provider == consumed.Data.Provider &&
 		expected.Data.SessionDigest == consumed.Data.SessionDigest &&
@@ -336,7 +385,7 @@ func (s *Server) completeMFAChallenge(
 		writeAPIError(w, http.StatusUnauthorized, "account changed; sign in again")
 		return
 	}
-	if pending.Data.Purpose == mfaPurposeReauthentication {
+	if pending.Data.Purpose == mfaPurposeReauthentication || pending.Data.Purpose == mfaPurposeOAuthStepUp {
 		if authenticated == nil || !sameSessionDigest(providerSessionDigest(authenticated.ID), pending.Data.SessionDigest) {
 			writeAPIError(w, http.StatusUnauthorized, "account changed; sign in again")
 			return
@@ -353,7 +402,11 @@ func (s *Server) completeMFAChallenge(
 			return
 		}
 		requestWithSession := r.WithContext(withAuthenticatedSession(r.Context(), authenticated))
-		marked, err := s.sessionMiddleware.MarkReauthenticated(w, requestWithSession, updated)
+		methods := oauthAuthenticationMethods(pending.Data.PrimaryMethod, secondFactor)
+		if pending.Data.Purpose == mfaPurposeOAuthStepUp {
+			methods = mergeAuthenticationMethods(pending.Data.AuthenticationMethods, methods...)
+		}
+		marked, err := s.sessionMiddleware.MarkReauthenticatedWithAuthentication(w, requestWithSession, updated, oauthstepup.ACRLevel2, methods)
 		if err != nil {
 			writeAPIError(w, http.StatusServiceUnavailable, "reauthentication session could not be updated")
 			return
@@ -361,6 +414,7 @@ func (s *Server) completeMFAChallenge(
 		details := map[string]any{
 			"authentication_method": pending.Data.PrimaryMethod,
 			"second_factor":         secondFactor,
+			"purpose":               pending.Data.Purpose,
 		}
 		if pending.Data.Provider != "" {
 			details["provider"] = pending.Data.Provider
@@ -371,7 +425,7 @@ func (s *Server) completeMFAChallenge(
 		writeJSON(w, http.StatusOK, sessionResponse(updated, marked.Data))
 		return
 	}
-	createdSession, err := s.sessionMiddleware.CreateSession(w, r, current)
+	createdSession, err := s.sessionMiddleware.CreateSessionWithAuthentication(w, r, current, oauthstepup.ACRLevel2, oauthAuthenticationMethods(pending.Data.PrimaryMethod, secondFactor))
 	if err != nil {
 		writeAPIError(w, http.StatusServiceUnavailable, "failed to create session")
 		return
@@ -392,6 +446,41 @@ func (s *Server) completeMFAChallenge(
 	_ = s.userService.RecordLogin(r.Context(), current.ID, ip)
 	s.telemetry.RecordAuthEvent(r.Context(), "login", "success")
 	writeJSON(w, http.StatusOK, sessionResponse(current, createdSession.Data))
+}
+
+func oauthAuthenticationMethods(primaryMethod, secondFactor string) []string {
+	methods := make([]string, 0, 2)
+	switch primaryMethod {
+	case "password":
+		methods = append(methods, "pwd")
+	case "provider":
+		methods = append(methods, "federated")
+	}
+	switch secondFactor {
+	case "totp", "recovery_code":
+		methods = append(methods, "otp")
+	case "passkey":
+		methods = append(methods, "hwk")
+	}
+	return methods
+}
+
+func mergeAuthenticationMethods(existing []string, additions ...string) []string {
+	methods := make([]string, 0, len(existing)+len(additions))
+	seen := make(map[string]struct{}, len(existing)+len(additions))
+	for _, method := range append(append([]string(nil), existing...), additions...) {
+		switch method {
+		case "pwd", "otp", "hwk", "federated", "mfa", "swk":
+		default:
+			continue
+		}
+		if _, exists := seen[method]; exists {
+			continue
+		}
+		seen[method] = struct{}{}
+		methods = append(methods, method)
+	}
+	return methods
 }
 
 func (s *Server) handleCancelMFAChallenge(w http.ResponseWriter, r *http.Request) {

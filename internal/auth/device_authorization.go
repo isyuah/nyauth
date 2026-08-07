@@ -262,9 +262,10 @@ func (h *Handler) handleDeviceCodeGrant(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	issueRefresh := containsScope(approved.GrantedScopes, "offline_access") && cl.HasGrant(models.GrantRefreshToken)
-	pair, err := h.tokenService.GenerateAuthorizationCodeTokenPairAtRevisionWithClaims(
+	authentication := IssuanceAuthentication{Context: approved.AuthenticationContext, Methods: approved.AuthenticationMethods, AuthTime: approved.AuthenticationTime}
+	pair, err := h.tokenService.GenerateAuthorizationCodeTokenPairAtRevisionWithClaimsAndAuthentication(
 		r.Context(), cl.ID, approved.UserID, approved.GrantedScopes, approved.AllowedClaims,
-		approved.AuthVersion, approved.AuthorizationIssuedAt, approved.ClientAuthorizationRevision, issueRefresh,
+		approved.AuthVersion, approved.AuthorizationIssuedAt, approved.ClientAuthorizationRevision, authentication, issueRefresh,
 	)
 	if err != nil {
 		if errors.Is(err, ErrInvalidToken) {
@@ -277,9 +278,9 @@ func (h *Handler) handleDeviceCodeGrant(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 	if containsScope(approved.GrantedScopes, "openid") {
-		pair.IDToken, err = h.tokenService.GenerateIDTokenWithClaims(
+		pair.IDToken, err = h.tokenService.GenerateIDTokenWithClaimsAndAuthentication(
 			r.Context(), cl.ID, approved.UserID, approved.GrantedScopes, approved.AllowedClaims, "",
-			h.userClaimsForAllowed(currentUser, approved.AllowedClaims),
+			h.userClaimsForAllowed(currentUser, approved.AllowedClaims), authentication,
 		)
 		if err != nil {
 			h.recordGrantAudit(r.Context(), models.AuditTokenGrantFailed, models.GrantDeviceCode, cl.ID, "failure", "high", "id_token_issuance_failed")

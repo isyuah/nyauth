@@ -448,6 +448,27 @@ describe('MFA API contract', () => {
     const [, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
     expect(JSON.parse(String(init.body))).toEqual({ password: 'current password' });
   });
+
+  it('starts the RFC Step-Up MFA challenge with the formal session CSRF', async () => {
+    const challenge: MFARequiredResponse = {
+      ...mfaRequired,
+      purpose: 'oauth_step_up',
+      required_acr: 'urn:nyauth:loa:2',
+    };
+    const fetchMock = vi.fn(async () => new Response(JSON.stringify(challenge), {
+      status: 202,
+      headers: { 'Content-Type': 'application/json' },
+    }));
+    vi.stubGlobal('fetch', fetchMock);
+    setCsrfToken('formal-session-csrf');
+
+    const result = await api.consent.stepUp('opaque-consent-challenge');
+    expect(isMFARequiredResponse(result)).toBe(true);
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit];
+    expect(url).toBe('/api/consent/step-up');
+    expect(new Headers(init.headers).get('X-CSRF-Token')).toBe('formal-session-csrf');
+    expect(JSON.parse(String(init.body))).toEqual({ challenge: 'opaque-consent-challenge' });
+  });
 });
 
 describe('avatar API contract', () => {

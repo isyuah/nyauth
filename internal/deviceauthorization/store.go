@@ -64,6 +64,9 @@ type Record struct {
 	GrantedScopes               []string            `json:"granted_scopes,omitempty"`
 	AllowedClaims               []string            `json:"allowed_claims,omitempty"`
 	AuthorizationIssuedAt       int64               `json:"authorization_issued_at,omitempty"`
+	AuthenticationContext       string              `json:"acr,omitempty"`
+	AuthenticationMethods       []string            `json:"amr,omitempty"`
+	AuthenticationTime          int64               `json:"auth_time,omitempty"`
 }
 
 type CreateInput struct {
@@ -256,6 +259,10 @@ func (s *Store) GetPending(ctx context.Context, deviceID, version string) (*Reco
 }
 
 func (s *Store) Approve(ctx context.Context, current *Record, userID string, authVersion int64, scopes, claims []string, authorizationIssuedAt int64) error {
+	return s.ApproveWithAuthentication(ctx, current, userID, authVersion, scopes, claims, authorizationIssuedAt, "", nil, 0)
+}
+
+func (s *Store) ApproveWithAuthentication(ctx context.Context, current *Record, userID string, authVersion int64, scopes, claims []string, authorizationIssuedAt int64, authenticationContext string, authenticationMethods []string, authenticationTime int64) error {
 	if current == nil || userID == "" || authVersion <= 0 || authorizationIssuedAt <= 0 {
 		return errors.New("invalid device authorization approval")
 	}
@@ -266,6 +273,9 @@ func (s *Store) Approve(ctx context.Context, current *Record, userID string, aut
 	replacement.GrantedScopes = append([]string(nil), scopes...)
 	replacement.AllowedClaims = append([]string(nil), claims...)
 	replacement.AuthorizationIssuedAt = authorizationIssuedAt
+	replacement.AuthenticationContext = authenticationContext
+	replacement.AuthenticationMethods = append([]string(nil), authenticationMethods...)
+	replacement.AuthenticationTime = authenticationTime
 	encoded, err := json.Marshal(&replacement)
 	if err != nil {
 		return err

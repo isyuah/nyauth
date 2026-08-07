@@ -21,6 +21,7 @@ import (
 	"github.com/nyasharp/nyauth/internal/humanverification"
 	"github.com/nyasharp/nyauth/internal/identity"
 	"github.com/nyasharp/nyauth/internal/notification"
+	"github.com/nyasharp/nyauth/internal/oauthstepup"
 	"github.com/nyasharp/nyauth/internal/provider"
 	"github.com/nyasharp/nyauth/internal/servicecontrol"
 	"github.com/nyasharp/nyauth/internal/user"
@@ -625,7 +626,11 @@ func (s *Server) finishExternalLogin(w http.ResponseWriter, r *http.Request, pro
 		http.Redirect(w, r, target, http.StatusFound)
 		return
 	}
-	if _, err := s.sessionMiddleware.CreateSession(w, r, current); err != nil {
+	authContext, authMethods := oauthstepup.ACRLevel1, []string{"federated"}
+	if trustedDevice {
+		authContext, authMethods = oauthstepup.ACRLevel2, []string{"federated", "mfa"}
+	}
+	if _, err := s.sessionMiddleware.CreateSessionWithAuthentication(w, r, current, authContext, authMethods); err != nil {
 		s.providerCallbackFailure(w, r, "login", returnTo, "session_failed", http.StatusInternalServerError)
 		return
 	}

@@ -62,6 +62,9 @@ type AuthorizationData struct {
 	ChallengeMethod             string   `json:"code_challenge_method"`
 	Nonce                       string   `json:"nonce,omitempty"`
 	AuthVersion                 int64    `json:"auth_version,omitempty"`
+	AuthenticationContext       string   `json:"acr,omitempty"`
+	AuthenticationMethods       []string `json:"amr,omitempty"`
+	AuthenticationTime          int64    `json:"auth_time,omitempty"`
 	AuthorizationIssuedAt       int64    `json:"authorization_issued_at,omitempty"`
 	ClientAuthorizationRevision int64    `json:"client_authorization_revision,omitempty"`
 }
@@ -73,6 +76,9 @@ type TokenData struct {
 	ClaimNamesSet               bool     `json:"claim_names_set,omitempty"`
 	TokenUse                    string   `json:"token_use"`
 	AuthVersion                 int64    `json:"auth_version,omitempty"`
+	AuthenticationContext       string   `json:"acr,omitempty"`
+	AuthenticationMethods       []string `json:"amr,omitempty"`
+	AuthenticationTime          int64    `json:"auth_time,omitempty"`
 	FamilyID                    string   `json:"family_id,omitempty"`
 	FamilyKey                   string   `json:"family_key,omitempty"`
 	UserKey                     string   `json:"user_key,omitempty"`
@@ -93,6 +99,8 @@ type SessionData struct {
 	CreatedAtUnixMilli            int64     `json:"created_at_unix_milli,omitempty"`
 	LastSeenAt                    time.Time `json:"last_seen_at"`
 	AuthenticatedAt               time.Time `json:"authenticated_at"`
+	AuthenticationContext         string    `json:"authentication_context,omitempty"`
+	AuthenticationMethods         []string  `json:"authentication_methods,omitempty"`
 	PolicyRevision                int64     `json:"policy_revision,omitempty"`
 	SessionExpiresAt              time.Time `json:"-"`
 	SessionIdleExpiresAt          time.Time `json:"-"`
@@ -119,6 +127,9 @@ type ConsentData struct {
 	AuthVersion                 int64                          `json:"auth_version,omitempty"`
 	ClientIdentityRevision      int64                          `json:"client_identity_revision,omitempty"`
 	ClientAuthorizationRevision int64                          `json:"client_authorization_revision,omitempty"`
+	RequiredAuthContext         string                         `json:"required_auth_context,omitempty"`
+	MaxAgeSeconds               *int64                         `json:"max_age,omitempty"`
+	MaxAgeSatisfied             bool                           `json:"max_age_satisfied,omitempty"`
 	DeviceID                    string                         `json:"device_id,omitempty"`
 	DeviceRecordVersion         string                         `json:"device_record_version,omitempty"`
 }

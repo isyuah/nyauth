@@ -22,6 +22,7 @@ import (
 	"github.com/nyasharp/nyauth/internal/humanverification"
 	"github.com/nyasharp/nyauth/internal/identity"
 	"github.com/nyasharp/nyauth/internal/notification"
+	"github.com/nyasharp/nyauth/internal/oauthstepup"
 	"github.com/nyasharp/nyauth/internal/securityaction"
 	"github.com/nyasharp/nyauth/internal/session"
 	"github.com/nyasharp/nyauth/internal/settings"
@@ -165,7 +166,11 @@ func (s *Server) handleLogin(w http.ResponseWriter, r *http.Request) {
 		writeJSON(w, http.StatusAccepted, mfaResponse)
 		return
 	}
-	authenticated, err := s.sessionMiddleware.CreateSession(w, r, current)
+	authContext, authMethods := oauthstepup.ACRLevel1, []string{"pwd"}
+	if trustedDevice {
+		authContext, authMethods = oauthstepup.ACRLevel2, []string{"pwd", "mfa"}
+	}
+	authenticated, err := s.sessionMiddleware.CreateSessionWithAuthentication(w, r, current, authContext, authMethods)
 	if err != nil {
 		s.telemetry.RecordAuthEvent(r.Context(), "login", "session_error")
 		writeAPIError(w, http.StatusInternalServerError, "failed to create session")

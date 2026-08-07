@@ -57,6 +57,8 @@ var apiErrorCodesByMessage = map[string]string{
 	"unsupported mfa method":                                                             "mfa.method_unsupported",
 	"account changed; sign in again":                                                     "auth.account_changed",
 	"mfa enrollment is required; contact an administrator":                               "mfa.enrollment_required",
+	"unmet authentication requirements":                                                  "oauth.unmet_authentication_requirements",
+	"invalid or expired authorization request":                                           "oauth.authorization_request_invalid",
 	"totp enrollment is disabled":                                                        "mfa.totp_enrollment_disabled",
 	"totp is already enrolled":                                                           "mfa.totp_already_enrolled",
 	"totp enrollment must be restarted":                                                  "mfa.totp_enrollment_restart_required",

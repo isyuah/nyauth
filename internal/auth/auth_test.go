@@ -11,6 +11,7 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -19,6 +20,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	"github.com/nyasharp/nyauth/internal/config"
+	"github.com/nyasharp/nyauth/internal/oauthstepup"
 	"github.com/nyasharp/nyauth/internal/session"
 	"github.com/nyasharp/nyauth/internal/settings"
 	"github.com/nyasharp/nyauth/pkg/models"
@@ -524,6 +526,16 @@ func TestDiscoveryAdvertisesOnlySupportedFlows(t *testing.T) {
 	if body["device_authorization_endpoint"] != "https://issuer.example/device_authorization" {
 		t.Fatalf("device authorization endpoint = %v", body["device_authorization_endpoint"])
 	}
+	acrValues := body["acr_values_supported"].([]interface{})
+	if len(acrValues) != 2 || acrValues[0] != oauthstepup.ACRLevel1 || acrValues[1] != oauthstepup.ACRLevel2 {
+		t.Fatalf("unexpected ACR values: %v", acrValues)
+	}
+	claims := body["claims_supported"].([]interface{})
+	for _, expected := range []string{"acr", "amr", "auth_time"} {
+		if !slices.Contains(claims, interface{}(expected)) {
+			t.Fatalf("claims_supported is missing %q: %v", expected, claims)
+		}
+	}
 	grants := body["grant_types_supported"].([]interface{})
 	foundDeviceGrant := false
 	for _, grant := range grants {
@@ -537,6 +549,62 @@ func TestDiscoveryAdvertisesOnlySupportedFlows(t *testing.T) {
 	scopes := body["scopes_supported"].([]interface{})
 	if scopes[len(scopes)-1] != "tenant.read" {
 		t.Fatalf("discovery scopes = %v", scopes)
+	}
+}
+
+func TestOAuthReauthenticationContinuationIsBoundAndSingleUse(t *testing.T) {
+	mini := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: mini.Addr()})
+	t.Cleanup(func() { _ = client.Close() })
+	store := session.NewStore(client)
+	handler := &Handler{sessionStore: store}
+	request := httptest.NewRequest(http.MethodGet, "/authorize?client_id=client&max_age=0&state=state", nil)
+	canonical := oauthAuthorizationRequestURI(request)
+	token := "one-time-continuation"
+	createdAt := time.Now().UTC().Add(-time.Second)
+	if err := store.SaveOAuthReauthentication(request.Context(), token, &session.OAuthReauthenticationData{
+		RequestURI: canonical,
+		CreatedAt:  createdAt,
+	}, time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	query := request.URL.Query()
+	query.Set(oauthReauthenticationParameter, token)
+	request.URL.RawQuery = query.Encode()
+	zero := time.Duration(0)
+	authenticated := &session.SessionData{AuthenticatedAt: createdAt.Add(500 * time.Millisecond)}
+	satisfied, err := handler.oauthReauthenticationSatisfied(request, authenticated, &zero)
+	if err != nil || !satisfied {
+		t.Fatalf("first continuation satisfied=%v err=%v", satisfied, err)
+	}
+	satisfied, err = handler.oauthReauthenticationSatisfied(request, authenticated, &zero)
+	if err != nil || satisfied {
+		t.Fatalf("reused continuation satisfied=%v err=%v", satisfied, err)
+	}
+}
+
+func TestAuthenticationClaimsAndIntrospectionUseStandardContext(t *testing.T) {
+	claims := &Claims{}
+	applyAuthenticationClaims(claims, IssuanceAuthentication{
+		Context: oauthstepup.ACRLevel2,
+		Methods: []string{"pwd", "otp"},
+		AuthTime: 1234,
+	})
+	if claims.AuthenticationContext != oauthstepup.ACRLevel2 || claims.AuthenticationTime != 1234 ||
+		!slices.Equal(claims.AuthenticationMethods, []string{"pwd", "otp"}) {
+		t.Fatalf("authentication claims = %#v", claims)
+	}
+	claims.Subject = "user"
+	claims.Audience = jwt.ClaimStrings{"client"}
+	claims.Scope = "openid"
+	claims.ID = "token"
+	claims.Issuer = "https://issuer.example"
+	claims.ExpiresAt = jwt.NewNumericDate(time.Unix(2000, 0))
+	claims.IssuedAt = jwt.NewNumericDate(time.Unix(1000, 0))
+	result := introspectionClaims(claims)
+	if result["acr"] != oauthstepup.ACRLevel2 || result["auth_time"] != int64(1234) ||
+		!slices.Equal(result["amr"].([]string), []string{"pwd", "otp"}) {
+		t.Fatalf("introspection authentication context = %#v", result)
 	}
 }
 

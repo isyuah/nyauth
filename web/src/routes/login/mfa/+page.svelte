@@ -5,6 +5,7 @@
   import { api, ApiError, isAPIErrorCode, type MFAMethod, type MFAPurpose, type MFARequiredResponse, type SessionInfo } from '$lib/api';
   import { brandingStore, safeReturnPath, sessionStore } from '$lib/stores';
   import BrandLogo from '$lib/components/layout/BrandLogo.svelte';
+  import AuthorizationBrandHeader from '$lib/components/oauth/AuthorizationBrandHeader.svelte';
   import Button from '$lib/components/ui/Button.svelte';
   import Input from '$lib/components/ui/Input.svelte';
   import {
@@ -29,8 +30,9 @@
   let passkeyGeneration = 0;
 
   let returnTo = $derived(safeReturnPath($page.url.searchParams.get('return_to'), '/dashboard'));
-  let requestedPurpose: MFAPurpose = $derived($page.url.searchParams.get('purpose') === 'reauthentication' ? 'reauthentication' : 'login');
+  let requestedPurpose: MFAPurpose = $derived(parsePurpose($page.url.searchParams.get('purpose')));
   let activePurpose = $derived(challenge?.purpose ?? requestedPurpose);
+  let oauthStepUp = $derived(activePurpose === 'oauth_step_up');
   let expiryTime = $derived(challenge ? Date.parse(challenge.expires_at) : Number.NaN);
   let remainingSeconds = $derived(Number.isFinite(expiryTime) ? Math.max(0, Math.ceil((expiryTime - now) / 1000)) : 0);
   let trustedDeviceDays = $derived(Math.max(1, Math.round((challenge?.trusted_device_ttl_seconds ?? 0) / 86_400)));
@@ -42,6 +44,31 @@
     }
     if (!challenge?.trusted_device_available || challenge.purpose !== 'login') trustDevice = false;
   });
+
+  function parsePurpose(value: string | null): MFAPurpose {
+    if (value === 'reauthentication' || value === 'oauth_step_up') return value;
+    return 'login';
+  }
+
+  function purposeTitle(purpose: MFAPurpose): string {
+    if (purpose === 'oauth_step_up') return '完成额外身份验证';
+    if (purpose === 'reauthentication') return '完成重新认证';
+    return '完成多因素验证';
+  }
+
+  function purposeDescription(purpose: MFAPurpose): string {
+    if (purpose === 'oauth_step_up') return '验证第二项凭据后返回应用授权确认，不会重复提交授权决定。';
+    if (purpose === 'reauthentication') return '验证第二项凭据后返回刚才的敏感操作。';
+    return '验证第二项凭据后才会创建完整登录会话。';
+  }
+
+  function returnButtonLabel(purpose: MFAPurpose): string {
+    return purpose === 'oauth_step_up' ? '返回授权页面' : purpose === 'reauthentication' ? '返回原页面' : '重新登录';
+  }
+
+  function cancelButtonLabel(purpose: MFAPurpose): string {
+    return purpose === 'oauth_step_up' ? '取消并返回授权页面' : purpose === 'reauthentication' ? '取消并返回原页面' : '取消并返回登录';
+  }
 
   onMount(() => {
     const timer = window.setInterval(() => (now = Date.now()), 1_000);
@@ -81,7 +108,7 @@
 
   async function finishMFA(session: SessionInfo, purpose: MFAPurpose) {
     sessionStore.setSession(session);
-    if (purpose === 'reauthentication') {
+    if (purpose !== 'login') {
       await goto(returnTo);
       return;
     }
@@ -206,7 +233,7 @@
     error = '';
     try {
       await api.cancelLoginMFA(pending.csrf_token);
-      if (activePurpose === 'reauthentication') await goto(returnTo);
+      if (activePurpose !== 'login') await goto(returnTo);
       else await goto(`/login?return_to=${encodeURIComponent(returnTo)}`);
     } catch (cause) {
       error = cause instanceof Error ? cause.message : '无法取消本次验证';
@@ -216,17 +243,30 @@
   }
 </script>
 
-<svelte:head><title>{activePurpose === 'reauthentication' ? '重新验证身份' : '多因素验证'} - {$brandingStore.title}</title></svelte:head>
+<svelte:head><title>{purposeTitle(activePurpose)} - {$brandingStore.title}</title></svelte:head>
 
-<main class="flex min-h-screen items-center justify-center px-4" style="background: var(--nya-gradient-soft)">
-  <div class="w-full max-w-[430px]">
-    <div class="mb-7 text-center">
-		<BrandLogo size={56} />
-      <h1 class="text-2xl font-bold text-nya-text-primary">{activePurpose === 'reauthentication' ? '完成重新认证' : '完成多因素验证'}</h1>
-      <p class="mt-2 text-body text-nya-text-secondary">{activePurpose === 'reauthentication' ? '验证第二项凭据后返回刚才的敏感操作。' : '验证第二项凭据后才会创建完整登录会话。'}</p>
-    </div>
+<main class="flex min-h-[100svh] items-center justify-center px-4 {oauthStepUp ? 'oauth-step-up-page py-8' : 'standard-mfa-page'}">
+  <div class="w-full {oauthStepUp ? 'max-w-[560px] overflow-hidden rounded-nya-card border border-nya-border bg-nya-surface shadow-nya-popup' : 'max-w-[430px]'}">
+    {#if oauthStepUp}
+      <div class="px-7 pb-5 pt-7">
+        <AuthorizationBrandHeader />
+        <div class="mt-6 flex items-start gap-3">
+          <span class="grid h-11 w-11 shrink-0 place-items-center rounded-full bg-nya-primary-soft text-nya-primary"><ShieldCheck size={22} /></span>
+          <div>
+            <h1 class="text-xl font-bold text-nya-text-primary">{purposeTitle(activePurpose)}</h1>
+            <p class="mt-1 text-body text-nya-text-secondary">{purposeDescription(activePurpose)}</p>
+          </div>
+        </div>
+      </div>
+    {:else}
+      <div class="mb-7 text-center">
+        <BrandLogo size={56} />
+        <h1 class="text-2xl font-bold text-nya-text-primary">{purposeTitle(activePurpose)}</h1>
+        <p class="mt-2 text-body text-nya-text-secondary">{purposeDescription(activePurpose)}</p>
+      </div>
+    {/if}
 
-    <div class="rounded-nya-lg border border-nya-border bg-nya-surface p-7 shadow-nya-sm">
+    <div class="{oauthStepUp ? 'border-t border-nya-divider px-7 pb-7 pt-5' : 'rounded-nya-lg border border-nya-border bg-nya-surface p-7 shadow-nya-sm'}">
       {#if loading}
         <p class="py-8 text-center text-body text-nya-text-tertiary" role="status">正在恢复验证状态…</p>
       {:else if !challenge}
@@ -238,14 +278,14 @@
           </div>
           <div class="flex justify-center gap-2">
             <Button variant="secondary" onclick={restoreChallenge}>重试恢复</Button>
-            <Button variant="primary" onclick={() => activePurpose === 'reauthentication' ? goto(returnTo) : goto(`/login?return_to=${encodeURIComponent(returnTo)}`)}>{activePurpose === 'reauthentication' ? '返回原页面' : '重新登录'}</Button>
+            <Button variant="primary" onclick={() => activePurpose !== 'login' ? goto(returnTo) : goto(`/login?return_to=${encodeURIComponent(returnTo)}`)}>{returnButtonLabel(activePurpose)}</Button>
           </div>
         </div>
       {:else}
         <div class="mb-5 flex items-start gap-3 rounded-nya-sm bg-nya-primary-soft px-4 py-3">
           <ShieldCheck size={19} class="mt-0.5 shrink-0 text-nya-primary" />
           <div>
-            <p class="text-body-medium font-semibold text-nya-text-primary">{challenge.purpose === 'reauthentication' ? '正在重新验证' : '正在验证'} @{challenge.username}</p>
+            <p class="text-body-medium font-semibold text-nya-text-primary">{challenge.purpose === 'oauth_step_up' ? '正在为应用授权提升认证等级' : challenge.purpose === 'reauthentication' ? '正在重新验证' : '正在验证'} @{challenge.username}</p>
             <p class="mt-1 text-small text-nya-text-secondary">
               {remainingSeconds > 0 ? `本次验证将在 ${Math.ceil(remainingSeconds / 60)} 分钟内过期` : '本次验证已到期，请重新登录'}
             </p>
@@ -311,14 +351,29 @@
           {/if}
           <Button type="submit" variant="primary" size="lg" loading={submitting} disabled={remainingSeconds <= 0 || cancelling} fullWidth>
             {#if selectedMethod === 'passkey'}<Fingerprint size={17} />{/if}
-            {selectedMethod === 'passkey' ? '使用 Passkey 验证' : challenge.purpose === 'reauthentication' ? '验证并返回' : '验证并登录'}
+            {selectedMethod === 'passkey' ? '使用 Passkey 验证' : challenge.purpose !== 'login' ? '验证并返回' : '验证并登录'}
           </Button>
         </form>
 
         <div class="mt-4 flex justify-center">
-          <Button variant="ghost" loading={cancelling} disabled={submitting} onclick={cancelChallenge}>{challenge.purpose === 'reauthentication' ? '取消并返回原页面' : '取消并返回登录'}</Button>
+          <Button variant="ghost" loading={cancelling} disabled={submitting} onclick={cancelChallenge}>{cancelButtonLabel(challenge.purpose)}</Button>
         </div>
       {/if}
     </div>
   </div>
 </main>
+
+<style>
+  .standard-mfa-page {
+    background: var(--nya-gradient-soft);
+  }
+
+  .oauth-step-up-page {
+    overflow-x: clip;
+    background-color: var(--nya-bg);
+    background-image:
+      linear-gradient(rgb(var(--nya-primary-rgb) / 0.035) 1px, transparent 1px),
+      linear-gradient(90deg, rgb(var(--nya-primary-rgb) / 0.035) 1px, transparent 1px);
+    background-size: 34px 34px;
+  }
+</style>

@@ -20,6 +20,7 @@ import (
 	internalcrypto "github.com/nyasharp/nyauth/internal/crypto"
 	"github.com/nyasharp/nyauth/internal/deviceauthorization"
 	"github.com/nyasharp/nyauth/internal/oauthops"
+	"github.com/nyasharp/nyauth/internal/oauthstepup"
 	"github.com/nyasharp/nyauth/internal/session"
 	"github.com/nyasharp/nyauth/pkg/models"
 )
@@ -142,6 +143,7 @@ func (h *ConsentHandler) GetConsent(w http.ResponseWriter, r *http.Request) {
 			newClaims = difference(claimsForGrantedScopes(data.Scopes, data.ScopeClaims), previousClaims)
 		}
 	}
+	stepUpRequired := !consentAuthenticationSatisfies(data, sess)
 	redirectOrigin := ""
 	if parsed, parseErr := url.Parse(data.RedirectURI); parseErr == nil && parsed.Scheme != "" && parsed.Host != "" {
 		redirectOrigin = parsed.Scheme + "://" + parsed.Host
@@ -157,6 +159,8 @@ func (h *ConsentHandler) GetConsent(w http.ResponseWriter, r *http.Request) {
 		"previously_authorized": previouslyAuthorized, "application_changed": applicationChanged,
 		"reauthorization_required": reauthorizationRequired,
 		"new_scopes":               newScopes, "new_claims": newClaims,
+		"step_up_required": stepUpRequired, "required_acr": data.RequiredAuthContext,
+		"max_age": data.MaxAgeSeconds,
 	})
 }
 
@@ -170,6 +174,15 @@ func (h *ConsentHandler) AcceptConsent(w http.ResponseWriter, r *http.Request) {
 	decision, ok := decodeConsentDecisionRequest(r)
 	if !ok {
 		writeError(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	storedConsent, err := h.sessionStore.GetConsent(r.Context(), decision.Challenge)
+	if err != nil || storedConsent.UserID != sess.UserID {
+		writeError(w, http.StatusBadRequest, "invalid_or_expired_challenge")
+		return
+	}
+	if !consentAuthenticationSatisfies(storedConsent, sess) {
+		writeError(w, http.StatusForbidden, "unmet_authentication_requirements")
 		return
 	}
 	data, err := h.sessionStore.ConsumeConsentForUser(r.Context(), decision.Challenge, sess.UserID)
@@ -229,7 +242,7 @@ func (h *ConsentHandler) AcceptConsent(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if pendingDevice != nil {
-		if err := h.deviceStore.Approve(r.Context(), pendingDevice, data.UserID, data.AuthVersion, grantedScopes, grantedClaims, authorizationIssuedAt); err != nil {
+		if err := h.deviceStore.ApproveWithAuthentication(r.Context(), pendingDevice, data.UserID, data.AuthVersion, grantedScopes, grantedClaims, authorizationIssuedAt, sess.AuthenticationContext, sess.AuthenticationMethods, sess.AuthenticatedAt.Unix()); err != nil {
 			if errors.Is(err, deviceauthorization.ErrNotFound) || errors.Is(err, deviceauthorization.ErrValueMismatch) {
 				h.recordConsentOperation(r.Context(), data, oauthops.OutcomeFailure, oauthops.ReasonExpiredToken, grantedScopes)
 				writeError(w, http.StatusBadRequest, "invalid_or_expired_challenge")
@@ -256,6 +269,7 @@ func (h *ConsentHandler) AcceptConsent(w http.ResponseWriter, r *http.Request) {
 		ClientID: data.ClientID, UserID: data.UserID, RedirectURI: data.RedirectURI, Scopes: grantedScopes,
 		AllowedClaims: grantedClaims, ClaimNamesSet: true,
 		CodeChallenge: data.CodeChallenge, ChallengeMethod: "S256", Nonce: data.Nonce, AuthVersion: data.AuthVersion,
+		AuthenticationContext: sess.AuthenticationContext, AuthenticationMethods: append([]string(nil), sess.AuthenticationMethods...), AuthenticationTime: sess.AuthenticatedAt.Unix(),
 		AuthorizationIssuedAt:       authorizationIssuedAt,
 		ClientAuthorizationRevision: cl.AuthorizationRevision,
 	}
@@ -371,6 +385,20 @@ func consentFlow(data *session.ConsentData) string {
 		return "device_authorization"
 	}
 	return "authorization_code"
+}
+
+func consentAuthenticationSatisfies(data *session.ConsentData, sess *session.SessionData) bool {
+	if data == nil || sess == nil {
+		return false
+	}
+	context := oauthstepup.NormalizeContext(sess.AuthenticationContext)
+	if !context.Satisfies(data.RequiredAuthContext) {
+		return false
+	}
+	if data.MaxAgeSeconds == nil {
+		return true
+	}
+	return data.MaxAgeSatisfied
 }
 
 func (h *ConsentHandler) authenticatedSession(w http.ResponseWriter, r *http.Request) (*session.SessionData, bool) {

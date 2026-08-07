@@ -15,6 +15,7 @@ import (
 	"github.com/nyasharp/nyauth/internal/crypto"
 	"github.com/nyasharp/nyauth/internal/mfa"
 	"github.com/nyasharp/nyauth/internal/notification"
+	"github.com/nyasharp/nyauth/internal/oauthstepup"
 	"github.com/nyasharp/nyauth/internal/session"
 	"github.com/nyasharp/nyauth/internal/user"
 	"github.com/nyasharp/nyauth/pkg/models"
@@ -128,7 +129,7 @@ func (s *Server) handleFinishPasskeyLogin(w http.ResponseWriter, r *http.Request
 		writeAPIError(w, http.StatusUnauthorized, "account changed; sign in again")
 		return
 	}
-	authenticated, err := s.sessionMiddleware.CreateSession(w, r, current)
+	authenticated, err := s.sessionMiddleware.CreateSessionWithAuthentication(w, r, current, oauthstepup.ACRLevel2, []string{"hwk"})
 	if err != nil {
 		writeAPIError(w, http.StatusServiceUnavailable, "failed to create session")
 		return

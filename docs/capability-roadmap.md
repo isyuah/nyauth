@@ -16,6 +16,7 @@
 | Passkey/WebAuthn | Phase P 已完成：独立登录、Conditional UI、MFA、step-up 与安全中心管理 | 已完成 |
 | 登录历史与可信浏览器 | Phase B 已完成：受限审计投影、MFA 后信任、版本绑定和用户自助撤销 | 已完成 |
 | OAuth Device Authorization | Phase C 已完成：RFC 8628 端点、共享 Consent、轮询节奏与一次性 Redis 状态 | 已完成并验收 |
+| OAuth Step-Up Authentication | RFC 9470：`acr_values`、`max_age`、`acr`/`amr`/`auth_time`、保留授权 challenge 的 MFA/Passkey 续接 | 已实现，待验收 |
 | 主题与品牌细节 | Phase D 已完成：浏览器本地主题、运行时主色与文字模式、双 Logo/favicon、认证与邮件品牌统一 | 已完成并验收 |
 | OAuth 运营与诊断 | Phase E 已完成：应用级统计与失败诊断、可扩展应用/授权列表、Provider 预检与交互诊断 | 已完成，自动化验证通过 |
 | 公告与站内消息 | Phase F：持久公告、个人安全/OAuth 通知、统一消息中心与实时未读计数 | 已完成，自动化验证通过 |

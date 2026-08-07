@@ -79,6 +79,7 @@ type MFARequiredResponse struct {
 	ExpiresAt               time.Time `json:"expires_at"`
 	TrustedDeviceAvailable  bool      `json:"trusted_device_available"`
 	TrustedDeviceTTLSeconds int64     `json:"trusted_device_ttl_seconds,omitempty"`
+	RequiredACR             string    `json:"required_acr,omitempty"`
 }
 
 // ChangePasswordRequest changes the password for the current user.

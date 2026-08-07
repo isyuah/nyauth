@@ -23,10 +23,12 @@
 
   let {
     onsessionupdated,
+    onfactorready,
     providerReauthenticationFailed = false,
     returnTo = '/profile',
   }: {
     onsessionupdated?: (session: SessionInfo) => void;
+    onfactorready?: () => void | Promise<void>;
     providerReauthenticationFailed?: boolean;
     returnTo?: string;
   } = $props();
@@ -109,6 +111,11 @@
     recoveryCodes = [...codes];
     recoveryCodesTitle = title;
     recoveryCodesOpen = true;
+  }
+
+  async function closeRecoveryCodes() {
+    recoveryCodesOpen = false;
+    await onfactorready?.();
   }
 
   async function beginEnrollment() {
@@ -322,7 +329,7 @@
     </div>
     <div class="flex flex-wrap items-center justify-between gap-3">
       <div class="flex items-center gap-2 text-small text-nya-text-secondary"><CopyButton value={recoveryCodes.join('\n')} label="复制全部恢复码" /> 复制全部恢复码</div>
-      <Button variant="primary" onclick={() => (recoveryCodesOpen = false)}>我已安全保存</Button>
+      <Button variant="primary" onclick={closeRecoveryCodes}>我已安全保存</Button>
     </div>
   </div>
 </Modal>

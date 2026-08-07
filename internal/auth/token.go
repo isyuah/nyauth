@@ -15,6 +15,7 @@ import (
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
 	internalcrypto "github.com/nyasharp/nyauth/internal/crypto"
+	"github.com/nyasharp/nyauth/internal/oauthstepup"
 	"github.com/nyasharp/nyauth/internal/session"
 	"github.com/nyasharp/nyauth/internal/user"
 	"github.com/nyasharp/nyauth/pkg/models"
@@ -147,12 +148,24 @@ type TokenPair struct {
 
 type Claims struct {
 	jwt.RegisteredClaims
-	Scope         string   `json:"scope,omitempty"`
-	AllowedClaims []string `json:"claim_names,omitempty"`
-	ClaimNamesSet bool     `json:"claim_names_set,omitempty"`
-	TokenUse      string   `json:"token_use"`
-	AuthVersion   int64    `json:"auth_version,omitempty"`
-	Nonce         string   `json:"nonce,omitempty"`
+	Scope                 string   `json:"scope,omitempty"`
+	AllowedClaims         []string `json:"claim_names,omitempty"`
+	ClaimNamesSet         bool     `json:"claim_names_set,omitempty"`
+	TokenUse              string   `json:"token_use"`
+	AuthVersion           int64    `json:"auth_version,omitempty"`
+	Nonce                 string   `json:"nonce,omitempty"`
+	AuthenticationContext string   `json:"acr,omitempty"`
+	AuthenticationMethods []string `json:"amr,omitempty"`
+	AuthenticationTime    int64    `json:"auth_time,omitempty"`
+}
+
+// IssuanceAuthentication is the verified browser authentication context that
+// is copied into user-bound OAuth credentials. Empty means a legacy or
+// machine-token issuance and intentionally emits no user assurance claims.
+type IssuanceAuthentication struct {
+	Context  string
+	Methods  []string
+	AuthTime int64
 }
 
 func (ts *TokenService) GenerateAuthorizationCodeTokenPair(ctx context.Context, clientID, userID string, scopes []string, authVersion, authorizationIssuedAt int64, issueRefresh bool) (*TokenPair, error) {
@@ -164,6 +177,10 @@ func (ts *TokenService) GenerateAuthorizationCodeTokenPairWithClaims(ctx context
 }
 
 func (ts *TokenService) GenerateAuthorizationCodeTokenPairAtRevisionWithClaims(ctx context.Context, clientID, userID string, scopes, allowedClaims []string, authVersion, authorizationIssuedAt, expectedClientRevision int64, issueRefresh bool) (*TokenPair, error) {
+	return ts.GenerateAuthorizationCodeTokenPairAtRevisionWithClaimsAndAuthentication(ctx, clientID, userID, scopes, allowedClaims, authVersion, authorizationIssuedAt, expectedClientRevision, IssuanceAuthentication{}, issueRefresh)
+}
+
+func (ts *TokenService) GenerateAuthorizationCodeTokenPairAtRevisionWithClaimsAndAuthentication(ctx context.Context, clientID, userID string, scopes, allowedClaims []string, authVersion, authorizationIssuedAt, expectedClientRevision int64, authentication IssuanceAuthentication, issueRefresh bool) (*TokenPair, error) {
 	if authVersion <= 0 || authorizationIssuedAt <= 0 {
 		return nil, fmt.Errorf("invalid user auth version")
 	}
@@ -180,16 +197,16 @@ func (ts *TokenService) GenerateAuthorizationCodeTokenPairAtRevisionWithClaims(c
 	}); err != nil {
 		return nil, err
 	}
-	return ts.generateTokenPair(ctx, clientID, userID, scopes, allowedClaims, authVersion, issueRefresh, "", authorizationIssuedAt, clientRevision)
+	return ts.generateTokenPair(ctx, clientID, userID, scopes, allowedClaims, authVersion, issueRefresh, "", authorizationIssuedAt, clientRevision, authentication)
 }
 
 func (ts *TokenService) GenerateClientTokenPair(ctx context.Context, clientID string, scopes []string) (*TokenPair, error) {
-	return ts.generateTokenPair(ctx, clientID, clientID, scopes, nil, 0, false, "", 0, 0)
+	return ts.generateTokenPair(ctx, clientID, clientID, scopes, nil, 0, false, "", 0, 0, IssuanceAuthentication{})
 }
 
-func (ts *TokenService) generateTokenPair(ctx context.Context, clientID, subject string, scopes, allowedClaims []string, authVersion int64, issueRefresh bool, familyKey string, authorizationIssuedAt, clientAuthorizationRevision int64) (*TokenPair, error) {
+func (ts *TokenService) generateTokenPair(ctx context.Context, clientID, subject string, scopes, allowedClaims []string, authVersion int64, issueRefresh bool, familyKey string, authorizationIssuedAt, clientAuthorizationRevision int64, authentication IssuanceAuthentication) (*TokenPair, error) {
 	lifetimes := ts.Lifetimes()
-	access, jti, err := ts.signAccessToken(ctx, clientID, subject, scopes, allowedClaims, authVersion, lifetimes.AccessToken)
+	access, jti, err := ts.signAccessToken(ctx, clientID, subject, scopes, allowedClaims, authVersion, lifetimes.AccessToken, authentication)
 	if err != nil {
 		return nil, err
 	}
@@ -199,13 +216,13 @@ func (ts *TokenService) generateTokenPair(ctx context.Context, clientID, subject
 		if err != nil {
 			return nil, fmt.Errorf("generating refresh token: %w", err)
 		}
-		refreshData := &session.TokenData{ClientID: clientID, UserID: subject, Scopes: scopes, AllowedClaims: allowedClaims, ClaimNamesSet: allowedClaims != nil, TokenUse: "refresh", AuthVersion: authVersion, AuthorizationIssuedAt: authorizationIssuedAt, ClientAuthorizationRevision: clientAuthorizationRevision}
+		refreshData := &session.TokenData{ClientID: clientID, UserID: subject, Scopes: scopes, AllowedClaims: allowedClaims, ClaimNamesSet: allowedClaims != nil, TokenUse: "refresh", AuthVersion: authVersion, AuthenticationContext: authentication.Context, AuthenticationMethods: slices.Clone(authentication.Methods), AuthenticationTime: authentication.AuthTime, AuthorizationIssuedAt: authorizationIssuedAt, ClientAuthorizationRevision: clientAuthorizationRevision}
 		if err := ts.session.SaveRefreshToken(ctx, refresh, refreshData, lifetimes.RefreshToken); err != nil {
 			return nil, fmt.Errorf("storing refresh token: %w", err)
 		}
 		familyKey = refreshData.FamilyKey
 	}
-	data := &session.TokenData{ClientID: clientID, UserID: subject, Scopes: scopes, AllowedClaims: allowedClaims, ClaimNamesSet: allowedClaims != nil, TokenUse: "access", AuthVersion: authVersion, FamilyKey: familyKey, AuthorizationIssuedAt: authorizationIssuedAt, ClientAuthorizationRevision: clientAuthorizationRevision}
+	data := &session.TokenData{ClientID: clientID, UserID: subject, Scopes: scopes, AllowedClaims: allowedClaims, ClaimNamesSet: allowedClaims != nil, TokenUse: "access", AuthVersion: authVersion, AuthenticationContext: authentication.Context, AuthenticationMethods: slices.Clone(authentication.Methods), AuthenticationTime: authentication.AuthTime, FamilyKey: familyKey, AuthorizationIssuedAt: authorizationIssuedAt, ClientAuthorizationRevision: clientAuthorizationRevision}
 	var saveErr error
 	if familyKey == "" {
 		saveErr = ts.session.SaveToken(ctx, jti, data, lifetimes.AccessToken)
@@ -231,7 +248,7 @@ func (ts *TokenService) generateTokenPair(ctx context.Context, clientID, subject
 	return result, nil
 }
 
-func (ts *TokenService) signAccessToken(ctx context.Context, clientID, subject string, scopes, allowedClaims []string, authVersion int64, accessTTL time.Duration) (string, string, error) {
+func (ts *TokenService) signAccessToken(ctx context.Context, clientID, subject string, scopes, allowedClaims []string, authVersion int64, accessTTL time.Duration, authentication IssuanceAuthentication) (string, string, error) {
 	privateKey, kid, err := ts.jwkManager.GetPrivateKey(ctx)
 	if err != nil {
 		return "", "", fmt.Errorf("getting signing key: %w", err)
@@ -242,6 +259,7 @@ func (ts *TokenService) signAccessToken(ctx context.Context, clientID, subject s
 		Issuer: ts.issuer, Subject: subject, Audience: jwt.ClaimStrings{clientID},
 		ExpiresAt: jwt.NewNumericDate(now.Add(accessTTL)), IssuedAt: jwt.NewNumericDate(now), NotBefore: jwt.NewNumericDate(now), ID: jti,
 	}, Scope: joinScopes(scopes), AllowedClaims: allowedClaims, ClaimNamesSet: allowedClaims != nil, TokenUse: "access", AuthVersion: authVersion}
+	applyAuthenticationClaims(claims, authentication)
 	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
 	token.Header["kid"] = kid
 	signed, err := token.SignedString(privateKey)
@@ -256,6 +274,10 @@ func (ts *TokenService) GenerateIDToken(ctx context.Context, clientID, userID st
 }
 
 func (ts *TokenService) GenerateIDTokenWithClaims(ctx context.Context, clientID, userID string, scopes, allowedClaims []string, nonce string, userInfo map[string]interface{}) (string, error) {
+	return ts.GenerateIDTokenWithClaimsAndAuthentication(ctx, clientID, userID, scopes, allowedClaims, nonce, userInfo, IssuanceAuthentication{})
+}
+
+func (ts *TokenService) GenerateIDTokenWithClaimsAndAuthentication(ctx context.Context, clientID, userID string, scopes, allowedClaims []string, nonce string, userInfo map[string]interface{}, authentication IssuanceAuthentication) (string, error) {
 	authVersion := int64(0)
 	if id, err := uuid.Parse(userID); err == nil && ts.users != nil {
 		u, err := ts.users.GetByID(ctx, id)
@@ -277,6 +299,7 @@ func (ts *TokenService) GenerateIDTokenWithClaims(ctx context.Context, clientID,
 	if nonce != "" {
 		claims["nonce"] = nonce
 	}
+	applyAuthenticationMapClaims(claims, authentication)
 	for key, value := range claimLimitedUserInfo(allowedClaims, userInfo) {
 		claims[key] = value
 	}
@@ -305,7 +328,9 @@ func (ts *TokenService) ValidateAccessToken(ctx context.Context, tokenString str
 	}
 	if metadata.TokenUse != "access" || metadata.ClientID != claims.Audience[0] || metadata.UserID != claims.Subject ||
 		metadata.AuthVersion != claims.AuthVersion || joinScopes(metadata.Scopes) != claims.Scope ||
-		metadata.ClaimNamesSet != claims.ClaimNamesSet || !slices.Equal(metadata.AllowedClaims, claims.AllowedClaims) {
+		metadata.ClaimNamesSet != claims.ClaimNamesSet || !slices.Equal(metadata.AllowedClaims, claims.AllowedClaims) ||
+		metadata.AuthenticationContext != claims.AuthenticationContext || metadata.AuthenticationTime != claims.AuthenticationTime ||
+		!slices.Equal(metadata.AuthenticationMethods, claims.AuthenticationMethods) {
 		return nil, ErrInvalidToken
 	}
 	if err := ts.validateUser(ctx, claims.Subject, claims.AuthVersion); err != nil {
@@ -406,13 +431,13 @@ func (ts *TokenService) RefreshTokenWithClaimPolicy(ctx context.Context, refresh
 	if err != nil {
 		return nil, fmt.Errorf("generating refresh token: %w", err)
 	}
-	access, jti, err := ts.signAccessToken(ctx, data.ClientID, data.UserID, data.Scopes, effectiveClaims, data.AuthVersion, lifetimes.AccessToken)
+	access, jti, err := ts.signAccessToken(ctx, data.ClientID, data.UserID, data.Scopes, effectiveClaims, data.AuthVersion, lifetimes.AccessToken, IssuanceAuthentication{Context: data.AuthenticationContext, Methods: data.AuthenticationMethods, AuthTime: data.AuthenticationTime})
 	if err != nil {
 		return nil, err
 	}
 	accessData := &session.TokenData{
 		ClientID: data.ClientID, UserID: data.UserID, Scopes: data.Scopes, AllowedClaims: effectiveClaims, ClaimNamesSet: true, TokenUse: "access",
-		AuthVersion: data.AuthVersion, FamilyKey: data.FamilyKey, AuthorizationIssuedAt: data.AuthorizationIssuedAt,
+		AuthVersion: data.AuthVersion, AuthenticationContext: data.AuthenticationContext, AuthenticationMethods: slices.Clone(data.AuthenticationMethods), AuthenticationTime: data.AuthenticationTime, FamilyKey: data.FamilyKey, AuthorizationIssuedAt: data.AuthorizationIssuedAt,
 		ClientAuthorizationRevision: data.ClientAuthorizationRevision,
 	}
 	_, err = ts.session.RotateRefreshTokenAndStoreAccess(
@@ -470,10 +495,14 @@ func (ts *TokenService) IntrospectTokenForClient(ctx context.Context, tokenStrin
 	if err := ts.validateAccessPolicy(ctx, data); err != nil {
 		return map[string]interface{}{"active": false}, nil
 	}
-	return map[string]interface{}{
+	result := map[string]interface{}{
 		"active": true, "sub": data.UserID, "client_id": data.ClientID,
 		"scope": joinScopes(data.Scopes), "token_type": "refresh_token",
-	}, nil
+	}
+	applyAuthenticationMapClaims(result, IssuanceAuthentication{
+		Context: data.AuthenticationContext, Methods: data.AuthenticationMethods, AuthTime: data.AuthenticationTime,
+	})
+	return result, nil
 }
 
 func (ts *TokenService) IntrospectToken(ctx context.Context, tokenString string) (map[string]interface{}, error) {
@@ -485,10 +514,47 @@ func (ts *TokenService) IntrospectToken(ctx context.Context, tokenString string)
 }
 
 func introspectionClaims(claims *Claims) map[string]interface{} {
-	return map[string]interface{}{
+	result := map[string]interface{}{
 		"active": true, "sub": claims.Subject, "client_id": claims.Audience[0], "aud": claims.Audience,
 		"scope": claims.Scope, "exp": claims.ExpiresAt.Unix(), "iat": claims.IssuedAt.Unix(),
 		"jti": claims.ID, "iss": claims.Issuer, "token_type": "Bearer",
+	}
+	if claims.AuthenticationContext != "" {
+		result["acr"] = claims.AuthenticationContext
+	}
+	if claims.AuthenticationTime > 0 {
+		result["auth_time"] = claims.AuthenticationTime
+	}
+	if len(claims.AuthenticationMethods) > 0 {
+		result["amr"] = slices.Clone(claims.AuthenticationMethods)
+	}
+	return result
+}
+
+func applyAuthenticationClaims(claims *Claims, authentication IssuanceAuthentication) {
+	if claims == nil || strings.TrimSpace(authentication.Context) == "" {
+		return
+	}
+	claims.AuthenticationContext = oauthstepup.NormalizeContext(authentication.Context).String()
+	claims.AuthenticationTime = authentication.AuthTime
+	if claims.AuthenticationTime <= 0 {
+		claims.AuthenticationTime = time.Now().UTC().Unix()
+	}
+	claims.AuthenticationMethods = slices.Clone(authentication.Methods)
+}
+
+func applyAuthenticationMapClaims(claims map[string]interface{}, authentication IssuanceAuthentication) {
+	if claims == nil || strings.TrimSpace(authentication.Context) == "" {
+		return
+	}
+	claims["acr"] = oauthstepup.NormalizeContext(authentication.Context).String()
+	authTime := authentication.AuthTime
+	if authTime <= 0 {
+		authTime = time.Now().UTC().Unix()
+	}
+	claims["auth_time"] = authTime
+	if len(authentication.Methods) > 0 {
+		claims["amr"] = slices.Clone(authentication.Methods)
 	}
 }
 
