@@ -104,6 +104,12 @@ func insertClient(ctx context.Context, execer clientExecer, c *models.OAuthClien
 	if c.AccessPolicy == "" {
 		c.AccessPolicy = models.ClientAccessOpen
 	}
+	if c.PostLogoutRedirectURIs == nil {
+		c.PostLogoutRedirectURIs = []string{}
+	}
+	if c.Scopes == nil {
+		c.Scopes = []string{}
+	}
 	if c.OptionalScopes == nil {
 		c.OptionalScopes = []string{}
 	}
