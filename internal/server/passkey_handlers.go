@@ -557,6 +557,8 @@ func (s *Server) handleDeletePasskey(w http.ResponseWriter, r *http.Request) {
 			writeAPIError(w, http.StatusConflict, "add a password, Provider identity, or another Passkey before removing this Passkey")
 		case errors.Is(err, mfa.ErrRequiredByPolicy):
 			writeAPIError(w, http.StatusConflict, "MFA is required for active administrators")
+		case errors.Is(err, mfa.ErrLoginMFAFactorRequired):
+			writeAPIError(w, http.StatusConflict, "turn off login MFA or add another factor before removing this Passkey")
 		case errors.Is(err, mfa.ErrAuthenticationChanged):
 			s.sessionMiddleware.DestroySession(w, r)
 			writeAPIError(w, http.StatusUnauthorized, "account changed; sign in again")

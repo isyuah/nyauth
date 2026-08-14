@@ -29,6 +29,9 @@ const (
 )
 
 type myMFAResponse struct {
+	LoginMFAEnabled        bool `json:"login_mfa_enabled"`
+	LoginMFARequired       bool `json:"login_mfa_required"`
+	CanEnableLoginMFA      bool `json:"can_enable_login_mfa"`
 	TOTPAvailable          bool `json:"totp_available"`
 	TOTPEnrolled           bool `json:"totp_enrolled"`
 	CanDisableTOTP         bool `json:"can_disable_totp"`
@@ -56,7 +59,7 @@ func (s *Server) loginMFARequirement(r *http.Request, current *models.User) ([]s
 	if err != nil {
 		return nil, false, err
 	}
-	required := len(methods) > 0 || (current.Role == "admin" && s.settingsMgr.Security().RequireMFAForAdmins)
+	required := current.LoginMFAEnabled || (current.Role == "admin" && s.settingsMgr.Security().RequireMFAForAdmins)
 	if required && len(methods) == 0 {
 		return nil, true, errMFAEnrollmentRequired
 	}
@@ -506,14 +509,79 @@ func (s *Server) handleGetMyMFA(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	security := s.settingsMgr.Security()
+	adminRequired := current.Role == "admin" && security.RequireMFAForAdmins
+	loginMFARequired := status.LoginMFAEnabled || adminRequired
 	writeJSON(w, http.StatusOK, myMFAResponse{
-		TOTPAvailable: security.TOTPEnabled, TOTPEnrolled: status.TOTPEnrolled,
-		CanDisableTOTP:    !(current.Role == "admin" && security.RequireMFAForAdmins && status.PasskeysEnrolled == 0),
+		LoginMFAEnabled: status.LoginMFAEnabled, LoginMFARequired: loginMFARequired,
+		CanEnableLoginMFA: status.TOTPEnrolled || status.PasskeysEnrolled > 0,
+		TOTPAvailable:     security.TOTPEnabled, TOTPEnrolled: status.TOTPEnrolled,
+		CanDisableTOTP:    !(loginMFARequired && status.PasskeysEnrolled == 0),
 		PasskeysAvailable: security.PasskeysEnabled, PasskeysEnrolled: status.PasskeysEnrolled,
 		RecoveryCodesRemaining: status.RecoveryCodesRemaining,
 		RequireMFAForAdmins:    security.RequireMFAForAdmins,
-		RequiredForCurrentUser: current.Role == "admin" && security.RequireMFAForAdmins,
+		RequiredForCurrentUser: adminRequired,
 	})
+}
+
+func (s *Server) handleUpdateLoginMFARequirement(w http.ResponseWriter, r *http.Request) {
+	setSessionNoStoreHeaders(w)
+	current := currentUserFromContext(r)
+	authenticated := sessionFromContext(r.Context())
+	if !s.requireRecentAuthentication(w, r) {
+		return
+	}
+	var request struct {
+		Enabled bool `json:"enabled"`
+	}
+	if err := decodeJSON(w, r, &request); err != nil {
+		writeAPIError(w, http.StatusBadRequest, "invalid request body")
+		return
+	}
+	binding := mfa.AuthenticationBinding{
+		AuthVersion: authenticated.Data.AuthVersion, SessionVersion: authenticated.Data.SessionVersion,
+	}
+	changed, err := s.mfaService.SetLoginMFARequirement(
+		r.Context(), current.ID, binding, request.Enabled,
+		s.mfaAuditContext(r, current), time.Now().UTC(),
+	)
+	if err != nil {
+		switch {
+		case errors.Is(err, mfa.ErrLoginMFAFactorRequired):
+			writeAPIError(w, http.StatusConflict, "enroll a TOTP or Passkey before requiring login MFA")
+		case errors.Is(err, mfa.ErrAuthenticationChanged):
+			s.sessionMiddleware.DestroySession(w, r)
+			writeAPIError(w, http.StatusUnauthorized, "account changed; sign in again")
+		default:
+			writeAPIError(w, http.StatusInternalServerError, "failed to update login MFA requirement")
+		}
+		return
+	}
+	if !changed {
+		writeJSON(w, http.StatusOK, sessionResponse(current, authenticated.Data))
+		return
+	}
+	title, body, reason := "登录两步验证已开启", "密码或外部身份登录现在需要额外完成动态验证码或 Passkey 验证。", "login_mfa_enabled"
+	if !request.Enabled {
+		title = "登录两步验证已关闭"
+		body = "密码或外部身份登录不再默认要求第二因素；Passkey、重新认证和应用请求的额外验证仍然可用。"
+		reason = "login_mfa_disabled"
+	}
+	s.notifySecurityChange(r.Context(), current.ID, notification.TypeMFAChanged, title, body, "/profile/security")
+	s.revokeUserSecurityState(r.Context(), current.ID, reason)
+	updated, err := s.userService.GetByID(r.Context(), current.ID)
+	if err != nil || updated.Status != models.UserStatusActive ||
+		updated.AuthVersion != binding.AuthVersion+1 || updated.SessionVersion != binding.SessionVersion {
+		s.sessionMiddleware.DestroySession(w, r)
+		writeAPIError(w, http.StatusUnauthorized, "account changed; sign in again")
+		return
+	}
+	rotated, err := s.sessionMiddleware.RotateSession(w, r, updated)
+	if err != nil {
+		s.sessionMiddleware.DestroySession(w, r)
+		writeAPIError(w, http.StatusInternalServerError, "login MFA updated; please sign in again")
+		return
+	}
+	writeJSON(w, http.StatusOK, sessionResponse(updated, rotated.Data))
 }
 
 func (s *Server) handleBeginTOTPEnrollment(w http.ResponseWriter, r *http.Request) {
@@ -578,7 +646,7 @@ func (s *Server) handleConfirmTOTPEnrollment(w http.ResponseWriter, r *http.Requ
 		}
 		return
 	}
-	s.notifySecurityChange(r.Context(), current.ID, notification.TypeMFAChanged, "两步验证已启用", "您的账户已启用 TOTP 两步验证。请妥善保存恢复码。", "/profile/security")
+	s.notifySecurityChange(r.Context(), current.ID, notification.TypeMFAChanged, "动态验证码已添加", "您的账户已添加 TOTP 动态验证码。请妥善保存恢复码；是否用于每次登录由登录两步验证设置决定。", "/profile/security")
 	s.revokeUserSecurityState(r.Context(), current.ID, "totp_enrolled")
 	updated, err := s.userService.GetByID(r.Context(), current.ID)
 	if err != nil || updated.Status != models.UserStatusActive ||
@@ -639,6 +707,8 @@ func (s *Server) handleDisableTOTP(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case errors.Is(err, mfa.ErrRequiredByPolicy):
 			writeAPIError(w, http.StatusConflict, "MFA is required for active administrators")
+		case errors.Is(err, mfa.ErrLoginMFAFactorRequired):
+			writeAPIError(w, http.StatusConflict, "turn off login MFA or add another factor before disabling TOTP")
 		case errors.Is(err, mfa.ErrNotEnrolled):
 			writeAPIError(w, http.StatusConflict, "TOTP is not enrolled")
 		case errors.Is(err, mfa.ErrAuthenticationChanged):
@@ -649,7 +719,7 @@ func (s *Server) handleDisableTOTP(w http.ResponseWriter, r *http.Request) {
 		}
 		return
 	}
-	s.notifySecurityChange(r.Context(), current.ID, notification.TypeMFAChanged, "两步验证已关闭", "您的账户已关闭 TOTP 两步验证。如果这不是您本人操作，请立即检查账户安全。", "/profile/security")
+	s.notifySecurityChange(r.Context(), current.ID, notification.TypeMFAChanged, "动态验证码已移除", "您的账户已移除 TOTP 动态验证码。如果这不是您本人操作，请立即检查账户安全。", "/profile/security")
 	s.revokeUserSecurityState(r.Context(), current.ID, "totp_disabled")
 	updated, err := s.userService.GetByID(r.Context(), current.ID)
 	if err != nil || updated.Status != models.UserStatusActive ||

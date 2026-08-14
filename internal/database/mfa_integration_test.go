@@ -180,6 +180,81 @@ func TestTOTPMFALifecyclePolicyAndAuditIntegration(t *testing.T) {
 	}
 }
 
+func TestExplicitLoginMFARequiresAndRetainsAnEnrolledFactor(t *testing.T) {
+	schema := newPostgresTestSchema(t)
+	if err := database.RunMigrations(schema.migrationDSN); err != nil {
+		t.Fatalf("run MFA migrations: %v", err)
+	}
+	ctx := context.Background()
+	service, err := mfa.NewService(schema.pool, mfa.Options{
+		ActiveKeyID: "primary",
+		MasterKeys:  map[string][]byte{"primary": []byte("0123456789abcdef0123456789abcdef")},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	current := registrationTestUser("explicit-login-mfa", models.UserStatusActive)
+	insertRegistrationTestUser(t, schema, current)
+	now := time.Now().UTC().Truncate(time.Second)
+	auditContext := mfa.AuditContext{ActorID: current.ID, ActorName: current.Username}
+
+	if changed, err := service.SetLoginMFARequirement(ctx, current.ID, mfa.AuthenticationBinding{
+		AuthVersion: current.AuthVersion, SessionVersion: current.SessionVersion,
+	}, true, auditContext, now); changed || !errors.Is(err, mfa.ErrLoginMFAFactorRequired) {
+		t.Fatalf("enable without factor: changed=%v err=%v", changed, err)
+	}
+
+	enrollment, err := service.BeginEnrollment(ctx, current.ID, "Nyauth Test", current.Username, now)
+	if err != nil {
+		t.Fatal(err)
+	}
+	secret, err := base32.StdEncoding.WithPadding(base32.NoPadding).DecodeString(enrollment.Secret)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := service.ConfirmEnrollment(ctx, current.ID, mfa.AuthenticationBinding{
+		AuthVersion: current.AuthVersion, SessionVersion: current.SessionVersion,
+	}, integrationTOTPCode(secret, now.Unix()/30), auditContext, now); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := service.SetLoginMFARequirement(ctx, current.ID, mfa.AuthenticationBinding{
+		AuthVersion: current.AuthVersion + 1, SessionVersion: current.SessionVersion,
+	}, true, auditContext, now.Add(time.Second))
+	if err != nil || !changed {
+		t.Fatalf("enable with factor: changed=%v err=%v", changed, err)
+	}
+	status, err := service.Status(ctx, current.ID)
+	if err != nil || !status.LoginMFAEnabled || !status.TOTPEnrolled {
+		t.Fatalf("enabled status=%#v err=%v", status, err)
+	}
+	if err := service.Disable(ctx, current.ID, mfa.AuthenticationBinding{
+		AuthVersion: current.AuthVersion + 2, SessionVersion: current.SessionVersion,
+	}, auditContext, now.Add(2*time.Second)); !errors.Is(err, mfa.ErrLoginMFAFactorRequired) {
+		t.Fatalf("disable final required factor: %v", err)
+	}
+	changed, err = service.SetLoginMFARequirement(ctx, current.ID, mfa.AuthenticationBinding{
+		AuthVersion: current.AuthVersion + 2, SessionVersion: current.SessionVersion,
+	}, false, auditContext, now.Add(3*time.Second))
+	if err != nil || !changed {
+		t.Fatalf("disable login MFA: changed=%v err=%v", changed, err)
+	}
+	if err := service.Disable(ctx, current.ID, mfa.AuthenticationBinding{
+		AuthVersion: current.AuthVersion + 3, SessionVersion: current.SessionVersion,
+	}, auditContext, now.Add(4*time.Second)); err != nil {
+		t.Fatalf("disable factor after relaxing login policy: %v", err)
+	}
+	var auditCount int
+	if err := schema.pool.QueryRow(ctx, `
+		SELECT COUNT(*) FROM audit_event_outbox
+		WHERE event=$1 AND aggregate_id=$2
+	`, models.AuditMFALoginRequirementUpdated, current.ID.String()).Scan(&auditCount); err != nil {
+		t.Fatal(err)
+	}
+	if auditCount != 2 {
+		t.Fatalf("login MFA audit count=%d", auditCount)
+	}
+}
+
 func TestAdministratorMFAPolicyRacesMaintainInvariant(t *testing.T) {
 	t.Run("policy enable races with factor disable", func(t *testing.T) {
 		schema := newPostgresTestSchema(t)

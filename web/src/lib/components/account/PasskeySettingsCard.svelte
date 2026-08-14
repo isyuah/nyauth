@@ -158,7 +158,14 @@
     const { passkey, ...nextSession } = result;
     updateSession(nextSession);
     passkeys = [passkey, ...passkeys.filter((item) => item.id !== passkey.id)];
-    if (status) status = { ...status, passkeys_enrolled: passkeys.length };
+    if (status) {
+      status = {
+        ...status,
+        passkeys_enrolled: passkeys.length,
+        can_enable_login_mfa: true,
+        can_disable_totp: true,
+      };
+    }
     registrationOpen = false;
     registrationName = '';
     notice = `Passkey“${passkey.name}”已注册，当前会话已安全轮换。`;
@@ -174,7 +181,8 @@
       status = {
         ...status,
         passkeys_enrolled: remaining,
-        can_disable_totp: !status.required_for_current_user || remaining > 0,
+        can_enable_login_mfa: status.totp_enrolled || remaining > 0,
+        can_disable_totp: !status.login_mfa_required || remaining > 0,
       };
     }
     deleteOpen = false;

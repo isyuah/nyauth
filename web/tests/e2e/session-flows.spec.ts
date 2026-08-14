@@ -674,6 +674,9 @@ async function installAPIMocks(page: Page, state: MockState) {
     if (path === '/api/me/mfa' && request.method() === 'GET') {
       state.mfaStatusRequests = (state.mfaStatusRequests || 0) + 1;
       await fulfillJSON(route, 200, {
+        login_mfa_enabled: false,
+        login_mfa_required: false,
+        can_enable_login_mfa: false,
         totp_available: true,
         totp_enrolled: false,
         can_disable_totp: true,
@@ -1917,18 +1920,23 @@ test('users can enroll TOTP, replace recovery codes, and disable the factor', as
   };
   await installAPIMocks(page, state);
   let enrolled = false;
+  let loginMFAEnabled = false;
   let enrollCSRF: string | null = null;
   let confirmCSRF: string | null = null;
   let regenerateCSRF: string | null = null;
   let disableCSRF: string | null = null;
+  const loginMFAUpdates: boolean[] = [];
   await page.route('**/api/**', async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
     if (path === '/api/me/mfa' && request.method() === 'GET') {
       await fulfillJSON(route, 200, {
+        login_mfa_enabled: loginMFAEnabled,
+        login_mfa_required: loginMFAEnabled,
+        can_enable_login_mfa: enrolled,
         totp_available: true,
         totp_enrolled: enrolled,
-        can_disable_totp: true,
+        can_disable_totp: !loginMFAEnabled,
         passkeys_available: true,
         passkeys_enrolled: 0,
         recovery_codes_remaining: enrolled ? 10 : 0,
@@ -1962,6 +1970,14 @@ test('users can enroll TOTP, replace recovery codes, and disable the factor', as
       });
       return;
     }
+    if (path === '/api/me/mfa/login-requirement' && request.method() === 'PUT') {
+      const body = request.postDataJSON() as { enabled: boolean };
+      loginMFAEnabled = body.enabled;
+      loginMFAUpdates.push(body.enabled);
+      state.csrfToken = body.enabled ? 'csrf-after-login-mfa-enable' : 'csrf-after-login-mfa-disable';
+      await fulfillJSON(route, 200, sessionResponse(state));
+      return;
+    }
     if (path === '/api/me/mfa/totp' && request.method() === 'DELETE') {
       disableCSRF = await request.headerValue('x-csrf-token');
       enrolled = false;
@@ -1985,12 +2001,17 @@ test('users can enroll TOTP, replace recovery codes, and disable the factor', as
   await page.keyboard.press('Escape');
   await expect(recoveryDialog).toBeVisible();
   await recoveryDialog.getByRole('button', { name: '我已安全保存' }).click();
-  await expect(page.getByText('动态验证码已保护此账户')).toBeVisible();
+  await expect(page.getByText('动态验证码已添加')).toBeVisible();
 
   await page.getByRole('button', { name: '重新生成恢复码' }).click();
   const regeneratedDialog = page.getByRole('dialog', { name: '新的恢复码' });
   await expect(regeneratedDialog.getByText('GGGG2222-HHHH2222IIII2222')).toBeVisible();
   await regeneratedDialog.getByRole('button', { name: '我已安全保存' }).click();
+
+  await page.getByRole('switch', { name: '已关闭' }).click();
+  await expect(page.getByRole('switch', { name: '已开启' })).toBeVisible();
+  await page.getByRole('switch', { name: '已开启' }).click();
+  await expect(page.getByRole('switch', { name: '已关闭' })).toBeVisible();
 
   await page.getByRole('button', { name: '停用', exact: true }).click();
   const disableDialog = page.getByRole('dialog', { name: '停用动态验证码' });
@@ -2000,7 +2021,8 @@ test('users can enroll TOTP, replace recovery codes, and disable the factor', as
   expect(enrollCSRF).toBe('csrf-before-totp');
   expect(confirmCSRF).toBe('csrf-before-totp');
   expect(regenerateCSRF).toBe('csrf-after-totp-enroll');
-  expect(disableCSRF).toBe('csrf-after-totp-enroll');
+  expect(disableCSRF).toBe('csrf-after-login-mfa-disable');
+  expect(loginMFAUpdates).toEqual([true, false]);
 });
 
 test('provider reauthentication denial does not replay a pending TOTP action', async ({ page }) => {

@@ -30,6 +30,7 @@ type User struct {
 	AuthVersion         int64             `json:"-" db:"auth_version"`
 	SessionVersion      int64             `json:"-" db:"session_version"`
 	MustChangePassword  bool              `json:"must_change_password" db:"must_change_password"`
+	LoginMFAEnabled     bool              `json:"-" db:"login_mfa_enabled"`
 	LastAuthenticatedAt *time.Time        `json:"-" db:"last_authenticated_at"`
 	LastLoginAt         *time.Time        `json:"last_login_at,omitempty" db:"last_login_at"`
 	LastLoginIP         *string           `json:"last_login_ip,omitempty" db:"last_login_ip"`

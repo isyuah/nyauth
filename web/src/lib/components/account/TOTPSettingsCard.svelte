@@ -246,7 +246,7 @@
       <span class="flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-nya-primary-soft text-nya-primary"><ShieldCheck size={19} /></span>
       <div>
         <h2 class="text-card-title text-nya-text-primary">动态验证码与恢复码</h2>
-        <p class="mt-1 text-body text-nya-text-secondary">使用兼容 RFC 6238 的身份验证器为登录增加第二项验证。</p>
+        <p class="mt-1 text-body text-nya-text-secondary">添加兼容 RFC 6238 的动态验证码，可用于登录、重新认证和应用额外验证。</p>
       </div>
     </div>
     {#if status}<Badge variant={status.totp_enrolled ? 'success' : status.totp_available ? 'warning' : 'default'}>{status.totp_enrolled ? '已启用' : status.totp_available ? '未启用' : '不可注册'}</Badge>{/if}
@@ -267,9 +267,9 @@
       {#if status.totp_enrolled}
         <div class="flex flex-col justify-between gap-4 rounded-nya-sm bg-nya-surface-muted p-4 sm:flex-row sm:items-center">
           <div>
-            <p class="text-body-medium font-semibold text-nya-text-primary">动态验证码已保护此账户</p>
+            <p class="text-body-medium font-semibold text-nya-text-primary">动态验证码已添加</p>
             <p class="mt-1 text-small text-nya-text-secondary">剩余 {status.recovery_codes_remaining} 枚一次性恢复码。</p>
-            {#if !status.can_disable_totp}<p class="mt-1 text-small text-nya-warning">管理员安全策略要求保留至少一种多因素验证方式；注册 Passkey 后可停用动态验证码。</p>{/if}
+            {#if !status.can_disable_totp}<p class="mt-1 text-small text-nya-warning">登录两步验证或管理员策略要求保留至少一种验证因素；添加 Passkey 后可停用动态验证码。</p>{/if}
           </div>
           <div class="flex flex-wrap gap-2">
             <Button variant="secondary" requiredCapability="account_mutations" loading={actionLoading === 'regenerate'} disabled={actionLoading !== null} onclick={() => void runProtectedAction('regenerate', true).catch(() => {})}>
@@ -284,7 +284,7 @@
         <div class="flex flex-col justify-between gap-4 rounded-nya-sm bg-nya-surface-muted p-4 sm:flex-row sm:items-center">
           <div>
             <p class="text-body-medium font-semibold text-nya-text-primary">尚未启用动态验证码</p>
-            <p class="mt-1 text-small text-nya-text-secondary">启用后，密码或外部身份登录还需输入动态验证码或恢复码。</p>
+            <p class="mt-1 text-small text-nya-text-secondary">添加后可用于需要第二项验证的操作；是否每次登录都要求验证由上方设置决定。</p>
             {#if !status.totp_available}<p class="mt-1 text-small text-nya-warning">管理员当前已关闭新的动态验证码注册。</p>{/if}
           </div>
           <Button variant="primary" requiredCapability="account_mutations" loading={actionLoading === 'enroll'} disabled={!status.totp_available || actionLoading !== null} onclick={() => void runProtectedAction('enroll', true).catch(() => {})}>

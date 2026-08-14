@@ -6,6 +6,7 @@
   import { consumeProviderAuthError, safeReturnPath, sessionStore } from '$lib/stores';
   import { PASSWORD_REQUIREMENT, passwordPolicyError } from '$lib/password-policy';
   import PasskeySettingsCard from '$lib/components/account/PasskeySettingsCard.svelte';
+  import LoginMFASettingsCard from '$lib/components/account/LoginMFASettingsCard.svelte';
   import ReauthenticationDialog from '$lib/components/account/ReauthenticationDialog.svelte';
   import TOTPSettingsCard from '$lib/components/account/TOTPSettingsCard.svelte';
   import ProviderIcon from '$lib/components/identity/ProviderIcon.svelte';
@@ -35,6 +36,8 @@
   let setPasswordError = $state('');
   let authenticationClock = $state(Date.now());
   let mfaFactorsRevision = $state(0);
+  let loginMFAStatusRevision = $state(0);
+  let loginMFARequirementRevision = $state(0);
 
   let hasPassword = $derived(session?.has_password ?? false);
   let recentAuthenticationValid = $derived(hasRecentAuthentication(session?.recent_authentication_expires_at, authenticationClock));
@@ -53,6 +56,16 @@
   function applyPasskeySession(next: SessionInfo) {
     applySession(next);
     mfaFactorsRevision += 1;
+    loginMFAStatusRevision += 1;
+  }
+
+  function applyTOTPSession(next: SessionInfo) {
+    applySession(next);
+    loginMFAStatusRevision += 1;
+  }
+
+  function handleLoginMFARequirementChanged() {
+    loginMFARequirementRevision += 1;
   }
 
   async function continueAfterFactorEnrollment() {
@@ -156,21 +169,32 @@
     </div>
   </section>
 
-  {#key mfaFactorsRevision}
-    <TOTPSettingsCard
+  {#key loginMFAStatusRevision}
+    <LoginMFASettingsCard
       {returnTo}
       onsessionupdated={applySession}
+      onrequirementchanged={handleLoginMFARequirementChanged}
+      providerReauthenticationFailed={initialProviderAuthError !== null}
+    />
+  {/key}
+
+  {#key `${mfaFactorsRevision}:${loginMFARequirementRevision}`}
+    <TOTPSettingsCard
+      {returnTo}
+      onsessionupdated={applyTOTPSession}
       onfactorready={continueAfterFactorEnrollment}
       providerReauthenticationFailed={initialProviderAuthError !== null}
     />
   {/key}
 
-  <PasskeySettingsCard
-    {returnTo}
-    onsessionupdated={applyPasskeySession}
-    onfactorready={continueAfterFactorEnrollment}
-    providerReauthenticationFailed={initialProviderAuthError !== null}
-  />
+  {#key loginMFARequirementRevision}
+    <PasskeySettingsCard
+      {returnTo}
+      onsessionupdated={applyPasskeySession}
+      onfactorready={continueAfterFactorEnrollment}
+      providerReauthenticationFailed={initialProviderAuthError !== null}
+    />
+  {/key}
 
   <section class="rounded-nya-card border border-nya-border bg-nya-surface shadow-nya-card">
     <div class="flex flex-col justify-between gap-4 border-b border-nya-divider px-7 py-5 sm:flex-row sm:items-center">

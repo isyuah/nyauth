@@ -46,6 +46,7 @@ describe('localizeAPIErrorMessage', () => {
     ['MFA is required for active administrators', '管理员策略要求保留多因素验证，当前无法停用'],
     ['Passkey registered; please sign in again', 'Passkey 已注册，但当前会话无法继续使用，请重新登录'],
     ['Passkey removed; please sign in again', 'Passkey 已删除，但当前会话无法继续使用，请重新登录'],
+    ['enroll a TOTP or Passkey before requiring login MFA', '请先添加动态验证码或 Passkey，再开启登录两步验证'],
     ['self-service client creation is disabled', '管理员已关闭用户自助创建客户端'],
     ['OAuth client policy changed; reload and retry', 'OAuth 客户端策略已更新，请重新加载后再试'],
     ['OTLP settings revision conflict', 'OTLP 设置已被其他管理员修改，请加载最新设置后重试'],
@@ -66,6 +67,7 @@ describe('localizeAPIErrorMessage', () => {
     expect(localizeAPIErrorMessage('wording changed', 'settings.revision_conflict')).toBe('设置已被其他管理员修改，请加载最新设置后重试');
     expect(localizeAPIErrorMessage('wording changed', 'media.instances_not_ready')).toBe('仍有运行实例尚未加载候选配置，请稍后重试');
     expect(localizeAPIErrorMessage('wording changed', 'media.operation_unavailable')).toBe('图片操作暂时不可用，请稍后重试');
+    expect(localizeAPIErrorMessage('wording changed', 'mfa.login_factor_required_for_passkey_removal')).toBe('请先关闭登录两步验证或添加动态验证码，再删除这枚 Passkey');
     expect(localizeAPIErrorMessage('wording changed', 'media.operation_rate_limited')).toBe('图片操作过于频繁，请稍后重试');
     expect(localizeAPIErrorMessage('wording changed', 'client.policy_changed')).toBe('OAuth 客户端策略已更新，请重新加载后再试');
     expect(localizeAPIErrorMessage('wording changed', 'telemetry.revision_conflict')).toBe('OTLP 设置已被其他管理员修改，请加载最新设置后重试');

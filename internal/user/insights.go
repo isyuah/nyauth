@@ -53,7 +53,7 @@ const adminOverviewUserSelectCols = `
 	subject.password_hash,subject.password_changed_at,subject.display_name,
 	CASE WHEN subject.current_avatar_id IS NULL THEN NULL ELSE '/media/avatars/' || subject.current_avatar_id::text || '/256.webp' END AS avatar_url,
 	subject.status,subject.role,subject.auth_version,subject.session_version,
-	subject.must_change_password,subject.last_authenticated_at,subject.last_login_at,
+	subject.must_change_password,subject.login_mfa_enabled,subject.last_authenticated_at,subject.last_login_at,
 	subject.last_login_ip,subject.metadata,subject.created_at,subject.updated_at`
 
 func (s *Store) GetAdminOverview(ctx context.Context, id uuid.UUID) (*AdminUserOverview, error) {

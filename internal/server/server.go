@@ -587,6 +587,7 @@ func (s *Server) buildRouter() *chi.Mux {
 			r.Post("/me/reauth/passkey/options", s.handleBeginPasskeyReauthentication)
 			r.Post("/me/reauth/passkey/verify", s.handleFinishPasskeyReauthentication)
 			r.Get("/me/mfa", s.handleGetMyMFA)
+			r.With(accountMutations).Put("/me/mfa/login-requirement", s.handleUpdateLoginMFARequirement)
 			r.With(accountMutations).Post("/me/mfa/totp/enroll", s.handleBeginTOTPEnrollment)
 			r.With(accountMutations).Post("/me/mfa/totp/enroll/confirm", s.handleConfirmTOTPEnrollment)
 			r.With(accountMutations).Post("/me/mfa/recovery-codes", s.handleRegenerateRecoveryCodes)

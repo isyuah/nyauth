@@ -120,6 +120,9 @@ export type ReauthenticationResponse = SessionInfo | MFARequiredResponse;
 export type ConsentStepUpResponse = MFARequiredResponse | { redirect_url: string };
 
 export interface MFAStatus {
+  login_mfa_enabled: boolean;
+  login_mfa_required: boolean;
+  can_enable_login_mfa: boolean;
   totp_available: boolean;
   totp_enrolled: boolean;
   can_disable_totp: boolean;
@@ -1613,6 +1616,11 @@ const API_ERROR_TRANSLATIONS: Record<string, string> = {
   'totp enrollment must be restarted': '本次设置已失效，请重新开始启用动态验证码',
   'totp is not enrolled': '尚未启用动态验证码',
   'mfa is required for active administrators': '管理员策略要求保留多因素验证，当前无法停用',
+  'enroll a totp or passkey before requiring login mfa': '请先添加动态验证码或 Passkey，再开启登录两步验证',
+  'turn off login mfa or add another factor before disabling totp': '请先关闭登录两步验证或添加 Passkey，再移除动态验证码',
+  'turn off login mfa or add another factor before removing this passkey': '请先关闭登录两步验证或添加动态验证码，再删除这枚 Passkey',
+  'failed to update login mfa requirement': '登录两步验证设置更新失败，请稍后重试',
+  'login mfa updated; please sign in again': '登录两步验证设置已更新，请重新登录',
   'all active administrators must enroll mfa before it can be required': '仍有管理员未启用多因素验证，暂时无法强制执行',
   'totp must remain enabled while administrator mfa is required': '要求管理员启用多因素验证时，必须同时开放动态验证码功能',
   'passkey login temporarily unavailable': 'Passkey 登录暂时不可用，请稍后重试',
@@ -1776,6 +1784,11 @@ const API_ERROR_MESSAGES_BY_CODE: Record<string, string> = {
   'mfa.totp_enrollment_restart_required': 'totp enrollment must be restarted',
   'mfa.totp_not_enrolled': 'totp is not enrolled',
   'mfa.required_for_admins': 'mfa is required for active administrators',
+  'mfa.login_factor_required': 'enroll a totp or passkey before requiring login mfa',
+  'mfa.login_factor_required_for_totp_removal': 'turn off login mfa or add another factor before disabling totp',
+  'mfa.login_factor_required_for_passkey_removal': 'turn off login mfa or add another factor before removing this passkey',
+  'mfa.login_requirement_update_failed': 'failed to update login mfa requirement',
+  'mfa.login_requirement_sign_in_required': 'login mfa updated; please sign in again',
   'mfa.admin_enrollment_incomplete': 'all active administrators must enroll mfa before it can be required',
   'mfa.totp_required_by_policy': 'totp must remain enabled while administrator mfa is required',
   'passkey.login_unavailable': 'passkey login temporarily unavailable',
@@ -2173,6 +2186,10 @@ export const api = {
     signal,
   }, false),
   getMyMFA: () => req<MFAStatus>('/api/me/mfa', { cache: 'no-store' }),
+  updateLoginMFARequirement: (enabled: boolean) => req<SessionInfo>('/api/me/mfa/login-requirement', {
+    method: 'PUT',
+    body: JSON.stringify({ enabled }),
+  }),
   beginTOTPEnrollment: () => req<TOTPEnrollment>('/api/me/mfa/totp/enroll', { method: 'POST' }),
   confirmTOTPEnrollment: (code: string) => req<TOTPConfirmationResult>('/api/me/mfa/totp/enroll/confirm', {
     method: 'POST', body: JSON.stringify({ code }),

@@ -56,6 +56,7 @@ func KnownFilterOptions() FilterOptions {
 		models.AuditMFARecoveryReset,
 		models.AuditMFADisabled,
 		models.AuditMFAEnrolled,
+		models.AuditMFALoginRequirementUpdated,
 		models.AuditMailCircuitOpened,
 		models.AuditMailCircuitRecovered,
 		models.AuditMailSettingsActivated,

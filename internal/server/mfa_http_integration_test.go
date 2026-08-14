@@ -37,6 +37,7 @@ func TestPasswordLoginRequiresMFAAndCreatesSessionOnlyAfterVerification(t *testi
 		t.Fatal(err)
 	}
 	enrolledFactor := enrollHTTPTestTOTP(t, testApp, admin, time.Now().UTC().Add(-2*time.Minute))
+	enableHTTPTestLoginMFA(t, testApp, admin, admin.AuthVersion+1)
 	secret := enrolledFactor.Secret
 
 	login := mfaHTTPRequest(testApp.app, http.MethodPost, "/api/login", `{
@@ -207,6 +208,12 @@ func TestTOTPSecurityCenterHTTPFlow(t *testing.T) {
 	initialCookie := responseCookie(t, login, sessionCookieName)
 	initialCookieHeader := initialCookie.Name + "=" + initialCookie.Value
 
+	enableWithoutFactor := mfaHTTPRequest(testApp.app, http.MethodPut, "/api/me/mfa/login-requirement",
+		`{"enabled":true}`, initialCookieHeader, initialSession.CSRFToken)
+	if enableWithoutFactor.Code != http.StatusConflict {
+		t.Fatalf("enable login MFA without factor=%d body=%s", enableWithoutFactor.Code, enableWithoutFactor.Body.String())
+	}
+
 	begin := mfaHTTPRequest(testApp.app, http.MethodPost, "/api/me/mfa/totp/enroll", "{}", initialCookieHeader, initialSession.CSRFToken)
 	if begin.Code != http.StatusOK {
 		t.Fatalf("begin enrollment=%d body=%s", begin.Code, begin.Body.String())
@@ -237,8 +244,16 @@ func TestTOTPSecurityCenterHTTPFlow(t *testing.T) {
 	status := mfaHTTPRequest(testApp.app, http.MethodGet, "/api/me/mfa", "", confirmedCookieHeader, "")
 	if status.Code != http.StatusOK ||
 		!bytes.Contains(status.Body.Bytes(), []byte(`"totp_enrolled":true`)) ||
+		!bytes.Contains(status.Body.Bytes(), []byte(`"login_mfa_enabled":false`)) ||
+		!bytes.Contains(status.Body.Bytes(), []byte(`"login_mfa_required":false`)) ||
 		!bytes.Contains(status.Body.Bytes(), []byte(`"required_for_current_user":false`)) {
 		t.Fatalf("enrolled status=%d body=%s", status.Code, status.Body.String())
+	}
+	loginWithFactorOnly := mfaHTTPRequest(testApp.app, http.MethodPost, "/api/login", `{
+		"username":"totp-security-user","password":"security center password"
+	}`, "", "")
+	if loginWithFactorOnly.Code != http.StatusOK {
+		t.Fatalf("factor-only login unexpectedly required MFA=%d body=%s", loginWithFactorOnly.Code, loginWithFactorOnly.Body.String())
 	}
 	regenerated := mfaHTTPRequest(testApp.app, http.MethodPost, "/api/me/mfa/recovery-codes", "{}", confirmedCookieHeader, confirmed.CSRFToken)
 	if regenerated.Code != http.StatusOK {
@@ -248,7 +263,45 @@ func TestTOTPSecurityCenterHTTPFlow(t *testing.T) {
 	if err := json.Unmarshal(regenerated.Body.Bytes(), &regeneratedCodes); err != nil || len(regeneratedCodes.RecoveryCodes) != 10 {
 		t.Fatalf("regenerated response=%#v err=%v", regeneratedCodes, err)
 	}
-	disabled := mfaHTTPRequest(testApp.app, http.MethodDelete, "/api/me/mfa/totp", "", confirmedCookieHeader, confirmed.CSRFToken)
+	enabled := mfaHTTPRequest(testApp.app, http.MethodPut, "/api/me/mfa/login-requirement",
+		`{"enabled":true}`, confirmedCookieHeader, confirmed.CSRFToken)
+	if enabled.Code != http.StatusOK {
+		t.Fatalf("enable login MFA=%d body=%s", enabled.Code, enabled.Body.String())
+	}
+	var enabledSession models.SessionResponse
+	if err := json.Unmarshal(enabled.Body.Bytes(), &enabledSession); err != nil {
+		t.Fatal(err)
+	}
+	enabledCookie := responseCookie(t, enabled, sessionCookieName)
+	enabledCookieHeader := enabledCookie.Name + "=" + enabledCookie.Value
+	status = mfaHTTPRequest(testApp.app, http.MethodGet, "/api/me/mfa", "", enabledCookieHeader, "")
+	if status.Code != http.StatusOK ||
+		!bytes.Contains(status.Body.Bytes(), []byte(`"login_mfa_enabled":true`)) ||
+		!bytes.Contains(status.Body.Bytes(), []byte(`"login_mfa_required":true`)) {
+		t.Fatalf("enabled login MFA status=%d body=%s", status.Code, status.Body.String())
+	}
+	loginAfterEnable := mfaHTTPRequest(testApp.app, http.MethodPost, "/api/login", `{
+		"username":"totp-security-user","password":"security center password"
+	}`, "", "")
+	if loginAfterEnable.Code != http.StatusAccepted {
+		t.Fatalf("explicit login MFA was not required=%d body=%s", loginAfterEnable.Code, loginAfterEnable.Body.String())
+	}
+	blockedDisable := mfaHTTPRequest(testApp.app, http.MethodDelete, "/api/me/mfa/totp", "", enabledCookieHeader, enabledSession.CSRFToken)
+	if blockedDisable.Code != http.StatusConflict {
+		t.Fatalf("removed final required factor=%d body=%s", blockedDisable.Code, blockedDisable.Body.String())
+	}
+	disabledRequirement := mfaHTTPRequest(testApp.app, http.MethodPut, "/api/me/mfa/login-requirement",
+		`{"enabled":false}`, enabledCookieHeader, enabledSession.CSRFToken)
+	if disabledRequirement.Code != http.StatusOK {
+		t.Fatalf("disable login MFA=%d body=%s", disabledRequirement.Code, disabledRequirement.Body.String())
+	}
+	var disabledRequirementSession models.SessionResponse
+	if err := json.Unmarshal(disabledRequirement.Body.Bytes(), &disabledRequirementSession); err != nil {
+		t.Fatal(err)
+	}
+	disabledRequirementCookie := responseCookie(t, disabledRequirement, sessionCookieName)
+	disabledRequirementCookieHeader := disabledRequirementCookie.Name + "=" + disabledRequirementCookie.Value
+	disabled := mfaHTTPRequest(testApp.app, http.MethodDelete, "/api/me/mfa/totp", "", disabledRequirementCookieHeader, disabledRequirementSession.CSRFToken)
 	if disabled.Code != http.StatusOK {
 		t.Fatalf("disable TOTP=%d body=%s", disabled.Code, disabled.Body.String())
 	}
@@ -406,7 +459,20 @@ func createHTTPTestProviderMFAUser(t *testing.T, testApp *registrationHTTPTestAp
 		t.Fatal(err)
 	}
 	enrolledFactor := enrollHTTPTestTOTP(t, testApp, current, time.Now().UTC().Add(-2*time.Minute))
+	enableHTTPTestLoginMFA(t, testApp, current, current.AuthVersion+1)
 	return current, enrolledFactor
+}
+
+func enableHTTPTestLoginMFA(t *testing.T, testApp *registrationHTTPTestApp, current *models.User, authVersion int64) {
+	t.Helper()
+	changed, err := testApp.app.mfaService.SetLoginMFARequirement(
+		context.Background(), current.ID,
+		mfa.AuthenticationBinding{AuthVersion: authVersion, SessionVersion: current.SessionVersion},
+		true, mfa.AuditContext{ActorID: current.ID, ActorName: current.Username}, time.Now().UTC(),
+	)
+	if err != nil || !changed {
+		t.Fatalf("enable login MFA: changed=%v err=%v", changed, err)
+	}
 }
 
 type enrolledHTTPTestTOTP struct {

@@ -165,6 +165,8 @@ func describeMutation(r *http.Request, actor *models.User) (mutationAuditDescrip
 		return highRiskUserMutation(models.AuditUserPasswordSet, actor), true
 	case r.Method == http.MethodPost && path == "/api/me/mfa/totp/enroll/confirm":
 		return highRiskUserMutation(models.AuditMFAEnrolled, actor), true
+	case r.Method == http.MethodPut && path == "/api/me/mfa/login-requirement":
+		return highRiskUserMutation(models.AuditMFALoginRequirementUpdated, actor), true
 	case r.Method == http.MethodPost && path == "/api/me/mfa/recovery-codes":
 		return highRiskUserMutation(models.AuditRecoveryCodesGenerated, actor), true
 	case r.Method == http.MethodDelete && path == "/api/me/mfa/totp":

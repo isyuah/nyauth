@@ -34,10 +34,13 @@ func TestPasskeyCeremonyUnavailableHasSpecificStableCode(t *testing.T) {
 
 func TestMiddlewareErrorsHaveSpecificStableCodes(t *testing.T) {
 	tests := map[string]string{
-		"invalid CSRF token":                            "security.csrf_validation_failed",
-		"password change required":                      "account.password_change_required",
-		"self-service client creation is disabled":      "client.self_service_disabled",
-		"OAuth client policy changed; reload and retry": "client.policy_changed",
+		"invalid CSRF token":                                                    "security.csrf_validation_failed",
+		"password change required":                                              "account.password_change_required",
+		"self-service client creation is disabled":                              "client.self_service_disabled",
+		"OAuth client policy changed; reload and retry":                         "client.policy_changed",
+		"enroll a TOTP or Passkey before requiring login MFA":                   "mfa.login_factor_required",
+		"turn off login MFA or add another factor before disabling TOTP":        "mfa.login_factor_required_for_totp_removal",
+		"turn off login MFA or add another factor before removing this Passkey": "mfa.login_factor_required_for_passkey_removal",
 	}
 	for message, expected := range tests {
 		if got := apiErrorCodeForMessage(message); got != expected {

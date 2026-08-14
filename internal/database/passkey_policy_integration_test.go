@@ -152,6 +152,27 @@ func TestPasskeyDeletionMaintainsAuthenticationAndAdministratorInvariants(t *tes
 		}
 	})
 
+	t.Run("explicit login MFA retains the final factor", func(t *testing.T) {
+		schema := newPasskeyTestSchema(t)
+		ctx := context.Background()
+		current := registrationTestUser("passkey-delete-login-mfa", models.UserStatusActive)
+		insertRegistrationTestUser(t, schema, current)
+		passkeyID := insertSyntheticPasskey(t, schema, passkeyTestRPID, current.ID, []byte("delete-login-mfa-key"), "Required factor")
+		if _, err := schema.pool.Exec(ctx, `UPDATE users SET login_mfa_enabled=TRUE WHERE id=$1`, current.ID); err != nil {
+			t.Fatal(err)
+		}
+		service := newPasskeyTestService(t, schema, passkeyTestRPID)
+		err := service.DeletePasskey(
+			ctx, current.ID, passkeyID,
+			mfa.AuthenticationBinding{AuthVersion: current.AuthVersion, SessionVersion: current.SessionVersion},
+			mfa.AuditContext{ActorID: current.ID, ActorName: current.Username}, time.Now().UTC(),
+		)
+		if !errors.Is(err, mfa.ErrLoginMFAFactorRequired) {
+			t.Fatalf("delete final login MFA factor: %v", err)
+		}
+		assertPasskeyMutationRolledBack(t, schema, current, passkeyID)
+	})
+
 	t.Run("last login method is retained", func(t *testing.T) {
 		schema := newPasskeyTestSchema(t)
 		ctx := context.Background()

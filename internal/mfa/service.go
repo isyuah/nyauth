@@ -20,14 +20,15 @@ import (
 const totpEnvelopePurpose = "mfa.totp.secret"
 
 var (
-	ErrTOTPDisabled          = errors.New("TOTP enrollment is disabled")
-	ErrAlreadyEnrolled       = errors.New("TOTP is already enrolled")
-	ErrNotEnrolled           = errors.New("TOTP is not enrolled")
-	ErrEnrollmentChanged     = errors.New("TOTP enrollment changed")
-	ErrInvalidCode           = errors.New("invalid MFA code")
-	ErrCodeReplayed          = errors.New("TOTP code has already been used")
-	ErrAuthenticationChanged = errors.New("authentication state changed")
-	ErrRequiredByPolicy      = errors.New("MFA is required for active administrators")
+	ErrTOTPDisabled           = errors.New("TOTP enrollment is disabled")
+	ErrAlreadyEnrolled        = errors.New("TOTP is already enrolled")
+	ErrNotEnrolled            = errors.New("TOTP is not enrolled")
+	ErrEnrollmentChanged      = errors.New("TOTP enrollment changed")
+	ErrInvalidCode            = errors.New("invalid MFA code")
+	ErrCodeReplayed           = errors.New("TOTP code has already been used")
+	ErrAuthenticationChanged  = errors.New("authentication state changed")
+	ErrRequiredByPolicy       = errors.New("MFA is required for active administrators")
+	ErrLoginMFAFactorRequired = errors.New("login MFA requires at least one enrolled factor")
 )
 
 type Options struct {
@@ -69,6 +70,7 @@ type ChallengeCommitGate struct {
 }
 
 type Status struct {
+	LoginMFAEnabled        bool `json:"login_mfa_enabled"`
 	TOTPEnrolled           bool `json:"totp_enrolled"`
 	RecoveryCodesRemaining int  `json:"recovery_codes_remaining"`
 	PasskeysEnrolled       int  `json:"passkeys_enrolled"`
@@ -110,23 +112,100 @@ func (s *Service) Status(ctx context.Context, userID uuid.UUID) (Status, error) 
 	}
 	err := s.db.QueryRow(ctx, `
 		SELECT
+			login_mfa_enabled,
 			EXISTS (
 				SELECT 1 FROM user_totp_credentials
-				WHERE user_id=$1 AND confirmed_at IS NOT NULL
+				WHERE user_id=users.id AND confirmed_at IS NOT NULL
 			),
 			(
 				SELECT COUNT(*) FROM user_recovery_codes
-				WHERE user_id=$1 AND used_at IS NULL
+				WHERE user_id=users.id AND used_at IS NULL
 			),
 			(
 				SELECT COUNT(*) FROM user_passkey_credentials
-				WHERE user_id=$1 AND ($2='' OR rp_id=$2)
+				WHERE user_id=users.id AND $2<>'' AND rp_id=$2
 			)
-	`, userID, rpID).Scan(&status.TOTPEnrolled, &status.RecoveryCodesRemaining, &status.PasskeysEnrolled)
+		FROM users
+		WHERE id=$1
+	`, userID, rpID).Scan(
+		&status.LoginMFAEnabled, &status.TOTPEnrolled,
+		&status.RecoveryCodesRemaining, &status.PasskeysEnrolled,
+	)
 	if err != nil {
 		return Status{}, fmt.Errorf("loading MFA status: %w", err)
 	}
 	return status, nil
+}
+
+// SetLoginMFARequirement changes the user's explicit login policy without
+// changing enrolled factors. Administrator policy remains an independent,
+// higher-priority requirement evaluated by the server.
+func (s *Service) SetLoginMFARequirement(
+	ctx context.Context,
+	userID uuid.UUID,
+	binding AuthenticationBinding,
+	enabled bool,
+	auditContext AuditContext,
+	now time.Time,
+) (bool, error) {
+	tx, err := s.db.Begin(ctx)
+	if err != nil {
+		return false, fmt.Errorf("starting login MFA policy update: %w", err)
+	}
+	defer tx.Rollback(ctx)
+	if _, err := lockAuthenticationState(ctx, tx, userID, binding); err != nil {
+		return false, err
+	}
+	var current bool
+	if err := tx.QueryRow(ctx, `SELECT login_mfa_enabled FROM users WHERE id=$1`, userID).Scan(&current); err != nil {
+		return false, fmt.Errorf("loading login MFA policy: %w", err)
+	}
+	if current == enabled {
+		return false, nil
+	}
+	if enabled {
+		rpID := ""
+		if s.passkeys != nil {
+			rpID = s.passkeys.rpID
+		}
+		var enrolled bool
+		if err := tx.QueryRow(ctx, `
+			SELECT
+				EXISTS (
+					SELECT 1 FROM user_totp_credentials
+					WHERE user_id=$1 AND confirmed_at IS NOT NULL
+				)
+				OR EXISTS (
+					SELECT 1 FROM user_passkey_credentials
+					WHERE user_id=$1 AND $2<>'' AND rp_id=$2
+				)
+		`, userID, rpID).Scan(&enrolled); err != nil {
+			return false, fmt.Errorf("checking login MFA factors: %w", err)
+		}
+		if !enrolled {
+			return false, ErrLoginMFAFactorRequired
+		}
+	}
+	result, err := tx.Exec(ctx, `
+		UPDATE users
+		SET login_mfa_enabled=$2,auth_version=auth_version+1,updated_at=$3
+		WHERE id=$1
+	`, userID, enabled, now.UTC())
+	if err != nil {
+		return false, fmt.Errorf("updating login MFA policy: %w", err)
+	}
+	if result.RowsAffected() == 0 {
+		return false, ErrAuthenticationChanged
+	}
+	if err := enqueueAudit(ctx, tx, models.AuditMFALoginRequirementUpdated, userID, auditContext, map[string]any{
+		"enabled": enabled, "previous_enabled": current,
+	}, now.UTC()); err != nil {
+		return false, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return false, fmt.Errorf("committing login MFA policy update: %w", err)
+	}
+	return true, nil
 }
 
 // VerifyStoredSecrets authenticates every persisted TOTP envelope without
@@ -574,7 +653,11 @@ func (s *Service) Disable(
 	if err != nil {
 		return err
 	}
-	if security.RequireMFAForAdmins && role == "admin" {
+	var loginMFAEnabled bool
+	if err := tx.QueryRow(ctx, `SELECT login_mfa_enabled FROM users WHERE id=$1`, userID).Scan(&loginMFAEnabled); err != nil {
+		return fmt.Errorf("loading login MFA policy: %w", err)
+	}
+	if (security.RequireMFAForAdmins && role == "admin") || loginMFAEnabled {
 		rpID := ""
 		if s.passkeys != nil {
 			rpID = s.passkeys.rpID
@@ -583,13 +666,16 @@ func (s *Service) Disable(
 		if err := tx.QueryRow(ctx, `
 			SELECT EXISTS (
 				SELECT 1 FROM user_passkey_credentials
-				WHERE user_id=$1 AND ($2='' OR rp_id=$2)
+				WHERE user_id=$1 AND $2<>'' AND rp_id=$2
 			)
 		`, userID, rpID).Scan(&hasPasskey); err != nil {
 			return fmt.Errorf("checking administrator Passkey enrollment: %w", err)
 		}
-		if !hasPasskey {
+		if !hasPasskey && security.RequireMFAForAdmins && role == "admin" {
 			return ErrRequiredByPolicy
+		}
+		if !hasPasskey && loginMFAEnabled {
+			return ErrLoginMFAFactorRequired
 		}
 	}
 	result, err := tx.Exec(ctx, `DELETE FROM user_totp_credentials WHERE user_id=$1 AND confirmed_at IS NOT NULL`, userID)

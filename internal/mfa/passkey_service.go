@@ -315,7 +315,7 @@ func (s *Service) DeletePasskey(
 		return err
 	}
 	var passkeyCount int
-	var hasPassword, hasIdentity, hasTOTP bool
+	var hasPassword, hasIdentity, hasTOTP, loginMFAEnabled bool
 	if err := tx.QueryRow(ctx, `
 		SELECT
 			(SELECT COUNT(*) FROM user_passkey_credentials WHERE rp_id=$1 AND user_id=$2),
@@ -329,8 +329,9 @@ func (s *Service) DeletePasskey(
 			EXISTS (
 				SELECT 1 FROM user_totp_credentials
 				WHERE user_id=$2 AND confirmed_at IS NOT NULL
-			)
-	`, s.passkeys.rpID, userID).Scan(&passkeyCount, &hasPassword, &hasIdentity, &hasTOTP); err != nil {
+			),
+			(SELECT login_mfa_enabled FROM users WHERE id=$2)
+	`, s.passkeys.rpID, userID).Scan(&passkeyCount, &hasPassword, &hasIdentity, &hasTOTP, &loginMFAEnabled); err != nil {
 		return fmt.Errorf("checking remaining authentication methods: %w", err)
 	}
 	if passkeyCount <= 1 && !hasPassword && !hasIdentity {
@@ -338,6 +339,9 @@ func (s *Service) DeletePasskey(
 	}
 	if security.RequireMFAForAdmins && role == "admin" && passkeyCount <= 1 && !hasTOTP {
 		return ErrRequiredByPolicy
+	}
+	if loginMFAEnabled && passkeyCount <= 1 && !hasTOTP {
+		return ErrLoginMFAFactorRequired
 	}
 	if _, err := tx.Exec(ctx, `
 		DELETE FROM user_passkey_credentials WHERE rp_id=$1 AND user_id=$2 AND id=$3

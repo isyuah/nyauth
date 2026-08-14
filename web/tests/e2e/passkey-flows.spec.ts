@@ -120,6 +120,9 @@ function sessionResponse(state: PasskeyMockState) {
 
 function mfaStatus(state: PasskeyMockState) {
   return {
+    login_mfa_enabled: false,
+    login_mfa_required: false,
+    can_enable_login_mfa: state.passkeys.length > 0,
     totp_available: true,
     totp_enrolled: false,
     can_disable_totp: true,

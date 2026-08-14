@@ -50,7 +50,7 @@ func (s *Store) SetSecurityNotificationBuilder(builder account.SecurityNotificat
 	s.notificationBuilder = builder
 }
 
-const userSelectCols = `id, username, email, email_verified_at, password_hash, password_changed_at, display_name, CASE WHEN current_avatar_id IS NULL THEN NULL ELSE '/media/avatars/' || current_avatar_id::text || '/256.webp' END AS avatar_url, status, role, auth_version, session_version, must_change_password, last_authenticated_at, last_login_at, last_login_ip, metadata, created_at, updated_at`
+const userSelectCols = `id, username, email, email_verified_at, password_hash, password_changed_at, display_name, CASE WHEN current_avatar_id IS NULL THEN NULL ELSE '/media/avatars/' || current_avatar_id::text || '/256.webp' END AS avatar_url, status, role, auth_version, session_version, must_change_password, login_mfa_enabled, last_authenticated_at, last_login_at, last_login_ip, metadata, created_at, updated_at`
 
 type rowScanner interface {
 	Scan(dest ...any) error
@@ -72,7 +72,7 @@ func userScanDestinations(u *models.User) []any {
 	return []any{
 		&u.ID, &u.Username, &u.Email, &u.EmailVerifiedAt, &u.PasswordHash, &u.PasswordChangedAt,
 		&u.DisplayName, &u.AvatarURL, &u.Status, &u.Role, &u.AuthVersion, &u.SessionVersion,
-		&u.MustChangePassword, &u.LastAuthenticatedAt, &u.LastLoginAt,
+		&u.MustChangePassword, &u.LoginMFAEnabled, &u.LastAuthenticatedAt, &u.LastLoginAt,
 		&u.LastLoginIP, &u.Metadata, &u.CreatedAt, &u.UpdatedAt,
 	}
 }

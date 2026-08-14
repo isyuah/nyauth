@@ -213,6 +213,54 @@ func TestDeviceOptionalScopesAndThemeBrandingUpgradeSchema15To17(t *testing.T) {
 	}
 }
 
+func TestUserLoginMFAUpgradeSchema19To20DefaultsExistingUsersToDisabled(t *testing.T) {
+	schema := newPostgresTestSchema(t)
+	source, err := iofs.New(migrationfiles.Files, ".")
+	if err != nil {
+		t.Fatal(err)
+	}
+	runner, err := migrate.NewWithSourceInstance("iofs", source, schema.migrationDSN)
+	if err != nil {
+		_ = source.Close()
+		t.Fatal(err)
+	}
+	if err := runner.Migrate(19); err != nil {
+		_, _ = runner.Close()
+		t.Fatalf("migrate to schema 19: %v", err)
+	}
+	if _, err := schema.pool.Exec(t.Context(), `
+		INSERT INTO users (username,status,role,creation_source)
+		VALUES ('login-mfa-upgrade-user','active','user','legacy')
+	`); err != nil {
+		_, _ = runner.Close()
+		t.Fatalf("insert schema 19 user: %v", err)
+	}
+	if sourceErr, databaseErr := runner.Close(); sourceErr != nil || databaseErr != nil {
+		t.Fatalf("close schema 19 runner: source=%v database=%v", sourceErr, databaseErr)
+	}
+
+	if err := database.RunMigrations(schema.migrationDSN); err != nil {
+		t.Fatalf("upgrade schema 19 to current: %v", err)
+	}
+	var enabled bool
+	if err := schema.pool.QueryRow(t.Context(), `
+		SELECT login_mfa_enabled FROM users WHERE username='login-mfa-upgrade-user'
+	`).Scan(&enabled); err != nil {
+		t.Fatalf("read migrated login MFA preference: %v", err)
+	}
+	if enabled {
+		t.Fatal("schema 20 unexpectedly enabled login MFA for an existing user")
+	}
+	if _, err := schema.pool.Exec(t.Context(), `
+		UPDATE users SET login_mfa_enabled=TRUE WHERE username='login-mfa-upgrade-user'
+	`); err != nil {
+		t.Fatalf("enable migrated login MFA preference: %v", err)
+	}
+	if err := database.ValidateSchemaVersion(t.Context(), schema.pool); err != nil {
+		t.Fatalf("validate schema 20: %v", err)
+	}
+}
+
 func assertReleaseBaseline(t *testing.T, schema *postgresTestSchema) {
 	t.Helper()
 	ctx := context.Background()
@@ -247,7 +295,7 @@ func assertReleaseBaseline(t *testing.T, schema *postgresTestSchema) {
 
 	for _, column := range []struct{ table, name string }{
 		{"users", "current_avatar_id"}, {"users", "creation_source"}, {"users", "created_by"},
-		{"users", "theme_preference"},
+		{"users", "theme_preference"}, {"users", "login_mfa_enabled"},
 		{"oauth_clients", "access_policy"}, {"oauth_clients", "optional_scopes"}, {"oauth_clients", "allowed_claims"},
 		{"oauth_clients", "homepage_uri"}, {"oauth_clients", "current_logo_id"}, {"oauth_clients", "identity_revision"}, {"oauth_clients", "authorization_revision"},
 		{"oauth_authorizations", "allowed_claims"}, {"oauth_authorizations", "client_name_snapshot"}, {"oauth_authorizations", "client_authorization_revision"},

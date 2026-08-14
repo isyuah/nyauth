@@ -89,6 +89,7 @@ const (
 	AuditTelemetrySettingsRolledBack = "telemetry.settings_rolled_back"
 	AuditMFAEnrolled                 = "mfa.enrolled"
 	AuditMFADisabled                 = "mfa.disabled"
+	AuditMFALoginRequirementUpdated  = "mfa.login_requirement_updated"
 	AuditMFAChallengeFailed          = "mfa.challenge_failed"
 	AuditMFARecoveryReset            = "mfa.recovery_reset"
 	AuditRecoveryCodeUsed            = "recovery_code.used"
